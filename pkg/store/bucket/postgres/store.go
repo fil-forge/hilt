@@ -1,0 +1,97 @@
+// Package postgres provides a PostgreSQL-backed implementation of bucket.Store.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
+	"github.com/fil-forge/ucantone/did"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const uniqueViolation = "23505"
+
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+var _ bucket.Store = (*Store)(nil)
+
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+// Initialize is a no-op. Schema is managed by the shared goose migrations.
+func (s *Store) Initialize(ctx context.Context) error { return nil }
+
+func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO bucket (id, tenant_id, name, created_at)
+		VALUES ($1, $2, $3, $4)
+	`, id.String(), tenant.String(), name, time.Now().UTC())
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+			return store.ErrRecordExists
+		}
+		return fmt.Errorf("adding bucket: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, name, created_at
+		FROM bucket
+		WHERE name = $1
+	`, name)
+	rec, err := scanRecord(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return bucket.Record{}, store.ErrRecordNotFound
+	}
+	if err != nil {
+		return bucket.Record{}, fmt.Errorf("getting bucket by name: %w", err)
+	}
+	return rec, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRecord(row rowScanner) (bucket.Record, error) {
+	var (
+		idStr     string
+		tenantID  *string
+		name      *string
+		createdAt time.Time
+	)
+	if err := row.Scan(&idStr, &tenantID, &name, &createdAt); err != nil {
+		return bucket.Record{}, err
+	}
+	id, err := did.Parse(idStr)
+	if err != nil {
+		return bucket.Record{}, fmt.Errorf("parsing bucket DID: %w", err)
+	}
+	rec := bucket.Record{
+		ID:        id,
+		CreatedAt: createdAt,
+	}
+	if tenantID != nil && *tenantID != "" {
+		tenant, err := did.Parse(*tenantID)
+		if err != nil {
+			return bucket.Record{}, fmt.Errorf("parsing tenant DID: %w", err)
+		}
+		rec.Tenant = tenant
+	}
+	if name != nil {
+		rec.Name = *name
+	}
+	return rec, nil
+}
