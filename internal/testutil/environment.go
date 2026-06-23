@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	docker_client "github.com/docker/docker/client"
-	"github.com/stretchr/testify/require"
 )
 
 // IsRunningInCI returns true if the process is running in a CI environment.
