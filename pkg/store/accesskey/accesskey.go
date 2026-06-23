@@ -1,0 +1,33 @@
+package accesskey
+
+import (
+	"context"
+	"time"
+
+	"github.com/fil-forge/ucantone/did"
+)
+
+type Record struct {
+	// Identifier for the tenant.
+	ID did.DID
+	// Tenant this access key belongs to.
+	Tenant did.DID
+	// Human readable name of the access key.
+	Name string
+	// Buckets the access key is authorized to use. Empty slice means the access
+	// key has access to all buckets.
+	Buckets []did.DID
+	// S3 permissions granted to the access key.
+	Permissions []string
+	// When the access key record was created.
+	CreatedAt time.Time
+}
+
+type Store interface {
+	// Add creates a new access key record. It returns [store.ErrRecordExists] if
+	// a record with the same ID already exists.
+	Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string) error
+	// Get retrieves the access key record for a given ID. It returns
+	// [store.ErrRecordNotFound] if no record exists for the specified ID.
+	Get(ctx context.Context, id did.DID) (Record, error)
+}
