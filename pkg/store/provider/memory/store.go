@@ -26,7 +26,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
 	defer s.mutex.Unlock()
 
 	for _, p := range s.providers {
-		if p.ID == id {
+		if p.ID == id || p.Region == region {
 			return store.ErrRecordExists
 		}
 	}
