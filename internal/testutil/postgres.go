@@ -37,8 +37,8 @@ func CreatePostgres(t *testing.T) *pgxpool.Pool {
 				WithStartupTimeout(30*time.Second),
 		),
 	)
-	testcontainers.CleanupContainer(t, container)
 	require.NoError(t, err)
+	testcontainers.CleanupContainer(t, container)
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
