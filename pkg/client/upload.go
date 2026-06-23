@@ -24,9 +24,9 @@ type UploadClientConfig struct {
 	httpClient *http.Client
 }
 
-func WithHTTPClient(client *http.Client) UploadClientOption {
+func WithHTTPClient(httpClient *http.Client) UploadClientOption {
 	return func(cfg *UploadClientConfig) {
-		cfg.httpClient = client
+		cfg.httpClient = httpClient
 	}
 }
 
@@ -46,7 +46,13 @@ func NewUploadClient(serviceID did.DID, serviceURL url.URL, proofs ucanlib.Proof
 		opt(cfg)
 	}
 
-	httpExecutor, err := client.NewHTTP(&serviceURL, client.WithHTTPClient(cfg.httpClient))
+	var httpExecutor execution.Executor
+	var err error
+	if cfg.httpClient != nil {
+		httpExecutor, err = client.NewHTTP(&serviceURL, client.WithHTTPClient(cfg.httpClient))
+	} else {
+		httpExecutor, err = client.NewHTTP(&serviceURL)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("creating HTTP executor: %w", err)
 	}
@@ -102,7 +108,7 @@ func (c *UploadClient) ProvisionSpace(ctx context.Context, account ucan.Issuer, 
 		invocation.WithAudience(c.ServiceID),
 	)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("invoking provision space: %w", err)
 	}
 	log := zapucan.WithInvocation(c.Logger, inv)
 	log.Debug("executing invocation")
