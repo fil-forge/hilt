@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/docker/docker v28.5.2+incompatible
-	github.com/fil-forge/libforge v0.0.0-20260619083649-eb26d871cda1
+	github.com/fil-forge/libforge v0.0.0-20260623151745-4c28e5a78e9d
 	github.com/fil-forge/ucantone v0.0.0-20260619013642-7985ec010b88
 	github.com/ipfs/go-cid v0.6.1
 	github.com/jackc/pgx/v5 v5.8.0
