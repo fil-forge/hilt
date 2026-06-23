@@ -19,8 +19,10 @@ func IsRunningInCI(t testing.TB) bool {
 func IsDockerAvailable(t testing.TB) bool {
 	t.Helper()
 	c, err := docker_client.NewClientWithOpts(docker_client.FromEnv, docker_client.WithAPIVersionNegotiation())
-	require.NoError(t, err)
-
+	if err != nil {
+		t.Logf("Docker client not available for test %s: %v", t.Name(), err)
+		return false
+	}
 	_, err = c.Info(t.Context())
 	if err != nil {
 		t.Logf("Docker not available for test %s: %v", t.Name(), err)
