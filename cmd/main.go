@@ -27,7 +27,7 @@ func main() {
 		Short: "Start the hilt service",
 		RunE:  runServe,
 	}
-	serveCmd.Flags().String("host", "0.0.0.0", "host to bind the server to")
+	serveCmd.Flags().String("host", "127.0.0.1", "host to bind the server to")
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")
 
 	rootCmd.AddCommand(serveCmd)
@@ -42,8 +42,9 @@ func main() {
 
 func runServe(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load(cfgFile, config.WithFlagSet(cmd.Flags()))
-	cobra.CheckErr(err)
-
+	if err != nil {
+		return err
+	}
 	app := fx.New(
 		appfx.AppModule(cfg),
 		// Suppress fx's default logging and use our own zap logger.

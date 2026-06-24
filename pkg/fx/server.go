@@ -51,13 +51,25 @@ func RegisterServerLifecycle(
 			addr := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
 			logger.Info("starting hilt service", zap.String("address", addr))
 
+			errCh := make(chan error, 1)
 			go func() {
 				if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
-					logger.Fatal("server error", zap.Error(err))
+					select {
+					case errCh <- err:
+					default:
+						logger.Error("server error", zap.Error(err))
+					}
 				}
 			}()
 
-			return nil
+			select {
+			case err := <-errCh:
+				return fmt.Errorf("starting server: %w", err)
+			case <-time.After(100 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		},
 		OnStop: func(ctx context.Context) error {
 			logger.Info("shutting down server")

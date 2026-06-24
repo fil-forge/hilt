@@ -2,7 +2,7 @@ BINARY := hilt
 BIN_DIR := .
 CMD := ./cmd
 
-.PHONY: build test vet clean run
+.PHONY: build test vet clean
 
 build:
 	go build -o $(BIN_DIR)/$(BINARY) $(CMD)

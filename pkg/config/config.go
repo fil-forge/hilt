@@ -29,7 +29,7 @@ type LogConfig struct {
 
 // SetDefaults configures default values for viper.
 func SetDefaults(v *viper.Viper) {
-	v.SetDefault("server.host", "0.0.0.0")
+	v.SetDefault("server.host", "127.0.0.1")
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("log.level", "info")
 }
@@ -100,8 +100,12 @@ func LoadWithViper(configFile string, opts ...LoadOption) (*Config, *viper.Viper
 		v.SetConfigType("yaml")
 		v.AddConfigPath(".")
 		v.AddConfigPath("/etc/hilt/")
-		// Ignore error if no config file found - use defaults and env vars
-		_ = v.ReadInConfig()
+		// Ignore error if no config file found - use defaults and env vars.
+		if err := v.ReadInConfig(); err != nil {
+			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+				return nil, nil, fmt.Errorf("reading config file: %w", err)
+			}
+		}
 	}
 
 	var cfg Config
