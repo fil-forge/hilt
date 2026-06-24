@@ -26,6 +26,7 @@ var ServerModule = fx.Module("server",
 type ServerParams struct {
 	fx.In
 	Logger *zap.Logger
+	Auth   config.AuthConfig
 	Routes []api.Route `group:"routes"`
 }
 
@@ -45,8 +46,10 @@ func NewEchoServer(p ServerParams) *echo.Echo {
 		return c.String(http.StatusOK, "OK")
 	})
 
+	// Tenant API routes require partner-key bearer auth; / and /health stay open.
+	api := e.Group("", middleware.PartnerKeyAuth(p.Auth.PartnerKey, p.Logger))
 	for _, r := range p.Routes {
-		e.Add(r.Method, r.Path, r.Handler)
+		api.Add(r.Method, r.Path, r.Handler)
 	}
 
 	return e

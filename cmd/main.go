@@ -37,6 +37,9 @@ func main() {
 	serveCmd.Flags().String("postgres-dsn", "", "postgres connection string (used when storage=postgres)")
 	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
 
+	// auth config
+	serveCmd.Flags().String("partner-key", "", "partner bearer key required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
+
 	rootCmd.AddCommand(serveCmd)
 
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: looks for config.yaml in current dir)")

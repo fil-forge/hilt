@@ -21,12 +21,19 @@ type Config struct {
 	Server  ServerConfig  `mapstructure:"server"`
 	Log     LogConfig     `mapstructure:"log"`
 	Storage StorageConfig `mapstructure:"storage"`
+	Auth    AuthConfig    `mapstructure:"auth"`
 }
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
 	Host string `mapstructure:"host"`
 	Port int    `mapstructure:"port"`
+}
+
+// AuthConfig holds authentication settings for the Tenant API.
+type AuthConfig struct {
+	// PartnerKey is the pre-shared bearer token required on Tenant API requests.
+	PartnerKey string `mapstructure:"partner_key"`
 }
 
 // LogConfig holds logging settings.
@@ -83,6 +90,7 @@ func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 		"storage.type":                     "storage",
 		"storage.postgres.dsn":             "postgres-dsn",
 		"storage.postgres.skip_migrations": "skip-migrations",
+		"auth.partner_key":                 "partner-key",
 	}
 	for key, name := range bindings {
 		if f := flags.Lookup(name); f != nil {
