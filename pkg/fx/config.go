@@ -18,6 +18,7 @@ type Configs struct {
 	Log      config.LogConfig
 	Storage  config.StorageConfig
 	Postgres config.PostgresConfig
+	Auth     config.AuthConfig
 }
 
 // ProvideConfigs provides the individual fields of the config.
@@ -27,5 +28,6 @@ func ProvideConfigs(cfg *config.Config) Configs {
 		Log:      cfg.Log,
 		Storage:  cfg.Storage,
 		Postgres: cfg.Storage.Postgres,
+		Auth:     cfg.Auth,
 	}
 }

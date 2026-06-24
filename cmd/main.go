@@ -37,6 +37,9 @@ func main() {
 	serveCmd.Flags().String("postgres-dsn", "", "postgres connection string (used when storage=postgres)")
 	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
 
+	serveCmd.Flags().String("partner-key", "", "partner bearer key required on Tenant API requests")
+	cobra.CheckErr(viper.BindPFlag("auth.partner_key", serveCmd.Flags().Lookup("partner-key")))
+
 	rootCmd.AddCommand(serveCmd)
 
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: looks for config.yaml in current dir)")
