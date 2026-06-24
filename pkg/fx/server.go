@@ -43,13 +43,13 @@ func NewEchoServer(logger *zap.Logger) *echo.Echo {
 func RegisterServerLifecycle(
 	lc fx.Lifecycle,
 	e *echo.Echo,
-	srv config.ServerConfig,
+	cfg config.ServerConfig,
 	logger *zap.Logger,
 ) {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			addr := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
-			logger.Info("starting hilt service", zap.String("address", addr))
+			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+			logger.Info("starting Hilt service", zap.String("address", addr))
 
 			errCh := make(chan error, 1)
 			go func() {
