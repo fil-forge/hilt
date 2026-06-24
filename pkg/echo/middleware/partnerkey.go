@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
@@ -18,10 +19,13 @@ const bearerPrefix = "Bearer "
 // it fails closed and rejects all requests. The key and presented token are
 // never logged.
 func PartnerKeyAuth(partnerKey string, logger *zap.Logger) echo.MiddlewareFunc {
+	var warnOnce sync.Once
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			if partnerKey == "" {
-				logger.Warn("partner key not configured; rejecting request")
+				warnOnce.Do(func() {
+					logger.Warn("partner key not configured; rejecting request")
+				})
 				return unauthorized(c)
 			}
 
