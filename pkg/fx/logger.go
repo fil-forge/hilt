@@ -5,24 +5,15 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/config"
 	"go.uber.org/fx"
-	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 // LoggerModule provides the zap logger.
-var LoggerModule = fx.Module("logger",
-	fx.Provide(NewLogger),
-	fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
-		zl := &fxevent.ZapLogger{Logger: logger}
-		zl.UseLogLevel(zapcore.DebugLevel)
-		return zl
-	}),
-)
+var LoggerModule = fx.Module("logger", fx.Provide(NewLogger))
 
 // NewLogger creates a zap logger based on the configured log level.
 func NewLogger(cfg config.LogConfig) (*zap.Logger, error) {
-
 	var level zapcore.Level
 	err := level.UnmarshalText([]byte(cfg.Level))
 	if err != nil {
