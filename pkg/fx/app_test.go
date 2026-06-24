@@ -20,12 +20,18 @@ func TestAppModuleStorageSelection(t *testing.T) {
 	})
 
 	t.Run("postgres", func(t *testing.T) {
-		cfg := &config.Config{Storage: config.StorageConfig{Type: config.StorageTypePostgres}}
+		cfg := &config.Config{Storage: config.StorageConfig{
+			Type:     config.StorageTypePostgres,
+			Postgres: config.PostgresConfig{DSN: "postgres://hilt:hilt@localhost:5432/hilt?sslmode=disable"},
+		}}
 		require.NoError(t, validate(cfg))
 	})
 
 	t.Run("empty defaults to postgres", func(t *testing.T) {
-		cfg := &config.Config{Storage: config.StorageConfig{Type: ""}}
+		cfg := &config.Config{Storage: config.StorageConfig{
+			Type:     "",
+			Postgres: config.PostgresConfig{DSN: "postgres://hilt:hilt@localhost:5432/hilt?sslmode=disable"},
+		}}
 		require.NoError(t, validate(cfg))
 	})
 
