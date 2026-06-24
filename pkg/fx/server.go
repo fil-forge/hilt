@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/echo/middleware"
 	"github.com/labstack/echo/v4"
@@ -20,14 +21,22 @@ var ServerModule = fx.Module("server",
 	fx.Invoke(RegisterServerLifecycle),
 )
 
+// ServerParams are the dependencies for constructing the echo server. Routes
+// are collected from the "routes" fx group (see APIModule).
+type ServerParams struct {
+	fx.In
+	Logger *zap.Logger
+	Routes []api.Route `group:"routes"`
+}
+
 // NewEchoServer creates and configures the Echo HTTP server.
-func NewEchoServer(logger *zap.Logger) *echo.Echo {
+func NewEchoServer(p ServerParams) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
 
 	e.Use(echomiddleware.Recover())
-	e.Use(middleware.RequestLogger(logger))
+	e.Use(middleware.RequestLogger(p.Logger))
 
 	e.GET("/", func(c echo.Context) error {
 		return c.String(http.StatusOK, "hello world")
@@ -35,6 +44,10 @@ func NewEchoServer(logger *zap.Logger) *echo.Echo {
 	e.GET("/health", func(c echo.Context) error {
 		return c.String(http.StatusOK, "OK")
 	})
+
+	for _, r := range p.Routes {
+		e.Add(r.Method, r.Path, r.Handler)
+	}
 
 	return e
 }
