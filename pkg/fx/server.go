@@ -3,6 +3,7 @@ package fx
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -47,29 +48,27 @@ func RegisterServerLifecycle(
 	logger *zap.Logger,
 ) {
 	lc.Append(fx.Hook{
-        OnStart: func(ctx context.Context) error {
-                addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+		OnStart: func(ctx context.Context) error {
+			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 
-                // Bind synchronously so a failure (e.g. port already in use) is
-                // returned from OnStart and aborts fx startup. Racing the bind
-                // against a timer can report success over a dead listener and
-                // silently drop a late bind error.
-                ln, err := net.Listen("tcp", addr)
-                if err != nil {
-                        return fmt.Errorf("binding %s: %w", addr, err)
-                }
-                e.Listener = ln
-                logger.Info("starting Hilt service", zap.String("address", addr))
-                go func() {
-                        // e.Start reuses the listener bound above and blocks serving
-                        // until Shutdown, which returns http.ErrServerClosed.
-                        if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
-                                logger.Error("server stopped unexpectedly", zap.Error(err))
-                        }
-                }()
+			// Bind synchronously so a failure (e.g. port already in use) is
+			// returned from OnStart and aborts fx startup.
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("binding %s: %w", addr, err)
+			}
+			e.Listener = ln
+			logger.Info("starting Hilt service", zap.String("address", addr))
+			go func() {
+				// e.Start reuses the listener bound above and blocks serving
+				// until Shutdown, which returns http.ErrServerClosed.
+				if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
+					logger.Error("server stopped unexpectedly", zap.Error(err))
+				}
+			}()
 
-                return nil
-        },
+			return nil
+		},
 		OnStop: func(ctx context.Context) error {
 			logger.Info("shutting down server")
 			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
