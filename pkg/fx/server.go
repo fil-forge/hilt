@@ -47,30 +47,29 @@ func RegisterServerLifecycle(
 	logger *zap.Logger,
 ) {
 	lc.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
-			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-			logger.Info("starting Hilt service", zap.String("address", addr))
+        OnStart: func(ctx context.Context) error {
+                addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 
-			errCh := make(chan error, 1)
-			go func() {
-				if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
-					select {
-					case errCh <- err:
-					default:
-						logger.Error("server error", zap.Error(err))
-					}
-				}
-			}()
+                // Bind synchronously so a failure (e.g. port already in use) is
+                // returned from OnStart and aborts fx startup. Racing the bind
+                // against a timer can report success over a dead listener and
+                // silently drop a late bind error.
+                ln, err := net.Listen("tcp", addr)
+                if err != nil {
+                        return fmt.Errorf("binding %s: %w", addr, err)
+                }
+                e.Listener = ln
+                logger.Info("starting Hilt service", zap.String("address", addr))
+                go func() {
+                        // e.Start reuses the listener bound above and blocks serving
+                        // until Shutdown, which returns http.ErrServerClosed.
+                        if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
+                                logger.Error("server stopped unexpectedly", zap.Error(err))
+                        }
+                }()
 
-			select {
-			case err := <-errCh:
-				return fmt.Errorf("starting server: %w", err)
-			case <-time.After(100 * time.Millisecond):
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		},
+                return nil
+        },
 		OnStop: func(ctx context.Context) error {
 			logger.Info("shutting down server")
 			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
