@@ -6,6 +6,7 @@ require (
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/fil-forge/libforge v0.0.0-20260623151745-4c28e5a78e9d
 	github.com/fil-forge/ucantone v0.0.0-20260619013642-7985ec010b88
+	github.com/hashicorp/vault-client-go v0.4.3
 	github.com/ipfs/go-cid v0.6.1
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/labstack/echo/v4 v4.15.0
@@ -18,6 +19,15 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
+)
+
+require (
+	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.1 // indirect
+	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
+	github.com/hashicorp/go-secure-stdlib/strutil v0.1.2 // indirect
+	github.com/mitchellh/go-homedir v1.1.0 // indirect
+	github.com/ryanuber/go-glob v1.0.0 // indirect
 )
 
 require (

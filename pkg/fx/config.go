@@ -16,18 +16,22 @@ type Configs struct {
 	fx.Out
 	Server   config.ServerConfig
 	Log      config.LogConfig
-	Storage  config.StorageConfig
-	Postgres config.PostgresConfig
-	Auth     config.AuthConfig
+	Storage   config.StorageConfig
+	Postgres  config.PostgresConfig
+	Vault     config.VaultConfig
+	Hashicorp config.HashicorpConfig
+	Auth      config.AuthConfig
 }
 
 // ProvideConfigs provides the individual fields of the config.
 func ProvideConfigs(cfg *config.Config) Configs {
 	return Configs{
-		Server:   cfg.Server,
-		Log:      cfg.Log,
-		Storage:  cfg.Storage,
-		Postgres: cfg.Storage.Postgres,
-		Auth:     cfg.Auth,
+		Server:    cfg.Server,
+		Log:       cfg.Log,
+		Storage:   cfg.Storage,
+		Postgres:  cfg.Storage.Postgres,
+		Vault:     cfg.Vault,
+		Hashicorp: cfg.Vault.Hashicorp,
+		Auth:      cfg.Auth,
 	}
 }

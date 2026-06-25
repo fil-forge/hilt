@@ -16,11 +16,24 @@ const (
 	StorageTypePostgres = "postgres"
 )
 
+// Valid values for VaultConfig.Type.
+const (
+	VaultTypeMemory    = "memory"
+	VaultTypeHashicorp = "hashicorp"
+)
+
+// Valid values for HashicorpConfig.AuthMethod.
+const (
+	VaultAuthToken   = "token"
+	VaultAuthAppRole = "approle"
+)
+
 // Config holds the hilt service configuration.
 type Config struct {
 	Server  ServerConfig  `mapstructure:"server"`
 	Log     LogConfig     `mapstructure:"log"`
 	Storage StorageConfig `mapstructure:"storage"`
+	Vault   VaultConfig   `mapstructure:"vault"`
 	Auth    AuthConfig    `mapstructure:"auth"`
 }
 
@@ -48,6 +61,38 @@ type StorageConfig struct {
 	Postgres PostgresConfig `mapstructure:"postgres"`
 }
 
+// VaultConfig selects and configures the vault backend for private key material.
+type VaultConfig struct {
+	// Type selects the backend: "hashicorp" or "memory". Defaults to "hashicorp".
+	Type      string          `mapstructure:"type"`
+	Hashicorp HashicorpConfig `mapstructure:"hashicorp"`
+}
+
+// HashicorpConfig holds settings for the HashiCorp Vault backend.
+type HashicorpConfig struct {
+	// Address is the Vault server address, e.g. "http://127.0.0.1:8200".
+	Address string `mapstructure:"address"`
+	// Mount is the KV v2 secrets engine mount path. Defaults to "secret".
+	Mount string `mapstructure:"mount"`
+	// AuthMethod selects how to authenticate: "token" or "approle". Defaults to
+	// "token".
+	AuthMethod string `mapstructure:"auth_method"`
+	// Token is the Vault auth token (used when AuthMethod is "token").
+	Token string `mapstructure:"token"`
+	// AppRole holds the AppRole credentials (used when AuthMethod is "approle").
+	AppRole AppRoleConfig `mapstructure:"approle"`
+}
+
+// AppRoleConfig holds HashiCorp Vault AppRole authentication credentials.
+type AppRoleConfig struct {
+	// RoleID is the AppRole role ID.
+	RoleID string `mapstructure:"role_id"`
+	// SecretID is the AppRole secret ID.
+	SecretID string `mapstructure:"secret_id"`
+	// Mount is the AppRole auth method mount path. Defaults to "approle".
+	Mount string `mapstructure:"mount"`
+}
+
 // PostgresConfig holds PostgreSQL settings.
 type PostgresConfig struct {
 	// DSN is a libpq-style connection string, e.g.
@@ -71,6 +116,12 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("storage.postgres.dsn", "postgres://hilt:hilt@localhost:5432/hilt?sslmode=disable")
 	v.SetDefault("storage.postgres.max_conns", 10)
 	v.SetDefault("storage.postgres.min_conns", 0)
+
+	v.SetDefault("vault.type", VaultTypeHashicorp)
+	v.SetDefault("vault.hashicorp.address", "http://127.0.0.1:8200")
+	v.SetDefault("vault.hashicorp.mount", "secret")
+	v.SetDefault("vault.hashicorp.auth_method", VaultAuthAppRole)
+	v.SetDefault("vault.hashicorp.approle.mount", "approle")
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix.
@@ -85,12 +136,20 @@ func BindEnvVars(v *viper.Viper) {
 // defaults. Flags that are absent from the set are skipped.
 func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 	bindings := map[string]string{
-		"server.host":                      "host",
-		"server.port":                      "port",
-		"storage.type":                     "storage",
-		"storage.postgres.dsn":             "postgres-dsn",
-		"storage.postgres.skip_migrations": "skip-migrations",
-		"auth.partner_key":                 "partner-key",
+		"server.host":                       "host",
+		"server.port":                       "port",
+		"storage.type":                      "storage",
+		"storage.postgres.dsn":              "postgres-dsn",
+		"storage.postgres.skip_migrations":  "skip-migrations",
+		"vault.type":                        "vault",
+		"vault.hashicorp.address":           "hashicorp-address",
+		"vault.hashicorp.mount":             "hashicorp-mount",
+		"vault.hashicorp.auth_method":       "hashicorp-auth-method",
+		"vault.hashicorp.token":             "hashicorp-token",
+		"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
+		"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
+		"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
+		"auth.partner_key":                  "partner-key",
 	}
 	for key, name := range bindings {
 		if f := flags.Lookup(name); f != nil {
