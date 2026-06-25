@@ -27,8 +27,15 @@ func main() {
 		Short: "Start the hilt service",
 		RunE:  runServe,
 	}
+
+	// http server config
 	serveCmd.Flags().String("host", "127.0.0.1", "host to bind the server to")
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")
+
+	// storage config
+	serveCmd.Flags().String("storage", "postgres", "storage backend (memory or postgres)")
+	serveCmd.Flags().String("postgres-dsn", "", "postgres connection string (used when storage=postgres)")
+	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
 
 	rootCmd.AddCommand(serveCmd)
 
