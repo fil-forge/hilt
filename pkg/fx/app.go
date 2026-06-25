@@ -6,6 +6,8 @@ import (
 	"github.com/fil-forge/hilt/pkg/config"
 	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
 	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
+	vaulthashicorp "github.com/fil-forge/hilt/pkg/fx/vault/hashicorp"
+	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
 	"go.uber.org/fx"
 )
 
@@ -28,6 +30,16 @@ func AppModule(cfg *config.Config) fx.Option {
 		opts = append(opts, storepostgres.Module)
 	default:
 		return fx.Error(fmt.Errorf("unknown storage.type %q (valid: memory, postgres)", cfg.Storage.Type))
+	}
+
+	switch cfg.Vault.Type {
+	case config.VaultTypeMemory:
+		opts = append(opts, vaultmemory.Module)
+	case config.VaultTypeHashicorp, "":
+		// Empty type is treated as the default backend (hashicorp).
+		opts = append(opts, vaulthashicorp.Module)
+	default:
+		return fx.Error(fmt.Errorf("unknown vault.type %q (valid: memory, hashicorp)", cfg.Vault.Type))
 	}
 
 	return fx.Options(opts...)
