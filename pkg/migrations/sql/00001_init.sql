@@ -8,7 +8,8 @@ CREATE TABLE provider (
 );
 
 CREATE TABLE tenant (
-    id          TEXT        PRIMARY KEY, -- DID
+    id          TEXT        PRIMARY KEY, -- DID (did:plc)
+    external_id TEXT        UNIQUE,      -- external Tenant API id ({tenantId})
     provider_id TEXT,                    -- DID
     name        TEXT,
     status      TEXT        NOT NULL, -- active, write-locked, disabled

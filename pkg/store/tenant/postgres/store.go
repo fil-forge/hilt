@@ -29,11 +29,11 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, provider did.DID, name string, status tenant.Status) error {
+func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, name string, status tenant.Status) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tenant (id, provider_id, name, status, created_at)
-		VALUES ($1, $2, $3, $4, $5)
-	`, id.String(), provider.String(), name, string(status), time.Now().UTC())
+		INSERT INTO tenant (id, external_id, provider_id, name, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, id.String(), externalID, provider.String(), name, string(status), time.Now().UTC())
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -46,7 +46,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, provider did.DID, name stri
 
 func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, provider_id, name, status, created_at, updated_at
+		SELECT id, external_id, provider_id, name, status, created_at, updated_at
 		FROM tenant
 		WHERE id = $1
 	`, id.String())
@@ -56,6 +56,22 @@ func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 	}
 	if err != nil {
 		return tenant.Record{}, fmt.Errorf("getting tenant: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, external_id, provider_id, name, status, created_at, updated_at
+		FROM tenant
+		WHERE external_id = $1
+	`, externalID)
+	rec, err := scanRecord(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tenant.Record{}, store.ErrRecordNotFound
+	}
+	if err != nil {
+		return tenant.Record{}, fmt.Errorf("getting tenant by external id: %w", err)
 	}
 	return rec, nil
 }
@@ -82,13 +98,14 @@ type rowScanner interface {
 func scanRecord(row rowScanner) (tenant.Record, error) {
 	var (
 		idStr      string
+		externalID *string
 		providerID *string
 		name       *string
 		status     string
 		createdAt  time.Time
 		updatedAt  *time.Time
 	)
-	if err := row.Scan(&idStr, &providerID, &name, &status, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&idStr, &externalID, &providerID, &name, &status, &createdAt, &updatedAt); err != nil {
 		return tenant.Record{}, err
 	}
 	id, err := did.Parse(idStr)
@@ -99,6 +116,9 @@ func scanRecord(row rowScanner) (tenant.Record, error) {
 		ID:        id,
 		Status:    tenant.Status(status),
 		CreatedAt: createdAt,
+	}
+	if externalID != nil {
+		rec.ExternalID = *externalID
 	}
 	if providerID != nil && *providerID != "" {
 		provider, err := did.Parse(*providerID)

@@ -34,6 +34,7 @@ type Config struct {
 	Log     LogConfig     `mapstructure:"log"`
 	Storage StorageConfig `mapstructure:"storage"`
 	Vault   VaultConfig   `mapstructure:"vault"`
+	PLC     PLCConfig     `mapstructure:"plc"`
 	Auth    AuthConfig    `mapstructure:"auth"`
 }
 
@@ -52,6 +53,13 @@ type AuthConfig struct {
 // LogConfig holds logging settings.
 type LogConfig struct {
 	Level string `mapstructure:"level"`
+}
+
+// PLCConfig holds settings for the did:plc directory.
+type PLCConfig struct {
+	// Directory is the did:plc directory endpoint used to resolve and publish
+	// PLC operations, e.g. "https://plc.directory".
+	Directory string `mapstructure:"directory"`
 }
 
 // StorageConfig selects and configures the store backend.
@@ -122,6 +130,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("vault.hashicorp.mount", "secret")
 	v.SetDefault("vault.hashicorp.auth_method", VaultAuthAppRole)
 	v.SetDefault("vault.hashicorp.approle.mount", "approle")
+
+	v.SetDefault("plc.directory", "https://plc.directory")
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix.
@@ -149,6 +159,7 @@ func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 		"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
 		"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
 		"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
+		"plc.directory":                     "plc-directory",
 		"auth.partner_key":                  "partner-key",
 	}
 	for key, name := range bindings {
