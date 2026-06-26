@@ -29,7 +29,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 		return store.ErrRecordExists
 	}
 	for _, rec := range s.tenants {
-		if externalID != "" && rec.ExternalID == externalID {
+		if rec.ExternalID == externalID {
 			return store.ErrRecordExists
 		}
 	}

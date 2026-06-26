@@ -101,6 +101,7 @@ func NewProvisionTenantHandler(
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, req.DisplayName, tenant.Active); err != nil {
 			if errors.Is(err, store.ErrRecordExists) {
+				_ = v.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
 				// Concurrent create with the same external id: return the winner.
 				if rec, gerr := tenants.GetByExternalID(ctx, externalID); gerr == nil {
 					return c.JSON(http.StatusOK, tenantResponse(rec))

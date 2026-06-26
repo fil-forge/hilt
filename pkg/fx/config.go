@@ -14,8 +14,8 @@ var ConfigModule = fx.Module("config",
 // Configs exposes the individual fields of the config to the fx graph.
 type Configs struct {
 	fx.Out
-	Server   config.ServerConfig
-	Log      config.LogConfig
+	Server    config.ServerConfig
+	Log       config.LogConfig
 	Storage   config.StorageConfig
 	Postgres  config.PostgresConfig
 	Vault     config.VaultConfig
