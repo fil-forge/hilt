@@ -18,6 +18,7 @@ func AppModule(cfg *config.Config) fx.Option {
 		fx.Supply(cfg),
 		ConfigModule,
 		LoggerModule,
+		PLCModule,
 		APIModule,
 		ServerModule,
 	}

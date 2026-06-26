@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/fil-forge/libforge v0.0.0-20260623151745-4c28e5a78e9d
-	github.com/fil-forge/ucantone v0.0.0-20260619013642-7985ec010b88
+	github.com/fil-forge/ucantone v0.0.0-20260626095728-03ab31e14439
 	github.com/hashicorp/vault-client-go v0.4.3
 	github.com/ipfs/go-cid v0.6.1
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
@@ -105,6 +105,8 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/whyrusleeping/cbor-gen v0.3.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
+	gitlab.com/yawning/secp256k1-voi v0.0.0-20230925100816-f2616030848b // indirect
+	gitlab.com/yawning/tuplehash v0.0.0-20230713102510-df83abbf9a02 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
