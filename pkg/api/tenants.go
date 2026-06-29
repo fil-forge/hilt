@@ -23,7 +23,7 @@ func NewProvisionTenantHandler(
 	logger *zap.Logger,
 	tenants tenant.Store,
 	providers provider.Store,
-	v vault.Vault,
+	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
 ) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
@@ -86,7 +86,7 @@ func NewProvisionTenantHandler(
 		// the multiformat-tagged bytes (signer.Bytes()) so the key type is
 		// recoverable on decode rather than assuming secp256k1.
 		vaultKey := "/tenant/" + tenantID.String()
-		if err := v.Write(ctx, vaultKey, signer.Bytes()); err != nil {
+		if err := secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
 			log.Error("storing tenant key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
@@ -94,14 +94,14 @@ func NewProvisionTenantHandler(
 		// Publish the genesis operation to register the did:plc.
 		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
 			log.Error("publishing genesis operation", zap.Error(err))
-			_ = v.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
+			_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
 		}
 
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, req.DisplayName, tenant.Active); err != nil {
 			if errors.Is(err, store.ErrRecordExists) {
-				_ = v.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
+				_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
 				// Concurrent create with the same external id: return the winner.
 				if rec, gerr := tenants.GetByExternalID(ctx, externalID); gerr == nil {
 					return c.JSON(http.StatusOK, tenantResponse(rec))
