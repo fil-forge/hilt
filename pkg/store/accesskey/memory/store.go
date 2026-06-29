@@ -22,12 +22,17 @@ func New() *Store {
 	return &Store{keys: map[did.DID]accesskey.Record{}}
 }
 
-func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string) error {
+func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	if _, ok := s.keys[id]; ok {
 		return store.ErrRecordExists
+	}
+	var expires *time.Time
+	if expiresAt != nil {
+		e := expiresAt.UTC()
+		expires = &e
 	}
 	s.keys[id] = accesskey.Record{
 		ID:          id,
@@ -35,6 +40,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 		Name:        name,
 		Buckets:     slices.Clone(buckets),
 		Permissions: slices.Clone(permissions),
+		ExpiresAt:   expires,
 		CreatedAt:   time.Now().UTC(),
 	}
 	return nil
