@@ -30,7 +30,8 @@ CREATE TABLE access_key (
     name        TEXT,
     buckets     TEXT[],
     permissions TEXT[]      NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL
+    created_at  TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ
 );
 
 CREATE TABLE delegation (

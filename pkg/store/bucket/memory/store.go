@@ -55,21 +55,33 @@ func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, erro
 	return bucket.Record{}, store.ErrRecordNotFound
 }
 
-func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...store.PaginationOption) (store.Page[bucket.Record], error) {
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket.ListOption) (store.Page[bucket.Record], error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
 	limit := defaultListLimit
-	cfg := store.PaginationConfig{Limit: &limit}
+	cfg := bucket.ListConfig{PaginationConfig: store.PaginationConfig{Limit: &limit}}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
+	var idFilter map[did.DID]bool
+	if len(cfg.IDs) > 0 {
+		idFilter = make(map[did.DID]bool, len(cfg.IDs))
+		for _, id := range cfg.IDs {
+			idFilter[id] = true
+		}
+	}
+
 	var recs []bucket.Record
 	for _, b := range s.buckets {
-		if b.Tenant == tenant {
-			recs = append(recs, b)
+		if b.Tenant != tenant {
+			continue
 		}
+		if idFilter != nil && !idFilter[b.ID] {
+			continue
+		}
+		recs = append(recs, b)
 	}
 	slices.SortFunc(recs, func(a, b bucket.Record) int {
 		return strings.Compare(a.ID.String(), b.ID.String())
