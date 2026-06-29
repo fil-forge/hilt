@@ -57,7 +57,54 @@ func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 		FROM access_key
 		WHERE id = $1
 	`, id.String())
+	rec, err := scanRecord(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return accesskey.Record{}, store.ErrRecordNotFound
+	}
+	if err != nil {
+		return accesskey.Record{}, fmt.Errorf("getting access key: %w", err)
+	}
+	return rec, nil
+}
 
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]accesskey.Record, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, name, buckets, permissions, created_at
+		FROM access_key
+		WHERE tenant_id = $1
+		ORDER BY id ASC
+	`, tenant.String())
+	if err != nil {
+		return nil, fmt.Errorf("listing access keys by tenant: %w", err)
+	}
+	defer rows.Close()
+
+	var recs []accesskey.Record
+	for rows.Next() {
+		rec, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating access keys: %w", err)
+	}
+	return recs, nil
+}
+
+func (s *Store) Delete(ctx context.Context, id did.DID) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM access_key WHERE id = $1`, id.String()); err != nil {
+		return fmt.Errorf("deleting access key: %w", err)
+	}
+	return nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRecord(row rowScanner) (accesskey.Record, error) {
 	var (
 		idStr      string
 		tenantID   *string
@@ -66,21 +113,16 @@ func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 		perms      []string
 		createdAt  time.Time
 	)
-	err := row.Scan(&idStr, &tenantID, &name, &bucketStrs, &perms, &createdAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return accesskey.Record{}, store.ErrRecordNotFound
-	}
-	if err != nil {
-		return accesskey.Record{}, fmt.Errorf("getting access key: %w", err)
+	if err := row.Scan(&idStr, &tenantID, &name, &bucketStrs, &perms, &createdAt); err != nil {
+		return accesskey.Record{}, err
 	}
 
-	parsedID, err := did.Parse(idStr)
+	id, err := did.Parse(idStr)
 	if err != nil {
 		return accesskey.Record{}, fmt.Errorf("parsing access key DID: %w", err)
 	}
 	rec := accesskey.Record{
-		ID:          parsedID,
-		Name:        "",
+		ID:          id,
 		Permissions: perms,
 		CreatedAt:   createdAt,
 	}

@@ -1,6 +1,8 @@
 package bucket_test
 
 import (
+	"context"
+	"fmt"
 	"runtime"
 	"testing"
 
@@ -78,6 +80,40 @@ func TestBucketStore(t *testing.T) {
 				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), "shared-name"))
 				err := s.Add(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), "shared-name")
 				require.ErrorIs(t, err, store.ErrRecordExists)
+			})
+
+			t.Run("ListByTenant isolates and paginates by tenant", func(t *testing.T) {
+				tenant := testutil.RandomDID(t)
+				other := testutil.RandomDID(t)
+				for i := range 5 {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenant, fmt.Sprintf("lbt-%d", i)))
+				}
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "lbt-other"))
+
+				all, err := store.Collect(t.Context(), func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
+					var listOpts []store.PaginationOption
+					if opts.Cursor != nil {
+						listOpts = append(listOpts, store.WithCursor(*opts.Cursor))
+					}
+					listOpts = append(listOpts, store.WithLimit(2))
+					return s.ListByTenant(ctx, tenant, listOpts...)
+				})
+				require.NoError(t, err)
+				require.Len(t, all, 5)
+				for _, b := range all {
+					require.Equal(t, tenant, b.Tenant)
+				}
+			})
+
+			t.Run("Delete removes a bucket and is idempotent", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, testutil.RandomDID(t), "to-delete"))
+
+				require.NoError(t, s.Delete(t.Context(), id))
+				_, err := s.GetByName(t.Context(), "to-delete")
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+
+				require.NoError(t, s.Delete(t.Context(), id))
 			})
 		})
 	}
