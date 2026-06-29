@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
 
@@ -25,4 +26,10 @@ type Store interface {
 	// GetByName retrieves the bucket record for a given name. It returns
 	// [store.ErrRecordNotFound] if no bucket exists with the specified name.
 	GetByName(ctx context.Context, name string) (Record, error)
+	// ListByTenant retrieves a paginated list of bucket records for a given
+	// tenant.
+	ListByTenant(ctx context.Context, tenant did.DID, opts ...store.PaginationOption) (store.Page[Record], error)
+	// Delete removes the bucket record for a given ID. It is idempotent:
+	// deleting an absent record returns nil.
+	Delete(ctx context.Context, id did.DID) error
 }

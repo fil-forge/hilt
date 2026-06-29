@@ -91,6 +91,13 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 	return nil
 }
 
+func (s *Store) Delete(ctx context.Context, id did.DID) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
+		return fmt.Errorf("deleting tenant: %w", err)
+	}
+	return nil
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

@@ -89,6 +89,33 @@ func TestAccessKeyStore(t *testing.T) {
 				err := s.Add(t.Context(), id, testutil.RandomDID(t), "dup", nil, []string{"s3:GetObject"})
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
+
+			t.Run("ListByTenant isolates by tenant", func(t *testing.T) {
+				tenant := testutil.RandomDID(t)
+				other := testutil.RandomDID(t)
+				for range 3 {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenant, "k", nil, []string{"s3:GetObject"}))
+				}
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "k", nil, []string{"s3:GetObject"}))
+
+				recs, err := s.ListByTenant(t.Context(), tenant)
+				require.NoError(t, err)
+				require.Len(t, recs, 3)
+				for _, r := range recs {
+					require.Equal(t, tenant, r.Tenant)
+				}
+			})
+
+			t.Run("Delete removes an access key and is idempotent", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, testutil.RandomDID(t), "del", nil, []string{"s3:GetObject"}))
+
+				require.NoError(t, s.Delete(t.Context(), id))
+				_, err := s.Get(t.Context(), id)
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+
+				require.NoError(t, s.Delete(t.Context(), id))
+			})
 		})
 	}
 }

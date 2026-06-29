@@ -60,6 +60,64 @@ func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, erro
 	return rec, nil
 }
 
+const defaultListLimit = 1000
+
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...store.PaginationOption) (store.Page[bucket.Record], error) {
+	cfg := store.PaginationConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	limit := defaultListLimit
+	if cfg.Limit != nil && *cfg.Limit > 0 {
+		limit = *cfg.Limit
+	}
+
+	args := []any{tenant.String(), limit + 1}
+	query := `
+		SELECT id, tenant_id, name, created_at
+		FROM bucket
+		WHERE tenant_id = $1
+	`
+	if cfg.Cursor != nil {
+		args = append(args, *cfg.Cursor)
+		query += ` AND id > $3`
+	}
+	query += ` ORDER BY id ASC LIMIT $2`
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return store.Page[bucket.Record]{}, fmt.Errorf("listing buckets by tenant: %w", err)
+	}
+	defer rows.Close()
+
+	recs := make([]bucket.Record, 0, limit)
+	for rows.Next() {
+		rec, err := scanRecord(rows)
+		if err != nil {
+			return store.Page[bucket.Record]{}, err
+		}
+		recs = append(recs, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return store.Page[bucket.Record]{}, fmt.Errorf("iterating buckets: %w", err)
+	}
+
+	var cursor *string
+	if len(recs) > limit {
+		last := recs[limit-1].ID.String()
+		cursor = &last
+		recs = recs[:limit]
+	}
+	return store.Page[bucket.Record]{Cursor: cursor, Results: recs}, nil
+}
+
+func (s *Store) Delete(ctx context.Context, id did.DID) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM bucket WHERE id = $1`, id.String()); err != nil {
+		return fmt.Errorf("deleting bucket: %w", err)
+	}
+	return nil
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

@@ -48,4 +48,7 @@ type Store interface {
 	// SetStatus updates the status of a tenant record. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	SetStatus(ctx context.Context, id did.DID, status Status) error
+	// Delete removes the tenant record for a given ID. It is idempotent:
+	// deleting an absent record returns nil.
+	Delete(ctx context.Context, id did.DID) error
 }

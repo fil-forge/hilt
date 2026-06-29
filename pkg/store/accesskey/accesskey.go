@@ -30,4 +30,9 @@ type Store interface {
 	// Get retrieves the access key record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	Get(ctx context.Context, id did.DID) (Record, error)
+	// ListByTenant retrieves all access key records for a given tenant.
+	ListByTenant(ctx context.Context, tenant did.DID) ([]Record, error)
+	// Delete removes the access key record for a given ID. It is idempotent:
+	// deleting an absent record returns nil.
+	Delete(ctx context.Context, id did.DID) error
 }
