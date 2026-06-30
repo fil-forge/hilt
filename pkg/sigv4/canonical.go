@@ -24,7 +24,7 @@ func (s *SignedRequest) canonicalRequest() string {
 	return b.String()
 }
 
-// stringToSign builds the AWS string-to-sign for the given algorithm.
+// stringToSign builds the AWS string-to-sign.
 func (s *SignedRequest) stringToSign() string {
 	return string(s.Scheme) + "\n" +
 		s.amzDate + "\n" +

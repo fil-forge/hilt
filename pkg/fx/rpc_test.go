@@ -8,6 +8,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/server"
@@ -38,7 +39,7 @@ func TestNewUCANServer(t *testing.T) {
 			rpc.NewCreateBucketHandler(zap.NewNop()),
 			rpc.NewDeleteBucketHandler(zap.NewNop()),
 			rpc.NewBucketInfoHandler(zap.NewNop()),
-			rpc.NewListBucketsHandler(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), bucketmemory.New(), vaultmemory.New()),
+			rpc.NewListBucketsHandler(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), bucketmemory.New(), providermemory.New(), vaultmemory.New()),
 		},
 	})
 	require.NotNil(t, srv)

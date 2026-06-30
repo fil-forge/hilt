@@ -3,6 +3,7 @@ package sigv4
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -13,10 +14,10 @@ const (
 )
 
 // Presign returns a copy of req signed as a presigned URL (auth in the query
-// string) for the given scheme. It mirrors Verify's canonicalization and is
-// primarily used by tests and any client-side signing; Hilt itself only
-// verifies. host is the only signed header.
-func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Scheme, signedAt time.Time) (Request, error) {
+// string) for the given scheme, valid for expires from signedAt. It mirrors
+// Verify's canonicalization and is primarily used by tests and any client-side
+// signing; Hilt itself only verifies. host is the only signed header.
+func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Scheme, signedAt time.Time, expires time.Duration) (Request, error) {
 	u, err := url.Parse(req.URL)
 	if err != nil {
 		return Request{}, fmt.Errorf("parsing request URL: %w", err)
@@ -34,6 +35,7 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 	q.Set(amzAlgorithm, string(scheme))
 	q.Set(amzCredential, accessKeyID+"/"+scope)
 	q.Set(amzDate, date)
+	q.Set(amzExpires, strconv.Itoa(int(expires.Seconds())))
 	q.Set(amzSignedHdrs, "host")
 	if scheme == SchemeV4a {
 		q.Set(amzRegionSet, region)
@@ -47,7 +49,7 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 	sr := &SignedRequest{
 		Scheme:        scheme,
 		AccessKeyID:   accessKeyID,
-		Region:        region,
+		Regions:       []string{region},
 		method:        req.Method,
 		canonicalURI:  canonicalURI,
 		query:         q, // X-Amz-Signature not yet set

@@ -18,7 +18,7 @@ func verifyV4(req *SignedRequest, secretAccessKey string) error {
 
 // signV4 computes the hex AWS4-HMAC-SHA256 signature for the request.
 func (s *SignedRequest) signV4(secretAccessKey string) string {
-	key := deriveSigningKeyV4(secretAccessKey, s.scopeDate(), s.Region, s.scopeService())
+	key := deriveSigningKeyV4(secretAccessKey, s.scopeDate(), s.scopeRegion(), s.scopeService())
 	return hex.EncodeToString(hmacSHA256(key, []byte(s.stringToSign())))
 }
 

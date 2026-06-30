@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Scheme identifies an AWS signature algorithm.
@@ -33,6 +35,7 @@ const (
 	amzDate         = "X-Amz-Date"
 	amzContentSHA   = "X-Amz-Content-Sha256"
 	amzRegionSet    = "X-Amz-Region-Set"
+	amzExpires      = "X-Amz-Expires"
 	terminator      = "aws4_request"
 	unsignedPayload = "UNSIGNED-PAYLOAD"
 )
@@ -59,8 +62,8 @@ func toHeader(m map[string]string) http.Header {
 // identity fields plus the components needed to recompute the signature.
 type SignedRequest struct {
 	Scheme      Scheme
-	AccessKeyID string // bare did:key identifier
-	Region      string // credential-scope region (V4) or X-Amz-Region-Set (V4a)
+	AccessKeyID string   // bare did:key identifier
+	Regions     []string // credential-scope region (V4) or X-Amz-Region-Set (V4a)
 
 	method        string
 	canonicalURI  string
@@ -72,6 +75,8 @@ type SignedRequest struct {
 	amzDate       string
 	scope         string // "<date>/[<region>/]<service>/aws4_request"
 	signature     string // the signature carried on the request
+	presigned     bool   // auth came from the query string (presigned URL)
+	expires       int    // X-Amz-Expires seconds (presigned only)
 }
 
 // Parse extracts the signature fields from an S3 request — from the
@@ -93,16 +98,20 @@ func Parse(req Request) (*SignedRequest, error) {
 		date          string
 		regionSet     string
 		payloadHash   string
+		presigned     bool
+		expires       int
 	)
 
 	if query.Get(amzAlgorithm) != "" {
 		// Presigned URL: auth fields live in the query string.
+		presigned = true
 		algorithm = query.Get(amzAlgorithm)
 		credential = query.Get(amzCredential)
 		signedHeaders = query.Get(amzSignedHdrs)
 		signature = query.Get(amzSignature)
 		date = query.Get(amzDate)
 		regionSet = query.Get(amzRegionSet)
+		expires, _ = strconv.Atoi(query.Get(amzExpires))
 		payloadHash = query.Get(amzContentSHA)
 		if payloadHash == "" {
 			payloadHash = unsignedPayload
@@ -140,9 +149,13 @@ func Parse(req Request) (*SignedRequest, error) {
 	accessKeyID := credParts[0]
 	scope := strings.Join(credParts[1:], "/")
 
-	region := regionSet
+	// SigV4 carries a single credential-scope region; SigV4a carries a
+	// (comma-separated) X-Amz-Region-Set.
+	var regions []string
 	if scheme == SchemeV4 {
-		region = credParts[2]
+		regions = []string{credParts[2]}
+	} else {
+		regions = splitRegionSet(regionSet)
 	}
 
 	canonicalURI := u.EscapedPath()
@@ -161,7 +174,7 @@ func Parse(req Request) (*SignedRequest, error) {
 	return &SignedRequest{
 		Scheme:        scheme,
 		AccessKeyID:   accessKeyID,
-		Region:        region,
+		Regions:       regions,
 		method:        req.Method,
 		canonicalURI:  canonicalURI,
 		query:         signed,
@@ -172,6 +185,8 @@ func Parse(req Request) (*SignedRequest, error) {
 		amzDate:       date,
 		scope:         scope,
 		signature:     signature,
+		presigned:     presigned,
+		expires:       expires,
 	}, nil
 }
 
@@ -187,6 +202,45 @@ func Verify(req *SignedRequest, secretAccessKey string) error {
 	default:
 		return fmt.Errorf("unsupported signature algorithm %q", req.Scheme)
 	}
+}
+
+const (
+	// maxPresignExpiry is AWS's upper bound on a presigned URL's validity window.
+	maxPresignExpiry = 7 * 24 * 60 * 60 // 7 days, in seconds
+	// maxClockSkew is the tolerance applied to a header-authenticated request's
+	// X-Amz-Date (AWS rejects beyond this as RequestTimeTooSkewed).
+	maxClockSkew = 15 * time.Minute
+)
+
+// ValidateTimeBounds checks that the request is still valid at now, bounding
+// signature replay. For presigned requests it enforces the
+// [signedAt, signedAt + X-Amz-Expires] window (and a 7-day cap on X-Amz-Expires).
+// For header-authenticated requests (no X-Amz-Expires) it enforces an X-Amz-Date
+// clock-skew window of ±maxClockSkew.
+func ValidateTimeBounds(req *SignedRequest, now time.Time) error {
+	signedAt, err := time.Parse(amzDateFormat, req.amzDate)
+	if err != nil {
+		return fmt.Errorf("parsing X-Amz-Date: %w", err)
+	}
+
+	if !req.presigned {
+		if now.Sub(signedAt).Abs() > maxClockSkew {
+			return fmt.Errorf("request time %s is outside the allowed clock skew", signedAt.Format(time.RFC3339))
+		}
+		return nil
+	}
+
+	if req.expires <= 0 || req.expires > maxPresignExpiry {
+		return fmt.Errorf("invalid X-Amz-Expires %d", req.expires)
+	}
+	expiresAt := signedAt.Add(time.Duration(req.expires) * time.Second)
+	if now.Before(signedAt) {
+		return fmt.Errorf("presigned URL not yet valid (signed %s)", signedAt.Format(time.RFC3339))
+	}
+	if now.After(expiresAt) {
+		return fmt.Errorf("presigned URL expired at %s", expiresAt.Format(time.RFC3339))
+	}
+	return nil
 }
 
 // scopeService returns the service element of the credential scope (e.g. "s3").
@@ -206,6 +260,26 @@ func (s *SignedRequest) scopeDate() string {
 		return ""
 	}
 	return parts[0]
+}
+
+// scopeRegion returns the region element of a SigV4 credential scope
+// ("<date>/<region>/<service>/aws4_request"); it is the source of truth for the
+// SigV4 signing-key derivation. SigV4a scopes carry no region.
+func (s *SignedRequest) scopeRegion() string {
+	parts := strings.Split(s.scope, "/")
+	if len(parts) != 4 {
+		return ""
+	}
+	return parts[1]
+}
+
+// splitRegionSet splits a SigV4a X-Amz-Region-Set into its (trimmed) regions.
+func splitRegionSet(set string) []string {
+	regions := strings.Split(set, ",")
+	for i := range regions {
+		regions[i] = strings.TrimSpace(regions[i])
+	}
+	return regions
 }
 
 func splitSignedHeaders(s string) []string {

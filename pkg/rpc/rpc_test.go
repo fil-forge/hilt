@@ -6,6 +6,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/server"
@@ -33,7 +34,7 @@ func TestHandlerCommands(t *testing.T) {
 	}
 
 	t.Run("list", func(t *testing.T) {
-		route := rpc.NewListBucketsHandler(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), bucketmemory.New(), vaultmemory.New())
+		route := rpc.NewListBucketsHandler(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), bucketmemory.New(), providermemory.New(), vaultmemory.New())
 		require.Equal(t, "/s3/bucket/list", route.Command.String())
 		require.NotNil(t, route.Handler)
 	})
