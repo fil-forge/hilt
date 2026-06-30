@@ -13,6 +13,8 @@ import (
 	memprovider "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	memtenant "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	"github.com/fil-forge/hilt/pkg/store/wrapkey"
+	memwrapkey "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"go.uber.org/fx"
 )
 
@@ -24,6 +26,7 @@ var Module = fx.Module("memory-store",
 		NewDelegationStore,
 		NewProviderStore,
 		NewTenantStore,
+		NewWrapKeyStore,
 	),
 )
 
@@ -45,4 +48,8 @@ func NewProviderStore() provider.Store {
 
 func NewTenantStore() tenant.Store {
 	return memtenant.New()
+}
+
+func NewWrapKeyStore() wrapkey.Store {
+	return memwrapkey.New()
 }
