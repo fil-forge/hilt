@@ -81,7 +81,7 @@ type SignedRequest struct {
 
 // Parse extracts the signature fields from an S3 request — from the
 // Authorization header or, for presigned URLs, the X-Amz-* query parameters. It
-// does not verify the signature; call [SignedRequest.Verify] for that.
+// does not verify the signature; call [Verify] for that.
 func Parse(req Request) (*SignedRequest, error) {
 	u, err := url.Parse(req.URL)
 	if err != nil {
@@ -122,7 +122,7 @@ func Parse(req Request) (*SignedRequest, error) {
 		regionSet = headers.Get(amzRegionSet)
 		payloadHash = headers.Get(amzContentSHA)
 		if payloadHash == "" {
-			payloadHash = hashSHA256(nil)
+			return nil, fmt.Errorf("missing %s header", amzContentSHA)
 		}
 	} else {
 		return nil, errors.New("request is not signed")
@@ -319,7 +319,14 @@ func splitRegionSet(set string) []string {
 }
 
 func splitSignedHeaders(s string) []string {
-	hdrs := strings.Split(strings.ToLower(s), ";")
+	raw := strings.Split(strings.ToLower(s), ";")
+	var hdrs []string
+	for _, h := range raw {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			hdrs = append(hdrs, h)
+		}
+	}
 	sort.Strings(hdrs)
 	return hdrs
 }

@@ -217,8 +217,9 @@ func TestParseHeaderAuth(t *testing.T) {
 		Method: "GET",
 		URL:    "https://bucket.s3.fil.one/",
 		Headers: map[string]string{
-			"Authorization": "AWS4-HMAC-SHA256 Credential=z6MkAbc/20260616/us-west-2/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc123",
-			"X-Amz-Date":    "20260616T091923Z",
+			"Authorization":        "AWS4-HMAC-SHA256 Credential=z6MkAbc/20260616/us-west-2/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc123",
+			"X-Amz-Date":           "20260616T091923Z",
+			"X-Amz-Content-Sha256": unsignedPayload,
 		},
 	}
 	sr, err := Parse(req)
@@ -249,6 +250,20 @@ func TestParseErrors(t *testing.T) {
 		_, err := Parse(Request{
 			Method: "GET",
 			URL:    "https://bucket.s3.fil.one/?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=z6MkAbc%2Fonly&X-Amz-SignedHeaders=host&X-Amz-Signature=abc&X-Amz-Date=20260616T091923Z",
+		})
+		require.Error(t, err)
+	})
+	t.Run("header auth missing payload hash", func(t *testing.T) {
+		// X-Amz-Content-Sha256 is part of the signed canonical request; refuse to
+		// invent an (empty-payload) hash for it rather than verify against the
+		// value the client actually signed.
+		_, err := Parse(Request{
+			Method: "GET",
+			URL:    "https://bucket.s3.fil.one/",
+			Headers: map[string]string{
+				"Authorization": "AWS4-HMAC-SHA256 Credential=z6MkAbc/20260616/us-west-2/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc123",
+				"X-Amz-Date":    "20260616T091923Z",
+			},
 		})
 		require.Error(t, err)
 	})
