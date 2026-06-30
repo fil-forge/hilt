@@ -90,7 +90,7 @@ func NewProvisionTenantHandler(
 		// Persist the private key before publishing so it is never lost. Store
 		// the multiformat-tagged bytes (signer.Bytes()) so the key type is
 		// recoverable on decode rather than assuming secp256k1.
-		vaultKey := vaultTenantKeyPath(tenantID)
+		vaultKey := vault.TenantKeyPath(tenantID)
 		if err := secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
 			log.Error("storing tenant key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -220,7 +220,7 @@ func NewDeleteTenantHandler(
 			return echo.NewHTTPError(http.StatusConflict, "tenant must be disabled before deletion")
 		}
 
-		tenantKey := vaultTenantKeyPath(rec.ID)
+		tenantKey := vault.TenantKeyPath(rec.ID)
 
 		// Deactivate the did:plc first — it requires the (still-present) tenant
 		// key. Aborting here leaves all local state intact for a retry.
@@ -240,7 +240,7 @@ func NewDeleteTenantHandler(
 				log.Error("deleting access key delegations", zap.Error(err))
 				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 			}
-			if err := secrets.Delete(ctx, vaultAccessKeyPath(rec.ID, ak.ID)); err != nil {
+			if err := secrets.Delete(ctx, vault.AccessKeyPath(rec.ID, ak.ID)); err != nil {
 				log.Warn("removing access key from vault", zap.Error(err))
 			}
 			if err := accessKeys.Delete(ctx, ak.ID); err != nil {

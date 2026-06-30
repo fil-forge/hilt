@@ -24,18 +24,6 @@ import (
 
 const maxAccessKeyNameLength = 100
 
-// vaultTenantKeyPath is the vault key under which a tenant's private key is
-// stored.
-func vaultTenantKeyPath(tenantDID did.DID) string {
-	return "/tenant/" + tenantDID.String()
-}
-
-// vaultAccessKeyPath is the vault key under which an access key's private key is
-// stored. It MUST match the path used by the tenant delete cascade.
-func vaultAccessKeyPath(tenantDID, accessKeyDID did.DID) string {
-	return vaultTenantKeyPath(tenantDID) + "/access/" + accessKeyDID.String()
-}
-
 // NewCreateAccessKeyHandler handles POST /tenants/{tenantId}/access-keys —
 // create an S3 access-key pair (returns the secret once only) and issue the
 // tenant→access-key UCAN delegations for the requested permissions.
@@ -78,7 +66,7 @@ func NewCreateAccessKeyHandler(
 
 		// Load the tenant signer up front: it is required to issue delegations and
 		// its absence is unrecoverable, so fail before creating any state.
-		tenantKeyBytes, err := secrets.Read(ctx, vaultTenantKeyPath(tenantRec.ID))
+		tenantKeyBytes, err := secrets.Read(ctx, vault.TenantKeyPath(tenantRec.ID))
 		if err != nil {
 			log.Error("reading tenant key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -131,7 +119,7 @@ func NewCreateAccessKeyHandler(
 		}
 		log = log.With(zap.Stringer("access_key", accessKeyDID))
 
-		vaultPath := vaultAccessKeyPath(tenantRec.ID, accessKeyDID)
+		vaultPath := vault.AccessKeyPath(tenantRec.ID, accessKeyDID)
 		if err := secrets.Write(ctx, vaultPath, signer.Bytes()); err != nil {
 			log.Error("storing access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -340,7 +328,7 @@ func NewDeleteAccessKeyHandler(
 			log.Error("deleting access key delegations", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		if err := secrets.Delete(ctx, vaultAccessKeyPath(tenantRec.ID, accessKeyDID)); err != nil {
+		if err := secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, accessKeyDID)); err != nil {
 			log.Warn("removing access key from vault", zap.Error(err))
 		}
 		if err := accessKeys.Delete(ctx, accessKeyDID); err != nil {

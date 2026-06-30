@@ -57,12 +57,3 @@ func NewBucketInfoHandler(logger *zap.Logger) server.Route {
 		return errNotImplemented
 	})
 }
-
-// NewListBucketsHandler handles /s3/bucket/list — list the tenant's buckets.
-func NewListBucketsHandler(logger *zap.Logger) server.Route {
-	log := logger.With(zap.Stringer("command", s3bkt.List.Command))
-	return s3bkt.List.Route(func(req *binding.Request[*s3bkt.ListArguments], res *binding.Response[*s3bkt.ListOK]) error {
-		log.Debug("not implemented")
-		return errNotImplemented
-	})
-}
