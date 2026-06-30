@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/fil-forge/libforge v0.0.0-20260623151745-4c28e5a78e9d
-	github.com/fil-forge/ucantone v0.0.0-20260630082720-1f5fdc42ba73
+	github.com/fil-forge/ucantone v0.0.0-20260630200110-9687344ad468
 	github.com/hashicorp/vault-client-go v0.4.3
 	github.com/ipfs/go-cid v0.6.1
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
