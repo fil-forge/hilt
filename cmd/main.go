@@ -47,6 +47,9 @@ func main() {
 	serveCmd.Flags().String("hashicorp-approle-secret-id", "", "hashicorp vault AppRole secret ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_SECRET_ID env var or config file)")
 	serveCmd.Flags().String("hashicorp-approle-mount", "approle", "hashicorp vault AppRole auth mount path")
 
+	// plc config
+	serveCmd.Flags().String("plc-directory", "https://plc.directory", "did:plc directory endpoint")
+
 	// auth config
 	serveCmd.Flags().String("partner-key", "", "partner bearer key required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
 

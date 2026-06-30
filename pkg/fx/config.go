@@ -14,12 +14,13 @@ var ConfigModule = fx.Module("config",
 // Configs exposes the individual fields of the config to the fx graph.
 type Configs struct {
 	fx.Out
-	Server   config.ServerConfig
-	Log      config.LogConfig
+	Server    config.ServerConfig
+	Log       config.LogConfig
 	Storage   config.StorageConfig
 	Postgres  config.PostgresConfig
 	Vault     config.VaultConfig
 	Hashicorp config.HashicorpConfig
+	PLC       config.PLCConfig
 	Auth      config.AuthConfig
 }
 
@@ -32,6 +33,7 @@ func ProvideConfigs(cfg *config.Config) Configs {
 		Postgres:  cfg.Storage.Postgres,
 		Vault:     cfg.Vault,
 		Hashicorp: cfg.Vault.Hashicorp,
+		PLC:       cfg.PLC,
 		Auth:      cfg.Auth,
 	}
 }
