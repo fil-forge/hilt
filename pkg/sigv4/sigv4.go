@@ -204,6 +204,42 @@ func Verify(req *SignedRequest, secretAccessKey string) error {
 	}
 }
 
+// VerifyWithKey verifies the request signature using a derived key previously
+// produced by [DeriveKey].
+//
+// For SigV4 key is the 32-byte HMAC signing key; for SigV4a it is the 33-byte
+// compressed SEC1 P-256 public key. It returns nil when the signature is valid.
+// It checks only the signature; time bounds, region, and permissions are the
+// caller's responsibility (as with [Verify]).
+func VerifyWithKey(req *SignedRequest, key []byte) error {
+	switch req.Scheme {
+	case SchemeV4:
+		return verifyV4WithKey(req, key)
+	case SchemeV4a:
+		return verifyV4aWithKey(req, key)
+	default:
+		return fmt.Errorf("unsupported signature algorithm %q", req.Scheme)
+	}
+}
+
+// DeriveKey returns the derived signing key for the request, that can be used
+// to verify subsequent requests with the same signature scheme. See
+// [VerifyWithKey].
+//
+// For SigV4 it returns the 32-byte HMAC signing key derived for the request's
+// date/region/service scope (symmetric — used to recompute and compare the
+// HMAC). For SigV4a it returns the 33-byte compressed SEC1 P-256 public key.
+func DeriveKey(req *SignedRequest, secretAccessKey string) ([]byte, error) {
+	switch req.Scheme {
+	case SchemeV4:
+		return deriveSigningKeyV4(secretAccessKey, req.scopeDate(), req.scopeRegion(), req.scopeService()), nil
+	case SchemeV4a:
+		return derivedPublicKeyV4a(req.AccessKeyID, secretAccessKey)
+	default:
+		return nil, fmt.Errorf("unsupported signature algorithm %q", req.Scheme)
+	}
+}
+
 const (
 	// maxPresignExpiry is AWS's upper bound on a presigned URL's validity window.
 	maxPresignExpiry = 7 * 24 * 60 * 60 // 7 days, in seconds

@@ -35,15 +35,69 @@ func verifyV4a(req *SignedRequest, secretAccessKey string) error {
 	if err != nil {
 		return err
 	}
+	return verifyV4aWithPublicKey(req, &priv.PublicKey)
+}
+
+// verifyV4aWithKey verifies the signature using a compressed SEC1 P-256 public
+// key (the SigV4a derived key, as produced by DeriveKey).
+func verifyV4aWithKey(req *SignedRequest, key []byte) error {
+	pub, err := parseCompressedP256(key)
+	if err != nil {
+		return err
+	}
+	return verifyV4aWithPublicKey(req, pub)
+}
+
+// verifyV4aWithPublicKey ECDSA-verifies the request's DER signature over the
+// string-to-sign against pub.
+func verifyV4aWithPublicKey(req *SignedRequest, pub *ecdsa.PublicKey) error {
 	der, err := hex.DecodeString(req.signature)
 	if err != nil {
 		return fmt.Errorf("decoding signature: %w", err)
 	}
 	digest := sha256.Sum256([]byte(req.stringToSign()))
-	if !ecdsa.VerifyASN1(&priv.PublicKey, digest[:], der) {
+	if !ecdsa.VerifyASN1(pub, digest[:], der) {
 		return errors.New("signature mismatch")
 	}
 	return nil
+}
+
+// parseCompressedP256 decodes a 33-byte compressed SEC1 point into an ECDSA P-256
+// public key. The standard library has no non-deprecated compressed-point parser
+// (crypto/ecdh rejects compressed points and ecdsa.ParseUncompressedPublicKey
+// takes only uncompressed), so use elliptic.UnmarshalCompressed — the documented
+// inverse of the compression DeriveKey applies — then re-encode as an
+// uncompressed point for ecdsa.ParseUncompressedPublicKey.
+func parseCompressedP256(key []byte) (*ecdsa.PublicKey, error) {
+	x, y := elliptic.UnmarshalCompressed(elliptic.P256(), key)
+	if x == nil {
+		return nil, errors.New("sigv4a: invalid compressed public key")
+	}
+	uncompressed := make([]byte, 65)
+	uncompressed[0] = 0x04
+	x.FillBytes(uncompressed[1:33])
+	y.FillBytes(uncompressed[33:65])
+	return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), uncompressed)
+}
+
+// derivedPublicKeyV4a derives the SigV4a P-256 key and returns its public key in
+// compressed SEC1 form (33 bytes) — the s3.VerificationKey data for the "sigv4a"
+// kind (see the RFC appendix, which encodes the same compressed bytes).
+func derivedPublicKeyV4a(accessKeyID, secretAccessKey string) ([]byte, error) {
+	priv, err := deriveKeyV4a(accessKeyID, secretAccessKey)
+	if err != nil {
+		return nil, err
+	}
+	// PublicKey.Bytes is the uncompressed SEC1 encoding (0x04 || X || Y); compress
+	// it to 0x02|0x03(parity of Y) || X, avoiding the deprecated coordinate APIs.
+	uncompressed, err := priv.PublicKey.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("sigv4a: marshaling public key: %w", err)
+	}
+	compressed := make([]byte, 33)
+	compressed[0] = 0x02 | (uncompressed[64] & 1)
+	copy(compressed[1:], uncompressed[1:33])
+	return compressed, nil
 }
 
 // deriveKeyV4a derives the SigV4a ECDSA P-256 private key from an access key id

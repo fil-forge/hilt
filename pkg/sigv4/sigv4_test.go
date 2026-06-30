@@ -1,6 +1,7 @@
 package sigv4
 
 import (
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"testing"
@@ -109,6 +110,106 @@ func TestDeriveKeyV4aDeterministic(t *testing.T) {
 
 	require.Equal(t, b1, b2, "derivation must be deterministic")
 	require.NotEqual(t, b1, bOther, "different secret yields a different key")
+}
+
+func TestDeriveKey(t *testing.T) {
+	const (
+		akid   = "z6MkExampleAccessKeyIdentifier000000000000000"
+		secret = "uExampleSecretAccessKeyMaterial00000000000000"
+		region = "us-east-1"
+	)
+	at := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+
+	presign := func(t *testing.T, scheme Scheme) *SignedRequest {
+		t.Helper()
+		signed, err := Presign(
+			Request{Method: "GET", URL: "https://bucket.s3.fil.one/path?x-id=ListBuckets"},
+			akid, secret, region, scheme, at, time.Hour,
+		)
+		require.NoError(t, err)
+		sr, err := Parse(signed)
+		require.NoError(t, err)
+		return sr
+	}
+
+	t.Run("sigv4 returns the HMAC signing key", func(t *testing.T) {
+		sr := presign(t, SchemeV4)
+		key, err := DeriveKey(sr, secret)
+		require.NoError(t, err)
+		require.Len(t, key, 32, "SigV4 signing key is HMAC-SHA256 sized")
+		// The derived key, applied as the gateway would, must reproduce the
+		// request's signature.
+		got := hex.EncodeToString(hmacSHA256(key, []byte(sr.stringToSign())))
+		require.Equal(t, sr.signature, got)
+	})
+
+	t.Run("sigv4a returns the compressed public key", func(t *testing.T) {
+		sr := presign(t, SchemeV4a)
+		key, err := DeriveKey(sr, secret)
+		require.NoError(t, err)
+		require.Len(t, key, 33, "compressed SEC1 P-256 point")
+		require.True(t, key[0] == 0x02 || key[0] == 0x03, "compressed-point prefix")
+
+		// Must be the access key's verifying public key: compare against the
+		// canonical uncompressed encoding (0x04 || X || Y).
+		priv, err := deriveKeyV4a(akid, secret)
+		require.NoError(t, err)
+		uncompressed, err := priv.PublicKey.Bytes()
+		require.NoError(t, err)
+		require.Equal(t, uncompressed[1:33], key[1:], "X coordinate")
+		require.Equal(t, byte(0x02|(uncompressed[64]&1)), key[0], "Y-parity prefix")
+	})
+
+	t.Run("unsupported scheme errors", func(t *testing.T) {
+		_, err := DeriveKey(&SignedRequest{Scheme: "bogus"}, secret)
+		require.Error(t, err)
+	})
+}
+
+func TestVerifyWithKey(t *testing.T) {
+	const (
+		akid      = "z6MkExampleAccessKeyIdentifier000000000000000"
+		secret    = "uExampleSecretAccessKeyMaterial00000000000000"
+		altSecret = "uDifferentSecretAccessKeyMaterial0000000000000"
+		region    = "us-east-1"
+	)
+	at := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+
+	signedFor := func(t *testing.T, scheme Scheme, signSecret string) *SignedRequest {
+		t.Helper()
+		signed, err := Presign(
+			Request{Method: "GET", URL: "https://bucket.s3.fil.one/path?x-id=ListBuckets"},
+			akid, signSecret, region, scheme, at, time.Hour,
+		)
+		require.NoError(t, err)
+		sr, err := Parse(signed)
+		require.NoError(t, err)
+		return sr
+	}
+
+	for _, scheme := range []Scheme{SchemeV4, SchemeV4a} {
+		t.Run(string(scheme), func(t *testing.T) {
+			// The Hilt→gateway round-trip: derive the key, then verify with it.
+			sr := signedFor(t, scheme, secret)
+			key, err := DeriveKey(sr, secret)
+			require.NoError(t, err)
+			require.NoError(t, VerifyWithKey(sr, key), "derived key should verify the request")
+
+			// A key derived for a different secret must not verify.
+			wrong, err := DeriveKey(signedFor(t, scheme, altSecret), altSecret)
+			require.NoError(t, err)
+			require.Error(t, VerifyWithKey(sr, wrong), "mismatched key should fail")
+		})
+	}
+
+	t.Run("malformed sigv4a key", func(t *testing.T) {
+		sr := signedFor(t, SchemeV4a, secret)
+		require.Error(t, VerifyWithKey(sr, []byte{0x02, 0x00}))
+	})
+
+	t.Run("unsupported scheme errors", func(t *testing.T) {
+		require.Error(t, VerifyWithKey(&SignedRequest{Scheme: "bogus"}, nil))
+	})
 }
 
 func TestParseHeaderAuth(t *testing.T) {
