@@ -50,6 +50,10 @@ type UploadConfig struct {
 	// ProductID is the Sprue product/plan DID that tenants are registered under
 	// when Hilt provisions them (the /customer/add product argument).
 	ProductID string `mapstructure:"product_id"`
+	// Proofs is the UCAN delegation container the upload client presents to Sprue
+	// — either an inline (codec-prefixed) encoded container or a path to a file
+	// containing one. Empty means no proofs (only self-issued calls will work).
+	Proofs string `mapstructure:"proofs"`
 }
 
 // IdentityConfig holds the Hilt service identity used to sign and receive UCAN
@@ -196,6 +200,7 @@ func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 		"upload.service_id":                 "upload-service-id",
 		"upload.service_url":                "upload-service-url",
 		"upload.product_id":                 "upload-product-id",
+		"upload.proofs":                     "upload-proofs",
 	}
 	for key, name := range bindings {
 		if f := flags.Lookup(name); f != nil {

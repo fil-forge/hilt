@@ -3,19 +3,21 @@ package fx
 import (
 	"fmt"
 	"net/url"
+	"os"
 
 	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/config"
-	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/fil-forge/ucantone/ucan/container"
 	"go.uber.org/zap"
 )
 
-// NewUploadClient builds the Sprue upload-service client from configuration. The
-// delegation store doubles as the client's proof store (it satisfies
-// ucanlib.ProofStore); ProvisionSpace is self-issued and does not consult it.
-func NewUploadClient(id identity.Identity, cfg config.UploadConfig, delegations delegationstore.Store, logger *zap.Logger) (*client.UploadClient, error) {
+// NewUploadClient builds the Sprue upload-service client from configuration. Its
+// proof store — the delegations it presents to Sprue — is loaded from
+// upload.proofs (see [uploadProofs]).
+func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.Logger) (*client.UploadClient, error) {
 	serviceID, err := did.Parse(cfg.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("parsing upload.service_id %q: %w", cfg.ServiceID, err)
@@ -34,6 +36,31 @@ func NewUploadClient(id identity.Identity, cfg config.UploadConfig, delegations 
 			return nil, fmt.Errorf("parsing upload.product_id %q: %w", cfg.ProductID, err)
 		}
 	}
-	return client.NewUploadClient(serviceID, *serviceURL, id, delegations,
+	proofs, err := uploadProofs(cfg.Proofs)
+	if err != nil {
+		return nil, fmt.Errorf("loading upload.proofs: %w", err)
+	}
+	return client.NewUploadClient(serviceID, *serviceURL, id, proofs,
 		client.WithProduct(product), client.WithLogger(logger))
+}
+
+// uploadProofs builds the upload client's proof store from cfg.Proofs, which is
+// either an inline (codec-prefixed) encoded UCAN container or a path to a file
+// containing one. The inline form is tried first so a file whose name happens to
+// be a valid container string does not shadow it. Empty yields an empty store.
+func uploadProofs(proofs string) (ucanlib.ProofStore, error) {
+	if proofs == "" {
+		return ucanlib.NewContainerProofStore(container.New()), nil
+	}
+	ct, err := container.Decode([]byte(proofs))
+	if err != nil {
+		data, ferr := os.ReadFile(proofs)
+		if ferr != nil {
+			return nil, fmt.Errorf("upload.proofs is neither a valid container (%v) nor a readable file: %w", err, ferr)
+		}
+		if ct, err = container.Decode(data); err != nil {
+			return nil, fmt.Errorf("decoding upload.proofs file %q: %w", proofs, err)
+		}
+	}
+	return ucanlib.NewContainerProofStore(ct), nil
 }

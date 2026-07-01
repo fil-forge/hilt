@@ -39,7 +39,6 @@ func TestNewUCANServer(t *testing.T) {
 	upload, err := appfx.NewUploadClient(
 		id,
 		config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test"},
-		delegationmemory.New(),
 		zap.NewNop(),
 	)
 	require.NoError(t, err)

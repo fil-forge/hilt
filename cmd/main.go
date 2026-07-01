@@ -61,6 +61,7 @@ func main() {
 	serveCmd.Flags().String("upload-service-id", "", "Upload service DID (e.g. did:web:sprue.example.com)")
 	serveCmd.Flags().String("upload-service-url", "", "Upload service HTTP endpoint")
 	serveCmd.Flags().String("upload-product-id", "", "Upload service product/plan DID that tenants are registered under")
+	serveCmd.Flags().String("upload-proofs", "", "Upload service proofs: an encoded UCAN container or a path to a file containing one")
 
 	rootCmd.AddCommand(serveCmd)
 
