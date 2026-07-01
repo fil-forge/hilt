@@ -13,6 +13,7 @@ import (
 var RPCModule = fx.Module("rpc",
 	fx.Provide(
 		auth.NewAuthorizer,
+		NewUploadClient,
 		NewUCANServer,
 		asUCANRoute(rpc.NewAuthorizeRequestHandler),
 		asUCANRoute(rpc.NewCreateBucketHandler),

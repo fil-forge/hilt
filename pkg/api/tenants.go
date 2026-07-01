@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -30,6 +31,7 @@ func NewProvisionTenantHandler(
 	providers provider.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
+	upload *client.UploadClient,
 ) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {
@@ -101,6 +103,19 @@ func NewProvisionTenantHandler(
 			log.Error("publishing genesis operation", zap.Error(err))
 			_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
+		}
+
+		// Register the tenant as a customer with the upload service (Sprue). Done
+		// before recording the tenant so a failed registration returns an error
+		// and is retried on the next call, rather than being short-circuited by
+		// the idempotency check above (which keys on the stored tenant record).
+		details := map[string]string{"external_id": externalID, "region": req.Region}
+		if err := upload.RegisterCustomer(ctx, tenantID, upload.Product, details); err != nil {
+			log.Error("registering tenant with upload service", zap.Error(err))
+			if err := secrets.Delete(ctx, vaultKey); err != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(err))
+			}
+			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant with upload service")
 		}
 
 		// Record the tenant.

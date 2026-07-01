@@ -37,6 +37,19 @@ type Config struct {
 	Vault    VaultConfig    `mapstructure:"vault"`
 	PLC      PLCConfig      `mapstructure:"plc"`
 	Auth     AuthConfig     `mapstructure:"auth"`
+	Upload   UploadConfig   `mapstructure:"upload"`
+}
+
+// UploadConfig holds settings for the Sprue upload service, which Hilt calls to
+// provision a bucket's storage space.
+type UploadConfig struct {
+	// ServiceID is the Sprue service's DID (e.g. "did:web:sprue.example.com").
+	ServiceID string `mapstructure:"service_id"`
+	// ServiceURL is the Sprue service's HTTP endpoint.
+	ServiceURL string `mapstructure:"service_url"`
+	// ProductID is the Sprue product/plan DID that tenants are registered under
+	// when Hilt provisions them (the /customer/add product argument).
+	ProductID string `mapstructure:"product_id"`
 }
 
 // IdentityConfig holds the Hilt service identity used to sign and receive UCAN
@@ -145,6 +158,10 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("vault.hashicorp.approle.mount", "approle")
 
 	v.SetDefault("plc.directory", "https://plc.directory")
+
+	v.SetDefault("upload.service_id", "did:web:upload.forgery.network")
+	v.SetDefault("upload.service_url", "https://upload.forgery.network")
+	v.SetDefault("upload.product_id", "did:web:hilt.forgery.network")
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix.
@@ -176,6 +193,9 @@ func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 		"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
 		"plc.directory":                     "plc-directory",
 		"auth.partner_key":                  "partner-key",
+		"upload.service_id":                 "upload-service-id",
+		"upload.service_url":                "upload-service-url",
+		"upload.product_id":                 "upload-product-id",
 	}
 	for key, name := range bindings {
 		if f := flags.Lookup(name); f != nil {

@@ -18,7 +18,10 @@ import (
 	"github.com/fil-forge/hilt/pkg/vault"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
+	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/ucan"
 	"github.com/multiformats/go-multibase"
 	"go.uber.org/zap"
 )
@@ -139,6 +142,21 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 
 	log.Debug("request authorized", zap.String("region", region))
 	return &AuthorizedRequest{AccessKey: akRec, Tenant: tenantRec, Region: region, Signed: sr}, nil
+}
+
+// TenantIssuer loads the tenant's secp256k1 signing key from the vault and
+// returns an issuer that signs as the tenant — used to act on the tenant's
+// behalf (e.g. provisioning a bucket's space with Sprue).
+func (a *Authorizer) TenantIssuer(ctx context.Context, tenantID did.DID) (ucan.Issuer, error) {
+	keyBytes, err := a.secrets.Read(ctx, vault.TenantKeyPath(tenantID))
+	if err != nil {
+		return nil, fmt.Errorf("reading tenant key: %w", err)
+	}
+	signer, err := secp256k1.Decode(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decoding tenant key: %w", err)
+	}
+	return multikey.NewIssuer(tenantID, signer), nil
 }
 
 // AccessKeySigner reads the access key's ed25519 private key from the vault.
