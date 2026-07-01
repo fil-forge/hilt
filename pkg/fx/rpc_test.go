@@ -6,6 +6,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 	"github.com/fil-forge/hilt/pkg/rpc"
+	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -32,14 +33,15 @@ func TestNewUCANServer(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), vaultmemory.New())
 	srv := appfx.NewUCANServer(appfx.UCANServerParams{
 		Identity: id,
 		Routes: []server.Route{
-			rpc.NewAuthorizeRequestHandler(zap.NewNop()),
+			rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, bucketmemory.New()),
 			rpc.NewCreateBucketHandler(zap.NewNop()),
 			rpc.NewDeleteBucketHandler(zap.NewNop()),
 			rpc.NewBucketInfoHandler(zap.NewNop()),
-			rpc.NewListBucketsHandler(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), bucketmemory.New(), providermemory.New(), vaultmemory.New()),
+			rpc.NewListBucketsHandler(zap.NewNop(), az, bucketmemory.New()),
 		},
 	})
 	require.NotNil(t, srv)

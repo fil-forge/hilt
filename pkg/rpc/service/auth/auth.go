@@ -1,4 +1,8 @@
-package rpc
+// Package auth provides the request authorization service for the Hilt UCAN RPC
+// handlers: it authenticates SigV4/SigV4a signatures, resolves the access key
+// and tenant, and enforces the provider/region constraints shared by every S3
+// command.
+package auth
 
 import (
 	"context"
@@ -27,34 +31,55 @@ type AuthorizedRequest struct {
 	AccessKey accesskey.Record
 	Tenant    tenant.Record
 	Region    string
+	// Signed is the parsed, verified request signature. Handlers use it to derive
+	// the verification key and to inspect the requested action.
+	Signed *sigv4.SignedRequest
 }
 
-// Authorize authenticates and authorizes an S3 RPC request — shared by all S3
-// command handlers. It verifies the SigV4/SigV4a signature and time bounds,
-// resolves the access key and its tenant, confirms the invocation issuer is the
-// tenant's provider, and validates the request region against that provider. The
-// command-specific S3 permission check is left to the caller (see
-// AccessKey.Permissions).
-func Authorize(
-	ctx context.Context,
+// Authorizer authenticates and authorizes S3 RPC requests. It is the shared
+// authorization service injected into the S3 command handlers.
+type Authorizer struct {
+	logger     *zap.Logger
+	accessKeys accesskey.Store
+	tenants    tenant.Store
+	providers  provider.Store
+	secrets    vault.Vault
+}
+
+// NewAuthorizer constructs the shared authorization service.
+func NewAuthorizer(
 	logger *zap.Logger,
 	accessKeys accesskey.Store,
 	tenants tenant.Store,
 	providers provider.Store,
 	secrets vault.Vault,
-	issuer did.DID,
-	req s3.Request,
-) (*AuthorizedRequest, error) {
+) *Authorizer {
+	return &Authorizer{
+		logger:     logger,
+		accessKeys: accessKeys,
+		tenants:    tenants,
+		providers:  providers,
+		secrets:    secrets,
+	}
+}
+
+// Authorize authenticates and authorizes an S3 RPC request — shared by all S3
+// command handlers. It verifies the SigV4/SigV4a signature and time bounds,
+// resolves the access key and its tenant, confirms the invocation issuer is the
+// tenant's provider, and validates the request region against that provider.
+// The command-specific S3 permission check is left to the caller (see
+// [accesskey.Record.Permissions]).
+func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request) (*AuthorizedRequest, error) {
 	sr, err := sigv4.Parse(sigv4.Request{
 		Method:  req.Method,
 		Headers: req.Headers,
 		URL:     req.URL,
 	})
 	if err != nil {
-		logger.Debug("rejecting unparseable request signature", zap.Error(err))
+		a.logger.Debug("rejecting unparseable request signature", zap.Error(err))
 		return nil, fmt.Errorf("parsing request signature: %w", err)
 	}
-	log := logger.With(zap.String("access_key", sr.AccessKeyID), zap.Strings("regions", sr.Regions))
+	log := a.logger.With(zap.String("access_key", sr.AccessKeyID), zap.Strings("regions", sr.Regions))
 	log.Debug("authorizing request")
 
 	accessKeyID, err := did.Parse(did.KeyPrefix + sr.AccessKeyID)
@@ -63,7 +88,7 @@ func Authorize(
 		return nil, fmt.Errorf("invalid access key id %q: %w", sr.AccessKeyID, err)
 	}
 
-	akRec, err := accessKeys.Get(ctx, accessKeyID)
+	akRec, err := a.accessKeys.Get(ctx, accessKeyID)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		log.Debug("rejecting unknown access key")
 		return nil, fmt.Errorf("unknown access key %q", sr.AccessKeyID)
@@ -74,9 +99,13 @@ func Authorize(
 	log = log.With(zap.Stringer("tenant", akRec.Tenant))
 
 	// Authenticate: verify the request signature using the access key's secret.
-	secret, err := accessKeySecret(ctx, secrets, akRec.Tenant, accessKeyID)
+	signer, err := a.AccessKeySigner(ctx, akRec.Tenant, accessKeyID)
 	if err != nil {
-		log.Error("loading access key secret", zap.Error(err))
+		log.Error("loading access key", zap.Error(err))
+		return nil, err
+	}
+	secret, err := EncodeSecret(signer)
+	if err != nil {
 		return nil, err
 	}
 	if err := sigv4.Verify(sr, secret); err != nil {
@@ -88,7 +117,7 @@ func Authorize(
 		return nil, fmt.Errorf("request signature is no longer valid: %w", err)
 	}
 
-	tenantRec, err := tenants.Get(ctx, akRec.Tenant)
+	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
 	if err != nil {
 		log.Error("looking up tenant", zap.Error(err))
 		return nil, fmt.Errorf("looking up tenant: %w", err)
@@ -102,27 +131,32 @@ func Authorize(
 	}
 
 	// The request must be scoped to a region served by the tenant's provider.
-	region, err := validateRegion(ctx, providers, sr.Regions, tenantRec.Provider)
+	region, err := validateRegion(ctx, a.providers, sr.Regions, tenantRec.Provider)
 	if err != nil {
 		log.Debug("rejecting request region", zap.Error(err))
 		return nil, err
 	}
 
 	log.Debug("request authorized", zap.String("region", region))
-	return &AuthorizedRequest{AccessKey: akRec, Tenant: tenantRec, Region: region}, nil
+	return &AuthorizedRequest{AccessKey: akRec, Tenant: tenantRec, Region: region, Signed: sr}, nil
 }
 
-// accessKeySecret reads the access key's private key from the vault and returns
-// the multibase base64url secretAccessKey string the client signs with.
-func accessKeySecret(ctx context.Context, secrets vault.Vault, tenantID, accessKeyID did.DID) (string, error) {
-	keyBytes, err := secrets.Read(ctx, vault.AccessKeyPath(tenantID, accessKeyID))
+// AccessKeySigner reads the access key's ed25519 private key from the vault.
+func (a *Authorizer) AccessKeySigner(ctx context.Context, tenantID, accessKeyID did.DID) (ed25519.Signer, error) {
+	keyBytes, err := a.secrets.Read(ctx, vault.AccessKeyPath(tenantID, accessKeyID))
 	if err != nil {
-		return "", fmt.Errorf("reading access key secret: %w", err)
+		return nil, fmt.Errorf("reading access key secret: %w", err)
 	}
 	signer, err := ed25519.Decode(keyBytes)
 	if err != nil {
-		return "", fmt.Errorf("decoding access key: %w", err)
+		return nil, fmt.Errorf("decoding access key: %w", err)
 	}
+	return signer, nil
+}
+
+// EncodeSecret returns the multibase base64url secretAccessKey string the
+// client signs with, for the given access key private key.
+func EncodeSecret(signer ed25519.Signer) (string, error) {
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	if err != nil {
 		return "", fmt.Errorf("encoding access key secret: %w", err)
