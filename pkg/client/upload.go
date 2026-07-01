@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/fil-forge/hilt/pkg/lib/zapucan"
+	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
 	ucanlib "github.com/fil-forge/libforge/ucan"
@@ -14,6 +15,7 @@ import (
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/execution"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/fil-forge/ucantone/ucan/invocation"
 	"go.uber.org/zap"
 )
@@ -22,6 +24,8 @@ type UploadClientOption func(*UploadClientConfig)
 
 type UploadClientConfig struct {
 	httpClient *http.Client
+	logger     *zap.Logger
+	product    did.DID
 }
 
 func WithHTTPClient(httpClient *http.Client) UploadClientOption {
@@ -30,18 +34,61 @@ func WithHTTPClient(httpClient *http.Client) UploadClientOption {
 	}
 }
 
+// WithProduct sets the default product/plan DID used when registering customers
+// (see [UploadClient.RegisterCustomer]).
+func WithProduct(product did.DID) UploadClientOption {
+	return func(cfg *UploadClientConfig) {
+		cfg.product = product
+	}
+}
+
+func WithLogger(logger *zap.Logger) UploadClientOption {
+	return func(cfg *UploadClientConfig) {
+		if logger != nil {
+			cfg.logger = logger
+		}
+	}
+}
+
+type UploadClientMethodOption func(*UploadClientMethodConfig)
+
+type UploadClientMethodConfig struct {
+	issuer ucan.Issuer
+	proofs ucanlib.ProofStore
+}
+
+func WithIssuer(iss ucan.Issuer) UploadClientMethodOption {
+	return func(cfg *UploadClientMethodConfig) {
+		if iss != nil {
+			cfg.issuer = iss
+		}
+	}
+}
+
+func WithProofs(proofs ucanlib.ProofStore) UploadClientMethodOption {
+	return func(cfg *UploadClientMethodConfig) {
+		if proofs != nil {
+			cfg.proofs = proofs
+		}
+	}
+}
+
 type UploadClient struct {
 	ServiceID did.DID
+	Issuer    ucan.Issuer
 	Proofs    ucanlib.ProofStore
+	Product   did.DID
 	Executor  execution.Executor
 	Logger    *zap.Logger
 }
 
 // NewUploadClient creates a new [UploadClient] for interacting with the upload
-// service. The proofs parameter is used to provide proofs for UCAN invocations
-// made by the client.
-func NewUploadClient(serviceID did.DID, serviceURL url.URL, proofs ucanlib.ProofStore, logger *zap.Logger, opts ...UploadClientOption) (*UploadClient, error) {
-	cfg := &UploadClientConfig{}
+// service. The issuer and proofs parameters are used as the default issuer and
+// proof set if none are provided as individual method options.
+func NewUploadClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, proofs ucanlib.ProofStore, opts ...UploadClientOption) (*UploadClient, error) {
+	cfg := &UploadClientConfig{
+		logger: zap.NewNop(),
+	}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -57,25 +104,38 @@ func NewUploadClient(serviceID did.DID, serviceURL url.URL, proofs ucanlib.Proof
 		return nil, fmt.Errorf("creating HTTP executor: %w", err)
 	}
 
+	if issuer == nil {
+		return nil, fmt.Errorf("issuer is required")
+	}
+	if proofs == nil {
+		proofs = ucanlib.NewContainerProofStore(container.New())
+	}
+
 	return &UploadClient{
 		ServiceID: serviceID,
+		Issuer:    issuer,
 		Proofs:    proofs,
+		Product:   cfg.product,
 		Executor:  httpExecutor,
-		Logger:    logger,
+		Logger:    cfg.logger,
 	}, nil
 }
 
 // RegisterCustomer registers a new customer with the upload service.
-func (c *UploadClient) RegisterCustomer(ctx context.Context, issuer ucan.Issuer, id did.DID, product did.DID, details map[string]string) error {
-	proofs, proofLinks, err := c.Proofs.ProofChain(ctx, issuer.DID(), customercmds.Add.Command, c.ServiceID)
+func (c *UploadClient) RegisterCustomer(ctx context.Context, customer did.DID, product did.DID, details map[string]string, opts ...UploadClientMethodOption) error {
+	cfg := &UploadClientMethodConfig{issuer: c.Issuer, proofs: c.Proofs}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	proofs, proofLinks, err := cfg.proofs.ProofChain(ctx, cfg.issuer.DID(), customercmds.Add.Command, c.ServiceID)
 	if err != nil {
 		return fmt.Errorf("getting proof chain: %w", err)
 	}
 	inv, err := customercmds.Add.Invoke(
-		issuer,
+		cfg.issuer,
 		c.ServiceID,
 		&customercmds.AddArguments{
-			Customer: id,
+			Customer: customer,
 			Product:  product,
 			Details:  details,
 		},
@@ -87,10 +147,14 @@ func (c *UploadClient) RegisterCustomer(ctx context.Context, issuer ucan.Issuer,
 	}
 	log := zapucan.WithInvocation(c.Logger, inv)
 	log.Debug("executing invocation")
-	_, err = c.Executor.Execute(execution.NewRequest(ctx, inv, execution.WithDelegations(proofs...)))
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv, execution.WithDelegations(proofs...)))
 	if err != nil {
 		log.Error("failed to execute register customer invocation", zap.Error(err))
 		return fmt.Errorf("executing register customer invocation: %w", err)
+	}
+	if _, err := customercmds.Add.Unpack(res.Receipt()); err != nil {
+		log.Error("failed to unpack register customer result", zap.Error(err))
+		return fmt.Errorf("unpacking register customer result: %w", err)
 	}
 	return nil
 }
@@ -123,4 +187,42 @@ func (c *UploadClient) ProvisionSpace(ctx context.Context, account ucan.Issuer, 
 		return "", fmt.Errorf("unpacking provision result: %w", err)
 	}
 	return addOK.ID, nil
+}
+
+// SpaceEmpty checks whether the given space is empty (contains no blobs).
+func (c *UploadClient) SpaceEmpty(ctx context.Context, space did.DID, opts ...UploadClientMethodOption) (bool, error) {
+	cfg := &UploadClientMethodConfig{issuer: c.Issuer, proofs: c.Proofs}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	proofs, proofLinks, err := cfg.proofs.ProofChain(ctx, cfg.issuer.DID(), blobcmds.List.Command, space)
+	if err != nil {
+		return false, fmt.Errorf("getting proof chain: %w", err)
+	}
+	size := uint64(1)
+	inv, err := blobcmds.List.Invoke(
+		cfg.issuer,
+		space,
+		&blobcmds.ListArguments{
+			Size: &size,
+		},
+		invocation.WithAudience(c.ServiceID),
+		invocation.WithProofs(proofLinks...),
+	)
+	if err != nil {
+		return false, fmt.Errorf("invoking list blobs: %w", err)
+	}
+	log := zapucan.WithInvocation(c.Logger, inv)
+	log.Debug("executing invocation")
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv, execution.WithDelegations(proofs...)))
+	if err != nil {
+		log.Error("failed to execute list blobs invocation", zap.Error(err))
+		return false, fmt.Errorf("executing list blobs invocation: %w", err)
+	}
+	listOK, err := blobcmds.List.Unpack(res.Receipt())
+	if err != nil {
+		log.Error("failed to unpack list blobs result", zap.Error(err))
+		return false, fmt.Errorf("unpacking list blobs result: %w", err)
+	}
+	return len(listOK.Results) == 0, nil
 }

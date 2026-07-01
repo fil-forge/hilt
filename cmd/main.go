@@ -57,6 +57,12 @@ func main() {
 	// auth config
 	serveCmd.Flags().String("partner-key", "", "partner bearer key required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
 
+	// upload service config
+	serveCmd.Flags().String("upload-service-id", "", "Upload service DID (e.g. did:web:sprue.example.com)")
+	serveCmd.Flags().String("upload-service-url", "", "Upload service HTTP endpoint")
+	serveCmd.Flags().String("upload-product-id", "", "Upload service product/plan DID that tenants are registered under")
+	serveCmd.Flags().String("upload-proofs", "", "Upload service proofs: an encoded UCAN container or a path to a file containing one")
+
 	rootCmd.AddCommand(serveCmd)
 
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: looks for config.yaml in current dir)")
