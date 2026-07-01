@@ -39,7 +39,7 @@ const (
 )
 
 // NewAuthorizeRequestHandler handles /s3/request/authorize — authenticate an AWS
-// S3 request, derive the verification key the gateway needs, and mint delegations
+// S3 request, derive the verification key the gateway needs, and issue delegations
 // for the requested action's Forge commands to the invocation issuer.
 func NewAuthorizeRequestHandler(
 	logger *zap.Logger,
@@ -67,7 +67,7 @@ func NewAuthorizeRequestHandler(
 
 // AuthorizeRequest authenticates the S3 request, resolves the addressed bucket,
 // checks the access key's permission for the action, derives the verification
-// key, and mints delegations for the action's Forge commands to the invocation
+// key, and issues delegations for the action's Forge commands to the invocation
 // issuer (TTL ≤ 24h). It returns the result and the delegation blocks to attach
 // to the response. It is factored out of the handler so it can be unit tested
 // without constructing a UCAN invocation.
