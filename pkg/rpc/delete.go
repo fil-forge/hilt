@@ -22,7 +22,7 @@ import (
 // satisfied by [*client.UploadClient]; the interface lets the handler logic be
 // unit tested without a live Sprue.
 type SpaceChecker interface {
-	SpaceEmpty(ctx context.Context, space did.DID, opts ...client.UploadClientMethodOption) (bool, error)
+	SpaceEmpty(ctx context.Context, space did.DID, opts ...client.MethodOption) (bool, error)
 }
 
 // NewDeleteBucketHandler handles /s3/bucket/delete — authenticate an AWS S3
