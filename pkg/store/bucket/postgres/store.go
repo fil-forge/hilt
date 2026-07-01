@@ -32,9 +32,9 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO bucket (id, tenant_id, name, created_at)
-		VALUES ($1, $2, $3, $4)
-	`, id.String(), tenant.String(), name, time.Now().UTC())
+		INSERT INTO bucket (id, tenant_id, name)
+		VALUES ($1, $2, $3)
+	`, id.String(), tenant.String(), name)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {

@@ -39,9 +39,9 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 		permissions = []string{}
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, id.String(), tenant.String(), name, bucketStrs, permissions, time.Now().UTC())
+		INSERT INTO access_key (id, tenant_id, name, buckets, permissions)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id.String(), tenant.String(), name, bucketStrs, permissions)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
