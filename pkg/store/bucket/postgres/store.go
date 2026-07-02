@@ -118,11 +118,7 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	return nil
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRecord(row rowScanner) (bucket.Record, error) {
+func scanRecord(row pgx.Row) (bucket.Record, error) {
 	var (
 		idStr     string
 		tenantID  *string
