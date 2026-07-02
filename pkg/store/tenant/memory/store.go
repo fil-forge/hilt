@@ -80,3 +80,11 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 	s.tenants[id] = rec
 	return nil
 }
+
+func (s *Store) Delete(ctx context.Context, id did.DID) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	delete(s.tenants, id)
+	return nil
+}

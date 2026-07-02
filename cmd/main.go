@@ -28,6 +28,10 @@ func main() {
 		RunE:  runServe,
 	}
 
+	// identity config (UCAN RPC service identity)
+	serveCmd.Flags().String("identity-key-file", "", "path to a PEM-encoded Ed25519 private key for the Hilt service identity (an ephemeral key is generated if unset)")
+	serveCmd.Flags().String("identity-service-id", "", "optional did:web service identity to wrap the key with, e.g. did:web:hilt.example.com")
+
 	// http server config
 	serveCmd.Flags().String("host", "127.0.0.1", "host to bind the server to")
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")

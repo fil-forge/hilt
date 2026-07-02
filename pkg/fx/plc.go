@@ -10,7 +10,7 @@ import (
 	"go.uber.org/fx"
 )
 
-// PLCModule provides a did:plc directory client.
+// PLCModule provides a did:plc directory client for the tenant handlers.
 var PLCModule = fx.Module("plc",
 	fx.Provide(NewPLCClient),
 )

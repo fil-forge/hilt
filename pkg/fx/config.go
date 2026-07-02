@@ -14,6 +14,7 @@ var ConfigModule = fx.Module("config",
 // Configs exposes the individual fields of the config to the fx graph.
 type Configs struct {
 	fx.Out
+	Identity  config.IdentityConfig
 	Server    config.ServerConfig
 	Log       config.LogConfig
 	Storage   config.StorageConfig
@@ -27,6 +28,7 @@ type Configs struct {
 // ProvideConfigs provides the individual fields of the config.
 func ProvideConfigs(cfg *config.Config) Configs {
 	return Configs{
+		Identity:  cfg.Identity,
 		Server:    cfg.Server,
 		Log:       cfg.Log,
 		Storage:   cfg.Storage,

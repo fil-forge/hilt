@@ -113,6 +113,18 @@ func TestTenantStore(t *testing.T) {
 				err := s.SetStatus(t.Context(), testutil.RandomDID(t), tenant.Disabled)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
+
+			t.Run("Delete removes a tenant and is idempotent", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "ext-del", testutil.RandomDID(t), "del", tenant.Active))
+
+				require.NoError(t, s.Delete(t.Context(), id))
+				_, err := s.Get(t.Context(), id)
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+
+				// Deleting an absent record is a no-op.
+				require.NoError(t, s.Delete(t.Context(), id))
+			})
 		})
 	}
 }
