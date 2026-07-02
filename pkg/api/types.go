@@ -14,7 +14,6 @@ const (
 // Tenant is the operational state and quotas for a tenant.
 type Tenant struct {
 	TenantID       string       `json:"tenantId"`
-	DisplayName    string       `json:"displayName"`
 	Status         TenantStatus `json:"status"`
 	BucketCount    int          `json:"bucketCount"`
 	BucketLimit    int          `json:"bucketLimit"`
@@ -25,8 +24,7 @@ type Tenant struct {
 
 // ProvisionTenantRequest is the body of PUT /tenants/{tenantId}.
 type ProvisionTenantRequest struct {
-	DisplayName string `json:"displayName"`
-	Region      string `json:"region"`
+	Region string `json:"region"`
 }
 
 // UpdateTenantStatusRequest is the body of POST /tenants/{tenantId}/status.

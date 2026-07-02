@@ -51,7 +51,7 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 		plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
 	)
 	require.NoError(t, err)
-	require.NoError(t, deps.tenants.Add(ctx, tenantID, externalID, testutil.RandomDID(t), "Acme", tenant.Active))
+	require.NoError(t, deps.tenants.Add(ctx, tenantID, externalID, testutil.RandomDID(t), tenant.Active))
 	require.NoError(t, deps.vault.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 	bucketID := testutil.RandomDID(t)
 	require.NoError(t, deps.buckets.Add(ctx, bucketID, tenantID, bucketName))
@@ -109,29 +109,29 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.Equal(t, []string{"bucket-a"}, created.Buckets)
 		require.Nil(t, created.ExpiresAt)
 
-		akDID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
+		akID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
 		require.NoError(t, err)
 
 		// Record persisted.
-		storedRec, err := deps.accessKeys.Get(ctx, akDID)
+		storedRec, err := deps.accessKeys.Get(ctx, akID)
 		require.NoError(t, err)
 		require.Equal(t, "k1", storedRec.Name)
 		require.Equal(t, []did.DID{deps.bucketID}, storedRec.Buckets)
 
 		// Private key in the vault.
-		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akDID.String())
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akID.String())
 		require.NoError(t, err)
 
 		// 4 delegations: /content/retrieve + /blob/add + /index/add + /upload/add,
 		// all scoped to the bucket, issued by the tenant to the access key.
-		dels, err := deps.delegations.ListByAudience(ctx, akDID)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
 		require.Len(t, dels.Results, 4)
 		cmds := map[string]bool{}
 		for _, d := range dels.Results {
 			cmds[d.Command().String()] = true
 			require.Equal(t, deps.bucketID, d.Subject())
-			require.Equal(t, akDID, d.Audience())
+			require.Equal(t, akID, d.Audience())
 			require.Equal(t, deps.tenantID, d.Issuer())
 		}
 		require.Equal(t, map[string]bool{
@@ -153,9 +153,9 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 		require.Empty(t, created.Buckets)
 
-		akDID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
+		akID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
 		require.NoError(t, err)
-		dels, err := deps.delegations.ListByAudience(ctx, akDID)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
 		require.Len(t, dels.Results, 1)
 		require.False(t, dels.Results[0].Subject().Defined(), "powerline subject is undefined")
@@ -171,14 +171,14 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		var created api.CreatedAccessKey
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 
-		akDID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
+		akID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
 		require.NoError(t, err)
-		dels, err := deps.delegations.ListByAudience(ctx, akDID)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
 		require.Empty(t, dels.Results)
 
 		// Still retrievable, with the permissions stored.
-		got, err := deps.accessKeys.Get(ctx, akDID)
+		got, err := deps.accessKeys.Get(ctx, akID)
 		require.NoError(t, err)
 		require.ElementsMatch(t, []string{"s3:CreateBucket", "s3:ListAllMyBuckets"}, got.Permissions)
 	})
@@ -198,14 +198,14 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.NotNil(t, created.ExpiresAt)
 		require.True(t, exp.Equal(*created.ExpiresAt))
 
-		akDID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
+		akID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
 		require.NoError(t, err)
-		got, err := deps.accessKeys.Get(ctx, akDID)
+		got, err := deps.accessKeys.Get(ctx, akID)
 		require.NoError(t, err)
 		require.NotNil(t, got.ExpiresAt)
 		require.True(t, exp.Equal(*got.ExpiresAt))
 
-		dels, err := deps.delegations.ListByAudience(ctx, akDID)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
 		require.Len(t, dels.Results, 1)
 		require.NotNil(t, dels.Results[0].Expiration())
@@ -307,17 +307,17 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		require.Equal(t, http.StatusCreated, created.Code)
 		var ck api.CreatedAccessKey
 		require.NoError(t, json.Unmarshal(created.Body.Bytes(), &ck))
-		akDID, err := did.Parse(did.KeyPrefix + ck.AccessKeyID)
+		akID, err := did.Parse(did.KeyPrefix + ck.AccessKeyID)
 		require.NoError(t, err)
 
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNoContent, rec.Code)
 
-		_, err = deps.accessKeys.Get(ctx, akDID)
+		_, err = deps.accessKeys.Get(ctx, akID)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
-		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akDID.String())
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akID.String())
 		require.ErrorIs(t, err, vault.ErrNotFound)
-		dels, err := deps.delegations.ListByAudience(ctx, akDID)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
 		require.Empty(t, dels.Results)
 

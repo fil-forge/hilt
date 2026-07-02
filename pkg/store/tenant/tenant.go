@@ -24,8 +24,6 @@ type Record struct {
 	ExternalID string
 	// Provider this tenant belongs to.
 	Provider did.DID
-	// Human readable name of the tenant.
-	Name string
 	// Current status of the tenant.
 	Status Status
 	// When the tenant record was created.
@@ -37,7 +35,7 @@ type Record struct {
 type Store interface {
 	// Add creates a new tenant record. It returns [store.ErrRecordExists] if a
 	// record with the same ID or external ID already exists.
-	Add(ctx context.Context, id did.DID, externalID string, provider did.DID, name string, status Status) error
+	Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status Status) error
 	// Get retrieves the tenant record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	Get(ctx context.Context, id did.DID) (Record, error)

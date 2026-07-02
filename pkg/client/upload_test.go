@@ -53,7 +53,7 @@ func TestRegisterCustomer(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		service := testutil.RandomIssuer(t)
 		alice := testutil.RandomIssuer(t)
-		customerDID := testutil.RandomDID(t)
+		customerID := testutil.RandomDID(t)
 		product := testutil.RandomDID(t)
 		details := map[string]string{"name": "Acme"}
 
@@ -73,10 +73,10 @@ func TestRegisterCustomer(t *testing.T) {
 			}))
 
 		c := newClient(t, service, srv, proofs)
-		err = c.RegisterCustomer(t.Context(), alice, customerDID, product, details)
+		err = c.RegisterCustomer(t.Context(), alice, customerID, product, details)
 		require.NoError(t, err)
 
-		require.Equal(t, customerDID, gotArgs.Customer)
+		require.Equal(t, customerID, gotArgs.Customer)
 		require.Equal(t, product, gotArgs.Product)
 		require.Equal(t, details, gotArgs.Details)
 		require.Equal(t, service.DID(), gotAud)

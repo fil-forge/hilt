@@ -46,7 +46,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 
 func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, external_id, provider_id, name, status, created_at, updated_at
+		SELECT id, external_id, provider_id, status, created_at, updated_at
 		FROM tenant
 		WHERE id = $1
 	`, id.String())
@@ -62,7 +62,7 @@ func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 
 func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, external_id, provider_id, name, status, created_at, updated_at
+		SELECT id, external_id, provider_id, status, created_at, updated_at
 		FROM tenant
 		WHERE external_id = $1
 	`, externalID)
@@ -107,12 +107,11 @@ func scanRecord(row rowScanner) (tenant.Record, error) {
 		idStr      string
 		externalID *string
 		providerID *string
-		name       *string
 		status     string
 		createdAt  time.Time
 		updatedAt  *time.Time
 	)
-	if err := row.Scan(&idStr, &externalID, &providerID, &name, &status, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&idStr, &externalID, &providerID, &status, &createdAt, &updatedAt); err != nil {
 		return tenant.Record{}, err
 	}
 	id, err := did.Parse(idStr)
@@ -133,9 +132,6 @@ func scanRecord(row rowScanner) (tenant.Record, error) {
 			return tenant.Record{}, fmt.Errorf("parsing provider DID: %w", err)
 		}
 		rec.Provider = provider
-	}
-	if name != nil {
-		rec.Name = *name
 	}
 	if updatedAt != nil {
 		rec.UpdatedAt = *updatedAt

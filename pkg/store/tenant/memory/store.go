@@ -21,7 +21,7 @@ func New() *Store {
 	return &Store{tenants: map[did.DID]tenant.Record{}}
 }
 
-func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, name string, status tenant.Status) error {
+func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status tenant.Status) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -37,7 +37,6 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 		ID:         id,
 		ExternalID: externalID,
 		Provider:   provider,
-		Name:       name,
 		Status:     status,
 		CreatedAt:  time.Now().UTC(),
 	}

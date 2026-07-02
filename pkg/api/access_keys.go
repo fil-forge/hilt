@@ -28,14 +28,14 @@ const maxAccessKeyNameLength = 100
 
 // vaultTenantKeyPath is the vault key under which a tenant's private key is
 // stored.
-func vaultTenantKeyPath(tenantDID did.DID) string {
-	return "/tenant/" + tenantDID.String()
+func vaultTenantKeyPath(tenantID did.DID) string {
+	return "/tenant/" + tenantID.String()
 }
 
 // vaultAccessKeyPath is the vault key under which an access key's private key is
 // stored. It MUST match the path used by the tenant delete cascade.
-func vaultAccessKeyPath(tenantDID, accessKeyDID did.DID) string {
-	return vaultTenantKeyPath(tenantDID) + "/access/" + accessKeyDID.String()
+func vaultAccessKeyPath(tenantID, accessKeyID did.DID) string {
+	return vaultTenantKeyPath(tenantID) + "/access/" + accessKeyID.String()
 }
 
 // NewCreateAccessKeyHandler handles POST /tenants/{tenantId}/access-keys —
@@ -96,7 +96,7 @@ func NewCreateAccessKeyHandler(
 		// The query is scoped to the tenant, so a name owned by another tenant (or
 		// one that doesn't exist) simply won't come back. An empty list means
 		// tenant-wide (powerline) access.
-		bucketDIDs := make([]did.DID, 0, len(req.Buckets))
+		bucketIDs := make([]did.DID, 0, len(req.Buckets))
 		if len(req.Buckets) > 0 {
 			recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
 				listOpts := []bucket.ListOption{bucket.WithNames(req.Buckets...)}
@@ -118,7 +118,7 @@ func NewCreateAccessKeyHandler(
 				if !ok {
 					return echo.NewHTTPError(http.StatusUnprocessableEntity, "unknown bucket: "+name)
 				}
-				bucketDIDs = append(bucketDIDs, id)
+				bucketIDs = append(bucketIDs, id)
 			}
 		}
 
@@ -129,15 +129,15 @@ func NewCreateAccessKeyHandler(
 			log.Error("generating access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		accessKeyDID := signer.KeyDID()
+		accessKeyID := signer.KeyDID()
 		secretAccessKey, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 		if err != nil {
 			log.Error("encoding secret access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		log = log.With(zap.Stringer("access_key", accessKeyDID))
+		log = log.With(zap.Stringer("access_key", accessKeyID))
 
-		vaultPath := vaultAccessKeyPath(tenantRec.ID, accessKeyDID)
+		vaultPath := vaultAccessKeyPath(tenantRec.ID, accessKeyID)
 		if err := secrets.Write(ctx, vaultPath, signer.Bytes()); err != nil {
 			log.Error("storing access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -146,10 +146,10 @@ func NewCreateAccessKeyHandler(
 		// Best-effort rollback of the (idempotent) state created below, so a
 		// partial failure leaves nothing behind and is retryable.
 		rollback := func() {
-			if err := delegations.DeleteByAudience(ctx, accessKeyDID); err != nil {
+			if err := delegations.DeleteByAudience(ctx, accessKeyID); err != nil {
 				log.Warn("rollback: deleting delegations", zap.Error(err))
 			}
-			if err := accessKeys.Delete(ctx, accessKeyDID); err != nil {
+			if err := accessKeys.Delete(ctx, accessKeyID); err != nil {
 				log.Warn("rollback: deleting access key", zap.Error(err))
 			}
 			if err := secrets.Delete(ctx, vaultPath); err != nil {
@@ -157,7 +157,7 @@ func NewCreateAccessKeyHandler(
 			}
 		}
 
-		if err := accessKeys.Add(ctx, accessKeyDID, tenantRec.ID, req.Name, bucketDIDs, req.Permissions, req.ExpiresAt); err != nil {
+		if err := accessKeys.Add(ctx, accessKeyID, tenantRec.ID, req.Name, bucketIDs, req.Permissions, req.ExpiresAt); err != nil {
 			rollback()
 			// Name uniqueness is enforced by the store's (tenant, name) constraint;
 			// a fresh random access-key DID colliding is not a realistic case.
@@ -174,14 +174,14 @@ func NewCreateAccessKeyHandler(
 		if req.ExpiresAt != nil {
 			opts = append(opts, delegation.WithExpiration(ucan.UnixTimestamp(req.ExpiresAt.Unix())))
 		}
-		subjects := bucketDIDs
+		subjects := bucketIDs
 		if len(subjects) == 0 {
 			subjects = []did.DID{did.Undef} // powerline: undefined subject
 		}
 		var dels []ucan.Delegation
 		for _, sub := range subjects {
 			for _, cmd := range commandsForPermissions(req.Permissions) {
-				d, err := delegation.Delegate(issuer, accessKeyDID, sub, cmd, opts...)
+				d, err := delegation.Delegate(issuer, accessKeyID, sub, cmd, opts...)
 				if err != nil {
 					rollback()
 					log.Error("issuing delegation", zap.Error(err))
@@ -198,7 +198,7 @@ func NewCreateAccessKeyHandler(
 			}
 		}
 
-		rec, err := accessKeys.Get(ctx, accessKeyDID)
+		rec, err := accessKeys.Get(ctx, accessKeyID)
 		if err != nil {
 			log.Error("loading created access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -287,11 +287,11 @@ func NewGetAccessKeyHandler(
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
-		accessKeyDID, err := did.Parse(did.KeyPrefix + c.Param("accessKeyId"))
+		accessKeyID, err := did.Parse(did.KeyPrefix + c.Param("accessKeyId"))
 		if err != nil {
 			return echo.NewHTTPError(http.StatusNotFound, "access key not found")
 		}
-		rec, err := accessKeys.Get(ctx, accessKeyDID)
+		rec, err := accessKeys.Get(ctx, accessKeyID)
 		if errors.Is(err, store.ErrRecordNotFound) || (err == nil && rec.Tenant != tenantRec.ID) {
 			return echo.NewHTTPError(http.StatusNotFound, "access key not found")
 		} else if err != nil {
@@ -331,13 +331,13 @@ func NewDeleteAccessKeyHandler(
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
-		accessKeyDID, err := did.Parse(did.KeyPrefix + c.Param("accessKeyId"))
+		accessKeyID, err := did.Parse(did.KeyPrefix + c.Param("accessKeyId"))
 		if err != nil {
 			return echo.NewHTTPError(http.StatusNotFound, "access key not found") // unparseable id ⇒ nothing to delete
 		}
 
 		// Idempotent: a missing key (or one owned by another tenant) is a no-op.
-		rec, err := accessKeys.Get(ctx, accessKeyDID)
+		rec, err := accessKeys.Get(ctx, accessKeyID)
 		if errors.Is(err, store.ErrRecordNotFound) || (err == nil && rec.Tenant != tenantRec.ID) {
 			return echo.NewHTTPError(http.StatusNotFound, "access key not found")
 		} else if err != nil {
@@ -345,14 +345,14 @@ func NewDeleteAccessKeyHandler(
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
-		if err := delegations.DeleteByAudience(ctx, accessKeyDID); err != nil {
+		if err := delegations.DeleteByAudience(ctx, accessKeyID); err != nil {
 			log.Error("deleting access key delegations", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		if err := secrets.Delete(ctx, vaultAccessKeyPath(tenantRec.ID, accessKeyDID)); err != nil {
+		if err := secrets.Delete(ctx, vaultAccessKeyPath(tenantRec.ID, accessKeyID)); err != nil {
 			log.Warn("removing access key from vault", zap.Error(err))
 		}
-		if err := accessKeys.Delete(ctx, accessKeyDID); err != nil {
+		if err := accessKeys.Delete(ctx, accessKeyID); err != nil {
 			log.Error("deleting access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}

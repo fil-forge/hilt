@@ -76,7 +76,7 @@ type addFailTenantStore struct {
 	err error
 }
 
-func (s addFailTenantStore) Add(context.Context, did.DID, string, did.DID, string, tenant.Status) error {
+func (s addFailTenantStore) Add(context.Context, did.DID, string, did.DID, tenant.Status) error {
 	return s.err
 }
 
@@ -155,10 +155,9 @@ func TestProvisionTenantHandler(t *testing.T) {
 		e, deps := setupProvision(t)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
 
-		rec := provisionRequest(t, e, "tenant-1", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-1", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusCreated, rec.Code)
 		require.Contains(t, rec.Body.String(), `"tenantId":"tenant-1"`)
-		require.Contains(t, rec.Body.String(), `"displayName":"Acme"`)
 
 		// A tenant record exists, keyed by a did:plc, mapped to the external id.
 		stored, err := deps.tenants.GetByExternalID(ctx, "tenant-1")
@@ -178,12 +177,12 @@ func TestProvisionTenantHandler(t *testing.T) {
 		e, deps := setupProvision(t)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
 
-		first := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
+		first := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusCreated, first.Code)
 		stored, err := deps.tenants.GetByExternalID(ctx, "tenant-2")
 		require.NoError(t, err)
 
-		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
+		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusOK, second.Code)
 
 		// No new key minted/published on the idempotent call.
@@ -195,20 +194,13 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("unknown region is rejected", func(t *testing.T) {
 		e, _ := setupProvision(t)
-		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "nowhere"})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
-	})
-
-	t.Run("missing displayName is rejected", func(t *testing.T) {
-		e, deps := setupProvision(t)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
-		rec := provisionRequest(t, e, "tenant-4", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("missing region is rejected", func(t *testing.T) {
 		e, _ := setupProvision(t)
-		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{DisplayName: "Acme"})
+		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
@@ -219,7 +211,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		secrets := newSpyVault()
 
 		e := provisionServer(t, tenants, providers, secrets, http.StatusInternalServerError)
-		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusBadGateway, rec.Code)
 
 		// A key was written then cleaned up, and no tenant was recorded.
@@ -236,7 +228,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		secrets := newSpyVault()
 
 		e := provisionServer(t, tenants, providers, secrets, http.StatusOK)
-		rec := provisionRequest(t, e, "tenant-7", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-7", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 		// The key written before the failed Add was cleaned up.
@@ -267,7 +259,7 @@ func doRequest(t *testing.T, e *echo.Echo, method, target string, body []byte) *
 func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), "Acme", tenant.Active))
+	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), tenants))
 
 	t.Run("found", func(t *testing.T) {
@@ -287,7 +279,7 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	id := testutil.RandomDID(t)
-	require.NoError(t, tenants.Add(ctx, id, "tenant-1", testutil.RandomDID(t), "Acme", tenant.Active))
+	require.NoError(t, tenants.Add(ctx, id, "tenant-1", testutil.RandomDID(t), tenant.Active))
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), tenants))
 
 	statusBody := func(s api.TenantStatus) []byte {
@@ -414,7 +406,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		genesis:     genesis,
 		tenantID:    tenantID,
 	}
-	require.NoError(t, deps.tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), "Acme", status))
+	require.NoError(t, deps.tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), status))
 	require.NoError(t, deps.vault.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 
 	route := api.NewDeleteTenantHandler(zap.NewNop(), deps.tenants, deps.buckets, deps.accessKeys, deps.delegations, deps.vault, plcClient)

@@ -44,9 +44,6 @@ func NewProvisionTenantHandler(
 		if err := c.Bind(&req); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
-		if req.DisplayName == "" {
-			return echo.NewHTTPError(http.StatusBadRequest, "displayName is required")
-		}
 		if req.Region == "" {
 			return echo.NewHTTPError(http.StatusBadRequest, "region is required")
 		}
@@ -106,7 +103,7 @@ func NewProvisionTenantHandler(
 		}
 
 		// Record the tenant.
-		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, req.DisplayName, tenant.Active); err != nil {
+		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, tenant.Active); err != nil {
 			// The tenant was not recorded; clean up its now-orphaned key.
 			if derr := secrets.Delete(ctx, vaultKey); derr != nil {
 				log.Error("cleaning up orphaned key", zap.Error(derr))
@@ -136,10 +133,9 @@ func NewProvisionTenantHandler(
 // counts/limits are not tracked yet and are returned as zero.
 func tenantResponse(rec tenant.Record) Tenant {
 	return Tenant{
-		TenantID:    rec.ExternalID,
-		DisplayName: rec.Name,
-		Status:      TenantStatus(rec.Status),
-		CreatedAt:   rec.CreatedAt,
+		TenantID:  rec.ExternalID,
+		Status:    TenantStatus(rec.Status),
+		CreatedAt: rec.CreatedAt,
 	}
 }
 
@@ -303,8 +299,8 @@ func NewDeleteTenantHandler(
 // deactivateTenantDID publishes a tombstone for the tenant's did:plc, signed
 // with its rotation key from the vault. If the DID is already deactivated it is
 // a no-op.
-func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, v vault.Vault, vaultKey string, tenantDID did.DID) error {
-	last, err := plcClient.Last(ctx, tenantDID)
+func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID) error {
+	last, err := plcClient.Last(ctx, tenantID)
 	if err != nil {
 		if _, ok := errors.AsType[*plc.DeactivatedDIDError](err); ok {
 			return nil // already deactivated
@@ -312,7 +308,7 @@ func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, v 
 		return fmt.Errorf("fetching last operation: %w", err)
 	}
 
-	keyBytes, err := v.Read(ctx, vaultKey)
+	keyBytes, err := secrets.Read(ctx, vaultKey)
 	if err != nil {
 		return fmt.Errorf("reading tenant key: %w", err)
 	}
@@ -329,7 +325,7 @@ func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, v 
 	if err != nil {
 		return fmt.Errorf("signing tombstone: %w", err)
 	}
-	if err := plcClient.Deactivate(ctx, tenantDID, signed); err != nil {
+	if err := plcClient.Deactivate(ctx, tenantID, signed); err != nil {
 		return fmt.Errorf("publishing tombstone: %w", err)
 	}
 	return nil
