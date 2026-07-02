@@ -45,8 +45,8 @@ github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/
 github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
-github.com/fil-forge/libforge v0.0.0-20260623151745-4c28e5a78e9d h1:a2ZVWDpGQ+eOB4tcKMBK/ynHVYTuN+VvWtHxQokUM1Q=
-github.com/fil-forge/libforge v0.0.0-20260623151745-4c28e5a78e9d/go.mod h1:0kXihIQ4L2uZ00nR5XrZ/Y8Db7Ht/qQNuiWslwMJ95M=
+github.com/fil-forge/libforge v0.0.0-20260629142629-e316a27288e5 h1:2DL8uM2GlV7CJyJ4bIynMTW/v+8A++8JekylbLvdymo=
+github.com/fil-forge/libforge v0.0.0-20260629142629-e316a27288e5/go.mod h1:0kXihIQ4L2uZ00nR5XrZ/Y8Db7Ht/qQNuiWslwMJ95M=
 github.com/fil-forge/ucantone v0.0.0-20260629104114-028c7ac019e7 h1:0PhG7VrufWOOk0JN91sCZQ0ocHjO4QDIcCLJbBniMpw=
 github.com/fil-forge/ucantone v0.0.0-20260629104114-028c7ac019e7/go.mod h1:vGptsR5Xwiv8dKmIvK7DezxN6/vzRl2Op1b0f+/48/c=
 github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHkI4W8=

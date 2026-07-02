@@ -62,25 +62,41 @@ func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, erro
 
 const defaultListLimit = 1000
 
-func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...store.PaginationOption) (store.Page[bucket.Record], error) {
-	cfg := store.PaginationConfig{}
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket.ListOption) (store.Page[bucket.Record], error) {
+	cfg := bucket.ListConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if len(cfg.IDs) > 0 && len(cfg.Names) > 0 {
+		return store.Page[bucket.Record]{}, bucket.ErrConflictingFilters
 	}
 	limit := defaultListLimit
 	if cfg.Limit != nil && *cfg.Limit > 0 {
 		limit = *cfg.Limit
 	}
 
+	// $1 = tenant, $2 = limit+1; further filters use dynamic placeholders.
 	args := []any{tenant.String(), limit + 1}
 	query := `
 		SELECT id, tenant_id, name, created_at
 		FROM bucket
 		WHERE tenant_id = $1
 	`
+	if len(cfg.IDs) > 0 {
+		ids := make([]string, len(cfg.IDs))
+		for i, id := range cfg.IDs {
+			ids[i] = id.String()
+		}
+		args = append(args, ids)
+		query += fmt.Sprintf(" AND id = ANY($%d)", len(args))
+	}
+	if len(cfg.Names) > 0 {
+		args = append(args, cfg.Names)
+		query += fmt.Sprintf(" AND name = ANY($%d)", len(args))
+	}
 	if cfg.Cursor != nil {
 		args = append(args, *cfg.Cursor)
-		query += ` AND id > $3`
+		query += fmt.Sprintf(" AND id > $%d", len(args))
 	}
 	query += ` ORDER BY id ASC LIMIT $2`
 
