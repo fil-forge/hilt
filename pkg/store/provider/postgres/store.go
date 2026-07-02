@@ -31,9 +31,9 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO provider (id, region, created_at)
-		VALUES ($1, $2, $3)
-	`, id.String(), region, time.Now().UTC())
+		INSERT INTO provider (id, region)
+		VALUES ($1, $2)
+	`, id.String(), region)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {

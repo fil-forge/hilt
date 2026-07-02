@@ -29,11 +29,11 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, name string, status tenant.Status) error {
+func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status tenant.Status) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tenant (id, external_id, provider_id, name, status, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, id.String(), externalID, provider.String(), name, string(status), time.Now().UTC())
+		INSERT INTO tenant (id, external_id, provider_id, status)
+		VALUES ($1, $2, $3, $4)
+	`, id.String(), externalID, provider.String(), string(status))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {

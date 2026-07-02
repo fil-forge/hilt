@@ -36,6 +36,12 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
 	for _, d := range delegations {
 		data, err := delegation.Encode(d)
 		if err != nil {
@@ -54,13 +60,17 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 			expiresAt = &t
 		}
 
-		if _, err := s.pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (id) DO NOTHING
 		`, d.Link().String(), d.Issuer().String(), d.Audience().String(), subject, d.Command().String(), data, expiresAt); err != nil {
 			return fmt.Errorf("storing delegation %s: %w", d.Link(), err)
 		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
