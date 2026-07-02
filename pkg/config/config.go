@@ -30,11 +30,25 @@ const (
 
 // Config holds the hilt service configuration.
 type Config struct {
-	Server  ServerConfig  `mapstructure:"server"`
-	Log     LogConfig     `mapstructure:"log"`
-	Storage StorageConfig `mapstructure:"storage"`
-	Vault   VaultConfig   `mapstructure:"vault"`
-	Auth    AuthConfig    `mapstructure:"auth"`
+	Identity IdentityConfig `mapstructure:"identity"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Log      LogConfig      `mapstructure:"log"`
+	Storage  StorageConfig  `mapstructure:"storage"`
+	Vault    VaultConfig    `mapstructure:"vault"`
+	PLC      PLCConfig      `mapstructure:"plc"`
+	Auth     AuthConfig     `mapstructure:"auth"`
+}
+
+// IdentityConfig holds the Hilt service identity used to sign and receive UCAN
+// invocations on the UCAN RPC API.
+type IdentityConfig struct {
+	// KeyFile is the path to a PEM-encoded Ed25519 private key. When empty, an
+	// ephemeral key is generated at startup (its DID changes each restart).
+	KeyFile string `mapstructure:"key_file"`
+	// ServiceID is an optional did:web identity to wrap the key with, allowing
+	// the service to accept UCANs addressed to the did:web (e.g.
+	// "did:web:hilt.example.com"). When empty, the key's did:key is used.
+	ServiceID string `mapstructure:"service_id"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -52,6 +66,13 @@ type AuthConfig struct {
 // LogConfig holds logging settings.
 type LogConfig struct {
 	Level string `mapstructure:"level"`
+}
+
+// PLCConfig holds settings for the did:plc directory.
+type PLCConfig struct {
+	// Directory is the did:plc directory endpoint used to resolve and publish
+	// PLC operations, e.g. "https://plc.directory".
+	Directory string `mapstructure:"directory"`
 }
 
 // StorageConfig selects and configures the store backend.
@@ -122,6 +143,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("vault.hashicorp.mount", "secret")
 	v.SetDefault("vault.hashicorp.auth_method", VaultAuthAppRole)
 	v.SetDefault("vault.hashicorp.approle.mount", "approle")
+
+	v.SetDefault("plc.directory", "https://plc.directory")
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix.
@@ -136,6 +159,8 @@ func BindEnvVars(v *viper.Viper) {
 // defaults. Flags that are absent from the set are skipped.
 func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 	bindings := map[string]string{
+		"identity.key_file":                 "identity-key-file",
+		"identity.service_id":               "identity-service-id",
 		"server.host":                       "host",
 		"server.port":                       "port",
 		"storage.type":                      "storage",
@@ -149,6 +174,7 @@ func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 		"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
 		"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
 		"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
+		"plc.directory":                     "plc-directory",
 		"auth.partner_key":                  "partner-key",
 	}
 	for key, name := range bindings {

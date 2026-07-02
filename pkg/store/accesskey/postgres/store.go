@@ -29,7 +29,7 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string) error {
+func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error {
 	bucketStrs := make([]string, len(buckets))
 	for i, b := range buckets {
 		bucketStrs[i] = b.String()
@@ -37,10 +37,15 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 	if permissions == nil {
 		permissions = []string{}
 	}
+	var expires *time.Time
+	if expiresAt != nil {
+		e := expiresAt.UTC()
+		expires = &e
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, id.String(), tenant.String(), name, bucketStrs, permissions, time.Now().UTC())
+		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, id.String(), tenant.String(), name, bucketStrs, permissions, expires, time.Now().UTC())
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -53,35 +58,75 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 
 func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, name, buckets, permissions, created_at
+		SELECT id, tenant_id, name, buckets, permissions, expires_at, created_at
 		FROM access_key
 		WHERE id = $1
 	`, id.String())
-
-	var (
-		idStr      string
-		tenantID   *string
-		name       *string
-		bucketStrs []string
-		perms      []string
-		createdAt  time.Time
-	)
-	err := row.Scan(&idStr, &tenantID, &name, &bucketStrs, &perms, &createdAt)
+	rec, err := scanRecord(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accesskey.Record{}, store.ErrRecordNotFound
 	}
 	if err != nil {
 		return accesskey.Record{}, fmt.Errorf("getting access key: %w", err)
 	}
+	return rec, nil
+}
 
-	parsedID, err := did.Parse(idStr)
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]accesskey.Record, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, name, buckets, permissions, expires_at, created_at
+		FROM access_key
+		WHERE tenant_id = $1
+		ORDER BY id ASC
+	`, tenant.String())
+	if err != nil {
+		return nil, fmt.Errorf("listing access keys by tenant: %w", err)
+	}
+	defer rows.Close()
+
+	var recs []accesskey.Record
+	for rows.Next() {
+		rec, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		recs = append(recs, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating access keys: %w", err)
+	}
+	return recs, nil
+}
+
+func (s *Store) Delete(ctx context.Context, id did.DID) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM access_key WHERE id = $1`, id.String()); err != nil {
+		return fmt.Errorf("deleting access key: %w", err)
+	}
+	return nil
+}
+
+func scanRecord(row pgx.Row) (accesskey.Record, error) {
+	var (
+		idStr      string
+		tenantID   *string
+		name       *string
+		bucketStrs []string
+		perms      []string
+		expiresAt  *time.Time
+		createdAt  time.Time
+	)
+	if err := row.Scan(&idStr, &tenantID, &name, &bucketStrs, &perms, &expiresAt, &createdAt); err != nil {
+		return accesskey.Record{}, err
+	}
+
+	id, err := did.Parse(idStr)
 	if err != nil {
 		return accesskey.Record{}, fmt.Errorf("parsing access key DID: %w", err)
 	}
 	rec := accesskey.Record{
-		ID:          parsedID,
-		Name:        "",
+		ID:          id,
 		Permissions: perms,
+		ExpiresAt:   expiresAt,
 		CreatedAt:   createdAt,
 	}
 	if tenantID != nil && *tenantID != "" {

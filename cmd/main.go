@@ -28,6 +28,10 @@ func main() {
 		RunE:  runServe,
 	}
 
+	// identity config (UCAN RPC service identity)
+	serveCmd.Flags().String("identity-key-file", "", "path to a PEM-encoded Ed25519 private key for the Hilt service identity (an ephemeral key is generated if unset)")
+	serveCmd.Flags().String("identity-service-id", "", "optional did:web service identity to wrap the key with, e.g. did:web:hilt.example.com")
+
 	// http server config
 	serveCmd.Flags().String("host", "127.0.0.1", "host to bind the server to")
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")
@@ -46,6 +50,9 @@ func main() {
 	serveCmd.Flags().String("hashicorp-approle-role-id", "", "hashicorp vault AppRole role ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_ROLE_ID env var or config file)")
 	serveCmd.Flags().String("hashicorp-approle-secret-id", "", "hashicorp vault AppRole secret ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_SECRET_ID env var or config file)")
 	serveCmd.Flags().String("hashicorp-approle-mount", "approle", "hashicorp vault AppRole auth mount path")
+
+	// plc config
+	serveCmd.Flags().String("plc-directory", "https://plc.directory", "did:plc directory endpoint")
 
 	// auth config
 	serveCmd.Flags().String("partner-key", "", "partner bearer key required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")

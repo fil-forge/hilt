@@ -52,11 +52,12 @@ func TestTenantStore(t *testing.T) {
 			t.Run("adds and retrieves a tenant", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), id, provider, "acme", tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-acme", provider, "acme", tenant.Active))
 
 				rec, err := s.Get(t.Context(), id)
 				require.NoError(t, err)
 				require.Equal(t, id, rec.ID)
+				require.Equal(t, "ext-acme", rec.ExternalID)
 				require.Equal(t, provider, rec.Provider)
 				require.Equal(t, "acme", rec.Name)
 				require.Equal(t, tenant.Active, rec.Status)
@@ -68,16 +69,37 @@ func TestTenantStore(t *testing.T) {
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
+			t.Run("GetByExternalID retrieves a tenant", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "ext-lookup", testutil.RandomDID(t), "lookup", tenant.Active))
+
+				rec, err := s.GetByExternalID(t.Context(), "ext-lookup")
+				require.NoError(t, err)
+				require.Equal(t, id, rec.ID)
+				require.Equal(t, "ext-lookup", rec.ExternalID)
+			})
+
+			t.Run("GetByExternalID returns ErrRecordNotFound for unknown external id", func(t *testing.T) {
+				_, err := s.GetByExternalID(t.Context(), "ext-missing")
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
+
 			t.Run("Add returns ErrRecordExists for duplicate id", func(t *testing.T) {
 				id := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), id, testutil.RandomDID(t), "dup", tenant.Active))
-				err := s.Add(t.Context(), id, testutil.RandomDID(t), "dup", tenant.Active)
+				require.NoError(t, s.Add(t.Context(), id, "ext-dup-1", testutil.RandomDID(t), "dup", tenant.Active))
+				err := s.Add(t.Context(), id, "ext-dup-2", testutil.RandomDID(t), "dup", tenant.Active)
+				require.ErrorIs(t, err, store.ErrRecordExists)
+			})
+
+			t.Run("Add returns ErrRecordExists for duplicate external id", func(t *testing.T) {
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), "ext-shared", testutil.RandomDID(t), "a", tenant.Active))
+				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-shared", testutil.RandomDID(t), "b", tenant.Active)
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("SetStatus updates status", func(t *testing.T) {
 				id := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), id, testutil.RandomDID(t), "switcher", tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-switcher", testutil.RandomDID(t), "switcher", tenant.Active))
 
 				require.NoError(t, s.SetStatus(t.Context(), id, tenant.WriteLocked))
 
@@ -90,6 +112,18 @@ func TestTenantStore(t *testing.T) {
 			t.Run("SetStatus returns ErrRecordNotFound for unknown id", func(t *testing.T) {
 				err := s.SetStatus(t.Context(), testutil.RandomDID(t), tenant.Disabled)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
+
+			t.Run("Delete removes a tenant and is idempotent", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "ext-del", testutil.RandomDID(t), "del", tenant.Active))
+
+				require.NoError(t, s.Delete(t.Context(), id))
+				_, err := s.Get(t.Context(), id)
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+
+				// Deleting an absent record is a no-op.
+				require.NoError(t, s.Delete(t.Context(), id))
 			})
 		})
 	}
