@@ -16,11 +16,39 @@ const (
 	StorageTypePostgres = "postgres"
 )
 
+// Valid values for VaultConfig.Type.
+const (
+	VaultTypeMemory    = "memory"
+	VaultTypeHashicorp = "hashicorp"
+)
+
+// Valid values for HashicorpConfig.AuthMethod.
+const (
+	VaultAuthToken   = "token"
+	VaultAuthAppRole = "approle"
+)
+
 // Config holds the hilt service configuration.
 type Config struct {
-	Server  ServerConfig  `mapstructure:"server"`
-	Log     LogConfig     `mapstructure:"log"`
-	Storage StorageConfig `mapstructure:"storage"`
+	Identity IdentityConfig `mapstructure:"identity"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Log      LogConfig      `mapstructure:"log"`
+	Storage  StorageConfig  `mapstructure:"storage"`
+	Vault    VaultConfig    `mapstructure:"vault"`
+	PLC      PLCConfig      `mapstructure:"plc"`
+	Auth     AuthConfig     `mapstructure:"auth"`
+}
+
+// IdentityConfig holds the Hilt service identity used to sign and receive UCAN
+// invocations on the UCAN RPC API.
+type IdentityConfig struct {
+	// KeyFile is the path to a PEM-encoded Ed25519 private key. When empty, an
+	// ephemeral key is generated at startup (its DID changes each restart).
+	KeyFile string `mapstructure:"key_file"`
+	// ServiceID is an optional did:web identity to wrap the key with, allowing
+	// the service to accept UCANs addressed to the did:web (e.g.
+	// "did:web:hilt.example.com"). When empty, the key's did:key is used.
+	ServiceID string `mapstructure:"service_id"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -29,9 +57,23 @@ type ServerConfig struct {
 	Port int    `mapstructure:"port"`
 }
 
+// AuthConfig holds authentication settings for the Tenant API.
+type AuthConfig struct {
+	// PartnerKey is the pre-shared bearer token required on Tenant API requests.
+	// CSV of keys is supported, e.g. "key1,key2".
+	PartnerKey string `mapstructure:"partner_key"`
+}
+
 // LogConfig holds logging settings.
 type LogConfig struct {
 	Level string `mapstructure:"level"`
+}
+
+// PLCConfig holds settings for the did:plc directory.
+type PLCConfig struct {
+	// Directory is the did:plc directory endpoint used to resolve and publish
+	// PLC operations, e.g. "https://plc.directory".
+	Directory string `mapstructure:"directory"`
 }
 
 // StorageConfig selects and configures the store backend.
@@ -39,6 +81,38 @@ type StorageConfig struct {
 	// Type selects the backend: "memory" or "postgres". Defaults to "postgres".
 	Type     string         `mapstructure:"type"`
 	Postgres PostgresConfig `mapstructure:"postgres"`
+}
+
+// VaultConfig selects and configures the vault backend for private key material.
+type VaultConfig struct {
+	// Type selects the backend: "hashicorp" or "memory". Defaults to "hashicorp".
+	Type      string          `mapstructure:"type"`
+	Hashicorp HashicorpConfig `mapstructure:"hashicorp"`
+}
+
+// HashicorpConfig holds settings for the HashiCorp Vault backend.
+type HashicorpConfig struct {
+	// Address is the Vault server address, e.g. "http://127.0.0.1:8200".
+	Address string `mapstructure:"address"`
+	// Mount is the KV v2 secrets engine mount path. Defaults to "secret".
+	Mount string `mapstructure:"mount"`
+	// AuthMethod selects how to authenticate: "token" or "approle". Defaults to
+	// "approle".
+	AuthMethod string `mapstructure:"auth_method"`
+	// Token is the Vault auth token (used when AuthMethod is "token").
+	Token string `mapstructure:"token"`
+	// AppRole holds the AppRole credentials (used when AuthMethod is "approle").
+	AppRole AppRoleConfig `mapstructure:"approle"`
+}
+
+// AppRoleConfig holds HashiCorp Vault AppRole authentication credentials.
+type AppRoleConfig struct {
+	// RoleID is the AppRole role ID.
+	RoleID string `mapstructure:"role_id"`
+	// SecretID is the AppRole secret ID.
+	SecretID string `mapstructure:"secret_id"`
+	// Mount is the AppRole auth method mount path. Defaults to "approle".
+	Mount string `mapstructure:"mount"`
 }
 
 // PostgresConfig holds PostgreSQL settings.
@@ -64,6 +138,14 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("storage.postgres.dsn", "postgres://hilt:hilt@localhost:5432/hilt?sslmode=disable")
 	v.SetDefault("storage.postgres.max_conns", 10)
 	v.SetDefault("storage.postgres.min_conns", 0)
+
+	v.SetDefault("vault.type", VaultTypeHashicorp)
+	v.SetDefault("vault.hashicorp.address", "http://127.0.0.1:8200")
+	v.SetDefault("vault.hashicorp.mount", "secret")
+	v.SetDefault("vault.hashicorp.auth_method", VaultAuthAppRole)
+	v.SetDefault("vault.hashicorp.approle.mount", "approle")
+
+	v.SetDefault("plc.directory", "https://plc.directory")
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix.
@@ -78,11 +160,23 @@ func BindEnvVars(v *viper.Viper) {
 // defaults. Flags that are absent from the set are skipped.
 func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 	bindings := map[string]string{
-		"server.host":                      "host",
-		"server.port":                      "port",
-		"storage.type":                     "storage",
-		"storage.postgres.dsn":             "postgres-dsn",
-		"storage.postgres.skip_migrations": "skip-migrations",
+		"identity.key_file":                 "identity-key-file",
+		"identity.service_id":               "identity-service-id",
+		"server.host":                       "host",
+		"server.port":                       "port",
+		"storage.type":                      "storage",
+		"storage.postgres.dsn":              "postgres-dsn",
+		"storage.postgres.skip_migrations":  "skip-migrations",
+		"vault.type":                        "vault",
+		"vault.hashicorp.address":           "hashicorp-address",
+		"vault.hashicorp.mount":             "hashicorp-mount",
+		"vault.hashicorp.auth_method":       "hashicorp-auth-method",
+		"vault.hashicorp.token":             "hashicorp-token",
+		"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
+		"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
+		"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
+		"plc.directory":                     "plc-directory",
+		"auth.partner_key":                  "partner-key",
 	}
 	for key, name := range bindings {
 		if f := flags.Lookup(name); f != nil {

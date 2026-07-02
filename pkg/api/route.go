@@ -4,10 +4,7 @@
 package api
 
 import (
-	"net/http"
-
 	"github.com/labstack/echo/v4"
-	"go.uber.org/zap"
 )
 
 // Route maps an HTTP method and path to the echo handler that serves it. A
@@ -22,13 +19,4 @@ type Route struct {
 // NewRoute builds a [Route] from a method, path, and handler.
 func NewRoute(method, path string, handler echo.HandlerFunc) Route {
 	return Route{Method: method, Path: path, Handler: handler}
-}
-
-// notImplemented returns a handler that logs and responds 501. Used by the
-// current stub handlers until the endpoints are implemented.
-func notImplemented(logger *zap.Logger, name string) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		logger.Debug("handler not implemented", zap.String("handler", name))
-		return echo.NewHTTPError(http.StatusNotImplemented, "not implemented")
-	}
 }

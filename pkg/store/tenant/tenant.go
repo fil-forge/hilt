@@ -16,8 +16,12 @@ const (
 )
 
 type Record struct {
-	// Identifier for the tenant.
+	// Identifier for the tenant (the tenant's did:plc, the internal crypto
+	// identity).
 	ID did.DID
+	// ExternalID is the tenant identifier used by the Tenant API (the {tenantId}
+	// path parameter supplied by the caller).
+	ExternalID string
 	// Provider this tenant belongs to.
 	Provider did.DID
 	// Human readable name of the tenant.
@@ -32,12 +36,19 @@ type Record struct {
 
 type Store interface {
 	// Add creates a new tenant record. It returns [store.ErrRecordExists] if a
-	// record with the same ID already exists.
-	Add(ctx context.Context, id did.DID, provider did.DID, name string, status Status) error
+	// record with the same ID or external ID already exists.
+	Add(ctx context.Context, id did.DID, externalID string, provider did.DID, name string, status Status) error
 	// Get retrieves the tenant record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	Get(ctx context.Context, id did.DID) (Record, error)
+	// GetByExternalID retrieves the tenant record for a given external ID. It
+	// returns [store.ErrRecordNotFound] if no record exists for the specified
+	// external ID.
+	GetByExternalID(ctx context.Context, externalID string) (Record, error)
 	// SetStatus updates the status of a tenant record. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	SetStatus(ctx context.Context, id did.DID, status Status) error
+	// Delete removes the tenant record for a given ID. It is idempotent:
+	// deleting an absent record returns nil.
+	Delete(ctx context.Context, id did.DID) error
 }

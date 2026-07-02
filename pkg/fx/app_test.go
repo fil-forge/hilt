@@ -40,3 +40,28 @@ func TestAppModuleStorageSelection(t *testing.T) {
 		require.Error(t, validate(cfg))
 	})
 }
+
+func TestAppModuleVaultSelection(t *testing.T) {
+	cfg := func(vaultType string) *config.Config {
+		return &config.Config{
+			Storage: config.StorageConfig{Type: config.StorageTypeMemory},
+			Vault:   config.VaultConfig{Type: vaultType},
+		}
+	}
+
+	t.Run("memory", func(t *testing.T) {
+		require.NoError(t, validate(cfg(config.VaultTypeMemory)))
+	})
+
+	t.Run("empty defaults to hashicorp", func(t *testing.T) {
+		require.NoError(t, validate(cfg("")))
+	})
+
+	t.Run("hashicorp", func(t *testing.T) {
+		require.NoError(t, validate(cfg(config.VaultTypeHashicorp)))
+	})
+
+	t.Run("unknown type errors", func(t *testing.T) {
+		require.Error(t, validate(cfg("bogus")))
+	})
+}
