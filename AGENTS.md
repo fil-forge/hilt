@@ -23,7 +23,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   three after changes — this is the standard loop.
 - Run locally: `go run ./cmd serve` (flags: `--storage=memory --vault=memory` to
   avoid external deps; see `cmd/main.go` / `pkg/config`).
-- Postgres- and Vault-backed tests use testcontainers and **skip when Docker is
+- Postgres and Vault-backed tests use testcontainers and **skip when Docker is
   unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
   only exercises the memory backends; run with Docker for full coverage.
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
