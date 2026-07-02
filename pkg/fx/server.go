@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/echo/middleware"
@@ -71,9 +70,7 @@ func RegisterServerLifecycle(
 		},
 		OnStop: func(ctx context.Context) error {
 			logger.Info("shutting down server")
-			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			return e.Shutdown(shutdownCtx)
+			return e.Shutdown(ctx)
 		},
 	})
 }
