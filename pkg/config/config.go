@@ -75,7 +75,7 @@ type HashicorpConfig struct {
 	// Mount is the KV v2 secrets engine mount path. Defaults to "secret".
 	Mount string `mapstructure:"mount"`
 	// AuthMethod selects how to authenticate: "token" or "approle". Defaults to
-	// "token".
+	// "approle".
 	AuthMethod string `mapstructure:"auth_method"`
 	// Token is the Vault auth token (used when AuthMethod is "token").
 	Token string `mapstructure:"token"`

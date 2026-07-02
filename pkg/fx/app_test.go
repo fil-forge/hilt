@@ -53,7 +53,7 @@ func TestAppModuleVaultSelection(t *testing.T) {
 		require.NoError(t, validate(cfg(config.VaultTypeMemory)))
 	})
 
-	t.Run("empty defaults to memory", func(t *testing.T) {
+	t.Run("empty defaults to hashicorp", func(t *testing.T) {
 		require.NoError(t, validate(cfg("")))
 	})
 

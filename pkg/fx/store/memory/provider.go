@@ -19,30 +19,10 @@ import (
 // Module provides the in-memory store implementations.
 var Module = fx.Module("memory-store",
 	fx.Provide(
-		NewAccessKeyStore,
-		NewBucketStore,
-		NewDelegationStore,
-		NewProviderStore,
-		NewTenantStore,
+		fx.Annotate(memaccesskey.New, fx.As(new(accesskey.Store))),
+		fx.Annotate(membucket.New, fx.As(new(bucket.Store))),
+		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
+		fx.Annotate(memprovider.New, fx.As(new(provider.Store))),
+		fx.Annotate(memtenant.New, fx.As(new(tenant.Store))),
 	),
 )
-
-func NewAccessKeyStore() accesskey.Store {
-	return memaccesskey.New()
-}
-
-func NewBucketStore() bucket.Store {
-	return membucket.New()
-}
-
-func NewDelegationStore() delegation.Store {
-	return memdelegation.New()
-}
-
-func NewProviderStore() provider.Store {
-	return memprovider.New()
-}
-
-func NewTenantStore() tenant.Store {
-	return memtenant.New()
-}

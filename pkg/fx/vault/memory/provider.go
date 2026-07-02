@@ -10,9 +10,7 @@ import (
 
 // Module provides the in-memory vault implementation.
 var Module = fx.Module("memory-vault",
-	fx.Provide(NewVault),
+	fx.Provide(
+		fx.Annotate(vaultmemory.New, fx.As(new(vault.Vault))),
+	),
 )
-
-func NewVault() vault.Vault {
-	return vaultmemory.New()
-}
