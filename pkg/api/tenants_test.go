@@ -14,6 +14,9 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/store"
+	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -383,7 +386,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 	require.NoError(t, err)
 	key := signer.KeyDID()
 	tenantID, genesis, err := plc.New(signer,
-		plc.WithRotationKeys([]did.DID{key}),
+		plc.WithRotationKeys(key),
 		plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
 	)
 	require.NoError(t, err)

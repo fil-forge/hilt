@@ -77,7 +77,7 @@ func NewProvisionTenantHandler(
 		key := signer.KeyDID()
 		tenantID, genesis, err := plc.New(
 			signer,
-			plc.WithRotationKeys([]did.DID{key}),
+			plc.WithRotationKeys(key),
 			plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
 		)
 		if err != nil {

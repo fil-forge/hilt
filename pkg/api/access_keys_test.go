@@ -47,7 +47,7 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 	require.NoError(t, err)
 	key := signer.KeyDID()
 	tenantID, _, err := plc.New(signer,
-		plc.WithRotationKeys([]did.DID{key}),
+		plc.WithRotationKeys(key),
 		plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
 	)
 	require.NoError(t, err)
