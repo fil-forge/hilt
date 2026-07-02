@@ -321,9 +321,8 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, dels.Results)
 
-		// Idempotent.
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
-		require.Equal(t, http.StatusNoContent, again.Code)
+		require.Equal(t, http.StatusNotFound, again.Code)
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {
