@@ -8,7 +8,7 @@ CREATE TABLE provider (
 );
 
 CREATE TABLE tenant (
-    id          TEXT        PRIMARY KEY, -- DID
+    id          TEXT        PRIMARY KEY, -- DID (did:plc)
     external_id TEXT        UNIQUE,      -- external Tenant API id ({tenantId})
     provider_id TEXT        NOT NULL REFERENCES provider(id) ON DELETE RESTRICT, -- DID
     status      TEXT        NOT NULL CONSTRAINT tenant_status_valid CHECK (status IN ('active', 'write-locked', 'disabled')), -- active, write-locked, disabled
@@ -29,7 +29,9 @@ CREATE TABLE access_key (
     name        TEXT        NOT NULL,
     buckets     TEXT[], -- bucket DIDs; NULL/empty = all buckets (powerline)
     permissions TEXT[]      NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMPTZ NOT NULL  DEFAULT NOW(),
+    expires_at  TIMESTAMPTZ,
+    UNIQUE (tenant_id, name)
 );
 
 CREATE TABLE delegation (
