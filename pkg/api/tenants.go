@@ -94,15 +94,20 @@ func NewProvisionTenantHandler(
 		// Publish the genesis operation to register the did:plc.
 		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
 			log.Error("publishing genesis operation", zap.Error(err))
-			_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
+			if err := secrets.Delete(ctx, vaultKey); err != nil {
+				log.Error("cleaning up orphaned key", zap.Error(err))
+			}
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
 		}
 
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, req.DisplayName, tenant.Active); err != nil {
+			// The tenant was not recorded; clean up its now-orphaned key.
+			if derr := secrets.Delete(ctx, vaultKey); derr != nil {
+				log.Error("cleaning up orphaned key", zap.Error(derr))
+			}
+			// Concurrent create with the same external id: return the winner.
 			if errors.Is(err, store.ErrRecordExists) {
-				_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
-				// Concurrent create with the same external id: return the winner.
 				if rec, gerr := tenants.GetByExternalID(ctx, externalID); gerr == nil {
 					return c.JSON(http.StatusOK, tenantResponse(rec))
 				}
