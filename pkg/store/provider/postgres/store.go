@@ -10,12 +10,11 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-const uniqueViolation = "23505"
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -37,7 +36,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
 	`, id.String(), region, time.Now().UTC())
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
 			return store.ErrRecordExists
 		}
 		return fmt.Errorf("adding provider: %w", err)
