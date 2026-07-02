@@ -31,7 +31,8 @@ CREATE TABLE access_key (
     buckets     TEXT[],
     permissions TEXT[]      NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL,
-    expires_at  TIMESTAMPTZ
+    expires_at  TIMESTAMPTZ,
+    UNIQUE (tenant_id, name)
 );
 
 CREATE TABLE delegation (

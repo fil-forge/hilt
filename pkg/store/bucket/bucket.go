@@ -2,11 +2,16 @@ package bucket
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
+
+// ErrConflictingFilters is returned by [Store.ListByTenant] when both [WithIDs]
+// and [WithNames] are supplied.
+var ErrConflictingFilters = errors.New("bucket: WithIDs and WithNames cannot be combined")
 
 type Record struct {
 	// Identifier for the bucket.
@@ -25,14 +30,24 @@ type ListConfig struct {
 	// IDs optionally restricts results to buckets with these IDs. When empty, no
 	// ID filtering is applied.
 	IDs []did.DID
+	// Names optionally restricts results to buckets with these names. When empty,
+	// no name filtering is applied. Must not be combined with IDs.
+	Names []string
 }
 
 // ListOption configures a [ListConfig].
 type ListOption func(*ListConfig)
 
-// WithIDs restricts results to buckets with the given IDs.
+// WithIDs restricts results to buckets with the given IDs. It must not be
+// combined with [WithNames].
 func WithIDs(ids ...did.DID) ListOption {
 	return func(c *ListConfig) { c.IDs = ids }
+}
+
+// WithNames restricts results to buckets with the given names. It must not be
+// combined with [WithIDs].
+func WithNames(names ...string) ListOption {
+	return func(c *ListConfig) { c.Names = names }
 }
 
 // WithLimit sets the maximum number of results per page.
@@ -53,7 +68,8 @@ type Store interface {
 	// [store.ErrRecordNotFound] if no bucket exists with the specified name.
 	GetByName(ctx context.Context, name string) (Record, error)
 	// ListByTenant retrieves a paginated list of bucket records for a given
-	// tenant, optionally filtered to a set of bucket IDs (see [WithIDs]).
+	// tenant, optionally filtered to a set of bucket IDs (see [WithIDs]) or names
+	// (see [WithNames]). Supplying both filters returns [ErrConflictingFilters].
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) (store.Page[Record], error)
 	// Delete removes the bucket record for a given ID. It is idempotent:
 	// deleting an absent record returns nil.

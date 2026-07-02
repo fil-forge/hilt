@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
+	"slices"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -90,29 +92,33 @@ func NewCreateAccessKeyHandler(
 		}
 		issuer := multikey.NewIssuer(tenantRec.ID, tenantSigner)
 
-		// Resolve the named buckets to DIDs, verifying each exists and belongs to
-		// the tenant. An empty list means tenant-wide (powerline) access.
+		// Resolve the named buckets to DIDs in a single tenant-scoped list query.
+		// The query is scoped to the tenant, so a name owned by another tenant (or
+		// one that doesn't exist) simply won't come back. An empty list means
+		// tenant-wide (powerline) access.
 		bucketDIDs := make([]did.DID, 0, len(req.Buckets))
-		for _, name := range req.Buckets {
-			b, err := buckets.GetByName(ctx, name)
-			if errors.Is(err, store.ErrRecordNotFound) || (err == nil && b.Tenant != tenantRec.ID) {
-				return echo.NewHTTPError(http.StatusUnprocessableEntity, "unknown bucket: "+name)
-			} else if err != nil {
-				log.Error("resolving bucket", zap.Error(err))
+		if len(req.Buckets) > 0 {
+			recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
+				listOpts := []bucket.ListOption{bucket.WithNames(req.Buckets...)}
+				if opts.Cursor != nil {
+					listOpts = append(listOpts, bucket.WithCursor(*opts.Cursor))
+				}
+				return buckets.ListByTenant(ctx, tenantRec.ID, listOpts...)
+			})
+			if err != nil {
+				log.Error("resolving buckets", zap.Error(err))
 				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 			}
-			bucketDIDs = append(bucketDIDs, b.ID)
-		}
-
-		// Names must be unique within the tenant.
-		existing, err := accessKeys.ListByTenant(ctx, tenantRec.ID)
-		if err != nil {
-			log.Error("listing access keys", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		for _, k := range existing {
-			if k.Name == req.Name {
-				return echo.NewHTTPError(http.StatusConflict, "an access key with this name already exists")
+			byName := make(map[string]did.DID, len(recs))
+			for _, b := range recs {
+				byName[b.Name] = b.ID
+			}
+			for _, name := range req.Buckets {
+				id, ok := byName[name]
+				if !ok {
+					return echo.NewHTTPError(http.StatusUnprocessableEntity, "unknown bucket: "+name)
+				}
+				bucketDIDs = append(bucketDIDs, id)
 			}
 		}
 
@@ -153,6 +159,11 @@ func NewCreateAccessKeyHandler(
 
 		if err := accessKeys.Add(ctx, accessKeyDID, tenantRec.ID, req.Name, bucketDIDs, req.Permissions, req.ExpiresAt); err != nil {
 			rollback()
+			// Name uniqueness is enforced by the store's (tenant, name) constraint;
+			// a fresh random access-key DID colliding is not a realistic case.
+			if errors.Is(err, store.ErrRecordExists) {
+				return echo.NewHTTPError(http.StatusConflict, "an access key with this name already exists")
+			}
 			log.Error("storing access key record", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
@@ -165,7 +176,7 @@ func NewCreateAccessKeyHandler(
 		}
 		subjects := bucketDIDs
 		if len(subjects) == 0 {
-			subjects = []did.DID{{}} // powerline: undefined subject
+			subjects = []did.DID{did.Undef} // powerline: undefined subject
 		}
 		var dels []ucan.Delegation
 		for _, sub := range subjects {
@@ -234,17 +245,15 @@ func NewListAccessKeysHandler(
 		}
 
 		// Resolve names only for the buckets actually referenced across all keys.
-		var bucketIDs []did.DID
-		seen := map[did.DID]bool{}
+		bucketIDs := map[did.DID]struct{}{}
 		for _, rec := range recs {
 			for _, b := range rec.Buckets {
-				if !seen[b] {
-					seen[b] = true
-					bucketIDs = append(bucketIDs, b)
+				if _, ok := bucketIDs[b]; !ok {
+					bucketIDs[b] = struct{}{}
 				}
 			}
 		}
-		bucketNames, err := bucketNamesByID(ctx, buckets, tenantRec.ID, bucketIDs)
+		bucketNames, err := bucketNamesByID(ctx, buckets, tenantRec.ID, slices.Collect(maps.Keys(bucketIDs)))
 		if err != nil {
 			log.Error("listing buckets", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -324,13 +333,13 @@ func NewDeleteAccessKeyHandler(
 
 		accessKeyDID, err := did.Parse(did.KeyPrefix + c.Param("accessKeyId"))
 		if err != nil {
-			return c.NoContent(http.StatusNoContent) // unparseable id ⇒ nothing to delete
+			return echo.NewHTTPError(http.StatusNotFound, "access key not found") // unparseable id ⇒ nothing to delete
 		}
 
 		// Idempotent: a missing key (or one owned by another tenant) is a no-op.
 		rec, err := accessKeys.Get(ctx, accessKeyDID)
 		if errors.Is(err, store.ErrRecordNotFound) || (err == nil && rec.Tenant != tenantRec.ID) {
-			return c.NoContent(http.StatusNoContent)
+			return echo.NewHTTPError(http.StatusNotFound, "access key not found")
 		} else if err != nil {
 			log.Error("looking up access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")

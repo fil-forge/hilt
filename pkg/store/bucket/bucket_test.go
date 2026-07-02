@@ -124,6 +124,33 @@ func TestBucketStore(t *testing.T) {
 				require.ElementsMatch(t, want, got)
 			})
 
+			t.Run("ListByTenant filters by names", func(t *testing.T) {
+				tenant := testutil.RandomDID(t)
+				want := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}
+				require.NoError(t, s.Add(t.Context(), want[0], tenant, "fbn-a"))
+				require.NoError(t, s.Add(t.Context(), want[1], tenant, "fbn-b"))
+				// Decoys: same tenant but not requested, and a different tenant.
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenant, "fbn-c"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), "fbn-other"))
+
+				// "fbn-other" belongs to a different tenant, so it is excluded by the
+				// tenant scope even though it is requested.
+				page, err := s.ListByTenant(t.Context(), tenant, bucket.WithNames("fbn-a", "fbn-b", "fbn-other"))
+				require.NoError(t, err)
+				got := make([]did.DID, 0, len(page.Results))
+				for _, b := range page.Results {
+					require.Equal(t, tenant, b.Tenant)
+					got = append(got, b.ID)
+				}
+				require.ElementsMatch(t, want, got)
+			})
+
+			t.Run("ListByTenant rejects IDs and Names together", func(t *testing.T) {
+				_, err := s.ListByTenant(t.Context(), testutil.RandomDID(t),
+					bucket.WithIDs(testutil.RandomDID(t)), bucket.WithNames("x"))
+				require.ErrorIs(t, err, bucket.ErrConflictingFilters)
+			})
+
 			t.Run("Delete removes a bucket and is idempotent", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				require.NoError(t, s.Add(t.Context(), id, testutil.RandomDID(t), "to-delete"))

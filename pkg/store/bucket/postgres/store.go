@@ -67,6 +67,9 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if len(cfg.IDs) > 0 && len(cfg.Names) > 0 {
+		return store.Page[bucket.Record]{}, bucket.ErrConflictingFilters
+	}
 	limit := defaultListLimit
 	if cfg.Limit != nil && *cfg.Limit > 0 {
 		limit = *cfg.Limit
@@ -86,6 +89,10 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 		}
 		args = append(args, ids)
 		query += fmt.Sprintf(" AND id = ANY($%d)", len(args))
+	}
+	if len(cfg.Names) > 0 {
+		args = append(args, cfg.Names)
+		query += fmt.Sprintf(" AND name = ANY($%d)", len(args))
 	}
 	if cfg.Cursor != nil {
 		args = append(args, *cfg.Cursor)

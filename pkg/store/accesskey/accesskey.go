@@ -27,7 +27,8 @@ type Record struct {
 
 type Store interface {
 	// Add creates a new access key record. It returns [store.ErrRecordExists] if
-	// a record with the same ID already exists.
+	// a record with the same ID, or the same (tenant, name), already exists.
+	// Names must be unique within a tenant.
 	Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error
 	// Get retrieves the access key record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.

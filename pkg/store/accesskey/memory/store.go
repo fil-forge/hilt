@@ -29,6 +29,13 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 	if _, ok := s.keys[id]; ok {
 		return store.ErrRecordExists
 	}
+	// Names must be unique within a tenant (mirrors the Postgres
+	// UNIQUE (tenant_id, name) constraint).
+	for _, rec := range s.keys {
+		if rec.Tenant == tenant && rec.Name == name {
+			return store.ErrRecordExists
+		}
+	}
 	var expires *time.Time
 	if expiresAt != nil {
 		e := expiresAt.UTC()

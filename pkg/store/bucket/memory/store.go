@@ -64,12 +64,22 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if len(cfg.IDs) > 0 && len(cfg.Names) > 0 {
+		return store.Page[bucket.Record]{}, bucket.ErrConflictingFilters
+	}
 
 	var idFilter map[did.DID]bool
 	if len(cfg.IDs) > 0 {
 		idFilter = make(map[did.DID]bool, len(cfg.IDs))
 		for _, id := range cfg.IDs {
 			idFilter[id] = true
+		}
+	}
+	var nameFilter map[string]bool
+	if len(cfg.Names) > 0 {
+		nameFilter = make(map[string]bool, len(cfg.Names))
+		for _, name := range cfg.Names {
+			nameFilter[name] = true
 		}
 	}
 
@@ -79,6 +89,9 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 			continue
 		}
 		if idFilter != nil && !idFilter[b.ID] {
+			continue
+		}
+		if nameFilter != nil && !nameFilter[b.Name] {
 			continue
 		}
 		recs = append(recs, b)

@@ -1,6 +1,7 @@
 package accesskey_test
 
 import (
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -103,13 +104,23 @@ func TestAccessKeyStore(t *testing.T) {
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
+			t.Run("Add returns ErrRecordExists for duplicate (tenant, name)", func(t *testing.T) {
+				tenant := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenant, "name-dup", nil, []string{"s3:GetObject"}, nil))
+				// Same tenant + name but a different id must be rejected.
+				err := s.Add(t.Context(), testutil.RandomDID(t), tenant, "name-dup", nil, []string{"s3:GetObject"}, nil)
+				require.ErrorIs(t, err, store.ErrRecordExists)
+				// The same name under a different tenant is allowed.
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), "name-dup", nil, []string{"s3:GetObject"}, nil))
+			})
+
 			t.Run("ListByTenant isolates by tenant", func(t *testing.T) {
 				tenant := testutil.RandomDID(t)
 				other := testutil.RandomDID(t)
-				for range 3 {
-					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenant, "k", nil, []string{"s3:GetObject"}, nil))
+				for i := range 3 {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenant, fmt.Sprintf("k%d", i), nil, []string{"s3:GetObject"}, nil))
 				}
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "k", nil, []string{"s3:GetObject"}, nil))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "k0", nil, []string{"s3:GetObject"}, nil))
 
 				recs, err := s.ListByTenant(t.Context(), tenant)
 				require.NoError(t, err)
