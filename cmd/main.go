@@ -28,6 +28,10 @@ func main() {
 		RunE:  runServe,
 	}
 
+	// identity config (UCAN RPC service identity)
+	serveCmd.Flags().String("identity-key-file", "", "path to a PEM-encoded Ed25519 private key for the Hilt service identity (an ephemeral key is generated if unset)")
+	serveCmd.Flags().String("identity-service-id", "", "optional did:web service identity to wrap the key with, e.g. did:web:hilt.example.com")
+
 	// http server config
 	serveCmd.Flags().String("host", "127.0.0.1", "host to bind the server to")
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")
@@ -36,6 +40,19 @@ func main() {
 	serveCmd.Flags().String("storage", "postgres", "storage backend (memory or postgres)")
 	serveCmd.Flags().String("postgres-dsn", "", "postgres connection string (used when storage=postgres)")
 	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
+
+	// vault config
+	serveCmd.Flags().String("vault", "hashicorp", "vault backend for private keys (hashicorp or memory)")
+	serveCmd.Flags().String("hashicorp-address", "http://127.0.0.1:8200", "hashicorp vault server address")
+	serveCmd.Flags().String("hashicorp-mount", "secret", "hashicorp vault KV v2 secrets engine mount path")
+	serveCmd.Flags().String("hashicorp-auth-method", "approle", "hashicorp vault auth method (approle or token)")
+	serveCmd.Flags().String("hashicorp-token", "", "hashicorp vault token (auth-method=token; prefer HILT_VAULT_HASHICORP_TOKEN env var or config file to avoid exposing via process args)")
+	serveCmd.Flags().String("hashicorp-approle-role-id", "", "hashicorp vault AppRole role ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_ROLE_ID env var or config file)")
+	serveCmd.Flags().String("hashicorp-approle-secret-id", "", "hashicorp vault AppRole secret ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_SECRET_ID env var or config file)")
+	serveCmd.Flags().String("hashicorp-approle-mount", "approle", "hashicorp vault AppRole auth mount path")
+
+	// plc config
+	serveCmd.Flags().String("plc-directory", "https://plc.directory", "did:plc directory endpoint")
 
 	// auth config
 	serveCmd.Flags().String("partner-key", "", "CSV partner bearer key(s) required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
