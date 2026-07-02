@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
@@ -18,14 +17,19 @@ const bearerPrefix = "Bearer "
 // missing, malformed, or does not match. If partnerKey is empty (unconfigured),
 // it fails closed and rejects all requests. The key and presented token are
 // never logged.
-func PartnerKeyAuth(partnerKey string, logger *zap.Logger) echo.MiddlewareFunc {
-	var warnOnce sync.Once
+func PartnerKeyAuth(partnerKey []string, logger *zap.Logger) echo.MiddlewareFunc {
+	// normalize the key set
+	var keys []string
+	for _, k := range partnerKey {
+		if strings.TrimSpace(k) != "" {
+			keys = append(keys, k)
+		}
+	}
+
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			if partnerKey == "" {
-				warnOnce.Do(func() {
-					logger.Warn("partner key not configured; rejecting request")
-				})
+			if len(keys) == 0 {
+				logger.Warn("partner key not configured; rejecting request")
 				return unauthorized(c)
 			}
 
@@ -36,7 +40,14 @@ func PartnerKeyAuth(partnerKey string, logger *zap.Logger) echo.MiddlewareFunc {
 			}
 			token := auth[len(bearerPrefix):]
 
-			if subtle.ConstantTimeCompare([]byte(token), []byte(partnerKey)) != 1 {
+			valid := false
+			for _, key := range keys {
+				if subtle.ConstantTimeCompare([]byte(token), []byte(key)) == 1 {
+					valid = true
+					break
+				}
+			}
+			if !valid {
 				logger.Debug("partner key mismatch")
 				return unauthorized(c)
 			}

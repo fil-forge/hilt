@@ -38,7 +38,7 @@ func main() {
 	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
 
 	// auth config
-	serveCmd.Flags().String("partner-key", "", "partner bearer key required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
+	serveCmd.Flags().String("partner-key", "", "CSV partner bearer key(s) required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
 
 	rootCmd.AddCommand(serveCmd)
 

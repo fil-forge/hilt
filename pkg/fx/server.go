@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/api"
@@ -47,7 +48,7 @@ func NewEchoServer(p ServerParams) *echo.Echo {
 	})
 
 	// Tenant API routes require partner-key bearer auth; / and /health stay open.
-	api := e.Group("", middleware.PartnerKeyAuth(p.Auth.PartnerKey, p.Logger))
+	api := e.Group("", middleware.PartnerKeyAuth(strings.Split(p.Auth.PartnerKey, ","), p.Logger))
 	for _, r := range p.Routes {
 		api.Add(r.Method, r.Path, r.Handler)
 	}

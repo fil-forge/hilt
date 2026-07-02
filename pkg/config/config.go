@@ -33,6 +33,7 @@ type ServerConfig struct {
 // AuthConfig holds authentication settings for the Tenant API.
 type AuthConfig struct {
 	// PartnerKey is the pre-shared bearer token required on Tenant API requests.
+	// CSV of keys is supported, e.g. "key1,key2".
 	PartnerKey string `mapstructure:"partner_key"`
 }
 

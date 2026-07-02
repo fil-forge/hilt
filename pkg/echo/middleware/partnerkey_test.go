@@ -13,7 +13,7 @@ import (
 
 // newServer builds an echo server whose /guarded route is protected by the
 // partner-key middleware (returning 200 when auth passes).
-func newServer(partnerKey string) *echo.Echo {
+func newServer(partnerKey []string) *echo.Echo {
 	e := echo.New()
 	g := e.Group("", middleware.PartnerKeyAuth(partnerKey, zap.NewNop()))
 	g.GET("/guarded", func(c echo.Context) error {
@@ -37,29 +37,34 @@ func TestPartnerKeyAuth(t *testing.T) {
 	const key = "s3cr3t-partner-key"
 
 	t.Run("correct bearer passes", func(t *testing.T) {
-		rec := do(t, newServer(key), "Bearer "+key)
+		rec := do(t, newServer([]string{key}), "Bearer "+key)
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.Equal(t, "ok", rec.Body.String())
 	})
 
 	t.Run("wrong bearer is rejected", func(t *testing.T) {
-		rec := do(t, newServer(key), "Bearer wrong")
+		rec := do(t, newServer([]string{key}), "Bearer wrong")
 		require.Equal(t, http.StatusUnauthorized, rec.Code)
 		require.Equal(t, "Bearer", rec.Header().Get(echo.HeaderWWWAuthenticate))
 	})
 
 	t.Run("missing header is rejected", func(t *testing.T) {
-		rec := do(t, newServer(key), "")
+		rec := do(t, newServer([]string{key}), "")
 		require.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 
 	t.Run("non-bearer scheme is rejected", func(t *testing.T) {
-		rec := do(t, newServer(key), "Basic "+key)
+		rec := do(t, newServer([]string{key}), "Basic "+key)
 		require.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 
 	t.Run("unconfigured key rejects all", func(t *testing.T) {
-		rec := do(t, newServer(""), "Bearer ")
+		rec := do(t, newServer([]string{}), "Bearer ")
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("empty/whitespace key rejects all", func(t *testing.T) {
+		rec := do(t, newServer([]string{"", "  ", "\t"}), "Bearer ")
 		require.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 }
