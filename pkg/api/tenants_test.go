@@ -24,17 +24,17 @@ import (
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
-	"github.com/fil-forge/hilt/pkg/store/wrapkey"
+	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
 	wrapkeymemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/hilt/pkg/wrapkey"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
-	"github.com/fil-forge/ucantone/multikey/x25519"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
@@ -100,7 +100,7 @@ type setupConfig struct {
 type provisionDeps struct {
 	tenants   tenant.Store
 	providers provider.Store
-	wrapKeys  wrapkey.Store
+	wrapKeys  wrapkeystore.Store
 	secrets   *spyVault
 	plcPosts  int
 	lastOp    []byte // body of the most recent op POSTed to the fake PLC directory
@@ -240,15 +240,15 @@ func TestProvisionTenantHandler(t *testing.T) {
 		wrapRec, err := deps.wrapKeys.GetActive(ctx, stored.ID)
 		require.NoError(t, err)
 		require.Equal(t, 1, wrapRec.Version)
-		require.Equal(t, wrapkey.Active, wrapRec.Status)
+		require.Equal(t, wrapkeystore.Active, wrapRec.Status)
 		require.NotEmpty(t, wrapRec.KID)
 
 		// The wrap private half was sealed at its own path, decodes to X25519, and
 		// its public key is exactly the kid.
-		require.Equal(t, wrapkey.VaultKey(stored.ID, 1), wrapRec.VaultKey)
-		sealed, err := deps.secrets.Read(ctx, wrapkey.VaultKey(stored.ID, 1))
+		require.Equal(t, wrapkeystore.VaultKey(stored.ID, 1), wrapRec.VaultKey)
+		sealed, err := deps.secrets.Read(ctx, wrapkeystore.VaultKey(stored.ID, 1))
 		require.NoError(t, err)
-		kp, err := x25519.Decode(sealed)
+		kp, err := wrapkey.Decode(sealed)
 		require.NoError(t, err)
 		require.Equal(t, kp.Public().String(), wrapRec.KID)
 
@@ -516,13 +516,13 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 	require.NoError(t, deps.vault.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 	// Every provisioned tenant has an active wrap key; seed one so deletion has
 	// wrap-key state to cascade.
-	require.NoError(t, deps.vault.Write(ctx, wrapkey.VaultKey(tenantID, 1), []byte("wrap-key")))
-	require.NoError(t, deps.wrapKeys.Add(ctx, wrapkey.Record{
+	require.NoError(t, deps.vault.Write(ctx, wrapkeystore.VaultKey(tenantID, 1), []byte("wrap-key")))
+	require.NoError(t, deps.wrapKeys.Add(ctx, wrapkeystore.Record{
 		Tenant:   tenantID,
 		Version:  1,
 		KID:      "z6LSseedWrapKid",
-		Status:   wrapkey.Active,
-		VaultKey: wrapkey.VaultKey(tenantID, 1),
+		Status:   wrapkeystore.Active,
+		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
 	route := api.NewDeleteTenantHandler(zap.NewNop(), deps.tenants, deps.buckets, deps.accessKeys, deps.delegations, deps.wrapKeys, deps.vault, plcClient)
@@ -569,7 +569,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		wks, err := deps.wrapKeys.List(ctx, deps.tenantID)
 		require.NoError(t, err)
 		require.Empty(t, wks)
-		_, err = deps.vault.Read(ctx, wrapkey.VaultKey(deps.tenantID, 1))
+		_, err = deps.vault.Read(ctx, wrapkeystore.VaultKey(deps.tenantID, 1))
 		require.ErrorIs(t, err, vault.ErrNotFound)
 
 		// Buckets + access keys (records and vault key) gone.

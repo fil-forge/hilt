@@ -13,12 +13,12 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	"github.com/fil-forge/hilt/pkg/store/wrapkey"
+	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/vault"
+	"github.com/fil-forge/hilt/pkg/wrapkey"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
-	"github.com/fil-forge/ucantone/multikey/x25519"
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
@@ -32,7 +32,7 @@ func NewProvisionTenantHandler(
 	logger *zap.Logger,
 	tenants tenant.Store,
 	providers provider.Store,
-	wrapKeys wrapkey.Store,
+	wrapKeys wrapkeystore.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
 	upload *client.UploadClient,
@@ -85,7 +85,7 @@ func NewProvisionTenantHandler(
 		// in the genesis operation at the fixed fragment #wrap for discovery of
 		// the current key; recovery keys off the fingerprint (kid), not the
 		// fragment.
-		wrapKeyPair, err := x25519.Generate()
+		wrapKeyPair, err := wrapkey.Generate()
 		if err != nil {
 			log.Error("generating wrap key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -95,8 +95,8 @@ func NewProvisionTenantHandler(
 			signer,
 			plc.WithRotationKeys(key),
 			plc.WithVerificationMethods(map[string]did.DID{
-				"hilt":           key,
-				wrapkey.Fragment: wrapKeyPair.KeyDID(),
+				"hilt":                key,
+				wrapkeystore.Fragment: wrapKeyPair.KeyDID(),
 			}),
 		)
 		if err != nil {
@@ -107,7 +107,7 @@ func NewProvisionTenantHandler(
 		log := log.With(zap.String("external_id", externalID), zap.Stringer("tenant", tenantID))
 
 		vaultKey := vault.TenantKeyPath(tenantID)
-		wrapKeyVault := wrapkey.VaultKey(tenantID, 1)
+		wrapKeyVault := wrapkeystore.VaultKey(tenantID, 1)
 
 		// cleanupKeys best-effort removes both sealed private halves after a
 		// failure once they have been written. Detached context so a client
@@ -162,11 +162,11 @@ func NewProvisionTenantHandler(
 		// a wrap-key entry. Its kid is the public-key fingerprint (the multibase
 		// multicodec-tagged X25519 public key); the private half stays sealed in
 		// the vault.
-		if err := wrapKeys.Add(ctx, wrapkey.Record{
+		if err := wrapKeys.Add(ctx, wrapkeystore.Record{
 			Tenant:   tenantID,
 			Version:  1,
 			KID:      wrapKeyPair.Public().String(),
-			Status:   wrapkey.Active,
+			Status:   wrapkeystore.Active,
 			VaultKey: wrapKeyVault,
 		}); err != nil {
 			log.Error("storing wrap key record", zap.Error(err))
@@ -275,7 +275,7 @@ func NewDeleteTenantHandler(
 	buckets bucket.Store,
 	accessKeys accesskey.Store,
 	delegations delegation.Store,
-	wrapKeys wrapkey.Store,
+	wrapKeys wrapkeystore.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
 ) Route {
