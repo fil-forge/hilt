@@ -24,7 +24,7 @@ import (
 )
 
 // NewProvisionTenantHandler handles PUT /tenants/{tenantId} — provision a
-// tenant: generate a rotatable did:plc tenant key and a per-tenant X25519 wrap
+// tenant: generate a rotatable did:plc signing key and a per-tenant X25519 wrap
 // key, publish them to the PLC directory, seal both private halves in the vault,
 // register the tenant with the upload service, and persist the tenant and
 // wrap-key records. It is idempotent on the external {tenantId}.
@@ -71,10 +71,10 @@ func NewProvisionTenantHandler(
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
-		// Generate the tenant's rotatable did:plc key (secp256k1 rotation key).
+		// Generate the tenant's signing key (the secp256k1 did:plc rotation key).
 		signer, err := secp256k1.Generate()
 		if err != nil {
-			log.Error("generating tenant key", zap.Error(err))
+			log.Error("generating signing key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 		key := signer.KeyDID()
@@ -106,42 +106,49 @@ func NewProvisionTenantHandler(
 
 		log := log.With(zap.String("external_id", externalID), zap.Stringer("tenant", tenantID))
 
-		vaultKey := vault.TenantKeyPath(tenantID)
-		wrapKeyVault := wrapkeystore.VaultKey(tenantID, 1)
+		signingVaultKey := vault.TenantKeyPath(tenantID)
+		wrapVaultKey := wrapkeystore.VaultKey(tenantID, 1)
 
-		// cleanupKeys best-effort removes both sealed private halves after a
-		// failure once they have been written. Detached context so a client
-		// disconnect can't cancel the cleanup.
-		cleanupKeys := func() {
+		// cleanups accumulates best-effort rollbacks for the durable state written
+		// so far. A later failure calls runCleanups, which unwinds them in reverse
+		// (LIFO) order under a detached context so a client disconnect can't cancel
+		// the rollback.
+		var cleanups []func(context.Context)
+		runCleanups := func() {
 			dctx := context.WithoutCancel(ctx)
-			if err := secrets.Delete(dctx, wrapKeyVault); err != nil {
+			for i := len(cleanups) - 1; i >= 0; i-- {
+				cleanups[i](dctx)
+			}
+		}
+
+		// Persist the private keys before publishing so they are never lost, signing
+		// key then wrap key. Store the multiformat-tagged bytes (Bytes()) so each key
+		// type is recoverable on decode rather than assumed.
+		if err := secrets.Write(ctx, signingVaultKey, signer.Bytes()); err != nil {
+			log.Error("storing signing key", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+		}
+		cleanups = append(cleanups, func(ctx context.Context) {
+			if err := secrets.Delete(ctx, signingVaultKey); err != nil {
+				log.Error("cleaning up orphaned signing key", zap.Error(err))
+			}
+		})
+
+		if err := secrets.Write(ctx, wrapVaultKey, wrapKeyPair.Bytes()); err != nil {
+			log.Error("storing wrap key", zap.Error(err))
+			runCleanups()
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+		}
+		cleanups = append(cleanups, func(ctx context.Context) {
+			if err := secrets.Delete(ctx, wrapVaultKey); err != nil {
 				log.Error("cleaning up orphaned wrap key", zap.Error(err))
 			}
-			if err := secrets.Delete(dctx, vaultKey); err != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(err))
-			}
-		}
-
-		// Persist the private keys before publishing so they are never lost. Store
-		// the multiformat-tagged bytes (Bytes()) so each key type is recoverable
-		// on decode rather than assumed.
-		if err := secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
-			log.Error("storing tenant key", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		if err := secrets.Write(ctx, wrapKeyVault, wrapKeyPair.Bytes()); err != nil {
-			log.Error("storing wrap key", zap.Error(err))
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if derr := secrets.Delete(context.WithoutCancel(ctx), vaultKey); derr != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(derr))
-			}
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
+		})
 
 		// Publish the genesis operation to register the did:plc.
 		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
 			log.Error("publishing genesis operation", zap.Error(err))
-			cleanupKeys()
+			runCleanups()
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
 		}
 
@@ -152,7 +159,7 @@ func NewProvisionTenantHandler(
 		details := map[string]string{"external_id": externalID, "region": req.Region}
 		if err := upload.RegisterCustomer(ctx, tenantID, upload.Product, details); err != nil {
 			log.Error("registering tenant with upload service", zap.Error(err))
-			cleanupKeys()
+			runCleanups()
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant with upload service")
 		}
 
@@ -167,21 +174,23 @@ func NewProvisionTenantHandler(
 			Version:  1,
 			KID:      wrapKeyPair.Public().String(),
 			Status:   wrapkeystore.Active,
-			VaultKey: wrapKeyVault,
+			VaultKey: wrapVaultKey,
 		}); err != nil {
 			log.Error("storing wrap key record", zap.Error(err))
-			cleanupKeys()
+			runCleanups()
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
+		cleanups = append(cleanups, func(ctx context.Context) {
+			if err := wrapKeys.DeleteByTenant(ctx, tenantID); err != nil {
+				log.Error("cleaning up orphaned wrap key record", zap.Error(err))
+			}
+		})
 
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, tenant.Active); err != nil {
-			// The tenant was not recorded; clean up its now-orphaned keys and
+			// The tenant was not recorded; unwind its now-orphaned keys and
 			// wrap-key record.
-			cleanupKeys()
-			if derr := wrapKeys.DeleteByTenant(context.WithoutCancel(ctx), tenantID); derr != nil {
-				log.Error("cleaning up orphaned wrap key record", zap.Error(derr))
-			}
+			runCleanups()
 			// Concurrent create with the same external id: return the winner.
 			if errors.Is(err, store.ErrRecordExists) {
 				if rec, gerr := tenants.GetByExternalID(ctx, externalID); gerr == nil {
@@ -296,11 +305,11 @@ func NewDeleteTenantHandler(
 			return echo.NewHTTPError(http.StatusConflict, "tenant must be disabled before deletion")
 		}
 
-		tenantKey := vault.TenantKeyPath(rec.ID)
+		signingVaultKey := vault.TenantKeyPath(rec.ID)
 
-		// Deactivate the did:plc first — it requires the (still-present) tenant
+		// Deactivate the did:plc first — it requires the (still-present) signing
 		// key. Aborting here leaves all local state intact for a retry.
-		if err := deactivateTenantDID(ctx, plcClient, secrets, tenantKey, rec.ID); err != nil {
+		if err := deactivateTenantDID(ctx, plcClient, secrets, signingVaultKey, rec.ID); err != nil {
 			log.Error("deactivating tenant DID", zap.Error(err))
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to deactivate tenant DID")
 		}
@@ -381,9 +390,9 @@ func NewDeleteTenantHandler(
 			log.Error("deleting tenant", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		// Best-effort removal of the tenant's key material.
-		if err := secrets.Delete(ctx, tenantKey); err != nil {
-			log.Warn("removing tenant key from vault", zap.Error(err))
+		// Best-effort removal of the tenant's signing key material.
+		if err := secrets.Delete(ctx, signingVaultKey); err != nil {
+			log.Warn("removing signing key from vault", zap.Error(err))
 		}
 		log.Info("deleted tenant")
 		return c.NoContent(http.StatusNoContent)
@@ -393,7 +402,7 @@ func NewDeleteTenantHandler(
 // deactivateTenantDID publishes a tombstone for the tenant's did:plc, signed
 // with its rotation key from the vault. If the DID is already deactivated it is
 // a no-op.
-func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID) error {
+func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, signingVaultKey string, tenantID did.DID) error {
 	last, err := plcClient.Last(ctx, tenantID)
 	if err != nil {
 		if _, ok := errors.AsType[*plc.DeactivatedDIDError](err); ok {
@@ -402,13 +411,13 @@ func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, se
 		return fmt.Errorf("fetching last operation: %w", err)
 	}
 
-	keyBytes, err := secrets.Read(ctx, vaultKey)
+	keyBytes, err := secrets.Read(ctx, signingVaultKey)
 	if err != nil {
-		return fmt.Errorf("reading tenant key: %w", err)
+		return fmt.Errorf("reading signing key: %w", err)
 	}
 	signer, err := secp256k1.Decode(keyBytes)
 	if err != nil {
-		return fmt.Errorf("decoding tenant key: %w", err)
+		return fmt.Errorf("decoding signing key: %w", err)
 	}
 
 	tomb, err := plc.NewTombstoneFromPrevious(last)
