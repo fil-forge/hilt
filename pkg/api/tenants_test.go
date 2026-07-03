@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
+	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -23,11 +25,16 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	customercmds "github.com/fil-forge/libforge/commands/customer"
+	ucanlib "github.com/fil-forge/libforge/ucan"
+	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
+	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
@@ -57,6 +64,7 @@ func (s *spyVault) Write(ctx context.Context, key string, value []byte) error {
 }
 
 func (s *spyVault) Delete(ctx context.Context, key string) error {
+	fmt.Println("GOT A DELETE")
 	s.mu.Lock()
 	delete(s.live, key)
 	s.mu.Unlock()
@@ -80,49 +88,52 @@ func (s addFailTenantStore) Add(context.Context, did.DID, string, did.DID, tenan
 	return s.err
 }
 
-// provisionServer wires the provision handler to the given stores/vault and a PLC
-// directory client pointed at an httptest server that returns plcStatus.
-func provisionServer(t *testing.T, tenants tenant.Store, providers provider.Store, secrets vault.Vault, plcStatus int) *echo.Echo {
-	t.Helper()
-	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(plcStatus)
-	}))
-	t.Cleanup(plcServer.Close)
-
-	endpoint, err := url.Parse(plcServer.URL)
-	require.NoError(t, err)
-	plcClient, err := plc.NewDirectoryClient(*endpoint)
-	require.NoError(t, err)
-
-	route := api.NewProvisionTenantHandler(zap.NewNop(), tenants, providers, secrets, plcClient)
-	e := echo.New()
-	e.Add(route.Method, route.Path, route.Handler)
-	return e
+type setupConfig struct {
+	plcStatus int
+	tenants   tenant.Store
 }
 
 type provisionDeps struct {
 	tenants   tenant.Store
 	providers provider.Store
-	vault     vault.Vault
+	secrets   *spyVault
 	plcPosts  int
+
+	// Sprue (upload service) stub state.
+	product      did.DID
+	customerAdds int
+	lastAddArgs  *customercmds.AddArguments
+	sprueFailure bool // when true the stub /customer/add handler returns a failure
 }
 
 // setupProvision builds an echo server with the provision handler wired to
-// memory stores/vault and a PLC directory client pointed at an httptest server
-// that accepts genesis operations (no real PLC network).
-func setupProvision(t *testing.T) (*echo.Echo, *provisionDeps) {
+// memory stores/vault, a PLC directory client pointed at an httptest server that
+// accepts genesis operations, and an upload client pointed at an in-process
+// Sprue stub that handles /customer/add (no real PLC or Sprue network).
+func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps) {
 	t.Helper()
+	var tenants tenant.Store
+	if cfg != nil && cfg.tenants != nil {
+		tenants = cfg.tenants
+	} else {
+		tenants = tenantmemory.New()
+	}
 	deps := &provisionDeps{
-		tenants:   tenantmemory.New(),
+		tenants:   tenants,
 		providers: providermemory.New(),
-		vault:     vaultmemory.New(),
+		secrets:   newSpyVault(),
+		product:   testutil.RandomDID(t),
 	}
 
 	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			deps.plcPosts++
 		}
-		w.WriteHeader(http.StatusOK)
+		status := http.StatusOK
+		if cfg != nil && cfg.plcStatus != 0 {
+			status = cfg.plcStatus
+		}
+		w.WriteHeader(status)
 	}))
 	t.Cleanup(plcServer.Close)
 
@@ -131,7 +142,33 @@ func setupProvision(t *testing.T) (*echo.Echo, *provisionDeps) {
 	plcClient, err := plc.NewDirectoryClient(*endpoint)
 	require.NoError(t, err)
 
-	route := api.NewProvisionTenantHandler(zap.NewNop(), deps.tenants, deps.providers, deps.vault, plcClient)
+	// Sprue stub: Hilt (the client's issuer) holds a /customer/add delegation
+	// from Sprue, and the in-process server records each invocation.
+	sprue := testutil.RandomIssuer(t)
+	hilt := testutil.RandomIssuer(t)
+	dlg, err := customercmds.Add.Delegate(sprue, hilt.DID(), sprue.DID())
+	require.NoError(t, err)
+	proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+
+	srv := server.NewHTTP(sprue)
+	srv.Handle(customercmds.Add.Command, customercmds.Add.Handler(
+		func(req *binding.Request[*customercmds.AddArguments], res *binding.Response[*customercmds.AddOK]) error {
+			deps.customerAdds++
+			deps.lastAddArgs = req.Task().Arguments()
+			if deps.sprueFailure {
+				return res.SetFailure(errors.New("sprue rejected"))
+			}
+			return res.SetSuccess(&customercmds.AddOK{})
+		}))
+
+	sprueURL, err := url.Parse("http://sprue.test")
+	require.NoError(t, err)
+	upload, err := client.NewUploadClient(sprue.DID(), *sprueURL, hilt, proofs,
+		client.WithProduct(deps.product),
+		client.WithHTTPClient(&http.Client{Transport: srv}))
+	require.NoError(t, err)
+
+	route := api.NewProvisionTenantHandler(zap.NewNop(), deps.tenants, deps.providers, deps.secrets, plcClient, upload)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
 	return e, deps
@@ -152,7 +189,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("provisions a new tenant", func(t *testing.T) {
-		e, deps := setupProvision(t)
+		e, deps := setupProvision(t, nil)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
 
 		rec := provisionRequest(t, e, "tenant-1", api.ProvisionTenantRequest{Region: "us-east-1"})
@@ -167,14 +204,22 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.Equal(t, tenant.Active, stored.Status)
 
 		// The private key was stored in the vault and the genesis op published.
-		key, err := deps.vault.Read(ctx, "/tenant/"+stored.ID.String())
+		key, err := deps.secrets.Read(ctx, "/tenant/"+stored.ID.String())
 		require.NoError(t, err)
 		require.NotEmpty(t, key)
 		require.Equal(t, 1, deps.plcPosts)
+
+		// The tenant was registered as a customer with Sprue, keyed by its
+		// did:plc, under the configured product, with the tenant details.
+		require.Equal(t, 1, deps.customerAdds)
+		require.NotNil(t, deps.lastAddArgs)
+		require.Equal(t, stored.ID, deps.lastAddArgs.Customer)
+		require.Equal(t, deps.product, deps.lastAddArgs.Product)
+		require.Equal(t, map[string]string{"external_id": "tenant-1", "region": "us-east-1"}, deps.lastAddArgs.Details)
 	})
 
 	t.Run("is idempotent on the external id", func(t *testing.T) {
-		e, deps := setupProvision(t)
+		e, deps := setupProvision(t, nil)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
 
 		first := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
@@ -185,55 +230,66 @@ func TestProvisionTenantHandler(t *testing.T) {
 		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusOK, second.Code)
 
-		// No new key minted/published on the idempotent call.
+		// No new key minted/published, and no re-registration, on the idempotent call.
 		require.Equal(t, 1, deps.plcPosts)
+		require.Equal(t, 1, deps.customerAdds)
 		again, err := deps.tenants.GetByExternalID(ctx, "tenant-2")
 		require.NoError(t, err)
 		require.Equal(t, stored.ID, again.ID)
 	})
 
+	t.Run("upload service failure aborts provisioning", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		deps.sprueFailure = true
+
+		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusBadGateway, rec.Code)
+
+		// Registration was attempted but no tenant record was written, so the
+		// operation is retryable.
+		require.Equal(t, 1, deps.customerAdds)
+		_, err := deps.tenants.GetByExternalID(ctx, "tenant-6")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
 	t.Run("unknown region is rejected", func(t *testing.T) {
-		e, _ := setupProvision(t)
+		e, _ := setupProvision(t, nil)
 		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("missing region is rejected", func(t *testing.T) {
-		e, _ := setupProvision(t)
+		e, _ := setupProvision(t, nil)
 		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
 	t.Run("cleans up the orphaned key when PLC publication fails", func(t *testing.T) {
-		tenants := tenantmemory.New()
-		providers := providermemory.New()
-		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
-		secrets := newSpyVault()
+		e, deps := setupProvision(t, &setupConfig{plcStatus: http.StatusInternalServerError})
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
 
-		e := provisionServer(t, tenants, providers, secrets, http.StatusInternalServerError)
 		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusBadGateway, rec.Code)
 
 		// A key was written then cleaned up, and no tenant was recorded.
-		require.Positive(t, secrets.writes)
-		require.Zero(t, secrets.liveKeys())
-		_, err := tenants.GetByExternalID(ctx, "tenant-6")
+		require.Positive(t, deps.secrets.writes)
+		require.Zero(t, deps.secrets.liveKeys())
+		_, err := deps.tenants.GetByExternalID(ctx, "tenant-6")
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("cleans up the orphaned key when storing the tenant fails", func(t *testing.T) {
 		tenants := addFailTenantStore{Store: tenantmemory.New(), err: errors.New("boom")}
-		providers := providermemory.New()
-		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
-		secrets := newSpyVault()
 
-		e := provisionServer(t, tenants, providers, secrets, http.StatusOK)
+		e, deps := setupProvision(t, &setupConfig{tenants: tenants})
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
 		rec := provisionRequest(t, e, "tenant-7", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 		// The key written before the failed Add was cleaned up.
-		require.Positive(t, secrets.writes)
-		require.Zero(t, secrets.liveKeys())
+		require.Positive(t, deps.secrets.writes)
+		require.Zero(t, deps.secrets.liveKeys())
 	})
 }
 
@@ -433,7 +489,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, "b1"))
 		akID := testutil.RandomDID(t)
 		require.NoError(t, deps.accessKeys.Add(ctx, akID, deps.tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
-		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access/" + akID.String()
+		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()
 		require.NoError(t, deps.vault.Write(ctx, akVaultKey, []byte("ak-key")))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, deps.tenantID)}))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, akID)}))

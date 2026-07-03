@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -25,18 +26,6 @@ import (
 )
 
 const maxAccessKeyNameLength = 100
-
-// vaultTenantKeyPath is the vault key under which a tenant's private key is
-// stored.
-func vaultTenantKeyPath(tenantID did.DID) string {
-	return "/tenant/" + tenantID.String()
-}
-
-// vaultAccessKeyPath is the vault key under which an access key's private key is
-// stored. It MUST match the path used by the tenant delete cascade.
-func vaultAccessKeyPath(tenantID, accessKeyID did.DID) string {
-	return vaultTenantKeyPath(tenantID) + "/access/" + accessKeyID.String()
-}
 
 // NewCreateAccessKeyHandler handles POST /tenants/{tenantId}/access-keys —
 // create an S3 access-key pair (returns the secret once only) and issue the
@@ -64,7 +53,7 @@ func NewCreateAccessKeyHandler(
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, "at least one permission is required")
 		}
 		for _, p := range req.Permissions {
-			if !validS3Permission(p) {
+			if !s3perm.Valid(p) {
 				return echo.NewHTTPError(http.StatusUnprocessableEntity, "unknown permission: "+p)
 			}
 		}
@@ -80,7 +69,7 @@ func NewCreateAccessKeyHandler(
 
 		// Load the tenant signer up front: it is required to issue delegations and
 		// its absence is unrecoverable, so fail before creating any state.
-		tenantKeyBytes, err := secrets.Read(ctx, vaultTenantKeyPath(tenantRec.ID))
+		tenantKeyBytes, err := secrets.Read(ctx, vault.TenantKeyPath(tenantRec.ID))
 		if err != nil {
 			log.Error("reading tenant key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -137,22 +126,26 @@ func NewCreateAccessKeyHandler(
 		}
 		log = log.With(zap.Stringer("access_key", accessKeyID))
 
-		vaultPath := vaultAccessKeyPath(tenantRec.ID, accessKeyID)
+		vaultPath := vault.AccessKeyPath(tenantRec.ID, accessKeyID)
 		if err := secrets.Write(ctx, vaultPath, signer.Bytes()); err != nil {
 			log.Error("storing access key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
 		// Best-effort rollback of the (idempotent) state created below, so a
-		// partial failure leaves nothing behind and is retryable.
+		// partial failure leaves nothing behind and is retryable. Cleanup runs on a
+		// context detached from the request (values retained, cancellation/deadline
+		// dropped) so a client disconnect — which cancels ctx — cannot abort the
+		// rollback partway and leave orphaned state.
 		rollback := func() {
-			if err := delegations.DeleteByAudience(ctx, accessKeyID); err != nil {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := delegations.DeleteByAudience(cleanupCtx, accessKeyID); err != nil {
 				log.Warn("rollback: deleting delegations", zap.Error(err))
 			}
-			if err := accessKeys.Delete(ctx, accessKeyID); err != nil {
+			if err := accessKeys.Delete(cleanupCtx, accessKeyID); err != nil {
 				log.Warn("rollback: deleting access key", zap.Error(err))
 			}
-			if err := secrets.Delete(ctx, vaultPath); err != nil {
+			if err := secrets.Delete(cleanupCtx, vaultPath); err != nil {
 				log.Warn("rollback: deleting access key from vault", zap.Error(err))
 			}
 		}
@@ -180,7 +173,7 @@ func NewCreateAccessKeyHandler(
 		}
 		var dels []ucan.Delegation
 		for _, sub := range subjects {
-			for _, cmd := range commandsForPermissions(req.Permissions) {
+			for _, cmd := range s3perm.CommandsFor(req.Permissions...) {
 				d, err := delegation.Delegate(issuer, accessKeyID, sub, cmd, opts...)
 				if err != nil {
 					rollback()
@@ -349,7 +342,7 @@ func NewDeleteAccessKeyHandler(
 			log.Error("deleting access key delegations", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		if err := secrets.Delete(ctx, vaultAccessKeyPath(tenantRec.ID, accessKeyID)); err != nil {
+		if err := secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, accessKeyID)); err != nil {
 			log.Warn("removing access key from vault", zap.Error(err))
 		}
 		if err := accessKeys.Delete(ctx, accessKeyID); err != nil {

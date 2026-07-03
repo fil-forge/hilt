@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"slices"
 	"strings"
@@ -88,6 +89,29 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 	defer s.mutex.Unlock()
 
 	delete(s.byAudience, audience)
+	return nil
+}
+
+func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
+	if !subject.Defined() {
+		return errors.New("cannot delete powerline delegations")
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// The store indexes only by audience, so scan each audience's delegations and
+	// drop those whose subject matches, removing now-empty audience entries.
+	for aud, dlgs := range s.byAudience {
+		kept := slices.DeleteFunc(dlgs, func(d ucan.Delegation) bool {
+			return d.Subject() == subject
+		})
+		if len(kept) == 0 {
+			delete(s.byAudience, aud)
+		} else {
+			s.byAudience[aud] = kept
+		}
+	}
 	return nil
 }
 

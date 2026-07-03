@@ -12,6 +12,9 @@ import (
 type Store interface {
 	// DeleteByAudience removes all delegation records for a given audience.
 	DeleteByAudience(ctx context.Context, audience did.DID) error
+	// DeleteBySubject removes all delegation records for a given subject.
+	// The undefined DID (powerline) is not removed by this method.
+	DeleteBySubject(ctx context.Context, subject did.DID) error
 	// ListByAudience retrieves a paginated list of delegation records for a given
 	// audience.
 	ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error)

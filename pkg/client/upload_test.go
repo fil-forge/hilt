@@ -7,10 +7,11 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/client"
+	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
+	"github.com/fil-forge/libforge/testutil"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
@@ -19,16 +20,15 @@ import (
 	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 // newClient builds an UploadClient whose transport is the given in-process
 // server, exercising NewUploadClient itself.
-func newClient(t *testing.T, service ucan.Issuer, srv *server.HTTPServer, proofs ucanlib.ProofStore) *client.UploadClient {
+func newClient(t *testing.T, service ucan.Issuer, srv *server.HTTPServer, issuer ucan.Issuer, proofs ucanlib.ProofStore) *client.UploadClient {
 	t.Helper()
 	u, err := url.Parse("http://upload.test")
 	require.NoError(t, err)
-	c, err := client.NewUploadClient(service.DID(), *u, proofs, zap.NewNop(),
+	c, err := client.NewUploadClient(service.DID(), *u, issuer, proofs,
 		client.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 	return c
@@ -72,8 +72,8 @@ func TestRegisterCustomer(t *testing.T) {
 				return res.SetSuccess(&customercmds.AddOK{})
 			}))
 
-		c := newClient(t, service, srv, proofs)
-		err = c.RegisterCustomer(t.Context(), alice, customerID, product, details)
+		c := newClient(t, service, srv, alice, proofs)
+		err = c.RegisterCustomer(t.Context(), customerID, product, details)
 		require.NoError(t, err)
 
 		require.Equal(t, customerID, gotArgs.Customer)
@@ -87,8 +87,8 @@ func TestRegisterCustomer(t *testing.T) {
 		alice := testutil.RandomIssuer(t)
 		srv := server.NewHTTP(service)
 
-		c := newClient(t, service, srv, errProofStore{err: errors.New("boom")})
-		err := c.RegisterCustomer(t.Context(), alice, testutil.RandomDID(t), testutil.RandomDID(t), nil)
+		c := newClient(t, service, srv, alice, errProofStore{err: errors.New("boom")})
+		err := c.RegisterCustomer(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "getting proof chain")
 	})
@@ -103,11 +103,11 @@ func TestRegisterCustomer(t *testing.T) {
 
 		u, err := url.Parse("http://upload.test")
 		require.NoError(t, err)
-		c, err := client.NewUploadClient(service.DID(), *u, proofs, zap.NewNop(),
+		c, err := client.NewUploadClient(service.DID(), *u, alice, proofs,
 			client.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
 		require.NoError(t, err)
 
-		err = c.RegisterCustomer(t.Context(), alice, testutil.RandomDID(t), testutil.RandomDID(t), nil)
+		err = c.RegisterCustomer(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), nil)
 		require.Error(t, err)
 	})
 }
@@ -129,7 +129,7 @@ func TestProvisionSpace(t *testing.T) {
 			}))
 
 		// ProvisionSpace is self-issued and does not consult the proof store.
-		c := newClient(t, service, srv, nil)
+		c := newClient(t, service, srv, account, nil)
 		id, err := c.ProvisionSpace(t.Context(), account, space)
 		require.NoError(t, err)
 		require.Equal(t, "sub-123", id)
@@ -150,9 +150,120 @@ func TestProvisionSpace(t *testing.T) {
 				return res.SetFailure(errors.New("nope"))
 			}))
 
-		c := newClient(t, service, srv, nil)
+		c := newClient(t, service, srv, account, nil)
 		id, err := c.ProvisionSpace(t.Context(), account, space)
 		require.Error(t, err)
 		require.Empty(t, id)
+	})
+}
+
+func TestSpaceEmpty(t *testing.T) {
+	// listServer builds an in-process server whose /blob/list handler returns
+	// the given results, capturing the invocation for assertions.
+	newListServer := func(t *testing.T, service ucan.Issuer, results []blobcmds.ListBlobItem) (*server.HTTPServer, func() (*blobcmds.ListArguments, did.DID, did.DID)) {
+		t.Helper()
+		var gotArgs *blobcmds.ListArguments
+		var gotSub, gotAud did.DID
+		srv := server.NewHTTP(service)
+		srv.Handle(blobcmds.List.Command, blobcmds.List.Handler(
+			func(req *binding.Request[*blobcmds.ListArguments], res *binding.Response[*blobcmds.ListOK]) error {
+				gotArgs = req.Task().Arguments()
+				gotSub = req.Invocation().Subject()
+				gotAud = req.Invocation().Audience()
+				return res.SetSuccess(&blobcmds.ListOK{Results: results})
+			}))
+		return srv, func() (*blobcmds.ListArguments, did.DID, did.DID) { return gotArgs, gotSub, gotAud }
+	}
+
+	t.Run("empty", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+
+		// space delegates /blob/list to alice (root: subject == issuer == space).
+		// The proof chain is looked up scoped to the space.
+		dlg, err := blobcmds.List.Delegate(space, alice.DID(), space.DID())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+
+		srv, captured := newListServer(t, service, nil)
+
+		c := newClient(t, service, srv, alice, proofs)
+		empty, err := c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		require.NoError(t, err)
+		require.True(t, empty)
+
+		gotArgs, gotSub, gotAud := captured()
+		require.NotNil(t, gotArgs.Size)
+		require.Equal(t, uint64(1), *gotArgs.Size)
+		require.Equal(t, space.DID(), gotSub)
+		require.Equal(t, service.DID(), gotAud)
+	})
+
+	t.Run("not empty", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+
+		dlg, err := blobcmds.List.Delegate(space, alice.DID(), space.DID())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+
+		srv, _ := newListServer(t, service, []blobcmds.ListBlobItem{{}})
+
+		c := newClient(t, service, srv, alice, nil)
+		empty, err := c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		require.NoError(t, err)
+		require.False(t, empty)
+	})
+
+	t.Run("proof chain error", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		srv := server.NewHTTP(service)
+
+		c := newClient(t, service, srv, alice, nil)
+		_, err := c.SpaceEmpty(t.Context(), testutil.RandomDID(t), client.WithIssuer(alice), client.WithProofs(errProofStore{err: errors.New("boom")}))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "getting proof chain")
+	})
+
+	t.Run("execution error", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+
+		dlg, err := blobcmds.List.Delegate(space, alice.DID(), space.DID())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+
+		u, err := url.Parse("http://upload.test")
+		require.NoError(t, err)
+		c, err := client.NewUploadClient(service.DID(), *u, alice, nil,
+			client.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
+		require.NoError(t, err)
+
+		_, err = c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		require.Error(t, err)
+	})
+
+	t.Run("failure receipt", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+
+		dlg, err := blobcmds.List.Delegate(space, alice.DID(), space.DID())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+
+		srv := server.NewHTTP(service)
+		srv.Handle(blobcmds.List.Command, blobcmds.List.Handler(
+			func(req *binding.Request[*blobcmds.ListArguments], res *binding.Response[*blobcmds.ListOK]) error {
+				return res.SetFailure(errors.New("nope"))
+			}))
+
+		c := newClient(t, service, srv, alice, nil)
+		_, err = c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		require.Error(t, err)
 	})
 }

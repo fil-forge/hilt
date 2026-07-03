@@ -4,11 +4,12 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,15 +33,15 @@ func makeStore(t *testing.T, k StoreKind) provider.Store {
 }
 
 func createPostgresStore(t *testing.T) provider.Store {
-	if testutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
-		if !testutil.IsDockerAvailable(t) {
+	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
+		if !htestutil.IsDockerAvailable(t) {
 			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
 		}
 	}
-	if !testutil.IsDockerAvailable(t) {
+	if !htestutil.IsDockerAvailable(t) {
 		t.SkipNow()
 	}
-	pool := testutil.CreatePostgres(t)
+	pool := htestutil.CreatePostgres(t)
 	return providerpostgres.New(pool)
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -30,6 +31,7 @@ func NewProvisionTenantHandler(
 	providers provider.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
+	upload *client.UploadClient,
 ) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {
@@ -87,7 +89,7 @@ func NewProvisionTenantHandler(
 		// Persist the private key before publishing so it is never lost. Store
 		// the multiformat-tagged bytes (signer.Bytes()) so the key type is
 		// recoverable on decode rather than assuming secp256k1.
-		vaultKey := vaultTenantKeyPath(tenantID)
+		vaultKey := vault.TenantKeyPath(tenantID)
 		if err := secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
 			log.Error("storing tenant key", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
@@ -96,17 +98,33 @@ func NewProvisionTenantHandler(
 		// Publish the genesis operation to register the did:plc.
 		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
 			log.Error("publishing genesis operation", zap.Error(err))
-			if err := secrets.Delete(ctx, vaultKey); err != nil {
-				log.Error("cleaning up orphaned key", zap.Error(err))
+			// Detached context so a client disconnect can't cancel the cleanup.
+			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(err))
 			}
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
 		}
 
+		// Register the tenant as a customer with the upload service (Sprue). Done
+		// before recording the tenant so a failed registration returns an error
+		// and is retried on the next call, rather than being short-circuited by
+		// the idempotency check above (which keys on the stored tenant record).
+		details := map[string]string{"external_id": externalID, "region": req.Region}
+		if err := upload.RegisterCustomer(ctx, tenantID, upload.Product, details); err != nil {
+			log.Error("registering tenant with upload service", zap.Error(err))
+			// Detached context so a client disconnect can't cancel the cleanup.
+			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(err))
+			}
+			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant with upload service")
+		}
+
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, tenant.Active); err != nil {
-			// The tenant was not recorded; clean up its now-orphaned key.
-			if derr := secrets.Delete(ctx, vaultKey); derr != nil {
-				log.Error("cleaning up orphaned key", zap.Error(derr))
+			// The tenant was not recorded, so its key is now orphaned; clean it up.
+			// Detached context so a client disconnect can't cancel the cleanup.
+			if derr := secrets.Delete(context.WithoutCancel(ctx), vaultKey); derr != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(derr))
 			}
 			// Concurrent create with the same external id: return the winner.
 			if errors.Is(err, store.ErrRecordExists) {
@@ -221,7 +239,7 @@ func NewDeleteTenantHandler(
 			return echo.NewHTTPError(http.StatusConflict, "tenant must be disabled before deletion")
 		}
 
-		tenantKey := vaultTenantKeyPath(rec.ID)
+		tenantKey := vault.TenantKeyPath(rec.ID)
 
 		// Deactivate the did:plc first — it requires the (still-present) tenant
 		// key. Aborting here leaves all local state intact for a retry.
@@ -241,7 +259,7 @@ func NewDeleteTenantHandler(
 				log.Error("deleting access key delegations", zap.Error(err))
 				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 			}
-			if err := secrets.Delete(ctx, vaultAccessKeyPath(rec.ID, ak.ID)); err != nil {
+			if err := secrets.Delete(ctx, vault.AccessKeyPath(rec.ID, ak.ID)); err != nil {
 				log.Warn("removing access key from vault", zap.Error(err))
 			}
 			if err := accessKeys.Delete(ctx, ak.ID); err != nil {

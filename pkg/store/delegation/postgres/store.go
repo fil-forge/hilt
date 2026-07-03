@@ -144,6 +144,16 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 	return nil
 }
 
+func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
+	if !subject.Defined() {
+		return errors.New("cannot delete powerline delegations")
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM delegation WHERE subject = $1`, subject.String()); err != nil {
+		return fmt.Errorf("deleting delegations by subject: %w", err)
+	}
+	return nil
+}
+
 // ProofChain builds the proof chain from aud toward sub for cmd in a single
 // recursive query. The walk follows edges audience -> issuer, matching the
 // fixed subject (or NULL powerline delegations) and requiring each delegation's

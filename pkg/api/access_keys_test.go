@@ -119,7 +119,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.Equal(t, []did.DID{deps.bucketID}, storedRec.Buckets)
 
 		// Private key in the vault.
-		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akID.String())
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.NoError(t, err)
 
 		// 4 delegations: /content/retrieve + /blob/add + /index/add + /upload/add,
@@ -315,7 +315,7 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 
 		_, err = deps.accessKeys.Get(ctx, akID)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
-		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akID.String())
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.ErrorIs(t, err, vault.ErrNotFound)
 		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)

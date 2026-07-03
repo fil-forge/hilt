@@ -23,6 +23,7 @@ type Configs struct {
 	Hashicorp config.HashicorpConfig
 	PLC       config.PLCConfig
 	Auth      config.AuthConfig
+	Upload    config.UploadConfig
 }
 
 // ProvideConfigs provides the individual fields of the config.
@@ -37,5 +38,6 @@ func ProvideConfigs(cfg *config.Config) Configs {
 		Hashicorp: cfg.Vault.Hashicorp,
 		PLC:       cfg.PLC,
 		Auth:      cfg.Auth,
+		Upload:    cfg.Upload,
 	}
 }

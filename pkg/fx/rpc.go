@@ -2,6 +2,7 @@ package fx
 
 import (
 	"github.com/fil-forge/hilt/pkg/rpc"
+	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/server"
 	"go.uber.org/fx"
@@ -11,6 +12,8 @@ import (
 // serves, collected into the "ucanRoutes" group.
 var RPCModule = fx.Module("rpc",
 	fx.Provide(
+		auth.NewAuthorizer,
+		NewUploadClient,
 		NewUCANServer,
 		asUCANRoute(rpc.NewAuthorizeRequestHandler),
 		asUCANRoute(rpc.NewCreateBucketHandler),
