@@ -18,16 +18,6 @@ import (
 
 var errNotImplemented = errors.New("not implemented")
 
-// NewAuthorizeRequestHandler handles /s3/request/authorize — authorize an AWS S3
-// API request and return the derived signing key and delegations.
-func NewAuthorizeRequestHandler(logger *zap.Logger) server.Route {
-	log := logger.With(zap.Stringer("command", s3req.Authorize.Command))
-	return s3req.Authorize.Route(func(req *binding.Request[*s3req.AuthorizeArguments], res *binding.Response[*s3req.AuthorizeOK]) error {
-		log.Debug("not implemented")
-		return errNotImplemented
-	})
-}
-
 // NewCreateBucketHandler handles /s3/bucket/create — create a bucket and
 // provision it with Sprue.
 func NewCreateBucketHandler(logger *zap.Logger) server.Route {

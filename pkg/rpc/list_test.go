@@ -6,6 +6,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc"
+	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -51,8 +52,11 @@ func TestListBuckets(t *testing.T) {
 	providerID := testutil.RandomDID(t)
 
 	// setup wires up the stores + vault for a tenant whose provider serves the
-	// signing region and that owns this access key.
-	setup := func(t *testing.T, perms []string, vaultSigner ed25519.Signer) (*accesskeymemory.Store, *tenantmemory.Store, *bucketmemory.Store, *providermemory.Store, vault.Vault, did.DID) {
+	// signing region and that owns this access key, and returns the Authorizer
+	// built from them plus the bucket store subtests populate. Authentication and
+	// authorization edge cases are covered by the auth service's own test suite;
+	// these tests focus on the list-specific behavior.
+	setup := func(t *testing.T, perms []string) (*auth.Authorizer, *bucketmemory.Store, did.DID) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
@@ -60,16 +64,17 @@ func TestListBuckets(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, "Acme", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
-		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
-		return accessKeys, tenants, buckets, providers, secrets, tenantID
+		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
+		return az, buckets, tenantID
 	}
 
 	t.Run("lists the tenant's buckets for a validly-signed request", func(t *testing.T) {
-		accessKeys, tenants, buckets, providers, secrets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, signer)
+		az, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"})
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "alpha"))
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bravo"))
 
-		ok, err := rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
+		ok, err := rpc.ListBuckets(ctx, zap.NewNop(), az, buckets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
 		require.NoError(t, err)
 		require.Equal(t, "Acme", ok.Owner.DisplayName)
 		require.Equal(t, tenantID.String(), ok.Owner.ID)
@@ -85,51 +90,24 @@ func TestListBuckets(t *testing.T) {
 		require.Contains(t, byName, "bravo")
 	})
 
-	t.Run("rejects an invalid signature", func(t *testing.T) {
-		// Vault holds a different key than the one that signed the request.
-		other, err := ed25519.Generate()
-		require.NoError(t, err)
-		accessKeys, tenants, buckets, providers, secrets, _ := setup(t, []string{"s3:ListAllMyBuckets"}, other)
-
-		_, err = rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
-		require.Error(t, err)
-	})
-
-	t.Run("rejects an unknown access key", func(t *testing.T) {
-		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
-		providers, secrets := providermemory.New(), vaultmemory.New()
-		_, err := rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
-		require.Error(t, err)
-	})
-
 	t.Run("rejects a key without the list permission", func(t *testing.T) {
-		accessKeys, tenants, buckets, providers, secrets, _ := setup(t, []string{"s3:GetObject"}, signer)
-		_, err := rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
+		az, buckets, _ := setup(t, []string{"s3:GetObject"})
+		_, err := rpc.ListBuckets(ctx, zap.NewNop(), az, buckets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
 		require.Error(t, err)
 	})
 
-	t.Run("rejects a region the tenant's provider does not serve", func(t *testing.T) {
-		accessKeys, tenants, buckets, providers, secrets, _ := setup(t, []string{"s3:ListAllMyBuckets"}, signer)
-		// A provider exists in eu-west-1, but it isn't the tenant's provider.
-		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "eu-west-1"))
-		args := signedListArgs(t, signer, "eu-west-1", time.Now(), time.Hour)
-		_, err := rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, providerID, args)
-		require.Error(t, err)
-	})
-
-	t.Run("rejects an expired presigned URL", func(t *testing.T) {
-		accessKeys, tenants, buckets, providers, secrets, _ := setup(t, []string{"s3:ListAllMyBuckets"}, signer)
-		// Validly signed, but two hours ago with only a one-hour window.
-		args := signedListArgs(t, signer, region, time.Now().Add(-2*time.Hour), time.Hour)
-		_, err := rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, providerID, args)
-		require.Error(t, err)
-	})
-
-	t.Run("rejects an invocation not from the tenant's provider", func(t *testing.T) {
-		accessKeys, tenants, buckets, providers, secrets, _ := setup(t, []string{"s3:ListAllMyBuckets"}, signer)
-		args := signedListArgs(t, signer, region, time.Now(), time.Hour)
-		// Issuer is not the tenant's provider.
-		_, err := rpc.ListBuckets(ctx, zap.NewNop(), accessKeys, tenants, buckets, providers, secrets, testutil.RandomDID(t), args)
+	t.Run("rejects a validly-signed request for a different operation", func(t *testing.T) {
+		// The key holds s3:GetObject, so a GetObject request passes Authorize — but
+		// the list handler must reject it because it is not a ListBuckets operation.
+		az, buckets, tenantID := setup(t, []string{"s3:GetObject"})
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bucket-a"))
+		secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+		require.NoError(t, err)
+		req := sigv4.Request{Method: "GET", URL: "https://" + region + ".s3.fil.one/bucket-a/object-key"}
+		signed, err := sigv4.Presign(req, akDID.Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		args := &s3bkt.ListArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL}}
+		_, err = rpc.ListBuckets(ctx, zap.NewNop(), az, buckets, providerID, args)
 		require.Error(t, err)
 	})
 }

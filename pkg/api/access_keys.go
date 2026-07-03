@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -50,7 +51,7 @@ func NewCreateAccessKeyHandler(
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, "at least one permission is required")
 		}
 		for _, p := range req.Permissions {
-			if !validS3Permission(p) {
+			if !s3perm.Valid(p) {
 				return echo.NewHTTPError(http.StatusUnprocessableEntity, "unknown permission: "+p)
 			}
 		}
@@ -157,7 +158,7 @@ func NewCreateAccessKeyHandler(
 		}
 		var dels []ucan.Delegation
 		for _, sub := range subjects {
-			for _, cmd := range commandsForPermissions(req.Permissions) {
+			for _, cmd := range s3perm.CommandsFor(req.Permissions...) {
 				d, err := delegation.Delegate(issuer, accessKeyDID, sub, cmd, opts...)
 				if err != nil {
 					rollback()

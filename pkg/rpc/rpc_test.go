@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/rpc"
+	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -20,7 +21,6 @@ func TestHandlerCommands(t *testing.T) {
 		route   func(*zap.Logger) server.Route
 		command string
 	}{
-		{"authorize", rpc.NewAuthorizeRequestHandler, "/s3/request/authorize"},
 		{"create", rpc.NewCreateBucketHandler, "/s3/bucket/create"},
 		{"delete", rpc.NewDeleteBucketHandler, "/s3/bucket/delete"},
 		{"info", rpc.NewBucketInfoHandler, "/s3/bucket/info"},
@@ -33,9 +33,17 @@ func TestHandlerCommands(t *testing.T) {
 		})
 	}
 
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
+
 	t.Run("list", func(t *testing.T) {
-		route := rpc.NewListBucketsHandler(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), bucketmemory.New(), providermemory.New(), vaultmemory.New())
+		route := rpc.NewListBucketsHandler(zap.NewNop(), az, bucketmemory.New())
 		require.Equal(t, "/s3/bucket/list", route.Command.String())
+		require.NotNil(t, route.Handler)
+	})
+
+	t.Run("authorize", func(t *testing.T) {
+		route := rpc.NewAuthorizeRequestHandler(zap.NewNop(), az)
+		require.Equal(t, "/s3/request/authorize", route.Command.String())
 		require.NotNil(t, route.Handler)
 	})
 }
