@@ -13,6 +13,8 @@ import (
 	memprovider "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	memtenant "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	"github.com/fil-forge/hilt/pkg/store/wrapkey"
+	memwrapkey "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"go.uber.org/fx"
 )
 
@@ -24,5 +26,6 @@ var Module = fx.Module("memory-store",
 		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
 		fx.Annotate(memprovider.New, fx.As(new(provider.Store))),
 		fx.Annotate(memtenant.New, fx.As(new(tenant.Store))),
+		fx.Annotate(memwrapkey.New, fx.As(new(wrapkey.Store))),
 	),
 )

@@ -19,6 +19,8 @@ import (
 	pgprovider "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	pgtenant "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	"github.com/fil-forge/hilt/pkg/store/wrapkey"
+	pgwrapkey "github.com/fil-forge/hilt/pkg/store/wrapkey/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -34,6 +36,7 @@ var Module = fx.Module("postgres-store",
 		NewDelegationStore,
 		NewProviderStore,
 		NewTenantStore,
+		NewWrapKeyStore,
 	),
 )
 
@@ -120,4 +123,8 @@ func NewProviderStore(mdb *MigratedPool) provider.Store {
 
 func NewTenantStore(mdb *MigratedPool) tenant.Store {
 	return pgtenant.New(mdb.Pool)
+}
+
+func NewWrapKeyStore(mdb *MigratedPool) wrapkey.Store {
+	return pgwrapkey.New(mdb.Pool)
 }

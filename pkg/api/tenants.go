@@ -13,22 +13,26 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/multikey/x25519"
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
 
 // NewProvisionTenantHandler handles PUT /tenants/{tenantId} — provision a
-// tenant: generate a rotatable did:plc tenant key, publish it to the PLC
-// directory, store the private key in the vault, and persist the tenant record.
-// It is idempotent on the external {tenantId}.
+// tenant: generate a rotatable did:plc tenant key and a per-tenant X25519 wrap
+// key, publish them to the PLC directory, seal both private halves in the vault,
+// register the tenant with the upload service, and persist the tenant and
+// wrap-key records. It is idempotent on the external {tenantId}.
 func NewProvisionTenantHandler(
 	logger *zap.Logger,
 	tenants tenant.Store,
 	providers provider.Store,
+	wrapKeys wrapkey.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
 	upload *client.UploadClient,
@@ -74,10 +78,26 @@ func NewProvisionTenantHandler(
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 		key := signer.KeyDID()
+
+		// Generate the tenant's X25519 FEE wrap key. This is distinct from the
+		// signing/rotation key above: it is only ever used as an ECDH recipient
+		// for wrapping content-encryption keys, never for signing. It is published
+		// in the genesis operation at the fixed fragment #wrap for discovery of
+		// the current key; recovery keys off the fingerprint (kid), not the
+		// fragment.
+		wrapKeyPair, err := x25519.Generate()
+		if err != nil {
+			log.Error("generating wrap key", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+		}
+
 		tenantID, genesis, err := plc.New(
 			signer,
 			plc.WithRotationKeys(key),
-			plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
+			plc.WithVerificationMethods(map[string]did.DID{
+				"hilt":           key,
+				wrapkey.Fragment: wrapKeyPair.KeyDID(),
+			}),
 		)
 		if err != nil {
 			log.Error("building genesis operation", zap.Error(err))
@@ -86,22 +106,42 @@ func NewProvisionTenantHandler(
 
 		log := log.With(zap.String("external_id", externalID), zap.Stringer("tenant", tenantID))
 
-		// Persist the private key before publishing so it is never lost. Store
-		// the multiformat-tagged bytes (signer.Bytes()) so the key type is
-		// recoverable on decode rather than assuming secp256k1.
 		vaultKey := vault.TenantKeyPath(tenantID)
+		wrapKeyVault := wrapkey.VaultKey(tenantID, 1)
+
+		// cleanupKeys best-effort removes both sealed private halves after a
+		// failure once they have been written. Detached context so a client
+		// disconnect can't cancel the cleanup.
+		cleanupKeys := func() {
+			dctx := context.WithoutCancel(ctx)
+			if err := secrets.Delete(dctx, wrapKeyVault); err != nil {
+				log.Error("cleaning up orphaned wrap key", zap.Error(err))
+			}
+			if err := secrets.Delete(dctx, vaultKey); err != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(err))
+			}
+		}
+
+		// Persist the private keys before publishing so they are never lost. Store
+		// the multiformat-tagged bytes (Bytes()) so each key type is recoverable
+		// on decode rather than assumed.
 		if err := secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
 			log.Error("storing tenant key", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+		}
+		if err := secrets.Write(ctx, wrapKeyVault, wrapKeyPair.Bytes()); err != nil {
+			log.Error("storing wrap key", zap.Error(err))
+			// Detached context so a client disconnect can't cancel the cleanup.
+			if derr := secrets.Delete(context.WithoutCancel(ctx), vaultKey); derr != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(derr))
+			}
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
 		// Publish the genesis operation to register the did:plc.
 		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
 			log.Error("publishing genesis operation", zap.Error(err))
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(err))
-			}
+			cleanupKeys()
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
 		}
 
@@ -112,19 +152,35 @@ func NewProvisionTenantHandler(
 		details := map[string]string{"external_id": externalID, "region": req.Region}
 		if err := upload.RegisterCustomer(ctx, tenantID, upload.Product, details); err != nil {
 			log.Error("registering tenant with upload service", zap.Error(err))
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(err))
-			}
+			cleanupKeys()
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant with upload service")
+		}
+
+		// Record the active wrap key (version 1) before the tenant row. The tenant
+		// row is the final "commit" write and the key the idempotency check reads,
+		// so recording the wrap key first guarantees a persisted tenant always has
+		// a wrap-key entry. Its kid is the public-key fingerprint (the multibase
+		// multicodec-tagged X25519 public key); the private half stays sealed in
+		// the vault.
+		if err := wrapKeys.Add(ctx, wrapkey.Record{
+			Tenant:   tenantID,
+			Version:  1,
+			KID:      wrapKeyPair.Public().String(),
+			Status:   wrapkey.Active,
+			VaultKey: wrapKeyVault,
+		}); err != nil {
+			log.Error("storing wrap key record", zap.Error(err))
+			cleanupKeys()
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, tenant.Active); err != nil {
-			// The tenant was not recorded, so its key is now orphaned; clean it up.
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if derr := secrets.Delete(context.WithoutCancel(ctx), vaultKey); derr != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(derr))
+			// The tenant was not recorded; clean up its now-orphaned keys and
+			// wrap-key record.
+			cleanupKeys()
+			if derr := wrapKeys.DeleteByTenant(context.WithoutCancel(ctx), tenantID); derr != nil {
+				log.Error("cleaning up orphaned wrap key record", zap.Error(derr))
 			}
 			// Concurrent create with the same external id: return the winner.
 			if errors.Is(err, store.ErrRecordExists) {
@@ -219,6 +275,7 @@ func NewDeleteTenantHandler(
 	buckets bucket.Store,
 	accessKeys accesskey.Store,
 	delegations delegation.Store,
+	wrapKeys wrapkey.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
 ) Route {
@@ -266,6 +323,25 @@ func NewDeleteTenantHandler(
 				log.Error("deleting access key", zap.Error(err))
 				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 			}
+		}
+
+		// Cascade: wrap keys (registry rows + their sealed private halves). Every
+		// version, active and archived, is destroyed — tenant deletion is the
+		// "true deletion" that ends the envelope-recovery path, so archive-don't-
+		// destroy (which governs rotation) does not apply.
+		wrapKeyRecs, err := wrapKeys.List(ctx, rec.ID)
+		if err != nil {
+			log.Error("listing wrap keys", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+		}
+		for _, wk := range wrapKeyRecs {
+			if err := secrets.Delete(ctx, wk.VaultKey); err != nil {
+				log.Warn("removing wrap key from vault", zap.Error(err))
+			}
+		}
+		if err := wrapKeys.DeleteByTenant(ctx, rec.ID); err != nil {
+			log.Error("deleting wrap keys", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
 
 		// Cascade: buckets (records; bucket keys are discarded at creation).
