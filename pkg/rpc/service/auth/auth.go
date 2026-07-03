@@ -77,7 +77,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	})
 	if err != nil {
 		a.logger.Debug("rejecting unparseable request signature", zap.Error(err))
-		return nil, fmt.Errorf("parsing request signature: %w", err)
+		return nil, ErrMalformedSignature
 	}
 	log := a.logger.With(zap.String("access_key", sr.AccessKeyID), zap.Strings("regions", sr.Regions))
 	log.Debug("authorizing request")
@@ -85,18 +85,25 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	accessKeyID, err := did.Parse(did.KeyPrefix + sr.AccessKeyID)
 	if err != nil {
 		log.Debug("rejecting invalid access key id", zap.Error(err))
-		return nil, fmt.Errorf("invalid access key id %q: %w", sr.AccessKeyID, err)
+		return nil, ErrInvalidAccessKeyID
 	}
 
 	akRec, err := a.accessKeys.Get(ctx, accessKeyID)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		log.Debug("rejecting unknown access key")
-		return nil, fmt.Errorf("unknown access key %q", sr.AccessKeyID)
+		return nil, ErrUnknownAccessKey
 	} else if err != nil {
 		log.Error("looking up access key", zap.Error(err))
 		return nil, fmt.Errorf("looking up access key: %w", err)
 	}
 	log = log.With(zap.Stringer("tenant", akRec.Tenant))
+
+	// Reject expired access keys before touching the vault. ValidateTimeBounds
+	// (below) bounds the signature's freshness, not the credential's lifetime.
+	if akRec.ExpiresAt != nil && time.Now().After(*akRec.ExpiresAt) {
+		log.Debug("rejecting expired access key", zap.Timep("expires_at", akRec.ExpiresAt))
+		return nil, ErrAccessKeyExpired
+	}
 
 	// Authenticate: verify the request signature using the access key's secret.
 	signer, err := a.AccessKeySigner(ctx, akRec.Tenant, accessKeyID)
@@ -110,11 +117,11 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	}
 	if err := sigv4.Verify(sr, secret); err != nil {
 		log.Debug("rejecting invalid request signature", zap.Error(err))
-		return nil, fmt.Errorf("invalid request signature: %w", err)
+		return nil, ErrSignatureMismatch
 	}
 	if err := sigv4.ValidateTimeBounds(sr, time.Now()); err != nil {
 		log.Debug("rejecting request outside its validity window", zap.Error(err))
-		return nil, fmt.Errorf("request signature is no longer valid: %w", err)
+		return nil, ErrSignatureExpired
 	}
 
 	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
@@ -124,10 +131,18 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	}
 	log = log.With(zap.Stringer("provider", tenantRec.Provider))
 
+	// Disabled is the hard lock-out state (lifecycle Active → Disabled → delete).
+	// WriteLocked still authenticates here so reads (like ListBuckets) work; write
+	// handlers gate WriteLocked themselves, since Authorize is operation-agnostic.
+	if tenantRec.Status == tenant.Disabled {
+		log.Debug("rejecting disabled tenant")
+		return nil, ErrTenantDisabled
+	}
+
 	// Only the tenant's provider may invoke on its behalf.
 	if issuer != tenantRec.Provider {
 		log.Debug("rejecting invocation not from the tenant's provider", zap.Stringer("issuer", issuer))
-		return nil, fmt.Errorf("invocation issuer %s is not the tenant's provider", issuer)
+		return nil, ErrIssuerForbidden
 	}
 
 	// The request must be scoped to a region served by the tenant's provider.
@@ -179,5 +194,5 @@ func validateRegion(ctx context.Context, providers provider.Store, regions []str
 			return r, nil
 		}
 	}
-	return "", fmt.Errorf("request region(s) %v do not match the tenant's provider", regions)
+	return "", ErrRegionNotServed
 }
