@@ -2,13 +2,18 @@ package fx
 
 import (
 	"github.com/fil-forge/hilt/pkg/api"
+	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"go.uber.org/fx"
 )
 
-// APIModule provides the tenant management API handlers as routes, collected
-// into the "routes" group and registered on the echo server.
+// APIModule provides the tenant management API services + handlers as routes,
+// collected into the "routes" group and registered on the echo server.
 var APIModule = fx.Module("api",
 	fx.Provide(
+		// Services
+		tenantsvc.New,
+		accesskeysvc.New,
 		// Tenants
 		asRoute(api.NewProvisionTenantHandler),
 		asRoute(api.NewGetTenantHandler),

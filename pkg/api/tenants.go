@@ -1,148 +1,101 @@
 package api
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"net/http"
 
-	"github.com/fil-forge/hilt/pkg/client"
-	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/fil-forge/hilt/pkg/store/accesskey"
-	"github.com/fil-forge/hilt/pkg/store/bucket"
-	"github.com/fil-forge/hilt/pkg/store/delegation"
-	"github.com/fil-forge/hilt/pkg/store/provider"
+	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	"github.com/fil-forge/hilt/pkg/vault"
-	"github.com/fil-forge/ucantone/did"
-	"github.com/fil-forge/ucantone/did/plc"
-	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
 
-// NewProvisionTenantHandler handles PUT /tenants/{tenantId} — provision a
-// tenant: generate a rotatable did:plc tenant key, publish it to the PLC
-// directory, store the private key in the vault, and persist the tenant record.
-// It is idempotent on the external {tenantId}.
-func NewProvisionTenantHandler(
-	logger *zap.Logger,
-	tenants tenant.Store,
-	providers provider.Store,
-	secrets vault.Vault,
-	plcClient *plc.DirectoryClient,
-	upload *client.UploadClient,
-) Route {
+// tenantHTTPError maps a tenant-service error to an echo HTTP error. Known errors
+// (see the tenant service's errors.go) become their mapped status with the error's
+// own message; anything else is logged and returned as a 500.
+func tenantHTTPError(log *zap.Logger, err error) error {
+	switch {
+	case errors.Is(err, tenantsvc.ErrTenantNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case errors.Is(err, tenantsvc.ErrInvalidStatus):
+		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, tenantsvc.ErrTenantNotDisabled):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, tenantsvc.ErrDIDRegistration),
+		errors.Is(err, tenantsvc.ErrUploadRegistration),
+		errors.Is(err, tenantsvc.ErrDIDDeactivation):
+		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+	default:
+		log.Error("request failed", zap.Error(err))
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+	}
+}
+
+// NewProvisionTenantHandler handles PUT /tenants/{tenantId} — provision a tenant
+// (idempotent on the external {tenantId}).
+func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {
-		ctx := c.Request().Context()
-
 		externalID := c.Param("tenantId")
 		if externalID == "" {
 			return echo.NewHTTPError(http.StatusBadRequest, "missing tenant id")
 		}
-
 		var req ProvisionTenantRequest
 		if err := c.Bind(&req); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
-		if req.Region == "" {
-			return echo.NewHTTPError(http.StatusBadRequest, "region is required")
-		}
 
-		// Idempotent: return the existing tenant if already provisioned.
-		if rec, err := tenants.GetByExternalID(ctx, externalID); err == nil {
-			return c.JSON(http.StatusOK, tenantResponse(rec))
-		} else if !errors.Is(err, store.ErrRecordNotFound) {
-			log.Error("looking up tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-
-		// Resolve the provider for the requested region.
-		prov, err := providers.GetByRegion(ctx, req.Region)
-		if errors.Is(err, store.ErrRecordNotFound) {
-			return echo.NewHTTPError(http.StatusBadRequest, "unknown region")
-		} else if err != nil {
-			log.Error("resolving provider", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-
-		// Generate the tenant's rotatable did:plc key (secp256k1 rotation key).
-		signer, err := secp256k1.Generate()
+		rec, created, err := tenants.Provision(c.Request().Context(), externalID, req.Region)
 		if err != nil {
-			log.Error("generating tenant key", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+			return tenantHTTPError(log, err)
 		}
-		key := signer.KeyDID()
-		tenantID, genesis, err := plc.New(
-			signer,
-			plc.WithRotationKeys(key),
-			plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
-		)
+		if created {
+			return c.JSON(http.StatusCreated, tenantResponse(rec))
+		}
+		return c.JSON(http.StatusOK, tenantResponse(rec))
+	})
+}
+
+// NewGetTenantHandler handles GET /tenants/{tenantId} — retrieve tenant
+// operational state and quotas.
+func NewGetTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
+	log := logger.With(zap.String("handler", "GetTenant"))
+	return NewRoute(http.MethodGet, "/tenants/:tenantId", func(c echo.Context) error {
+		rec, err := tenants.Get(c.Request().Context(), c.Param("tenantId"))
 		if err != nil {
-			log.Error("building genesis operation", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+			return tenantHTTPError(log, err)
 		}
+		return c.JSON(http.StatusOK, tenantResponse(rec))
+	})
+}
 
-		log := log.With(zap.String("external_id", externalID), zap.Stringer("tenant", tenantID))
-
-		// Persist the private key before publishing so it is never lost. Store
-		// the multiformat-tagged bytes (signer.Bytes()) so the key type is
-		// recoverable on decode rather than assuming secp256k1.
-		vaultKey := vault.TenantKeyPath(tenantID)
-		if err := secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
-			log.Error("storing tenant key", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+// NewUpdateTenantStatusHandler handles POST /tenants/{tenantId}/status — update
+// tenant access mode.
+func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
+	log := logger.With(zap.String("handler", "UpdateTenantStatus"))
+	return NewRoute(http.MethodPost, "/tenants/:tenantId/status", func(c echo.Context) error {
+		var req UpdateTenantStatusRequest
+		if err := c.Bind(&req); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
-
-		// Publish the genesis operation to register the did:plc.
-		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
-			log.Error("publishing genesis operation", zap.Error(err))
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(err))
-			}
-			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
+		if err := tenants.SetStatus(c.Request().Context(), c.Param("tenantId"), string(req.Status)); err != nil {
+			return tenantHTTPError(log, err)
 		}
+		return c.NoContent(http.StatusNoContent)
+	})
+}
 
-		// Register the tenant as a customer with the upload service (Sprue). Done
-		// before recording the tenant so a failed registration returns an error
-		// and is retried on the next call, rather than being short-circuited by
-		// the idempotency check above (which keys on the stored tenant record).
-		details := map[string]string{"external_id": externalID, "region": req.Region}
-		if err := upload.RegisterCustomer(ctx, tenantID, upload.Product, details); err != nil {
-			log.Error("registering tenant with upload service", zap.Error(err))
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(err))
-			}
-			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant with upload service")
+// NewDeleteTenantHandler handles DELETE /tenants/{tenantId} — permanently delete a
+// tenant (must be disabled first). Idempotent.
+func NewDeleteTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
+	log := logger.With(zap.String("handler", "DeleteTenant"))
+	return NewRoute(http.MethodDelete, "/tenants/:tenantId", func(c echo.Context) error {
+		if err := tenants.Delete(c.Request().Context(), c.Param("tenantId")); err != nil {
+			return tenantHTTPError(log, err)
 		}
-
-		// Record the tenant.
-		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, tenant.Active); err != nil {
-			// The tenant was not recorded, so its key is now orphaned; clean it up.
-			// Detached context so a client disconnect can't cancel the cleanup.
-			if derr := secrets.Delete(context.WithoutCancel(ctx), vaultKey); derr != nil {
-				log.Error("cleaning up orphaned tenant key", zap.Error(derr))
-			}
-			// Concurrent create with the same external id: return the winner.
-			if errors.Is(err, store.ErrRecordExists) {
-				if rec, gerr := tenants.GetByExternalID(ctx, externalID); gerr == nil {
-					return c.JSON(http.StatusOK, tenantResponse(rec))
-				}
-			}
-			log.Error("storing tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-
-		rec, err := tenants.Get(ctx, tenantID)
-		if err != nil {
-			log.Error("loading created tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		log.Info("provisioned tenant")
-		return c.JSON(http.StatusCreated, tenantResponse(rec))
+		return c.NoContent(http.StatusNoContent)
 	})
 }
 
@@ -154,207 +107,5 @@ func tenantResponse(rec tenant.Record) Tenant {
 		TenantID:  rec.ExternalID,
 		Status:    TenantStatus(rec.Status),
 		CreatedAt: rec.CreatedAt,
-	}
-}
-
-// NewGetTenantHandler handles GET /tenants/{tenantId} — retrieve tenant
-// operational state and quotas.
-func NewGetTenantHandler(logger *zap.Logger, tenants tenant.Store) Route {
-	log := logger.With(zap.String("handler", "GetTenant"))
-	return NewRoute(http.MethodGet, "/tenants/:tenantId", func(c echo.Context) error {
-		rec, err := tenants.GetByExternalID(c.Request().Context(), c.Param("tenantId"))
-		if errors.Is(err, store.ErrRecordNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, "tenant not found")
-		} else if err != nil {
-			log.Error("looking up tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		return c.JSON(http.StatusOK, tenantResponse(rec))
-	})
-}
-
-// NewUpdateTenantStatusHandler handles POST /tenants/{tenantId}/status — update
-// tenant access mode.
-func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants tenant.Store) Route {
-	log := logger.With(zap.String("handler", "UpdateTenantStatus"))
-	return NewRoute(http.MethodPost, "/tenants/:tenantId/status", func(c echo.Context) error {
-		ctx := c.Request().Context()
-
-		var req UpdateTenantStatusRequest
-		if err := c.Bind(&req); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-		}
-		if !validTenantStatus(req.Status) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, "invalid status")
-		}
-
-		rec, err := tenants.GetByExternalID(ctx, c.Param("tenantId"))
-		if errors.Is(err, store.ErrRecordNotFound) {
-			return echo.NewHTTPError(http.StatusNotFound, "tenant not found")
-		} else if err != nil {
-			log.Error("looking up tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-
-		if err := tenants.SetStatus(ctx, rec.ID, tenant.Status(req.Status)); err != nil {
-			if errors.Is(err, store.ErrRecordNotFound) {
-				return echo.NewHTTPError(http.StatusNotFound, "tenant not found")
-			}
-			log.Error("updating tenant status", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-}
-
-// NewDeleteTenantHandler handles DELETE /tenants/{tenantId} — permanently
-// delete a tenant (must be disabled first), cascading to its buckets, access
-// keys, and delegations, and deactivating the tenant's did:plc. Idempotent.
-//
-// Out of scope: deprovisioning the tenant's spaces from the Forge upload
-// service (Sprue), for which there is no facility per the RFC.
-func NewDeleteTenantHandler(
-	logger *zap.Logger,
-	tenants tenant.Store,
-	buckets bucket.Store,
-	accessKeys accesskey.Store,
-	delegations delegation.Store,
-	secrets vault.Vault,
-	plcClient *plc.DirectoryClient,
-) Route {
-	log := logger.With(zap.String("handler", "DeleteTenant"))
-	return NewRoute(http.MethodDelete, "/tenants/:tenantId", func(c echo.Context) error {
-		ctx := c.Request().Context()
-
-		rec, err := tenants.GetByExternalID(ctx, c.Param("tenantId"))
-		if errors.Is(err, store.ErrRecordNotFound) {
-			return c.NoContent(http.StatusNoContent) // idempotent
-		} else if err != nil {
-			log.Error("looking up tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		log := log.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
-
-		if rec.Status != tenant.Disabled {
-			return echo.NewHTTPError(http.StatusConflict, "tenant must be disabled before deletion")
-		}
-
-		tenantKey := vault.TenantKeyPath(rec.ID)
-
-		// Deactivate the did:plc first — it requires the (still-present) tenant
-		// key. Aborting here leaves all local state intact for a retry.
-		if err := deactivateTenantDID(ctx, plcClient, secrets, tenantKey, rec.ID); err != nil {
-			log.Error("deactivating tenant DID", zap.Error(err))
-			return echo.NewHTTPError(http.StatusBadGateway, "failed to deactivate tenant DID")
-		}
-
-		// Cascade: access keys (records + their delegations + vault keys).
-		keys, err := accessKeys.ListByTenant(ctx, rec.ID)
-		if err != nil {
-			log.Error("listing access keys", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		for _, ak := range keys {
-			if err := delegations.DeleteByAudience(ctx, ak.ID); err != nil {
-				log.Error("deleting access key delegations", zap.Error(err))
-				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-			}
-			if err := secrets.Delete(ctx, vault.AccessKeyPath(rec.ID, ak.ID)); err != nil {
-				log.Warn("removing access key from vault", zap.Error(err))
-			}
-			if err := accessKeys.Delete(ctx, ak.ID); err != nil {
-				log.Error("deleting access key", zap.Error(err))
-				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-			}
-		}
-
-		// Cascade: buckets (records; bucket keys are discarded at creation).
-		bucketIDs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[did.DID], error) {
-			var listOpts []bucket.ListOption
-			if opts.Cursor != nil {
-				listOpts = append(listOpts, bucket.WithCursor(*opts.Cursor))
-			}
-			page, err := buckets.ListByTenant(ctx, rec.ID, listOpts...)
-			if err != nil {
-				return store.Page[did.DID]{}, err
-			}
-			ids := make([]did.DID, 0, len(page.Results))
-			for _, r := range page.Results {
-				ids = append(ids, r.ID)
-			}
-			return store.Page[did.DID]{Results: ids, Cursor: page.Cursor}, nil
-		})
-		if err != nil {
-			log.Error("listing buckets", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		for _, id := range bucketIDs {
-			if err := buckets.Delete(ctx, id); err != nil {
-				log.Error("deleting bucket", zap.Error(err))
-				return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-			}
-		}
-
-		// Delegations addressed to the tenant (the bucket -> tenant grants).
-		if err := delegations.DeleteByAudience(ctx, rec.ID); err != nil {
-			log.Error("deleting tenant delegations", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-
-		if err := tenants.Delete(ctx, rec.ID); err != nil {
-			log.Error("deleting tenant", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
-		}
-		// Best-effort removal of the tenant's key material.
-		if err := secrets.Delete(ctx, tenantKey); err != nil {
-			log.Warn("removing tenant key from vault", zap.Error(err))
-		}
-		log.Info("deleted tenant")
-		return c.NoContent(http.StatusNoContent)
-	})
-}
-
-// deactivateTenantDID publishes a tombstone for the tenant's did:plc, signed
-// with its rotation key from the vault. If the DID is already deactivated it is
-// a no-op.
-func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID) error {
-	last, err := plcClient.Last(ctx, tenantID)
-	if err != nil {
-		if _, ok := errors.AsType[*plc.DeactivatedDIDError](err); ok {
-			return nil // already deactivated
-		}
-		return fmt.Errorf("fetching last operation: %w", err)
-	}
-
-	keyBytes, err := secrets.Read(ctx, vaultKey)
-	if err != nil {
-		return fmt.Errorf("reading tenant key: %w", err)
-	}
-	signer, err := secp256k1.Decode(keyBytes)
-	if err != nil {
-		return fmt.Errorf("decoding tenant key: %w", err)
-	}
-
-	tomb, err := plc.NewTombstoneFromPrevious(last)
-	if err != nil {
-		return fmt.Errorf("building tombstone: %w", err)
-	}
-	signed, err := plc.SignTombstone(signer, tomb)
-	if err != nil {
-		return fmt.Errorf("signing tombstone: %w", err)
-	}
-	if err := plcClient.Deactivate(ctx, tenantID, signed); err != nil {
-		return fmt.Errorf("publishing tombstone: %w", err)
-	}
-	return nil
-}
-
-// validTenantStatus reports whether s is a recognized tenant status.
-func validTenantStatus(s TenantStatus) bool {
-	switch s {
-	case TenantStatusActive, TenantStatusWriteLocked, TenantStatusDisabled:
-		return true
-	default:
-		return false
 	}
 }
