@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
@@ -17,6 +16,7 @@ import (
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/multiformats/go-multibase"

@@ -6,11 +6,11 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/client"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
+	"github.com/fil-forge/libforge/testutil"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"

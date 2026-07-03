@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -23,6 +22,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
+	"github.com/fil-forge/libforge/testutil"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
@@ -405,7 +405,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, "b1"))
 		akID := testutil.RandomDID(t)
 		require.NoError(t, deps.accessKeys.Add(ctx, akID, deps.tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
-		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access/" + akID.String()
+		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()
 		require.NoError(t, deps.vault.Write(ctx, akVaultKey, []byte("ak-key")))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, deps.tenantID)}))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, akID)}))

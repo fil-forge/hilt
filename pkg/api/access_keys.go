@@ -127,15 +127,19 @@ func NewCreateAccessKeyHandler(
 		}
 
 		// Best-effort rollback of the (idempotent) state created below, so a
-		// partial failure leaves nothing behind and is retryable.
+		// partial failure leaves nothing behind and is retryable. Cleanup runs on a
+		// context detached from the request (values retained, cancellation/deadline
+		// dropped) so a client disconnect — which cancels ctx — cannot abort the
+		// rollback partway and leave orphaned state.
 		rollback := func() {
-			if err := delegations.DeleteByAudience(ctx, accessKeyDID); err != nil {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := delegations.DeleteByAudience(cleanupCtx, accessKeyDID); err != nil {
 				log.Warn("rollback: deleting delegations", zap.Error(err))
 			}
-			if err := accessKeys.Delete(ctx, accessKeyDID); err != nil {
+			if err := accessKeys.Delete(cleanupCtx, accessKeyDID); err != nil {
 				log.Warn("rollback: deleting access key", zap.Error(err))
 			}
-			if err := secrets.Delete(ctx, vaultPath); err != nil {
+			if err := secrets.Delete(cleanupCtx, vaultPath); err != nil {
 				log.Warn("rollback: deleting access key from vault", zap.Error(err))
 			}
 		}

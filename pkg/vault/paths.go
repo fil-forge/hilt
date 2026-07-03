@@ -10,5 +10,5 @@ func TenantKeyPath(tenantID did.DID) string {
 // AccessKeyPath is the vault key under which an access key's private key is
 // stored, scoped beneath its tenant.
 func AccessKeyPath(tenantID, accessKeyID did.DID) string {
-	return TenantKeyPath(tenantID) + "/access/" + accessKeyID.String()
+	return TenantKeyPath(tenantID) + "/access-key/" + accessKeyID.String()
 }

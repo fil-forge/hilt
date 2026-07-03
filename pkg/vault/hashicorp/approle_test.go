@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaulthashicorp "github.com/fil-forge/hilt/pkg/vault/hashicorp"
 	vaultclient "github.com/hashicorp/vault-client-go"
@@ -54,16 +54,16 @@ func setupAppRole(t *testing.T, address, rootToken string) (roleID, secretID str
 }
 
 func TestAppRoleLogin(t *testing.T) {
-	if testutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
-		if !testutil.IsDockerAvailable(t) {
+	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
+		if !htestutil.IsDockerAvailable(t) {
 			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
 		}
 	}
-	if !testutil.IsDockerAvailable(t) {
+	if !htestutil.IsDockerAvailable(t) {
 		t.SkipNow()
 	}
 
-	address, rootToken := testutil.CreateVault(t)
+	address, rootToken := htestutil.CreateVault(t)
 	roleID, secretID := setupAppRole(t, address, rootToken)
 
 	t.Run("logs in and yields a usable token", func(t *testing.T) {

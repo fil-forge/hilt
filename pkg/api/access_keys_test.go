@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
@@ -18,6 +17,7 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
@@ -119,7 +119,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.Equal(t, []did.DID{deps.bucketID}, storedRec.Buckets)
 
 		// Private key in the vault.
-		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access/"+akDID.String())
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akDID.String())
 		require.NoError(t, err)
 
 		// 4 delegations: /content/retrieve + /blob/add + /index/add + /upload/add,

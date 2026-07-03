@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaulthashicorp "github.com/fil-forge/hilt/pkg/vault/hashicorp"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -32,15 +32,15 @@ func makeVault(t *testing.T, k VaultKind) vault.Vault {
 }
 
 func createHashicorpVault(t *testing.T) vault.Vault {
-	if testutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
-		if !testutil.IsDockerAvailable(t) {
+	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
+		if !htestutil.IsDockerAvailable(t) {
 			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
 		}
 	}
-	if !testutil.IsDockerAvailable(t) {
+	if !htestutil.IsDockerAvailable(t) {
 		t.SkipNow()
 	}
-	address, token := testutil.CreateVault(t)
+	address, token := htestutil.CreateVault(t)
 	client, err := vaultclient.New(vaultclient.WithAddress(address))
 	require.NoError(t, err)
 	require.NoError(t, client.SetToken(token))

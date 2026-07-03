@@ -5,11 +5,12 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
 	dlgstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
@@ -37,15 +38,15 @@ func makeStore(t *testing.T, k StoreKind) dlgstore.Store {
 }
 
 func createPostgresStore(t *testing.T) dlgstore.Store {
-	if testutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
-		if !testutil.IsDockerAvailable(t) {
+	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
+		if !htestutil.IsDockerAvailable(t) {
 			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
 		}
 	}
-	if !testutil.IsDockerAvailable(t) {
+	if !htestutil.IsDockerAvailable(t) {
 		t.SkipNow()
 	}
-	pool := testutil.CreatePostgres(t)
+	pool := htestutil.CreatePostgres(t)
 	return delegationpostgres.New(pool)
 }
 

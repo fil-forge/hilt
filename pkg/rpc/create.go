@@ -114,8 +114,13 @@ func CreateBucket(
 	// Best-effort rollback of the bucket record on a later failure. The root
 	// delegation (if already stored) becomes unreachable — its bucket record is
 	// gone — so it is inert; the delegation store has no delete-by-CID.
+	//
+	// Cleanup runs on a context detached from the request (values retained, but
+	// cancellation/deadline dropped) so a client disconnect — which cancels ctx —
+	// cannot abort the rollback partway and leave an orphaned bucket record.
 	rollback := func() {
-		if err := buckets.Delete(ctx, bucketID); err != nil {
+		cleanupCtx := context.WithoutCancel(ctx)
+		if err := buckets.Delete(cleanupCtx, bucketID); err != nil {
 			log.Error("rollback: deleting bucket", zap.Error(err))
 		}
 	}

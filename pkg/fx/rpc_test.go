@@ -3,7 +3,6 @@ package fx_test
 import (
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 	"github.com/fil-forge/hilt/pkg/rpc"
@@ -14,6 +13,7 @@ import (
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

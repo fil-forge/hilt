@@ -4,7 +4,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -14,6 +13,7 @@ import (
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )

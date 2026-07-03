@@ -101,7 +101,10 @@ func NewProvisionTenantHandler(
 		// Publish the genesis operation to register the did:plc.
 		if err := plcClient.Update(ctx, tenantID, genesis); err != nil {
 			log.Error("publishing genesis operation", zap.Error(err))
-			_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
+			// Detached context so a client disconnect can't cancel the cleanup.
+			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
+				log.Error("cleaning up orphaned tenant key", zap.Error(err))
+			}
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant DID")
 		}
 
@@ -112,7 +115,8 @@ func NewProvisionTenantHandler(
 		details := map[string]string{"external_id": externalID, "region": req.Region}
 		if err := upload.RegisterCustomer(ctx, tenantID, upload.Product, details); err != nil {
 			log.Error("registering tenant with upload service", zap.Error(err))
-			if err := secrets.Delete(ctx, vaultKey); err != nil {
+			// Detached context so a client disconnect can't cancel the cleanup.
+			if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
 				log.Error("cleaning up orphaned tenant key", zap.Error(err))
 			}
 			return echo.NewHTTPError(http.StatusBadGateway, "failed to register tenant with upload service")
@@ -121,7 +125,10 @@ func NewProvisionTenantHandler(
 		// Record the tenant.
 		if err := tenants.Add(ctx, tenantID, externalID, prov.ID, req.DisplayName, tenant.Active); err != nil {
 			if errors.Is(err, store.ErrRecordExists) {
-				_ = secrets.Delete(ctx, vaultKey) // best-effort cleanup of the orphaned key
+				// Detached context so a client disconnect can't cancel the cleanup.
+				if err := secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
+					log.Error("cleaning up orphaned tenant key", zap.Error(err))
+				}
 				// Concurrent create with the same external id: return the winner.
 				if rec, gerr := tenants.GetByExternalID(ctx, externalID); gerr == nil {
 					return c.JSON(http.StatusOK, tenantResponse(rec))

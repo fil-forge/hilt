@@ -7,11 +7,11 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/client"
 	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
+	"github.com/fil-forge/libforge/testutil"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"

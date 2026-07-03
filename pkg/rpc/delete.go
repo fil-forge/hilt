@@ -81,8 +81,8 @@ func DeleteBucket(
 		return nil, fmt.Errorf("bucket %q is not empty", authz.BucketName)
 	}
 
-	// TODO: revoke the delegations where subject == bucket, so that the bucket's
-	// delegations cannot be used after deletion.
+	// TODO: revoke the delegations where subject == bucket, via external
+	// revocation service to inform Ingot that these are no longer valid.
 
 	// Remove the bucket's delegations (subject == bucket), then the record.
 	if err := delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {

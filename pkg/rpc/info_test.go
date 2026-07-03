@@ -3,13 +3,13 @@ package rpc_test
 import (
 	"testing"
 
-	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/libforge/commands/content"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"

@@ -135,6 +135,9 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 }
 
 func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
+	if !subject.Defined() {
+		return errors.New("cannot delete powerline delegations")
+	}
 	if _, err := s.pool.Exec(ctx, `DELETE FROM delegation WHERE subject = $1`, subject.String()); err != nil {
 		return fmt.Errorf("deleting delegations by subject: %w", err)
 	}

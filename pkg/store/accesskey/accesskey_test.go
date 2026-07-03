@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fil-forge/hilt/internal/testutil"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/stretchr/testify/require"
 )
@@ -34,15 +35,15 @@ func makeStore(t *testing.T, k StoreKind) accesskey.Store {
 }
 
 func createPostgresStore(t *testing.T) accesskey.Store {
-	if testutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
-		if !testutil.IsDockerAvailable(t) {
+	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
+		if !htestutil.IsDockerAvailable(t) {
 			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
 		}
 	}
-	if !testutil.IsDockerAvailable(t) {
+	if !htestutil.IsDockerAvailable(t) {
 		t.SkipNow()
 	}
-	pool := testutil.CreatePostgres(t)
+	pool := htestutil.CreatePostgres(t)
 	return accesskeypostgres.New(pool)
 }
 
