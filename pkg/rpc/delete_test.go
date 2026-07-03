@@ -43,7 +43,7 @@ type fakeSpaceChecker struct {
 	space  did.DID
 }
 
-func (f *fakeSpaceChecker) SpaceEmpty(_ context.Context, space did.DID, _ ...client.UploadClientMethodOption) (bool, error) {
+func (f *fakeSpaceChecker) SpaceEmpty(_ context.Context, space did.DID, _ ...client.MethodOption) (bool, error) {
 	f.called = true
 	f.space = space
 	return f.empty, f.err
