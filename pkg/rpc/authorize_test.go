@@ -74,12 +74,12 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
 
-		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, secrets), buckets
+		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), buckets
 	}
 
 	call := func(t *testing.T, authorizer *auth.Authorizer, buckets *bucketmemory.Store, issuer did.DID, args *s3req.AuthorizeArguments) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
 		t.Helper()
-		return rpc.AuthorizeRequest(ctx, zap.NewNop(), authorizer, buckets, issuer, args)
+		return rpc.AuthorizeRequest(ctx, zap.NewNop(), authorizer, issuer, args)
 	}
 
 	t.Run("authorizes a validly-signed request and mints a delegation to the issuer", func(t *testing.T) {

@@ -3,7 +3,6 @@ package rpc
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -15,9 +14,6 @@ import (
 	"github.com/fil-forge/ucantone/server"
 	"go.uber.org/zap"
 )
-
-// permListAllMyBuckets is the S3 permission required to list a tenant's buckets.
-const permListAllMyBuckets = "s3:ListAllMyBuckets"
 
 // NewListBucketsHandler handles /s3/bucket/list — list the tenant's buckets. The
 // caller is identified and authenticated by the access key in the request's
@@ -38,10 +34,10 @@ func NewListBucketsHandler(
 	})
 }
 
-// ListBuckets authorizes the request (see [Authorize]), checks the
-// s3:ListAllMyBuckets permission, and returns the tenant's buckets. It is
-// factored out of the handler so it can be unit tested without constructing a
-// UCAN invocation.
+// ListBuckets authorizes the request (see [auth.Authorizer.Authorize], which also
+// verifies the access key holds the operation's permission), confirms the request
+// is a ListBuckets operation, and returns the tenant's buckets. It is factored out
+// of the handler so it can be unit tested without constructing a UCAN invocation.
 func ListBuckets(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -54,8 +50,10 @@ func ListBuckets(
 	if err != nil {
 		return nil, err
 	}
-	if !slices.Contains(authz.AccessKey.Permissions, permListAllMyBuckets) {
-		return nil, fmt.Errorf("access key is not permitted to %s", permListAllMyBuckets)
+	// Bind the verified signature to this handler's operation: reject a
+	// (validly-signed) request for any other S3 operation.
+	if authz.Operation != auth.OpListBuckets {
+		return nil, fmt.Errorf("request is not a ListBuckets operation: %s", authz.Operation)
 	}
 
 	recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {

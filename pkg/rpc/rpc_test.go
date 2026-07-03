@@ -33,7 +33,7 @@ func TestHandlerCommands(t *testing.T) {
 		})
 	}
 
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), vaultmemory.New())
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
 
 	t.Run("list", func(t *testing.T) {
 		route := rpc.NewListBucketsHandler(zap.NewNop(), az, bucketmemory.New())
@@ -42,7 +42,7 @@ func TestHandlerCommands(t *testing.T) {
 	})
 
 	t.Run("authorize", func(t *testing.T) {
-		route := rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, bucketmemory.New())
+		route := rpc.NewAuthorizeRequestHandler(zap.NewNop(), az)
 		require.Equal(t, "/s3/request/authorize", route.Command.String())
 		require.NotNil(t, route.Handler)
 	})

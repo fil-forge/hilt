@@ -65,7 +65,7 @@ func TestListBuckets(t *testing.T) {
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, "Acme", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 		return az, buckets, tenantID
 	}
 
@@ -93,6 +93,21 @@ func TestListBuckets(t *testing.T) {
 	t.Run("rejects a key without the list permission", func(t *testing.T) {
 		az, buckets, _ := setup(t, []string{"s3:GetObject"})
 		_, err := rpc.ListBuckets(ctx, zap.NewNop(), az, buckets, providerID, signedListArgs(t, signer, region, time.Now(), time.Hour))
+		require.Error(t, err)
+	})
+
+	t.Run("rejects a validly-signed request for a different operation", func(t *testing.T) {
+		// The key holds s3:GetObject, so a GetObject request passes Authorize — but
+		// the list handler must reject it because it is not a ListBuckets operation.
+		az, buckets, tenantID := setup(t, []string{"s3:GetObject"})
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bucket-a"))
+		secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+		require.NoError(t, err)
+		req := sigv4.Request{Method: "GET", URL: "https://" + region + ".s3.fil.one/bucket-a/object-key"}
+		signed, err := sigv4.Presign(req, akDID.Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		args := &s3bkt.ListArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL}}
+		_, err = rpc.ListBuckets(ctx, zap.NewNop(), az, buckets, providerID, args)
 		require.Error(t, err)
 	})
 }

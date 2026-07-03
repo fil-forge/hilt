@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,6 +137,21 @@ func Parse(req Request) (*SignedRequest, error) {
 		return nil, errors.New("incomplete signature parameters")
 	}
 
+	signedHeaderList := splitSignedHeaders(signedHeaders)
+	// Header-authenticated requests must cover Host with the signature, and SigV4a
+	// must additionally cover X-Amz-Region-Set (the authorization region), so an
+	// on-path attacker cannot rewrite them without invalidating the signature.
+	// Presigned URLs carry host and the region-set as signed query params, so this
+	// applies to header auth only.
+	if !presigned {
+		if !slices.Contains(signedHeaderList, "host") {
+			return nil, errors.New("host must be a signed header")
+		}
+		if scheme == SchemeV4a && !slices.Contains(signedHeaderList, strings.ToLower(amzRegionSet)) {
+			return nil, errors.New("x-amz-region-set must be a signed header for SigV4a")
+		}
+	}
+
 	// Credential = "<accessKeyId>/<scope>". V4 scope carries the region; V4a does
 	// not (region comes from X-Amz-Region-Set).
 	credParts := strings.Split(credential, "/")
@@ -166,10 +182,7 @@ func Parse(req Request) (*SignedRequest, error) {
 	signed := query
 	signed.Del(amzSignature)
 
-	host := headers.Get("Host")
-	if host == "" {
-		host = u.Host
-	}
+	host := extractHost(headers, u)
 
 	return &SignedRequest{
 		Scheme:        scheme,
@@ -180,7 +193,7 @@ func Parse(req Request) (*SignedRequest, error) {
 		query:         signed,
 		headers:       headers,
 		host:          host,
-		signedHeaders: splitSignedHeaders(signedHeaders),
+		signedHeaders: signedHeaderList,
 		payloadHash:   payloadHash,
 		amzDate:       date,
 		scope:         scope,
@@ -310,10 +323,14 @@ func (s *SignedRequest) scopeRegion() string {
 }
 
 // splitRegionSet splits a SigV4a X-Amz-Region-Set into its (trimmed) regions.
-func splitRegionSet(set string) []string {
-	regions := strings.Split(set, ",")
-	for i := range regions {
-		regions[i] = strings.TrimSpace(regions[i])
+func splitRegionSet(s string) []string {
+	raw := strings.Split(strings.ToLower(s), ",")
+	var regions []string
+	for _, r := range raw {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			regions = append(regions, r)
+		}
 	}
 	return regions
 }

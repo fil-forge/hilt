@@ -33,11 +33,11 @@ func TestNewUCANServer(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), vaultmemory.New())
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
 	srv := appfx.NewUCANServer(appfx.UCANServerParams{
 		Identity: id,
 		Routes: []server.Route{
-			rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, bucketmemory.New()),
+			rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),
 			rpc.NewCreateBucketHandler(zap.NewNop()),
 			rpc.NewDeleteBucketHandler(zap.NewNop()),
 			rpc.NewBucketInfoHandler(zap.NewNop()),

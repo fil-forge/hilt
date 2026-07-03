@@ -269,6 +269,45 @@ func TestParseErrors(t *testing.T) {
 	})
 }
 
+// TestParseRequiresSignedHeaders covers the header-authenticated hardening: Host
+// must be a signed header, and SigV4a must additionally sign X-Amz-Region-Set, so
+// the host and authorization region are covered by the signature. (These are
+// parse-time structural checks; no valid signature is needed.)
+func TestParseRequiresSignedHeaders(t *testing.T) {
+	headerAuth := func(scheme Scheme, credential, signedHeaders string, extra map[string]string) Request {
+		headers := map[string]string{
+			"Authorization":        string(scheme) + " Credential=" + credential + ", SignedHeaders=" + signedHeaders + ", Signature=abc123",
+			"X-Amz-Date":           "20260616T091923Z",
+			"X-Amz-Content-Sha256": unsignedPayload,
+		}
+		for k, v := range extra {
+			headers[k] = v
+		}
+		return Request{Method: "GET", URL: "https://bucket.s3.fil.one/", Headers: headers}
+	}
+
+	t.Run("SigV4 rejects when host is not signed", func(t *testing.T) {
+		_, err := Parse(headerAuth(SchemeV4, "z6MkAbc/20260616/us-west-2/s3/aws4_request", "x-amz-date", nil))
+		require.Error(t, err)
+	})
+
+	t.Run("SigV4a rejects when region-set is not signed", func(t *testing.T) {
+		req := headerAuth(SchemeV4a, "z6MkAbc/20260616/s3/aws4_request", "host;x-amz-date",
+			map[string]string{"X-Amz-Region-Set": "us-west-2"})
+		_, err := Parse(req)
+		require.Error(t, err)
+	})
+
+	t.Run("SigV4a accepts when host and region-set are signed", func(t *testing.T) {
+		req := headerAuth(SchemeV4a, "z6MkAbc/20260616/s3/aws4_request", "host;x-amz-date;x-amz-region-set",
+			map[string]string{"X-Amz-Region-Set": "us-west-2"})
+		sr, err := Parse(req)
+		require.NoError(t, err)
+		require.Equal(t, SchemeV4a, sr.Scheme)
+		require.Equal(t, []string{"us-west-2"}, sr.Regions)
+	})
+}
+
 func TestValidateTimeBounds(t *testing.T) {
 	const (
 		akid   = "z6MkExampleAccessKeyIdentifier000000000000000"
@@ -315,4 +354,65 @@ func TestValidateTimeBounds(t *testing.T) {
 		sr := &SignedRequest{amzDate: signedAt.Format(amzDateFormat)}
 		require.Error(t, ValidateTimeBounds(sr, signedAt.Add(time.Hour)))
 	})
+}
+
+// TestExtractHost ports the forwarded-header cases from SeaweedFS's
+// TestExtractHostHeader (the externalHost override cases are out of scope). It
+// verifies the signed Host is reconstructed from X-Forwarded-Host/Port/Proto with
+// AWS-style default-port stripping and IPv6 bracket handling.
+func TestExtractHost(t *testing.T) {
+	tests := []struct {
+		name           string
+		host           string // Host header (r.Host)
+		forwardedHost  string
+		forwardedPort  string
+		forwardedProto string
+		want           string
+	}{
+		{name: "basic host without forwarding", host: "example.com", want: "example.com"},
+		{name: "host with port without forwarding", host: "example.com:8080", want: "example.com:8080"},
+		{name: "X-Forwarded-Host without port", host: "backend:8333", forwardedHost: "example.com", want: "example.com"},
+		{name: "XFH with XFP (HTTP non-standard)", host: "backend:8333", forwardedHost: "example.com", forwardedPort: "8080", forwardedProto: "http", want: "example.com:8080"},
+		{name: "XFH with XFP (HTTPS non-standard)", host: "backend:8333", forwardedHost: "example.com", forwardedPort: "8443", forwardedProto: "https", want: "example.com:8443"},
+		{name: "XFH with XFP (HTTP standard port 80)", host: "backend:8333", forwardedHost: "example.com", forwardedPort: "80", forwardedProto: "http", want: "example.com"},
+		{name: "XFH with XFP (HTTPS standard port 443)", host: "backend:8333", forwardedHost: "example.com", forwardedPort: "443", forwardedProto: "https", want: "example.com"},
+		{name: "XFH with port already included", host: "backend:8333", forwardedHost: "127.0.0.1:8433", forwardedPort: "8433", forwardedProto: "https", want: "127.0.0.1:8433"},
+		{name: "XFH with standard port already included (HTTPS 443)", host: "backend:8333", forwardedHost: "example.com:443", forwardedPort: "443", forwardedProto: "https", want: "example.com"},
+		{name: "XFH with port, no XFP", host: "backend:8333", forwardedHost: "example.com:9000", forwardedProto: "http", want: "example.com:9000"},
+		{name: "IPv6 brackets and port in XFH", host: "backend:8333", forwardedHost: "[::1]:8080", forwardedPort: "8080", forwardedProto: "http", want: "[::1]:8080"},
+		{name: "IPv6 no brackets, add brackets with port", host: "backend:8333", forwardedHost: "::1", forwardedPort: "8080", forwardedProto: "http", want: "[::1]:8080"},
+		{name: "IPv6 no brackets, standard port stripped", host: "backend:8333", forwardedHost: "::1", forwardedPort: "80", forwardedProto: "http", want: "::1"},
+		{name: "IPv6 no brackets, standard HTTPS port stripped", host: "backend:8333", forwardedHost: "2001:db8::1", forwardedPort: "443", forwardedProto: "https", want: "2001:db8::1"},
+		{name: "IPv6 brackets, no port, add port", host: "backend:8333", forwardedHost: "[2001:db8::1]", forwardedPort: "8080", forwardedProto: "http", want: "[2001:db8::1]:8080"},
+		{name: "IPv6 full brackets, default port stripped", host: "backend:8333", forwardedHost: "[2001:db8:85a3::8a2e:370:7334]:443", forwardedPort: "443", forwardedProto: "https", want: "2001:db8:85a3::8a2e:370:7334"},
+		{name: "IPv4-mapped IPv6 no brackets, add brackets with port", host: "backend:8333", forwardedHost: "::ffff:127.0.0.1", forwardedPort: "8080", forwardedProto: "http", want: "[::ffff:127.0.0.1]:8080"},
+		{name: "simple port 442", host: "bucket.domain.com:442", want: "bucket.domain.com:442"},
+		{name: "port 442 with XFH", host: "backend:8333", forwardedHost: "bucket.domain.com:442", want: "bucket.domain.com:442"},
+		{name: "port 442 with XFP", host: "backend:8333", forwardedHost: "bucket.domain.com", forwardedPort: "442", want: "bucket.domain.com:442"},
+		{name: "HTTPS with port 442 (not stripped)", host: "bucket.domain.com:442", forwardedProto: "https", want: "bucket.domain.com:442"},
+		{name: "XFH multiple hosts (including port)", forwardedHost: "bucket.domain.com:442, internal.proxy", want: "bucket.domain.com:442"},
+		{name: "IPv6 with port", host: "[2001:db8::1]:442", want: "[2001:db8::1]:442"},
+		{name: "XFH port 442 but XFP 80 (prefer 442)", forwardedHost: "bucket.domain.com:442", forwardedPort: "80", forwardedProto: "http", want: "bucket.domain.com:442"},
+		{name: "XFP misreports 443 but Host has 30007", host: "storage-stgops.mt.mtnet:30007", forwardedHost: "storage-stgops.mt.mtnet", forwardedPort: "443", forwardedProto: "https", want: "storage-stgops.mt.mtnet:30007"},
+		{name: "XFH already has correct port, ignore misaligned XFP", host: "backend:8333", forwardedHost: "storage-stgops.mt.mtnet:30007", forwardedPort: "443", forwardedProto: "https", want: "storage-stgops.mt.mtnet:30007"},
+		{name: "XFH no port, match Host hostname and take its port", host: "example.com:8080", forwardedHost: "example.com", forwardedPort: "80", forwardedProto: "http", want: "example.com:8080"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set("Host", tt.host)
+			if tt.forwardedHost != "" {
+				headers.Set("X-Forwarded-Host", tt.forwardedHost)
+			}
+			if tt.forwardedPort != "" {
+				headers.Set("X-Forwarded-Port", tt.forwardedPort)
+			}
+			if tt.forwardedProto != "" {
+				headers.Set("X-Forwarded-Proto", tt.forwardedProto)
+			}
+			u := &url.URL{Scheme: "http", Host: tt.host}
+			require.Equal(t, tt.want, extractHost(headers, u))
+		})
+	}
 }

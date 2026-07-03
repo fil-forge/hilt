@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -31,6 +33,14 @@ type AuthorizedRequest struct {
 	AccessKey accesskey.Record
 	Tenant    tenant.Record
 	Region    string
+	// Operation is the S3 operation the (signature-verified) request performs. The
+	// access key is confirmed to hold its permission; handlers check it matches the
+	// operation they serve.
+	Operation Operation
+	// Bucket is the resolved bucket the request addresses, when the operation acts
+	// on an existing bucket. It is confirmed to belong to the tenant and to be
+	// within the access key's bucket scope. Nil for ListBuckets and CreateBucket.
+	Bucket *bucket.Record
 	// Signed is the parsed, verified request signature. Handlers use it to derive
 	// the verification key and to inspect the requested action.
 	Signed *sigv4.SignedRequest
@@ -43,6 +53,7 @@ type Authorizer struct {
 	accessKeys accesskey.Store
 	tenants    tenant.Store
 	providers  provider.Store
+	buckets    bucket.Store
 	secrets    vault.Vault
 }
 
@@ -52,6 +63,7 @@ func NewAuthorizer(
 	accessKeys accesskey.Store,
 	tenants tenant.Store,
 	providers provider.Store,
+	buckets bucket.Store,
 	secrets vault.Vault,
 ) *Authorizer {
 	return &Authorizer{
@@ -59,16 +71,19 @@ func NewAuthorizer(
 		accessKeys: accessKeys,
 		tenants:    tenants,
 		providers:  providers,
+		buckets:    buckets,
 		secrets:    secrets,
 	}
 }
 
-// Authorize authenticates and authorizes an S3 RPC request — shared by all S3
-// command handlers. It verifies the SigV4/SigV4a signature and time bounds,
-// resolves the access key and its tenant, confirms the invocation issuer is the
-// tenant's provider, and validates the request region against that provider.
-// The command-specific S3 permission check is left to the caller (see
-// [accesskey.Record.Permissions]).
+// Authorize authenticates and authorizes an S3 RPC request. It verifies the
+// SigV4/SigV4a signature and time bounds, resolves the access key and its
+// tenant, confirms the invocation issuer is the tenant's provider, and
+// validates the request region against that provider.
+//
+// Finally, the requested S3 operation is checked against the access key's
+// permissions. Note that the caller must still check the operation matches the
+// handler's operation, since Authorize is operation-agnostic.
 func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request) (*AuthorizedRequest, error) {
 	sr, err := sigv4.Parse(sigv4.Request{
 		Method:  req.Method,
@@ -151,9 +166,42 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		log.Debug("rejecting request region", zap.Error(err))
 		return nil, err
 	}
+	log = log.With(zap.String("region", region))
 
-	log.Debug("request authorized", zap.String("region", region))
-	return &AuthorizedRequest{AccessKey: akRec, Tenant: tenantRec, Region: region, Signed: sr}, nil
+	// Determine the S3 operation the (verified) request performs and confirm the
+	// access key is permitted to perform it. The operation is returned so the
+	// handler can check it matches the operation it serves.
+	op, bucketName, _, err := classifyRequest(req)
+	if err != nil {
+		log.Debug("rejecting unsupported operation", zap.Error(err))
+		return nil, ErrUnsupportedOperation
+	}
+	if !slices.Contains(akRec.Permissions, op.Permission()) {
+		log.Debug("rejecting operation the access key lacks permission for", zap.Stringer("operation", op))
+		return nil, ErrOperationNotPermitted
+	}
+
+	// For operations on an existing bucket, resolve it (within the tenant) and
+	// confirm it is within the access key's bucket scope (empty scope = all buckets).
+	var resolved *bucket.Record
+	if op.addressesExistingBucket() {
+		b, err := a.buckets.GetByName(ctx, bucketName)
+		if errors.Is(err, store.ErrRecordNotFound) || (err == nil && b.Tenant != tenantRec.ID) {
+			log.Debug("rejecting unknown bucket", zap.String("bucket", bucketName))
+			return nil, ErrUnknownBucket
+		} else if err != nil {
+			log.Error("looking up bucket", zap.Error(err))
+			return nil, fmt.Errorf("looking up bucket: %w", err)
+		}
+		if len(akRec.Buckets) > 0 && !slices.Contains(akRec.Buckets, b.ID) {
+			log.Debug("rejecting bucket the access key is not scoped to", zap.String("bucket", bucketName))
+			return nil, ErrBucketNotPermitted
+		}
+		resolved = &b
+	}
+
+	log.Debug("request authorized", zap.Stringer("operation", op))
+	return &AuthorizedRequest{AccessKey: akRec, Tenant: tenantRec, Region: region, Operation: op, Bucket: resolved, Signed: sr}, nil
 }
 
 // AccessKeySigner reads the access key's ed25519 private key from the vault.

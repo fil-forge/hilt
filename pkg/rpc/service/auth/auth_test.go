@@ -8,6 +8,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -36,7 +37,19 @@ func signedRequest(t *testing.T, signer multikey.Signer, region string, signedAt
 
 type setupConfig struct {
 	accessKeyExpires *time.Time
+	accessKeyBuckets []did.DID
 	tenantStatus     tenant.Status
+}
+
+// signedObjectRequest presigns a GET of an object in the named bucket.
+func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, region string) s3.Request {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/" + bucketName + "/object-key"}
+	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+	require.NoError(t, err)
+	return s3.Request{Method: signed.Method, URL: signed.URL}
 }
 
 func TestAuthorize(t *testing.T) {
@@ -56,7 +69,7 @@ func TestAuthorize(t *testing.T) {
 	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID) {
 		t.Helper()
 		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-		providers, secrets := providermemory.New(), vaultmemory.New()
+		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region))
 		tenantID := testutil.RandomDID(t)
 		tenantStatus := tenant.Active
@@ -64,13 +77,17 @@ func TestAuthorize(t *testing.T) {
 			tenantStatus = setupConfig.tenantStatus
 		}
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, "Acme", tenantStatus))
+		// The bucket the happy-path request addresses (GET /bucket/object-key).
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bucket"))
 		var accessKeyExpires *time.Time
+		var accessKeyBuckets []did.DID
 		if setupConfig != nil {
 			accessKeyExpires = setupConfig.accessKeyExpires
+			accessKeyBuckets = setupConfig.accessKeyBuckets
 		}
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, accessKeyExpires))
+		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, []string{"s3:GetObject"}, accessKeyExpires))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
-		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, secrets), providers, tenantID
+		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), providers, tenantID
 	}
 
 	t.Run("authorizes a validly-signed request", func(t *testing.T) {
@@ -80,7 +97,37 @@ func TestAuthorize(t *testing.T) {
 		require.Equal(t, accessKey.DID(), authz.AccessKey.ID)
 		require.Equal(t, tenantID, authz.Tenant.ID)
 		require.Equal(t, region, authz.Region)
+		require.Equal(t, auth.OpGetObject, authz.Operation) // GET /bucket/object-key
+		require.NotNil(t, authz.Bucket)
+		require.Equal(t, "bucket", authz.Bucket.Name)
 		require.NotNil(t, authz.Signed)
+	})
+
+	t.Run("rejects a bucket the access key is not scoped to", func(t *testing.T) {
+		// The key is scoped to some other bucket, so it may not use "bucket".
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyBuckets: []did.DID{testutil.RandomDID(t)}})
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrBucketNotPermitted)
+	})
+
+	t.Run("rejects an unknown bucket", func(t *testing.T) {
+		// The key may use any bucket (nil scope), but "nope" does not exist.
+		az, _, _ := setup(t, accessKey, nil)
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "nope", region))
+		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("rejects an operation the access key lacks permission for", func(t *testing.T) {
+		// The key holds only s3:GetObject, but a ListBuckets-shaped request (GET
+		// with no bucket in the path) requires s3:ListAllMyBuckets.
+		az, _, _ := setup(t, accessKey, nil)
+		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+		require.NoError(t, err)
+		req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/"}
+		signed, err := sigv4.Presign(req, accessKey.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		_, err = az.Authorize(ctx, providerID, s3.Request{Method: signed.Method, URL: signed.URL})
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects an invalid signature", func(t *testing.T) {
@@ -95,7 +142,7 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, "Acme", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), other.Bytes()))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
 
 		_, err = az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrSignatureMismatch)
@@ -108,7 +155,7 @@ func TestAuthorize(t *testing.T) {
 	})
 
 	t.Run("rejects an unknown access key", func(t *testing.T) {
-		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), vaultmemory.New())
+		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
 	})
@@ -122,7 +169,7 @@ func TestAuthorize(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, "Acme", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
 
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.Error(t, err)

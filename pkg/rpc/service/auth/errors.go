@@ -6,15 +6,19 @@ import "github.com/fil-forge/ucantone/errors"
 // mapping to canonical S3 error responses) can match on the stable Name() of a
 // serialized failure.
 const (
-	MalformedSignatureErrorName = "MalformedSignature"
-	InvalidAccessKeyIDErrorName = "InvalidAccessKeyID"
-	UnknownAccessKeyErrorName   = "UnknownAccessKey"
-	SignatureMismatchErrorName  = "SignatureMismatch"
-	SignatureExpiredErrorName   = "SignatureExpired"
-	AccessKeyExpiredErrorName   = "AccessKeyExpired"
-	TenantDisabledErrorName     = "TenantDisabled"
-	IssuerForbiddenErrorName    = "IssuerForbidden"
-	RegionNotServedErrorName    = "RegionNotServed"
+	MalformedSignatureErrorName    = "MalformedSignature"
+	InvalidAccessKeyIDErrorName    = "InvalidAccessKeyID"
+	UnknownAccessKeyErrorName      = "UnknownAccessKey"
+	SignatureMismatchErrorName     = "SignatureMismatch"
+	SignatureExpiredErrorName      = "SignatureExpired"
+	AccessKeyExpiredErrorName      = "AccessKeyExpired"
+	TenantDisabledErrorName        = "TenantDisabled"
+	IssuerForbiddenErrorName       = "IssuerForbidden"
+	RegionNotServedErrorName       = "RegionNotServed"
+	UnsupportedOperationErrorName  = "UnsupportedOperation"
+	OperationNotPermittedErrorName = "OperationNotPermitted"
+	UnknownBucketErrorName         = "UnknownBucket"
+	BucketNotPermittedErrorName    = "BucketNotPermitted"
 )
 
 // Named rejection errors returned by [Authorizer.Authorize]. Each is a sentinel
@@ -49,4 +53,16 @@ var (
 	// ErrRegionNotServed is returned when none of the request's regions are served
 	// by the tenant's provider.
 	ErrRegionNotServed = errors.New(RegionNotServedErrorName, "request region is not served by the tenant's provider")
+	// ErrUnsupportedOperation is returned when the request's method and path map to
+	// no supported S3 operation.
+	ErrUnsupportedOperation = errors.New(UnsupportedOperationErrorName, "unsupported S3 operation")
+	// ErrOperationNotPermitted is returned when the access key does not hold the
+	// permission required for the requested operation.
+	ErrOperationNotPermitted = errors.New(OperationNotPermittedErrorName, "access key is not permitted to perform this operation")
+	// ErrUnknownBucket is returned when the request's bucket does not exist or
+	// belongs to another tenant.
+	ErrUnknownBucket = errors.New(UnknownBucketErrorName, "unknown bucket")
+	// ErrBucketNotPermitted is returned when the access key's bucket scope does not
+	// include the request's bucket.
+	ErrBucketNotPermitted = errors.New(BucketNotPermittedErrorName, "access key is not permitted to use this bucket")
 )

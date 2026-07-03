@@ -2,19 +2,12 @@ package rpc
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
-	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/fil-forge/hilt/pkg/store/bucket"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
 	"github.com/fil-forge/ucantone/binding"
@@ -28,27 +21,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// S3 permissions checked against the access key for the requested action.
-const (
-	permGetObject    = "s3:GetObject"
-	permPutObject    = "s3:PutObject"
-	permDeleteObject = "s3:DeleteObject"
-	permListBucket   = "s3:ListBucket"
-	permCreateBucket = "s3:CreateBucket"
-	permDeleteBucket = "s3:DeleteBucket"
-)
-
 // NewAuthorizeRequestHandler handles /s3/request/authorize — authenticate an AWS
 // S3 request, derive the verification key the gateway needs, and mint delegations
 // for the requested action's Forge commands to the invocation issuer.
 func NewAuthorizeRequestHandler(
 	logger *zap.Logger,
 	authorizer *auth.Authorizer,
-	buckets bucket.Store,
 ) server.Route {
 	log := logger.With(zap.Stringer("command", s3req.Authorize.Command))
 	return s3req.Authorize.Route(func(req *binding.Request[*s3req.AuthorizeArguments], res *binding.Response[*s3req.AuthorizeOK]) error {
-		ok, dlgs, err := AuthorizeRequest(req.Context(), log, authorizer, buckets, req.Invocation().Issuer(), req.Task().Arguments())
+		ok, dlgs, err := AuthorizeRequest(req.Context(), log, authorizer, req.Invocation().Issuer(), req.Task().Arguments())
 		if err != nil {
 			log.Error("authorize request failed", zap.Error(err))
 			return res.SetFailure(err)
@@ -65,17 +47,16 @@ func NewAuthorizeRequestHandler(
 	})
 }
 
-// AuthorizeRequest authenticates the S3 request, resolves the addressed bucket,
-// checks the access key's permission for the action, derives the verification
-// key, and mints delegations for the action's Forge commands to the invocation
-// issuer (TTL ≤ 24h). It returns the result and the delegation blocks to attach
-// to the response. It is factored out of the handler so it can be unit tested
-// without constructing a UCAN invocation.
+// AuthorizeRequest authenticates the S3 request (which resolves and scope-checks
+// the addressed bucket and the access key's permission for the action), derives the
+// verification key, and mints delegations for the action's Forge commands to the
+// invocation issuer (TTL ≤ 24h). It returns the result and the delegation blocks to
+// attach to the response. It is factored out of the handler so it can be unit
+// tested without constructing a UCAN invocation.
 func AuthorizeRequest(
 	ctx context.Context,
 	logger *zap.Logger,
 	authorizer *auth.Authorizer,
-	buckets bucket.Store,
 	issuer did.DID,
 	args *s3req.AuthorizeArguments,
 ) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
@@ -85,29 +66,16 @@ func AuthorizeRequest(
 	}
 	accessKeyID := authz.AccessKey.ID
 
-	// Resolve the addressed bucket and confirm the access key may use it.
-	target, err := parseS3Target(args.Request.URL)
-	if err != nil {
-		return nil, nil, err
+	// Authorize resolved and scope-checked the addressed bucket; the gateway path
+	// only handles requests that operate on a bucket.
+	if authz.Bucket == nil {
+		return nil, nil, fmt.Errorf("request does not address a bucket")
 	}
-	b, err := buckets.GetByName(ctx, target.bucket)
-	if errors.Is(err, store.ErrRecordNotFound) || (err == nil && b.Tenant != authz.Tenant.ID) {
-		return nil, nil, fmt.Errorf("unknown bucket %q", target.bucket)
-	} else if err != nil {
-		return nil, nil, fmt.Errorf("looking up bucket: %w", err)
-	}
-	if len(authz.AccessKey.Buckets) > 0 && !slices.Contains(authz.AccessKey.Buckets, b.ID) {
-		return nil, nil, fmt.Errorf("access key is not permitted to use bucket %q", target.bucket)
-	}
+	b := authz.Bucket
 
-	// Verify the access key holds the permission required for the requested action.
-	perm, err := requiredPermission(args.Request.Method, target.key != "")
-	if err != nil {
-		return nil, nil, err
-	}
-	if !slices.Contains(authz.AccessKey.Permissions, perm) {
-		return nil, nil, fmt.Errorf("access key is not permitted to %s", perm)
-	}
+	// Authorize also verified the access key holds the operation's permission; the
+	// permission drives which Forge commands to re-delegate.
+	perm := authz.Operation.Permission()
 
 	// Derive the verification key the gateway uses to validate request signatures.
 	signer, err := authorizer.AccessKeySigner(ctx, authz.AccessKey.Tenant, accessKeyID)
@@ -176,56 +144,4 @@ func AuthorizeRequest(
 func nextUTCMidnight(t time.Time) time.Time {
 	t = t.UTC()
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
-}
-
-// s3Target identifies the bucket and object key addressed by an S3 request. key
-// is empty for bucket-level operations.
-type s3Target struct {
-	bucket string
-	key    string
-}
-
-// parseS3Target extracts the bucket and object key from an S3 request URL using
-// path-style addressing (https://<host>/<bucket>/<key...>), which is what Ingot
-// uses. The path is part of the SigV4-signed canonical request, so it is
-// authenticated by the time this runs.
-//
-// Virtual-hosted-style (bucket as the host's leftmost label) can be added here
-// when Ingot adopts it — gated on a configured service endpoint domain so the two
-// styles can be told apart reliably.
-func parseS3Target(rawURL string) (s3Target, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return s3Target{}, fmt.Errorf("parsing request URL: %w", err)
-	}
-	bucket, key, _ := strings.Cut(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
-	if bucket == "" {
-		return s3Target{}, errors.New("request URL has no bucket in its path")
-	}
-	return s3Target{bucket: bucket, key: key}, nil
-}
-
-// requiredPermission maps an S3 request (method + whether it addresses an object)
-// to the S3 permission the access key must hold. It covers the core operations;
-// finer-grained actions can be added as needed.
-func requiredPermission(method string, hasObject bool) (string, error) {
-	switch strings.ToUpper(method) {
-	case http.MethodGet, http.MethodHead:
-		if hasObject {
-			return permGetObject, nil
-		}
-		return permListBucket, nil
-	case http.MethodPut, http.MethodPost:
-		if hasObject {
-			return permPutObject, nil
-		}
-		return permCreateBucket, nil
-	case http.MethodDelete:
-		if hasObject {
-			return permDeleteObject, nil
-		}
-		return permDeleteBucket, nil
-	default:
-		return "", fmt.Errorf("unsupported S3 method %q", method)
-	}
 }
