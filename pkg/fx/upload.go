@@ -7,8 +7,8 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/config"
-	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/libforge/identity"
+	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan/container"
 	"go.uber.org/zap"
