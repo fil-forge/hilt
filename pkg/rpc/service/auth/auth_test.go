@@ -18,6 +18,7 @@ import (
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
+	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/multiformats/go-multibase"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -218,5 +219,27 @@ func TestAuthorize(t *testing.T) {
 		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.Disabled})
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrTenantDisabled)
+	})
+}
+
+func TestTenantIssuer(t *testing.T) {
+	ctx := t.Context()
+	buckets, secrets := bucketmemory.New(), vaultmemory.New()
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), buckets, secrets)
+
+	tenantSigner, err := secp256k1.Generate()
+	require.NoError(t, err)
+	tenantID := tenantSigner.KeyDID()
+
+	t.Run("returns an issuer for a tenant with a vaulted key", func(t *testing.T) {
+		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
+		iss, err := az.TenantIssuer(ctx, tenantID)
+		require.NoError(t, err)
+		require.Equal(t, tenantID, iss.DID())
+	})
+
+	t.Run("errors when the tenant key is missing", func(t *testing.T) {
+		_, err := az.TenantIssuer(ctx, testutil.RandomDID(t))
+		require.Error(t, err)
 	})
 }

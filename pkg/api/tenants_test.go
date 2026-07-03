@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
+	"github.com/fil-forge/hilt/pkg/client"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -20,11 +22,16 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	customercmds "github.com/fil-forge/libforge/commands/customer"
+	ucanlib "github.com/fil-forge/libforge/ucan"
+	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
+	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
@@ -36,17 +43,25 @@ type provisionDeps struct {
 	providers provider.Store
 	vault     vault.Vault
 	plcPosts  int
+
+	// Sprue (upload service) stub state.
+	product      did.DID
+	customerAdds int
+	lastAddArgs  *customercmds.AddArguments
+	sprueFailure bool // when true the stub /customer/add handler returns a failure
 }
 
 // setupProvision builds an echo server with the provision handler wired to
-// memory stores/vault and a PLC directory client pointed at an httptest server
-// that accepts genesis operations (no real PLC network).
+// memory stores/vault, a PLC directory client pointed at an httptest server that
+// accepts genesis operations, and an upload client pointed at an in-process
+// Sprue stub that handles /customer/add (no real PLC or Sprue network).
 func setupProvision(t *testing.T) (*echo.Echo, *provisionDeps) {
 	t.Helper()
 	deps := &provisionDeps{
 		tenants:   tenantmemory.New(),
 		providers: providermemory.New(),
 		vault:     vaultmemory.New(),
+		product:   testutil.RandomDID(t),
 	}
 
 	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +77,33 @@ func setupProvision(t *testing.T) (*echo.Echo, *provisionDeps) {
 	plcClient, err := plc.NewDirectoryClient(*endpoint)
 	require.NoError(t, err)
 
-	route := api.NewProvisionTenantHandler(zap.NewNop(), deps.tenants, deps.providers, deps.vault, plcClient)
+	// Sprue stub: Hilt (the client's issuer) holds a /customer/add delegation
+	// from Sprue, and the in-process server records each invocation.
+	sprue := testutil.RandomIssuer(t)
+	hilt := testutil.RandomIssuer(t)
+	dlg, err := customercmds.Add.Delegate(sprue, hilt.DID(), sprue.DID())
+	require.NoError(t, err)
+	proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+
+	srv := server.NewHTTP(sprue)
+	srv.Handle(customercmds.Add.Command, customercmds.Add.Handler(
+		func(req *binding.Request[*customercmds.AddArguments], res *binding.Response[*customercmds.AddOK]) error {
+			deps.customerAdds++
+			deps.lastAddArgs = req.Task().Arguments()
+			if deps.sprueFailure {
+				return res.SetFailure(errors.New("sprue rejected"))
+			}
+			return res.SetSuccess(&customercmds.AddOK{})
+		}))
+
+	sprueURL, err := url.Parse("http://sprue.test")
+	require.NoError(t, err)
+	upload, err := client.NewUploadClient(sprue.DID(), *sprueURL, hilt, proofs,
+		client.WithProduct(deps.product),
+		client.WithHTTPClient(&http.Client{Transport: srv}))
+	require.NoError(t, err)
+
+	route := api.NewProvisionTenantHandler(zap.NewNop(), deps.tenants, deps.providers, deps.vault, plcClient, upload)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
 	return e, deps
@@ -103,6 +144,14 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, key)
 		require.Equal(t, 1, deps.plcPosts)
+
+		// The tenant was registered as a customer with Sprue, keyed by its
+		// did:plc, under the configured product, with the tenant details.
+		require.Equal(t, 1, deps.customerAdds)
+		require.NotNil(t, deps.lastAddArgs)
+		require.Equal(t, stored.ID, deps.lastAddArgs.Customer)
+		require.Equal(t, deps.product, deps.lastAddArgs.Product)
+		require.Equal(t, map[string]string{"external_id": "tenant-1", "region": "us-east-1"}, deps.lastAddArgs.Details)
 	})
 
 	t.Run("is idempotent on the external id", func(t *testing.T) {
@@ -117,11 +166,27 @@ func TestProvisionTenantHandler(t *testing.T) {
 		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
 		require.Equal(t, http.StatusOK, second.Code)
 
-		// No new key minted/published on the idempotent call.
+		// No new key minted/published, and no re-registration, on the idempotent call.
 		require.Equal(t, 1, deps.plcPosts)
+		require.Equal(t, 1, deps.customerAdds)
 		again, err := deps.tenants.GetByExternalID(ctx, "tenant-2")
 		require.NoError(t, err)
 		require.Equal(t, stored.ID, again.ID)
+	})
+
+	t.Run("upload service failure aborts provisioning", func(t *testing.T) {
+		e, deps := setupProvision(t)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		deps.sprueFailure = true
+
+		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{DisplayName: "Acme", Region: "us-east-1"})
+		require.Equal(t, http.StatusBadGateway, rec.Code)
+
+		// Registration was attempted but no tenant record was written, so the
+		// operation is retryable.
+		require.Equal(t, 1, deps.customerAdds)
+		_, err := deps.tenants.GetByExternalID(ctx, "tenant-6")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("unknown region is rejected", func(t *testing.T) {

@@ -112,6 +112,34 @@ func TestDelegationStore(t *testing.T) {
 				require.Empty(t, page.Results)
 			})
 
+			t.Run("DeleteBySubject removes only that subject's delegations", func(t *testing.T) {
+				subjectA, subjectB := testutil.RandomDID(t), testutil.RandomDID(t)
+				audA1, audA2 := testutil.RandomDID(t), testutil.RandomDID(t)
+				audB, audPowerline := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+
+				dA1 := makeDelegation(t, testutil.RandomIssuer(t), audA1, subjectA, cmd)
+				dA2 := makeDelegation(t, testutil.RandomIssuer(t), audA2, subjectA, cmd)
+				dB := makeDelegation(t, testutil.RandomIssuer(t), audB, subjectB, cmd)
+				// Powerline delegation (undefined subject) must be preserved.
+				dPowerline := makeDelegation(t, testutil.RandomIssuer(t), audPowerline, did.DID{}, cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dA1, dA2, dB, dPowerline}))
+
+				require.NoError(t, s.DeleteBySubject(t.Context(), subjectA))
+
+				for _, aud := range []did.DID{audA1, audA2} {
+					page, err := s.ListByAudience(t.Context(), aud)
+					require.NoError(t, err)
+					require.Empty(t, page.Results, "subject A delegations should be deleted")
+				}
+				pageB, err := s.ListByAudience(t.Context(), audB)
+				require.NoError(t, err)
+				require.Len(t, pageB.Results, 1, "subject B delegation should remain")
+				pagePowerline, err := s.ListByAudience(t.Context(), audPowerline)
+				require.NoError(t, err)
+				require.Len(t, pagePowerline.Results, 1, "powerline delegation should remain")
+			})
+
 			t.Run("ListByAudience paginates results", func(t *testing.T) {
 				audience := testutil.RandomDID(t)
 				for range 5 {

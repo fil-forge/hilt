@@ -20,7 +20,10 @@ import (
 	"github.com/fil-forge/hilt/pkg/vault"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
+	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/ucan"
 	"github.com/multiformats/go-multibase"
 	"go.uber.org/zap"
 )
@@ -37,6 +40,8 @@ type AuthorizedRequest struct {
 	// access key is confirmed to hold its permission; handlers check it matches the
 	// operation they serve.
 	Operation Operation
+	// BucketName is the bucket name from the request.
+	BucketName string
 	// Bucket is the resolved bucket the request addresses, when the operation acts
 	// on an existing bucket. It is confirmed to belong to the tenant and to be
 	// within the access key's bucket scope. Nil for ListBuckets and CreateBucket.
@@ -201,11 +206,34 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	}
 
 	log.Debug("request authorized", zap.Stringer("operation", op))
-	return &AuthorizedRequest{AccessKey: akRec, Tenant: tenantRec, Region: region, Operation: op, Bucket: resolved, Signed: sr}, nil
+	return &AuthorizedRequest{
+		AccessKey:  akRec,
+		Tenant:     tenantRec,
+		Region:     region,
+		Operation:  op,
+		BucketName: bucketName,
+		Bucket:     resolved,
+		Signed:     sr,
+	}, nil
+}
+
+// TenantIssuer loads the tenant's secp256k1 signing key from the vault and
+// returns an issuer that signs as the tenant — used to act on the tenant's
+// behalf (e.g. provisioning a bucket's space with Sprue).
+func (a *Authorizer) TenantIssuer(ctx context.Context, tenantID did.DID) (ucan.Issuer, error) {
+	keyBytes, err := a.secrets.Read(ctx, vault.TenantKeyPath(tenantID))
+	if err != nil {
+		return nil, fmt.Errorf("reading tenant key: %w", err)
+	}
+	signer, err := secp256k1.Decode(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decoding tenant key: %w", err)
+	}
+	return multikey.NewIssuer(tenantID, signer), nil
 }
 
 // AccessKeySigner reads the access key's ed25519 private key from the vault.
-func (a *Authorizer) AccessKeySigner(ctx context.Context, tenantID, accessKeyID did.DID) (ed25519.Signer, error) {
+func (a *Authorizer) AccessKeySigner(ctx context.Context, tenantID, accessKeyID did.DID) (multikey.Signer, error) {
 	keyBytes, err := a.secrets.Read(ctx, vault.AccessKeyPath(tenantID, accessKeyID))
 	if err != nil {
 		return nil, fmt.Errorf("reading access key secret: %w", err)
@@ -219,7 +247,7 @@ func (a *Authorizer) AccessKeySigner(ctx context.Context, tenantID, accessKeyID 
 
 // EncodeSecret returns the multibase base64url secretAccessKey string the
 // client signs with, for the given access key private key.
-func EncodeSecret(signer ed25519.Signer) (string, error) {
+func EncodeSecret(signer multikey.Signer) (string, error) {
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	if err != nil {
 		return "", fmt.Errorf("encoding access key secret: %w", err)

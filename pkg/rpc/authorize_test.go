@@ -48,7 +48,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	)
 
 	// The access key signs the request; its private key lives in the vault so the
-	// handler can mint delegations as the access key.
+	// handler can issue delegations as the access key.
 	akSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	akDID := akSigner.KeyDID()
@@ -82,7 +82,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		return rpc.AuthorizeRequest(ctx, zap.NewNop(), authorizer, issuer, args)
 	}
 
-	t.Run("authorizes a validly-signed request and mints a delegation to the issuer", func(t *testing.T) {
+	t.Run("authorizes a validly-signed request and issues a delegation to the issuer", func(t *testing.T) {
 		az, buckets := setup(t, []string{"s3:GetObject"}, akSigner)
 		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
 
@@ -100,8 +100,8 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, sigv4.VerifyWithKey(sr, keys[0].Data))
 
-		// s3:GetObject maps to /content/retrieve: exactly one minted delegation,
-		// issued to the invocation issuer over the bucket, no proof chain fetched.
+		// s3:GetObject maps to /content/retrieve: exactly one delegation issued to
+		// the invocation issuer over the bucket, no proof chain fetched.
 		require.Len(t, blocks, 1)
 		reDel := blocks[0]
 		require.Equal(t, providerID, reDel.Audience())
@@ -116,7 +116,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.Greater(t, int64(*exp), now)
 		require.LessOrEqual(t, int64(*exp), now+86400)
 
-		// The delegations map keys the minted delegation to its own CID (the
+		// The delegations map keys the issued delegation to its own CID (the
 		// initial-implementation proof chain).
 		require.Len(t, ok.Delegations.Entries, 1)
 		chain, found := ok.Delegations.Entries[reDel.Link()]

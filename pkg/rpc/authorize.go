@@ -22,7 +22,7 @@ import (
 )
 
 // NewAuthorizeRequestHandler handles /s3/request/authorize — authenticate an AWS
-// S3 request, derive the verification key the gateway needs, and mint delegations
+// S3 request, derive the verification key the gateway needs, and issue delegations
 // for the requested action's Forge commands to the invocation issuer.
 func NewAuthorizeRequestHandler(
 	logger *zap.Logger,

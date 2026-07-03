@@ -91,6 +91,25 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 	return nil
 }
 
+func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// The store indexes only by audience, so scan each audience's delegations and
+	// drop those whose subject matches, removing now-empty audience entries.
+	for aud, dlgs := range s.byAudience {
+		kept := slices.DeleteFunc(dlgs, func(d ucan.Delegation) bool {
+			return d.Subject() == subject
+		})
+		if len(kept) == 0 {
+			delete(s.byAudience, aud)
+		} else {
+			s.byAudience[aud] = kept
+		}
+	}
+	return nil
+}
+
 func (s *Store) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
 	matcher := ucanlib.NewDelegationMatcher(s.listExact)
 	return ucanlib.ProofChain(ctx, matcher, aud, cmd, sub)
