@@ -3,8 +3,8 @@ package rpc_test
 import (
 	"testing"
 
-	"github.com/fil-forge/hilt/pkg/rpc"
 	adminprovider "github.com/fil-forge/hilt/pkg/commands/admin/provider"
+	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/store"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/libforge/testutil"
