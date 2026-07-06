@@ -33,7 +33,7 @@ func NewAuthorizeRequestHandler(
 		ok, dlgs, err := AuthorizeRequest(req.Context(), log, authorizer, req.Invocation().Issuer(), req.Task().Arguments())
 		if err != nil {
 			log.Error("authorize request failed", zap.Error(err))
-			return res.SetFailure(err)
+			return authFailure(res, err)
 		}
 		// The delegation map in the result carries only CIDs; the blocks ride back
 		// in the response container via the metadata.
