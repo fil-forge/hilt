@@ -149,14 +149,17 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	// signatures for this bucket.
 	signer, err := s.authorizer.AccessKeySigner(ctx, authz.AccessKey.Tenant, accessKeyID)
 	if err != nil {
+		rollback()
 		return nil, nil, err
 	}
 	secret, err := auth.EncodeSecret(signer)
 	if err != nil {
+		rollback()
 		return nil, nil, err
 	}
 	key, err := sigv4.DeriveKey(authz.Signed, secret)
 	if err != nil {
+		rollback()
 		return nil, nil, fmt.Errorf("deriving signing key: %w", err)
 	}
 	kind := s3.KeyKindSigV4
@@ -174,6 +177,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		return s.delegations.ListByAudience(ctx, accessKeyID, o...)
 	})
 	if err != nil {
+		rollback()
 		return nil, nil, fmt.Errorf("listing delegations: %w", err)
 	}
 
@@ -186,6 +190,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		}
 		proofs, links, err := s.delegations.ProofChain(ctx, accessKeyID, d.Command(), bucketID)
 		if err != nil {
+			rollback()
 			return nil, nil, fmt.Errorf("building proof chain for %s: %w", d.Command(), err)
 		}
 		if len(proofs) == 0 {

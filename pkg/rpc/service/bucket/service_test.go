@@ -13,6 +13,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -85,10 +86,10 @@ func TestCreate(t *testing.T) {
 	providerID := testutil.RandomDID(t)
 
 	// setup seeds a powerline tenant→access-key delegation for /content/retrieve.
-	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient) (*bucketsvc.Service, *bucketmemory.Store) {
+	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, delegations delegationstore.Store) (*bucketsvc.Service, *bucketmemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
-		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
+		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
@@ -107,7 +108,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("creates and provisions the bucket, returning the powerline chain", func(t *testing.T) {
 		sprue := &fakeSprue{sub: "sub-1"}
-		svc, buckets := setup(t, []string{"s3:CreateBucket", "s3:GetObject"}, sprue)
+		svc, buckets := setup(t, []string{"s3:CreateBucket", "s3:GetObject"}, sprue, delegationmemory.New())
 		ok, blocks, err := svc.Create(ctx, providerID, args())
 		require.NoError(t, err)
 
@@ -122,25 +123,47 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rejects a key without s3:CreateBucket", func(t *testing.T) {
-		svc, _ := setup(t, []string{"s3:GetObject"}, &fakeSprue{})
+		svc, _ := setup(t, []string{"s3:GetObject"}, &fakeSprue{}, delegationmemory.New())
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects a duplicate bucket name", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{})
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New())
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, bucketName))
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.ErrorIs(t, err, bucketsvc.ErrBucketExists)
 	})
 
 	t.Run("rolls back the bucket when provisioning fails", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{provErr: errors.New("sprue unavailable")})
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{provErr: errors.New("sprue unavailable")}, delegationmemory.New())
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
+
+	t.Run("rolls back the bucket when listing delegations fails", func(t *testing.T) {
+		// A failure after provisioning (listing the access key's delegations) must
+		// still roll the bucket record back.
+		delegations := failingListDelegations{Store: delegationmemory.New(), err: errors.New("boom")}
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegations)
+		_, _, err := svc.Create(ctx, providerID, args())
+		require.Error(t, err)
+		_, err = buckets.GetByName(ctx, bucketName)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+}
+
+// failingListDelegations wraps a delegation store, failing ListByAudience so a
+// post-provisioning failure can be exercised.
+type failingListDelegations struct {
+	delegationstore.Store
+	err error
+}
+
+func (f failingListDelegations) ListByAudience(context.Context, did.DID, ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	return store.Page[ucan.Delegation]{}, f.err
 }
 
 func TestDelete(t *testing.T) {
