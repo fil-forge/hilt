@@ -14,6 +14,7 @@ import (
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -55,6 +56,14 @@ func TestHandlerCommands(t *testing.T) {
 	t.Run("info", func(t *testing.T) {
 		route := rpc.NewBucketInfoHandler(zap.NewNop(), buckets)
 		require.Equal(t, "/s3/bucket/info", route.Command.String())
+		require.NotNil(t, route.Handler)
+	})
+
+	t.Run("provider add", func(t *testing.T) {
+		id, err := identity.New("", "")
+		require.NoError(t, err)
+		route := rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New())
+		require.Equal(t, "/admin/provider/add", route.Command.String())
 		require.NotNil(t, route.Handler)
 	})
 }

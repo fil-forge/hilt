@@ -9,6 +9,7 @@ import (
 	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
 
+	"github.com/fil-forge/hilt/cmd/client"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 )
@@ -64,6 +65,7 @@ func main() {
 	serveCmd.Flags().String("upload-proofs", "", "Upload service proofs: an encoded UCAN container or a path to a file containing one")
 
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(client.Cmd)
 
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: looks for config.yaml in current dir)")
 

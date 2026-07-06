@@ -36,6 +36,19 @@ func authFailure(res failer, err error) error {
 	}
 }
 
+// adminFailure records a known admin-command rejection as the receipt failure so
+// its stable Name() reaches the caller; other errors are returned unchanged (→
+// "HandlerExecutionError").
+func adminFailure(res failer, err error) error {
+	switch {
+	case errors.Is(err, ErrUnauthorized),
+		errors.Is(err, ErrProviderExists):
+		return res.SetFailure(err)
+	default:
+		return err
+	}
+}
+
 // bucketFailure records a known bucket-service rejection, falling through to
 // authFailure for the auth rejections the bucket service propagates from Authorize.
 func bucketFailure(res failer, err error) error {
