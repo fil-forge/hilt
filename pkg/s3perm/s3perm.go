@@ -16,7 +16,7 @@ import (
 // command identifiers stay in sync with their definitions.
 var (
 	cmdsRetrieve = []ucan.Command{content.Retrieve.Command}
-	cmdsAdd      = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command}
+	cmdsAdd      = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command}
 	cmdsRemove   = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
 )
 
