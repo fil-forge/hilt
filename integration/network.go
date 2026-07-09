@@ -198,14 +198,15 @@ func freePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// waitForHealth blocks until Hilt's /health endpoint responds 200 (or fails the test).
 func waitForHealth(t *testing.T, baseURL string) {
 	t.Helper()
+
+	httpc := &http.Client{Timeout: 250 * time.Millisecond}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/health")
+		resp, err := httpc.Get(baseURL + "/health")
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return
 			}
