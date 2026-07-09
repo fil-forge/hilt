@@ -54,7 +54,7 @@ func serverURL(cmd *cobra.Command, cfg *config.Config) (url.URL, error) {
 		return *u, nil
 	}
 	host := cfg.Server.Host
-	if host == "" || host == "0.0.0.0" {
+	if host == "" {
 		host = "127.0.0.1"
 	}
 	return url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(cfg.Server.Port))}, nil
