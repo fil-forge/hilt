@@ -141,6 +141,33 @@ func TestAccessKeyStore(t *testing.T) {
 				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), otherTenant, "name-dup", nil, []string{"s3:GetObject"}, nil))
 			})
 
+			t.Run("Add returns ErrInvalidArgument for undef access key ID", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				err := s.Add(t.Context(), did.Undef, tenantID, "undef-id", nil, []string{"s3:GetObject"}, nil)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for undef tenant", func(t *testing.T) {
+				err := s.Add(t.Context(), testutil.RandomDID(t), did.Undef, "undef-tenant", nil, []string{"s3:GetObject"}, nil)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for empty name", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, "", nil, []string{"s3:GetObject"}, nil)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for buckets containing an undef DID", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				buckets := []did.DID{testutil.RandomDID(t), did.Undef}
+				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, "undef-bucket", buckets, []string{"s3:GetObject"}, nil)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
 			t.Run("ListByTenant isolates by tenant", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				other := testutil.RandomDID(t)

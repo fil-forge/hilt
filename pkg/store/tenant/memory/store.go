@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -22,6 +23,16 @@ func New() *Store {
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status tenant.Status) error {
+	if id == did.Undef {
+		return fmt.Errorf("tenant ID is required: %w", store.ErrInvalidArgument)
+	}
+	if provider == did.Undef {
+		return fmt.Errorf("tenant provider is required: %w", store.ErrInvalidArgument)
+	}
+	if !status.Valid() {
+		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -67,6 +78,10 @@ func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.
 }
 
 func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status) error {
+	if !status.Valid() {
+		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

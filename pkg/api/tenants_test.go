@@ -489,7 +489,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		// Seed owned resources: a bucket, an access key (+ vault key), and
 		// delegations addressed to the tenant and to the access key.
 		bucketID := testutil.RandomDID(t)
-		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, "b1"))
+		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, "bucket-1"))
 		akID := testutil.RandomDID(t)
 		require.NoError(t, deps.accessKeys.Add(ctx, akID, deps.tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()

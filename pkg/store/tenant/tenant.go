@@ -15,6 +15,15 @@ const (
 	Disabled    Status = "disabled"
 )
 
+// Valid reports whether s is a recognized tenant status.
+func (s Status) Valid() bool {
+	switch s {
+	case Active, WriteLocked, Disabled:
+		return true
+	}
+	return false
+}
+
 type Record struct {
 	// Identifier for the tenant (the tenant's did:plc, the internal crypto
 	// identity).
@@ -33,8 +42,10 @@ type Record struct {
 }
 
 type Store interface {
-	// Add creates a new tenant record. It returns [store.ErrRecordExists] if a
-	// record with the same ID or external ID already exists.
+	// Add creates a new tenant record. It returns [store.ErrInvalidArgument] if
+	// the ID or provider is undef or the status is not valid, and
+	// [store.ErrRecordExists] if a record with the same ID or external ID
+	// already exists.
 	Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status Status) error
 	// Get retrieves the tenant record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
@@ -44,6 +55,7 @@ type Store interface {
 	// external ID.
 	GetByExternalID(ctx context.Context, externalID string) (Record, error)
 	// SetStatus updates the status of a tenant record. It returns
+	// [store.ErrInvalidArgument] if the status is not valid, and
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	SetStatus(ctx context.Context, id did.DID, status Status) error
 	// Delete removes the tenant record for a given ID. It is idempotent:

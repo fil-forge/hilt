@@ -3,6 +3,8 @@ package bucket
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
@@ -12,6 +14,20 @@ import (
 // ErrConflictingFilters is returned by [Store.ListByTenant] when both [WithIDs]
 // and [WithNames] are supplied.
 var ErrConflictingFilters = errors.New("bucket: WithIDs and WithNames cannot be combined")
+
+// nameRegexp mirrors the bucket_name_valid CHECK constraint: 3-63 characters,
+// lowercase letters, digits, dots and hyphens, starting and ending with a
+// letter or digit.
+var nameRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+
+// ValidateName checks that name is a valid bucket name. It returns
+// [store.ErrInvalidArgument] if it is not.
+func ValidateName(name string) error {
+	if !nameRegexp.MatchString(name) {
+		return fmt.Errorf("bucket name must be 3-63 lowercase letters, digits, dots or hyphens, starting and ending with a letter or digit: %w", store.ErrInvalidArgument)
+	}
+	return nil
+}
 
 type Record struct {
 	// Identifier for the bucket.
@@ -61,8 +77,9 @@ func WithCursor(cursor string) ListOption {
 }
 
 type Store interface {
-	// Add creates a new bucket record. It returns [store.ErrRecordExists] if a
-	// record with the same ID already exists.
+	// Add creates a new bucket record. It returns [store.ErrInvalidArgument] if
+	// the ID or tenant is undef or the name is not valid (see [ValidateName]),
+	// and [store.ErrRecordExists] if a record with the same ID already exists.
 	Add(ctx context.Context, id did.DID, tenant did.DID, name string) error
 	// GetByName retrieves the bucket record for a given name. It returns
 	// [store.ErrRecordNotFound] if no bucket exists with the specified name.
