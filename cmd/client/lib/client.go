@@ -35,7 +35,7 @@ func InitAdminClient(cmd *cobra.Command) (*client.AdminClient, *zap.Logger, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	c, err := client.NewAdminClient(id.DID(), endpoint, id, logger)
+	c, err := client.NewAdminClient(id, endpoint, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating admin client: %w", err)
 	}
@@ -50,6 +50,13 @@ func serverURL(cmd *cobra.Command, cfg *config.Config) (url.URL, error) {
 		u, err := url.Parse(raw)
 		if err != nil {
 			return url.URL{}, fmt.Errorf("parsing --url: %w", err)
+		}
+		// Accept host[:port][/path] without an explicit scheme.
+		if u.Scheme == "" && u.Host == "" {
+			u, err = url.Parse("http://" + raw)
+			if err != nil {
+				return url.URL{}, fmt.Errorf("parsing --url: %w", err)
+			}
 		}
 		return *u, nil
 	}

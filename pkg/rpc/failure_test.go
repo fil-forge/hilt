@@ -56,6 +56,31 @@ func TestBucketFailure(t *testing.T) {
 	})
 }
 
+func TestAdminFailure(t *testing.T) {
+	t.Run("wrapped provider-exists sentinel is set as failure with its name", func(t *testing.T) {
+		f := &recordingFailer{}
+		err := fmt.Errorf("%w: provider %s region %q", ErrProviderExists, "did:example:provider", "us-east-1")
+		require.NoError(t, adminFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, ProviderExistsErrorName)
+	})
+
+	t.Run("unauthorized sentinel is set as failure with its name", func(t *testing.T) {
+		f := &recordingFailer{}
+		err := fmt.Errorf("adding provider: %w", ErrUnauthorized)
+		require.NoError(t, adminFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, UnauthorizedErrorName)
+	})
+
+	t.Run("unknown error is returned, not set as failure", func(t *testing.T) {
+		f := &recordingFailer{}
+		boom := errors.New("boom")
+		require.ErrorIs(t, adminFailure(f, boom), boom)
+		require.False(t, f.called)
+	})
+}
+
 func TestAuthFailure(t *testing.T) {
 	t.Run("wrapped auth sentinel is set as failure with its name", func(t *testing.T) {
 		f := &recordingFailer{}

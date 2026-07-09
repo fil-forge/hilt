@@ -20,16 +20,15 @@ import (
 // itself, so no delegation proofs are attached. Construct it with [NewAdminClient],
 // passing the service identity as the issuer.
 type AdminClient struct {
-	ServiceID did.DID // Hilt's DID (invocation issuer + subject + audience)
-	Issuer    ucan.Issuer
-	Executor  execution.Executor
-	Logger    *zap.Logger
+	Issuer   ucan.Issuer
+	Executor execution.Executor
+	Logger   *zap.Logger
 }
 
 // NewAdminClient creates an admin client for Hilt's UCAN RPC API at serviceURL.
-// serviceID is Hilt's DID and issuer must sign as that same DID (it is the service
-// identity); the two must match, since admin commands are self-issued.
-func NewAdminClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, logger *zap.Logger) (*AdminClient, error) {
+// issuer is the service identity: admin commands are self-issued, so its DID is
+// the invocation issuer, subject and audience.
+func NewAdminClient(issuer ucan.Issuer, serviceURL url.URL, logger *zap.Logger) (*AdminClient, error) {
 	if issuer == nil {
 		return nil, fmt.Errorf("issuer is required")
 	}
@@ -40,19 +39,17 @@ func NewAdminClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, l
 	if err != nil {
 		return nil, fmt.Errorf("creating HTTP executor: %w", err)
 	}
-	return &AdminClient{ServiceID: serviceID, Issuer: issuer, Executor: executor, Logger: logger}, nil
+	return &AdminClient{Issuer: issuer, Executor: executor, Logger: logger}, nil
 }
 
 // AddProvider invokes /admin/provider/add to register a regional provider. No
 // proofs are attached: the subject is the service itself, so authority is implicit
 // in the issuer being the service identity.
 func (c *AdminClient) AddProvider(ctx context.Context, providerID did.DID, region string) error {
-	if c.Issuer.DID() != c.ServiceID {
-		return fmt.Errorf("admin operation not permitted: issuer %s is not the service %s", c.Issuer.DID(), c.ServiceID)
-	}
-	inv, err := adminprovider.Add.Invoke(c.Issuer, c.ServiceID,
+	serviceID := c.Issuer.DID()
+	inv, err := adminprovider.Add.Invoke(c.Issuer, serviceID,
 		&adminprovider.AddArguments{Provider: providerID, Region: region},
-		invocation.WithAudience(c.ServiceID),
+		invocation.WithAudience(serviceID),
 	)
 	if err != nil {
 		return fmt.Errorf("invoking %s: %w", adminprovider.Add.Command, err)
