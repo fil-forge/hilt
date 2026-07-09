@@ -116,6 +116,25 @@ func TestTenantStore(t *testing.T) {
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
+			t.Run("Add returns ErrInvalidArgument for undef tenant ID", func(t *testing.T) {
+				provider := testutil.RandomDID(t)
+				seed(t, provider)
+				err := s.Add(t.Context(), did.Undef, "ext-undef-id", provider, tenant.Active)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for undef provider", func(t *testing.T) {
+				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-undef-prov", did.Undef, tenant.Active)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for invalid status", func(t *testing.T) {
+				provider := testutil.RandomDID(t)
+				seed(t, provider)
+				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-bad-status", provider, tenant.Status("bogus"))
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
 			t.Run("SetStatus updates status", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
@@ -133,6 +152,16 @@ func TestTenantStore(t *testing.T) {
 			t.Run("SetStatus returns ErrRecordNotFound for unknown id", func(t *testing.T) {
 				err := s.SetStatus(t.Context(), testutil.RandomDID(t), tenant.Disabled)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
+
+			t.Run("SetStatus returns ErrInvalidArgument for invalid status", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				provider := testutil.RandomDID(t)
+				seed(t, provider)
+				require.NoError(t, s.Add(t.Context(), id, "ext-bad-set-status", provider, tenant.Active))
+
+				err := s.SetStatus(t.Context(), id, tenant.Status(""))
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("Delete removes a tenant and is idempotent", func(t *testing.T) {

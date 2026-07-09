@@ -30,6 +30,15 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status tenant.Status) error {
+	if id == did.Undef {
+		return fmt.Errorf("tenant ID is required: %w", store.ErrInvalidArgument)
+	}
+	if provider == did.Undef {
+		return fmt.Errorf("tenant provider is required: %w", store.ErrInvalidArgument)
+	}
+	if !status.Valid() {
+		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO tenant (id, external_id, provider_id, status)
 		VALUES ($1, $2, $3, $4)
@@ -77,6 +86,9 @@ func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.
 }
 
 func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status) error {
+	if !status.Valid() {
+		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
+	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE tenant
 		SET status = $1, updated_at = $2

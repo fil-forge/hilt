@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -24,6 +25,13 @@ func New() *Store {
 func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
+	if id == did.Undef {
+		return fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
+	}
+	if region == "" {
+		return fmt.Errorf("provider region is required: %w", store.ErrInvalidArgument)
+	}
 
 	for _, p := range s.providers {
 		if p.ID == id || p.Region == region {

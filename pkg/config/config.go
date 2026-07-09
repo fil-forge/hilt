@@ -169,41 +169,52 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("upload.product_id", "did:web:hilt.forgery.network")
 }
 
-// BindEnvVars sets up environment variable binding with the HILT_ prefix.
+// flagBindings maps each config key to its serve-command flag name.
+var flagBindings = map[string]string{
+	"identity.key_file":                 "identity-key-file",
+	"identity.service_id":               "identity-service-id",
+	"server.host":                       "host",
+	"server.port":                       "port",
+	"storage.type":                      "storage",
+	"storage.postgres.dsn":              "postgres-dsn",
+	"storage.postgres.skip_migrations":  "skip-migrations",
+	"vault.type":                        "vault",
+	"vault.hashicorp.address":           "hashicorp-address",
+	"vault.hashicorp.mount":             "hashicorp-mount",
+	"vault.hashicorp.auth_method":       "hashicorp-auth-method",
+	"vault.hashicorp.token":             "hashicorp-token",
+	"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
+	"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
+	"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
+	"plc.directory":                     "plc-directory",
+	"auth.partner_key":                  "partner-key",
+	"upload.service_id":                 "upload-service-id",
+	"upload.service_url":                "upload-service-url",
+	"upload.product_id":                 "upload-product-id",
+	"upload.proofs":                     "upload-proofs",
+}
+
+// BindEnvVars sets up environment variable binding with the HILT_ prefix. Each
+// known config key is bound explicitly so env vars resolve on Unmarshal even when
+// no flag or config file provides the key (viper's AutomaticEnv alone does not
+// populate nested keys during Unmarshal) — this is what lets the `hilt client`
+// commands pick up e.g. HILT_IDENTITY_KEY_FILE.
 func BindEnvVars(v *viper.Viper) {
 	v.SetEnvPrefix("HILT")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	for key := range flagBindings {
+		// BindEnv derives the env name from the prefix + replacer (e.g.
+		// identity.key_file → HILT_IDENTITY_KEY_FILE); it only errors on an empty key.
+		_ = v.BindEnv(key)
+	}
 }
 
 // BindFlags binds known server flags from the flag set to their config keys, so
 // a flag set on the command line overrides env vars, the config file, and
 // defaults. Flags that are absent from the set are skipped.
 func BindFlags(v *viper.Viper, flags *pflag.FlagSet) error {
-	bindings := map[string]string{
-		"identity.key_file":                 "identity-key-file",
-		"identity.service_id":               "identity-service-id",
-		"server.host":                       "host",
-		"server.port":                       "port",
-		"storage.type":                      "storage",
-		"storage.postgres.dsn":              "postgres-dsn",
-		"storage.postgres.skip_migrations":  "skip-migrations",
-		"vault.type":                        "vault",
-		"vault.hashicorp.address":           "hashicorp-address",
-		"vault.hashicorp.mount":             "hashicorp-mount",
-		"vault.hashicorp.auth_method":       "hashicorp-auth-method",
-		"vault.hashicorp.token":             "hashicorp-token",
-		"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
-		"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
-		"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
-		"plc.directory":                     "plc-directory",
-		"auth.partner_key":                  "partner-key",
-		"upload.service_id":                 "upload-service-id",
-		"upload.service_url":                "upload-service-url",
-		"upload.product_id":                 "upload-product-id",
-		"upload.proofs":                     "upload-proofs",
-	}
-	for key, name := range bindings {
+	for key, name := range flagBindings {
 		if f := flags.Lookup(name); f != nil {
 			if err := v.BindPFlag(key, f); err != nil {
 				return fmt.Errorf("binding flag %q: %w", name, err)

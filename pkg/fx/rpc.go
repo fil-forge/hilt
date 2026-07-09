@@ -26,6 +26,7 @@ var RPCModule = fx.Module("rpc",
 		asUCANRoute(rpc.NewDeleteBucketHandler),
 		asUCANRoute(rpc.NewBucketInfoHandler),
 		asUCANRoute(rpc.NewListBucketsHandler),
+		asUCANRoute(rpc.NewAddProviderHandler),
 	),
 )
 
