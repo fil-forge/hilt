@@ -134,7 +134,7 @@ func Start(t *testing.T) *Network {
 	require.NoError(t, err)
 
 	// Admin client issues as Hilt's own identity (admin commands are self-issued).
-	admin, err := client.NewAdminClient(hiltDID, *hiltU, hiltIssuer, logger)
+	admin, err := client.NewAdminClient(hiltIssuer, *hiltU, logger)
 	require.NoError(t, err)
 
 	// The Ingot's Hilt client issues as the provider identity and carries the
