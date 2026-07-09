@@ -44,8 +44,9 @@ func TestNewUCANServer(t *testing.T) {
 	)
 	require.NoError(t, err)
 	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), upload)
-	srv := appfx.NewUCANServer(appfx.UCANServerParams{
+	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{
 		Identity: id,
+		Logger:   zap.NewNop(),
 		Routes: []server.Route{
 			rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),
 			rpc.NewCreateBucketHandler(zap.NewNop(), buckets),
@@ -55,5 +56,6 @@ func TestNewUCANServer(t *testing.T) {
 			rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New()),
 		},
 	})
+	require.NoError(t, err)
 	require.NotNil(t, srv)
 }

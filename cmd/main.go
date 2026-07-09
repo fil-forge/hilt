@@ -36,6 +36,7 @@ func main() {
 	// http server config
 	serveCmd.Flags().String("host", "127.0.0.1", "host to bind the server to")
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")
+	serveCmd.Flags().Bool("insecure-did-resolution", false, "resolve did:web DIDs over HTTP instead of HTTPS on the UCAN RPC server (insecure; development only)")
 
 	// storage config
 	serveCmd.Flags().String("storage", "postgres", "storage backend (memory or postgres)")
