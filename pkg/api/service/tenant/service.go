@@ -66,16 +66,16 @@ func New(
 // generates a rotatable did:plc key, publishes it, registers the tenant with the
 // upload service, and records it. created is false when an existing tenant is
 // returned (including the concurrent-create winner).
-func (s *Service) Provision(ctx context.Context, externalID, region string) (rec tenantstore.Record, created bool, err error) {
+func (s *Service) Provision(ctx context.Context, externalID, region string) (tenantstore.Record, bool, error) {
 	if region == "" {
 		return tenantstore.Record{}, false, ErrRegionRequired
 	}
 
 	// Idempotent: return the existing tenant if already provisioned.
-	if existing, lerr := s.tenants.GetByExternalID(ctx, externalID); lerr == nil {
+	if existing, err := s.tenants.GetByExternalID(ctx, externalID); err == nil {
 		return existing, false, nil
-	} else if !errors.Is(lerr, store.ErrRecordNotFound) {
-		return tenantstore.Record{}, false, fmt.Errorf("looking up tenant: %w", lerr)
+	} else if !errors.Is(err, store.ErrRecordNotFound) {
+		return tenantstore.Record{}, false, fmt.Errorf("looking up tenant: %w", err)
 	}
 
 	// Resolve the provider for the requested region.
@@ -142,7 +142,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (rec
 		return tenantstore.Record{}, false, fmt.Errorf("storing tenant: %w", err)
 	}
 
-	rec, err = s.tenants.Get(ctx, tenantID)
+	rec, err := s.tenants.Get(ctx, tenantID)
 	if err != nil {
 		return tenantstore.Record{}, false, fmt.Errorf("loading created tenant: %w", err)
 	}

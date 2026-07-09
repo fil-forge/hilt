@@ -30,7 +30,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const maxNameLength = 100
+const maxNameLength = 64
 
 // Service implements S3 access-key operations shared by the REST handlers.
 type Service struct {
