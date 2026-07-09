@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/fil-forge/hilt/internal/testutil"
@@ -102,6 +103,36 @@ func TestBucketStore(t *testing.T) {
 				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "shared-name"))
 				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, "shared-name")
 				require.ErrorIs(t, err, store.ErrRecordExists)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for undef bucket ID", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				err := s.Add(t.Context(), did.Undef, tenantID, "undef-id")
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for undef tenant", func(t *testing.T) {
+				err := s.Add(t.Context(), testutil.RandomDID(t), did.Undef, "undef-tenant")
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for invalid names", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				invalid := []string{
+					"",                      // empty
+					"ab",                    // too short
+					strings.Repeat("a", 64), // too long
+					"Invalid-Name",          // uppercase
+					"under_score",           // disallowed character
+					"-leading-hyphen",       // must start with letter or digit
+					"trailing-hyphen-",      // must end with letter or digit
+				}
+				for _, name := range invalid {
+					err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, name)
+					require.ErrorIs(t, err, store.ErrInvalidArgument, "name %q", name)
+				}
 			})
 
 			t.Run("ListByTenant isolates and paginates by tenant", func(t *testing.T) {

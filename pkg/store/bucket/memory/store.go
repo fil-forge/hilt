@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -26,6 +27,16 @@ func New() *Store {
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string) error {
+	if id == did.Undef {
+		return fmt.Errorf("bucket ID is required: %w", store.ErrInvalidArgument)
+	}
+	if tenant == did.Undef {
+		return fmt.Errorf("bucket tenant is required: %w", store.ErrInvalidArgument)
+	}
+	if err := bucket.ValidateName(name); err != nil {
+		return err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
+	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -71,12 +72,13 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	deps.tenantID, deps.bucketID = addTenant(t, deps, "tenant-1", "bucket-a")
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets, deps.delegations, deps.vault)
 	e := echo.New()
 	for _, r := range []api.Route{
-		api.NewCreateAccessKeyHandler(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets, deps.delegations, deps.vault),
-		api.NewListAccessKeysHandler(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets),
-		api.NewGetAccessKeyHandler(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets),
-		api.NewDeleteAccessKeyHandler(zap.NewNop(), deps.tenants, deps.accessKeys, deps.delegations, deps.vault),
+		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
+		api.NewListAccessKeysHandler(zap.NewNop(), svc),
+		api.NewGetAccessKeyHandler(zap.NewNop(), svc),
+		api.NewDeleteAccessKeyHandler(zap.NewNop(), svc),
 	} {
 		e.Add(r.Method, r.Path, r.Handler)
 	}

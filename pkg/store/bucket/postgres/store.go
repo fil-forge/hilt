@@ -30,6 +30,15 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string) error {
+	if id == did.Undef {
+		return fmt.Errorf("bucket ID is required: %w", store.ErrInvalidArgument)
+	}
+	if tenant == did.Undef {
+		return fmt.Errorf("bucket tenant is required: %w", store.ErrInvalidArgument)
+	}
+	if err := bucket.ValidateName(name); err != nil {
+		return err
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO bucket (id, tenant_id, name)
 		VALUES ($1, $2, $3)

@@ -30,6 +30,12 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
+	if id == did.Undef {
+		return fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
+	}
+	if region == "" {
+		return fmt.Errorf("provider region is required: %w", store.ErrInvalidArgument)
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO provider (id, region)
 		VALUES ($1, $2)

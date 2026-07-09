@@ -141,6 +141,30 @@ func TestDelegationStore(t *testing.T) {
 				require.Len(t, pagePowerline.Results, 1, "powerline delegation should remain")
 			})
 
+			t.Run("PutBatch returns ErrInvalidArgument for a nil delegation", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				dlg := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+
+				err := s.PutBatch(t.Context(), []ucan.Delegation{dlg, nil})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+				// Nothing from the batch is stored.
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Empty(t, page.Results)
+			})
+
+			t.Run("DeleteBySubject returns ErrInvalidArgument for undef subject", func(t *testing.T) {
+				err := s.DeleteBySubject(t.Context(), did.Undef)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("ProofChain returns ErrInvalidArgument for undef subject", func(t *testing.T) {
+				_, _, err := s.ProofChain(t.Context(), testutil.RandomDID(t), command.MustParse("/content/retrieve"), did.Undef)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
 			t.Run("ListByAudience paginates results", func(t *testing.T) {
 				audience := testutil.RandomDID(t)
 				for range 5 {

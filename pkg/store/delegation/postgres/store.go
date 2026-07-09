@@ -36,6 +36,10 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) error {
+	// Validate the whole batch before storing anything.
+	if slices.Contains(delegations, nil) {
+		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -146,7 +150,7 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 
 func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
 	if !subject.Defined() {
-		return errors.New("cannot delete powerline delegations")
+		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
 	}
 	if _, err := s.pool.Exec(ctx, `DELETE FROM delegation WHERE subject = $1`, subject.String()); err != nil {
 		return fmt.Errorf("deleting delegations by subject: %w", err)
@@ -163,7 +167,7 @@ func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
 // root-first, mirroring the in-memory store's use of libforge's ProofChain.
 func (s *Store) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
 	if !sub.Defined() {
-		return nil, nil, fmt.Errorf("missing proof chain subject")
+		return nil, nil, fmt.Errorf("missing proof chain subject: %w", store.ErrInvalidArgument)
 	}
 
 	// The CTE accumulates encoded payloads (datas) and link ids along each path.

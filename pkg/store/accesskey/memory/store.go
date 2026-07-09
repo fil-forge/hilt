@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -23,6 +24,19 @@ func New() *Store {
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error {
+	if id == did.Undef {
+		return fmt.Errorf("access key ID is required: %w", store.ErrInvalidArgument)
+	}
+	if tenant == did.Undef {
+		return fmt.Errorf("access key tenant is required: %w", store.ErrInvalidArgument)
+	}
+	if name == "" {
+		return fmt.Errorf("access key name is required: %w", store.ErrInvalidArgument)
+	}
+	if slices.Contains(buckets, did.Undef) {
+		return fmt.Errorf("access key bucket DIDs must be defined: %w", store.ErrInvalidArgument)
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

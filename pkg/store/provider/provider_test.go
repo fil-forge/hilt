@@ -10,6 +10,7 @@ import (
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/libforge/testutil"
+	"github.com/fil-forge/ucantone/did"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,6 +65,16 @@ func TestProviderStore(t *testing.T) {
 			t.Run("GetByRegion returns ErrRecordNotFound for unknown region", func(t *testing.T) {
 				_, err := s.GetByRegion(t.Context(), "eu-west-99")
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for undef provider ID", func(t *testing.T) {
+				err := s.Add(t.Context(), did.Undef, "us-west-1")
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for empty region", func(t *testing.T) {
+				err := s.Add(t.Context(), testutil.RandomDID(t), "")
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("Add returns ErrRecordExists for duplicate id", func(t *testing.T) {
