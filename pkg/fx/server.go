@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/fil-forge/hilt/pkg/api"
+	"github.com/fil-forge/hilt/pkg/build"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/echo/middleware"
 	"github.com/fil-forge/libforge/identity"
@@ -44,9 +45,7 @@ func NewEchoServer(p ServerParams) *echo.Echo {
 	e.Use(echomiddleware.Recover())
 	e.Use(middleware.RequestLogger(p.Logger))
 
-	e.GET("/", func(c echo.Context) error {
-		return c.String(http.StatusOK, "hello world")
-	})
+	e.GET("/", serverInfoHandler(p.Identity))
 	e.GET("/health", func(c echo.Context) error {
 		return c.String(http.StatusOK, "OK")
 	})
@@ -100,6 +99,37 @@ func RegisterServerLifecycle(
 			return e.Shutdown(ctx)
 		},
 	})
+}
+
+// ServerInfo identifies the service and its build, served on GET /.
+type ServerInfo struct {
+	ID    string    `json:"id"`
+	Build BuildInfo `json:"build"`
+}
+
+// BuildInfo is the version and source repository of the running build.
+type BuildInfo struct {
+	Version string `json:"version"`
+	Repo    string `json:"repo"`
+}
+
+// serverInfoHandler serves the service DID and build info: JSON when requested
+// via the Accept header, otherwise a plain-text banner.
+func serverInfoHandler(id identity.Identity) echo.HandlerFunc {
+	info := ServerInfo{
+		ID: id.DID().String(),
+		Build: BuildInfo{
+			Version: build.Version,
+			Repo:    "https://github.com/fil-forge/hilt",
+		},
+	}
+	return func(c echo.Context) error {
+		if strings.Contains(c.Request().Header.Get("Accept"), "application/json") {
+			return c.JSON(http.StatusOK, info)
+		}
+		banner := fmt.Sprintf("🗡️ hilt %s\n- %s\n- %s", info.Build.Version, info.Build.Repo, info.ID)
+		return c.String(http.StatusOK, banner)
+	}
 }
 
 // didDocumentHandler serves the service identity's DID document for did:web
