@@ -15,10 +15,13 @@ func TestDIDDocumentRoute(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Logger: zap.NewNop()})
+	require.NoError(t, err)
+
 	e := appfx.NewEchoServer(appfx.ServerParams{
 		Logger:     zap.NewNop(),
 		Identity:   id,
-		UCANServer: appfx.NewUCANServer(appfx.UCANServerParams{Identity: id}),
+		UCANServer: ucanSrv,
 	})
 
 	// Public route: reachable without a partner-key bearer token.

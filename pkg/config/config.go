@@ -72,6 +72,11 @@ type IdentityConfig struct {
 type ServerConfig struct {
 	Host string `mapstructure:"host"`
 	Port int    `mapstructure:"port"`
+	// InsecureDIDResolution resolves did:web DIDs over HTTP instead of HTTPS on
+	// the UCAN RPC server. This is insecure and intended only for local
+	// development against services that serve their DID document over plain
+	// HTTP; it must never be enabled in production.
+	InsecureDIDResolution bool `mapstructure:"insecure_did_resolution"`
 }
 
 // AuthConfig holds authentication settings for the Tenant API.
@@ -149,6 +154,7 @@ type PostgresConfig struct {
 func SetDefaults(v *viper.Viper) {
 	v.SetDefault("server.host", "127.0.0.1")
 	v.SetDefault("server.port", 8080)
+	v.SetDefault("server.insecure_did_resolution", false)
 	v.SetDefault("log.level", "info")
 
 	v.SetDefault("storage.type", StorageTypePostgres)
@@ -175,6 +181,7 @@ var flagBindings = map[string]string{
 	"identity.service_id":               "identity-service-id",
 	"server.host":                       "host",
 	"server.port":                       "port",
+	"server.insecure_did_resolution":    "insecure-did-resolution",
 	"storage.type":                      "storage",
 	"storage.postgres.dsn":              "postgres-dsn",
 	"storage.postgres.skip_migrations":  "skip-migrations",
