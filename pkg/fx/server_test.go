@@ -23,15 +23,21 @@ func TestServerInfoRoute(t *testing.T) {
 		UCANServer: appfx.NewUCANServer(appfx.UCANServerParams{Identity: id}),
 	})
 
-	t.Run("returns JSON when requested via Accept", func(t *testing.T) {
+	t.Run("returns JSON when requested via Accept, case-insensitively", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept", "Application/JSON")
 		rec := httptest.NewRecorder()
 		e.ServeHTTP(rec, req)
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
-		var info appfx.ServerInfo
+		var info struct {
+			ID    string `json:"id"`
+			Build struct {
+				Version string `json:"version"`
+				Repo    string `json:"repo"`
+			} `json:"build"`
+		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &info))
 		require.Equal(t, id.DID().String(), info.ID)
 		require.Equal(t, build.Version, info.Build.Version)
