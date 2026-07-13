@@ -66,13 +66,6 @@ func AuthorizeRequest(
 	}
 	accessKeyID := authz.AccessKey.ID
 
-	// Authorize resolved and scope-checked the addressed bucket; the gateway path
-	// only handles requests that operate on a bucket.
-	if authz.Bucket == nil {
-		return nil, nil, fmt.Errorf("request does not address a bucket")
-	}
-	b := authz.Bucket
-
 	// Authorize also verified the access key holds the operation's permission; the
 	// permission drives which Forge commands to re-delegate.
 	perm := authz.Operation.Permission()
@@ -113,24 +106,33 @@ func AuthorizeRequest(
 		}
 	}
 
+	var bucketID *did.DID
+	if authz.Bucket != nil {
+		bucketID = &authz.Bucket.ID
+	}
+
 	proofSet := map[cid.Cid][]cid.Cid{}
-	var blocks []ucan.Delegation
+	var delegations []ucan.Delegation
 	for _, cmd := range s3perm.CommandsFor(perm) {
-		reDel, err := delegation.Delegate(akIssuer, issuer, b.ID, cmd, delegation.WithExpiration(exp))
+		// If the bucket is nil then there _should_ be no commands returned.
+		if bucketID == nil {
+			return nil, nil, fmt.Errorf("delegating %s: missing bucket", cmd)
+		}
+		reDel, err := delegation.Delegate(akIssuer, issuer, *bucketID, cmd, delegation.WithExpiration(exp))
 		if err != nil {
 			return nil, nil, fmt.Errorf("delegating %s: %w", cmd, err)
 		}
 		proofSet[reDel.Link()] = []cid.Cid{reDel.Link()}
-		blocks = append(blocks, reDel)
+		delegations = append(delegations, reDel)
 	}
 
 	logger.Debug("authorized request",
-		zap.Stringer("bucket", b.ID),
+		zap.Stringer("bucket", bucketID),
 		zap.String("permission", perm),
 		zap.Int("delegations", len(proofSet)),
 	)
 	return &s3req.AuthorizeOK{
-		Bucket: b.ID,
+		Bucket: bucketID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
 			accessKeyID: authz.AccessKey.Permissions,
 		}},
@@ -138,7 +140,7 @@ func AuthorizeRequest(
 			accessKeyID: {{Kind: kind, Data: key}},
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
-	}, blocks, nil
+	}, delegations, nil
 }
 
 // nextUTCMidnight returns 00:00:00 UTC of the day after t — when a date-scoped

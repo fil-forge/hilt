@@ -114,10 +114,10 @@ func TestCreate(t *testing.T) {
 
 		rec, err := buckets.GetByName(ctx, bucketName)
 		require.NoError(t, err)
-		require.Equal(t, rec.ID, ok.Bucket)
+		require.Equal(t, &rec.ID, ok.Bucket)
 		require.True(t, sprue.provCalled)
 		require.Equal(t, tenantID, sprue.provAccount)
-		require.Equal(t, ok.Bucket, sprue.provSpace)
+		require.Equal(t, *ok.Bucket, sprue.provSpace)
 		require.Len(t, ok.Delegations.Entries, 1)
 		require.Len(t, blocks, 2) // bucket→tenant root + tenant→access-key powerline
 	})

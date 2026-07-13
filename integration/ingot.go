@@ -134,13 +134,16 @@ func (m *mockIngot) putObject(w http.ResponseWriter, r *http.Request, bucket, ob
 // bucket->tenant->accessKey chain fetched from /s3/bucket/info. The invocation is
 // issued by Ingot with the bucket as subject.
 func (m *mockIngot) storeBlob(ctx context.Context, bucket string, auth *s3req.AuthorizeOK, authCtr ucan.Container, body []byte) error {
-	bucketDID := auth.Bucket
-	accessKeyDID, err := singleAccessKey(auth)
+	bucketID := auth.Bucket
+	if bucketID == nil {
+		return fmt.Errorf("missing bucket identifier")
+	}
+	accessKeyID, err := singleAccessKey(auth)
 	if err != nil {
 		return err
 	}
 
-	_, infoCtr, err := m.hilt.BucketInfo(ctx, bucket, accessKeyDID)
+	_, infoCtr, err := m.hilt.BucketInfo(ctx, bucket, accessKeyID)
 	if err != nil {
 		return fmt.Errorf("fetching bucket info: %w", err)
 	}
@@ -150,19 +153,19 @@ func (m *mockIngot) storeBlob(ctx context.Context, bucket string, auth *s3req.Au
 	merged := container.New(container.WithDelegations(
 		append(authCtr.Delegations(), infoCtr.Delegations()...)...))
 	proofs, links, err := ucanlib.NewContainerProofStore(merged).
-		ProofChain(ctx, m.ingotIssuer.DID(), blobcmds.Add.Command, bucketDID)
+		ProofChain(ctx, m.ingotIssuer.DID(), blobcmds.Add.Command, *bucketID)
 	if err != nil {
 		return fmt.Errorf("building /blob/add proof chain: %w", err)
 	}
 	if len(proofs) == 0 {
-		return fmt.Errorf("no proof chain to invoke /blob/add on %s", bucketDID)
+		return fmt.Errorf("no proof chain to invoke /blob/add on %s", *bucketID)
 	}
 
 	digest, err := multihash.Sum(body, multihash.SHA2_256, -1)
 	if err != nil {
 		return fmt.Errorf("hashing body: %w", err)
 	}
-	inv, err := blobcmds.Add.Invoke(m.ingotIssuer, bucketDID,
+	inv, err := blobcmds.Add.Invoke(m.ingotIssuer, *bucketID,
 		&blobcmds.AddArguments{Blob: blobcmds.Blob{Digest: digest, Size: uint64(len(body))}},
 		invocation.WithAudience(m.sprueID),
 		invocation.WithProofs(links...),

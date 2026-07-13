@@ -43,7 +43,7 @@ func rootProofs[A, O binding.CBORValue](t *testing.T, cmd binding.Binding[A, O],
 func TestClientAuthorizeRequest(t *testing.T) {
 	hilt := testutil.RandomIssuer(t)
 	ingot := testutil.RandomIssuer(t)
-	bucketDID := testutil.RandomDID(t)
+	bucketID := testutil.RandomDID(t)
 
 	// A delegation Hilt attaches to the response for the caller to extract.
 	attached, err := s3req.Authorize.Delegate(hilt, ingot.DID(), hilt.DID())
@@ -57,14 +57,14 @@ func TestClientAuthorizeRequest(t *testing.T) {
 			if err := res.SetMetadata(container.New(container.WithDelegations(attached))); err != nil {
 				return err
 			}
-			return res.SetSuccess(&s3req.AuthorizeOK{Bucket: bucketDID})
+			return res.SetSuccess(&s3req.AuthorizeOK{Bucket: &bucketID})
 		}))
 
 	c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3req.Authorize, hilt, ingot.DID()))
 	ok, ctr, err := c.AuthorizeRequest(t.Context(), s3.Request{Method: "GET", URL: "https://s3.fil.one/bucket/key"})
 	require.NoError(t, err)
 
-	require.Equal(t, bucketDID, ok.Bucket)
+	require.Equal(t, &bucketID, ok.Bucket)
 	require.Equal(t, hilt.DID(), gotSub)
 	require.Equal(t, hilt.DID(), gotAud)
 	_, found := ctr.Delegation(attached.Link())
@@ -74,7 +74,7 @@ func TestClientAuthorizeRequest(t *testing.T) {
 func TestClientCreateBucket(t *testing.T) {
 	hilt := testutil.RandomIssuer(t)
 	ingot := testutil.RandomIssuer(t)
-	bucketDID := testutil.RandomDID(t)
+	bucketID := testutil.RandomDID(t)
 
 	attached, err := s3bkt.Create.Delegate(hilt, ingot.DID(), hilt.DID())
 	require.NoError(t, err)
@@ -85,14 +85,14 @@ func TestClientCreateBucket(t *testing.T) {
 			if err := res.SetMetadata(container.New(container.WithDelegations(attached))); err != nil {
 				return err
 			}
-			return res.SetSuccess(&s3req.AuthorizeOK{Bucket: bucketDID})
+			return res.SetSuccess(&s3req.AuthorizeOK{Bucket: &bucketID})
 		}))
 
 	c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Create, hilt, ingot.DID()))
 	ok, ctr, err := c.CreateBucket(t.Context(), s3.Request{Method: "PUT", URL: "https://s3.fil.one/bucket"})
 	require.NoError(t, err)
 
-	require.Equal(t, bucketDID, ok.Bucket)
+	require.Equal(t, &bucketID, ok.Bucket)
 	_, found := ctr.Delegation(attached.Link())
 	require.True(t, found)
 }
@@ -100,8 +100,8 @@ func TestClientCreateBucket(t *testing.T) {
 func TestClientBucketInfo(t *testing.T) {
 	hilt := testutil.RandomIssuer(t)
 	ingot := testutil.RandomIssuer(t)
-	bucketDID := testutil.RandomDID(t)
-	akDID := testutil.RandomDID(t)
+	bucketID := testutil.RandomDID(t)
+	accessKeyID := testutil.RandomDID(t)
 
 	attached, err := s3bkt.Info.Delegate(hilt, ingot.DID(), hilt.DID())
 	require.NoError(t, err)
@@ -114,16 +114,16 @@ func TestClientBucketInfo(t *testing.T) {
 			if err := res.SetMetadata(container.New(container.WithDelegations(attached))); err != nil {
 				return err
 			}
-			return res.SetSuccess(&s3bkt.InfoOK{ID: bucketDID})
+			return res.SetSuccess(&s3bkt.InfoOK{ID: bucketID})
 		}))
 
 	c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Info, hilt, ingot.DID()))
-	ok, ctr, err := c.BucketInfo(t.Context(), "mybucket", akDID)
+	ok, ctr, err := c.BucketInfo(t.Context(), "mybucket", accessKeyID)
 	require.NoError(t, err)
 
-	require.Equal(t, bucketDID, ok.ID)
+	require.Equal(t, bucketID, ok.ID)
 	require.Equal(t, "mybucket", gotArgs.Name)
-	require.Equal(t, akDID, gotArgs.AccessKey)
+	require.Equal(t, accessKeyID, gotArgs.AccessKey)
 	_, found := ctr.Delegation(attached.Link())
 	require.True(t, found)
 }
