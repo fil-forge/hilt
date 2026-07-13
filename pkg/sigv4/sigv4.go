@@ -256,16 +256,18 @@ func DeriveKey(req *SignedRequest, secretAccessKey string) ([]byte, error) {
 const (
 	// maxPresignExpiry is AWS's upper bound on a presigned URL's validity window.
 	maxPresignExpiry = 7 * 24 * 60 * 60 // 7 days, in seconds
-	// maxClockSkew is the tolerance applied to a header-authenticated request's
-	// X-Amz-Date (AWS rejects beyond this as RequestTimeTooSkewed).
-	maxClockSkew = 15 * time.Minute
+	// MaxClockSkew is the tolerance applied to a header-authenticated request's
+	// X-Amz-Date (AWS rejects beyond this as RequestTimeTooSkewed). Exported
+	// because delegations issued for a date-scoped key must outlive the key's
+	// date window by this tolerance (see pkg/rpc).
+	MaxClockSkew = 15 * time.Minute
 )
 
 // ValidateTimeBounds checks that the request is still valid at now, bounding
 // signature replay. For presigned requests it enforces the
 // [signedAt, signedAt + X-Amz-Expires] window (and a 7-day cap on X-Amz-Expires).
 // For header-authenticated requests (no X-Amz-Expires) it enforces an X-Amz-Date
-// clock-skew window of ±maxClockSkew.
+// clock-skew window of ±MaxClockSkew.
 func ValidateTimeBounds(req *SignedRequest, now time.Time) error {
 	signedAt, err := time.Parse(amzDateFormat, req.amzDate)
 	if err != nil {
@@ -273,7 +275,7 @@ func ValidateTimeBounds(req *SignedRequest, now time.Time) error {
 	}
 
 	if !req.presigned {
-		if now.Sub(signedAt).Abs() > maxClockSkew {
+		if now.Sub(signedAt).Abs() > MaxClockSkew {
 			return fmt.Errorf("request time %s is outside the allowed clock skew", signedAt.Format(time.RFC3339))
 		}
 		return nil

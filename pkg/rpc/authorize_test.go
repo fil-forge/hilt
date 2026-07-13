@@ -111,10 +111,12 @@ func TestAuthorizeRequest(t *testing.T) {
 		exp := reDel.Expiration()
 		require.NotNil(t, exp)
 		now := time.Now().Unix()
-		// Expires at the next UTC midnight: a day boundary within the next 24h.
-		require.Zero(t, int64(*exp)%86400, "expiry should be a UTC midnight")
+		// Expires at the next UTC midnight plus the max clock skew, so the gateway
+		// can still enact requests signed just before the key's date rolls over.
+		skew := int64(sigv4.MaxClockSkew / time.Second)
+		require.Zero(t, (int64(*exp)-skew)%86400, "expiry should be a UTC midnight plus the max clock skew")
 		require.Greater(t, int64(*exp), now)
-		require.LessOrEqual(t, int64(*exp), now+86400)
+		require.LessOrEqual(t, int64(*exp), now+86400+skew)
 
 		// The delegations map keys the issued delegation to its own CID (the
 		// initial-implementation proof chain).

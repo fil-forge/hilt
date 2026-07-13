@@ -49,8 +49,8 @@ func NewAuthorizeRequestHandler(
 
 // AuthorizeRequest authenticates the S3 request (which resolves and scope-checks
 // the addressed bucket and the access key's permission for the action), derives the
-// verification key, and mints delegations for the action's Forge commands to the
-// invocation issuer (TTL ≤ 24h). It returns the result and the delegation blocks to
+// verification key, and issues delegations for the action's Forge commands to the
+// invocation issuer (TTL ≤ 24h + clock skew). It returns the result and the delegation blocks to
 // attach to the response. It is factored out of the handler so it can be unit
 // tested without constructing a UCAN invocation.
 func AuthorizeRequest(
@@ -102,9 +102,11 @@ func AuthorizeRequest(
 	// root and is unusable — harmless. The gateway obtains the chain to the
 	// access key via `/s3/bucket/info`.
 	akIssuer := multikey.NewIssuer(accessKeyID, signer)
-	// Expire when the derived key does: 00:00:00 UTC of the following day (≤24h,
-	// satisfying the RFC TTL), capped to the access key's own expiry if sooner.
-	exp := ucan.UnixTimestamp(nextUTCMidnight(time.Now()).Unix())
+	// Expire when the derived key does — 00:00:00 UTC of the following day — plus
+	// the max clock skew, so the gateway can still enact a request signed just
+	// before midnight but received within the skew window after it. Capped to the
+	// access key's own expiry if sooner.
+	exp := ucan.UnixTimestamp(nextUTCMidnight(time.Now()).Add(sigv4.MaxClockSkew).Unix())
 	if authz.AccessKey.ExpiresAt != nil {
 		if capExp := authz.AccessKey.ExpiresAt.Unix(); capExp < int64(exp) {
 			exp = ucan.UnixTimestamp(capExp)
