@@ -17,10 +17,13 @@ func TestServerInfoRoute(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
+	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id})
+	require.NoError(t, err)
+
 	e := appfx.NewEchoServer(appfx.ServerParams{
 		Logger:     zap.NewNop(),
 		Identity:   id,
-		UCANServer: appfx.NewUCANServer(appfx.UCANServerParams{Identity: id}),
+		UCANServer: srv,
 	})
 
 	t.Run("returns JSON when requested via Accept, case-insensitively", func(t *testing.T) {
