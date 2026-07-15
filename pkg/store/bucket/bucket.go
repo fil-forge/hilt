@@ -49,6 +49,9 @@ type ListConfig struct {
 	// Names optionally restricts results to buckets with these names. When empty,
 	// no name filtering is applied. Must not be combined with IDs.
 	Names []string
+	// Prefix optionally restricts results to buckets whose name starts with it
+	// (matched literally). When empty, no prefix filtering is applied.
+	Prefix string
 }
 
 // ListOption configures a [ListConfig].
@@ -66,12 +69,20 @@ func WithNames(names ...string) ListOption {
 	return func(c *ListConfig) { c.Names = names }
 }
 
+// WithPrefix restricts results to buckets whose name starts with the given
+// prefix (matched literally).
+func WithPrefix(prefix string) ListOption {
+	return func(c *ListConfig) { c.Prefix = prefix }
+}
+
 // WithLimit sets the maximum number of results per page.
 func WithLimit(limit int) ListOption {
 	return func(c *ListConfig) { c.Limit = &limit }
 }
 
-// WithCursor sets the page cursor (the bucket ID after which to start).
+// WithCursor sets the page cursor (the bucket name after which to start).
+// Results resume strictly after it, whether or not a bucket with that exact
+// name exists.
 func WithCursor(cursor string) ListOption {
 	return func(c *ListConfig) { c.Cursor = &cursor }
 }
@@ -85,8 +96,11 @@ type Store interface {
 	// [store.ErrRecordNotFound] if no bucket exists with the specified name.
 	GetByName(ctx context.Context, name string) (Record, error)
 	// ListByTenant retrieves a paginated list of bucket records for a given
-	// tenant, optionally filtered to a set of bucket IDs (see [WithIDs]) or names
-	// (see [WithNames]). Supplying both filters returns [ErrConflictingFilters].
+	// tenant in lexicographic name order, optionally filtered to a set of bucket
+	// IDs (see [WithIDs]), names (see [WithNames]) or a name prefix (see
+	// [WithPrefix]). Supplying both IDs and Names returns
+	// [ErrConflictingFilters]. The cursor of a truncated page is the name of the
+	// last record it includes (see [WithCursor]).
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) (store.Page[Record], error)
 	// Delete removes the bucket record for a given ID. It is idempotent:
 	// deleting an absent record returns nil.

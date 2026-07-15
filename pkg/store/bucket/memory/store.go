@@ -105,25 +105,24 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 		if nameFilter != nil && !nameFilter[b.Name] {
 			continue
 		}
+		if cfg.Prefix != "" && !strings.HasPrefix(b.Name, cfg.Prefix) {
+			continue
+		}
+		// Resume strictly after the cursor name, whether or not a bucket with
+		// that exact name exists.
+		if cfg.Cursor != nil && b.Name <= *cfg.Cursor {
+			continue
+		}
 		recs = append(recs, b)
 	}
 	slices.SortFunc(recs, func(a, b bucket.Record) int {
-		return strings.Compare(a.ID.String(), b.ID.String())
+		return strings.Compare(a.Name, b.Name)
 	})
-
-	if cfg.Cursor != nil {
-		for i, r := range recs {
-			if r.ID.String() == *cfg.Cursor {
-				recs = recs[i+1:]
-				break
-			}
-		}
-	}
 
 	var cursor *string
 	if cfg.Limit != nil && len(recs) > *cfg.Limit {
 		recs = recs[:*cfg.Limit]
-		last := recs[len(recs)-1].ID.String()
+		last := recs[len(recs)-1].Name
 		cursor = &last
 	}
 	return store.Page[bucket.Record]{Cursor: cursor, Results: recs}, nil

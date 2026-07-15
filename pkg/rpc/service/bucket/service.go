@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"time"
 
 	client "github.com/fil-forge/hilt/pkg/client"
@@ -31,6 +33,10 @@ import (
 	"github.com/ipfs/go-cid"
 	"go.uber.org/zap"
 )
+
+// maxListBuckets is the S3 ListBuckets max-buckets ceiling, also used as the
+// page size when the parameter is absent.
+const maxListBuckets = 10000
 
 // UploadClient is the subset of the upload service (Sprue) the bucket operations
 // need. It is satisfied by [*client.UploadClient]; the interface lets the logic be
@@ -262,7 +268,8 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 
 // List authorizes the request (which also verifies the access key holds the
 // operation's permission), confirms the request is a ListBuckets operation, and
-// returns the tenant's buckets.
+// returns one page of the tenant's buckets in name order, honouring the
+// request's prefix, continuation-token and max-buckets parameters.
 func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArguments) (*s3bkt.ListOK, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -274,25 +281,47 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 		return nil, fmt.Errorf("%w: %s", ErrOperationMismatch, authz.Operation)
 	}
 
-	recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucketstore.Record], error) {
-		var listOpts []bucketstore.ListOption
-		if opts.Cursor != nil {
-			listOpts = append(listOpts, bucketstore.WithCursor(*opts.Cursor))
+	// The ListBuckets options ride as query parameters on the signed URL, which
+	// the verified signature covers in full.
+	u, err := url.Parse(args.Request.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing request URL: %w", err)
+	}
+	query := u.Query()
+	prefix := query.Get("prefix")
+	token := query.Get("continuation-token")
+	max := maxListBuckets
+	if v := query.Get("max-buckets"); v != "" {
+		max, err = strconv.Atoi(v)
+		if err != nil || max < 1 || max > maxListBuckets {
+			return nil, fmt.Errorf("%w: max-buckets: %q", ErrInvalidArgument, v)
 		}
-		return s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...)
-	})
+	}
+
+	listOpts := []bucketstore.ListOption{bucketstore.WithLimit(max)}
+	if prefix != "" {
+		listOpts = append(listOpts, bucketstore.WithPrefix(prefix))
+	}
+	if token != "" {
+		listOpts = append(listOpts, bucketstore.WithCursor(token))
+	}
+	page, err := s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("listing buckets: %w", err)
 	}
 
 	out := &s3bkt.ListOK{
-		Buckets: make([]s3bkt.Bucket, 0, len(recs)),
+		Buckets: make([]s3bkt.Bucket, 0, len(page.Results)),
+		Prefix:  prefix,
 		Owner: s3bkt.Owner{
 			DisplayName: "",
 			ID:          authz.Tenant.ID.String(),
 		},
 	}
-	for _, b := range recs {
+	if page.Cursor != nil {
+		out.ContinuationToken = *page.Cursor
+	}
+	for _, b := range page.Results {
 		out.Buckets = append(out.Buckets, s3bkt.Bucket{
 			ARN:          "arn:aws:s3:::" + b.Name,
 			Region:       authz.Region,

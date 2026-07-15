@@ -3,6 +3,7 @@ package bucket_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -264,8 +265,20 @@ func TestList(t *testing.T) {
 		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}), buckets, tenantID
 	}
 
-	listArgs := func() *s3bkt.ListArguments {
-		return &s3bkt.ListArguments{Request: presign(t, signer, "GET", "https://"+region+".s3.fil.one/?x-id=ListBuckets", region)}
+	// listArgs presigns a ListBuckets request; extra ListBuckets query params
+	// (prefix, max-buckets, continuation-token) are appended before signing so
+	// the signature covers them.
+	listArgs := func(params ...string) *s3bkt.ListArguments {
+		url := strings.Join(append([]string{"https://" + region + ".s3.fil.one/?x-id=ListBuckets"}, params...), "&")
+		return &s3bkt.ListArguments{Request: presign(t, signer, "GET", url, region)}
+	}
+
+	bucketNames := func(ok *s3bkt.ListOK) []string {
+		names := make([]string, 0, len(ok.Buckets))
+		for _, b := range ok.Buckets {
+			names = append(names, b.Name)
+		}
+		return names
 	}
 
 	t.Run("lists the tenant's buckets", func(t *testing.T) {
@@ -274,7 +287,46 @@ func TestList(t *testing.T) {
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bravo"))
 		ok, err := svc.List(ctx, providerID, listArgs())
 		require.NoError(t, err)
-		require.Len(t, ok.Buckets, 2)
+		require.Equal(t, []string{"alpha", "bravo"}, bucketNames(ok))
+		require.Empty(t, ok.ContinuationToken)
+		require.Empty(t, ok.Prefix)
+	})
+
+	t.Run("filters by prefix and echoes it", func(t *testing.T) {
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"})
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "alpha"))
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "apple"))
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bravo"))
+		ok, err := svc.List(ctx, providerID, listArgs("prefix=a"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"alpha", "apple"}, bucketNames(ok))
+		require.Equal(t, "a", ok.Prefix)
+		require.Empty(t, ok.ContinuationToken)
+	})
+
+	t.Run("paginates with max-buckets and continuation-token", func(t *testing.T) {
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"})
+		for _, name := range []string{"charlie", "alpha", "bravo"} {
+			require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, name))
+		}
+
+		ok, err := svc.List(ctx, providerID, listArgs("max-buckets=2"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"alpha", "bravo"}, bucketNames(ok))
+		require.Equal(t, "bravo", ok.ContinuationToken)
+
+		ok, err = svc.List(ctx, providerID, listArgs("max-buckets=2", "continuation-token="+ok.ContinuationToken))
+		require.NoError(t, err)
+		require.Equal(t, []string{"charlie"}, bucketNames(ok))
+		require.Empty(t, ok.ContinuationToken)
+	})
+
+	t.Run("rejects an invalid max-buckets", func(t *testing.T) {
+		svc, _, _ := setup(t, []string{"s3:ListAllMyBuckets"})
+		for _, param := range []string{"max-buckets=abc", "max-buckets=0", "max-buckets=-1", "max-buckets=10001"} {
+			_, err := svc.List(ctx, providerID, listArgs(param))
+			require.ErrorIs(t, err, bucketsvc.ErrInvalidArgument, "param %q", param)
+		}
 	})
 
 	t.Run("rejects a key without the list permission", func(t *testing.T) {

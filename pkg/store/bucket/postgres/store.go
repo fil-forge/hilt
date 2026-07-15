@@ -103,11 +103,17 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 		args = append(args, cfg.Names)
 		query += fmt.Sprintf(" AND name = ANY($%d)", len(args))
 	}
+	if cfg.Prefix != "" {
+		// starts_with matches literally — a LIKE pattern would treat %/_ in the
+		// caller-supplied prefix as wildcards.
+		args = append(args, cfg.Prefix)
+		query += fmt.Sprintf(" AND starts_with(name, $%d)", len(args))
+	}
 	if cfg.Cursor != nil {
 		args = append(args, *cfg.Cursor)
-		query += fmt.Sprintf(" AND id > $%d", len(args))
+		query += fmt.Sprintf(" AND name > $%d", len(args))
 	}
-	query += ` ORDER BY id ASC LIMIT $2`
+	query += ` ORDER BY name ASC LIMIT $2`
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -129,7 +135,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 
 	var cursor *string
 	if len(recs) > limit {
-		last := recs[limit-1].ID.String()
+		last := recs[limit-1].Name
 		cursor = &last
 		recs = recs[:limit]
 	}
