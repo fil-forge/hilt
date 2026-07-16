@@ -57,7 +57,8 @@ func bucketFailure(res failer, err error) error {
 		errors.Is(err, bucketsvc.ErrBucketExists),
 		errors.Is(err, bucketsvc.ErrBucketNotEmpty),
 		errors.Is(err, bucketsvc.ErrUnknownBucket),
-		errors.Is(err, bucketsvc.ErrUnknownAccessKey):
+		errors.Is(err, bucketsvc.ErrUnknownAccessKey),
+		errors.Is(err, bucketsvc.ErrInvalidArgument):
 		return res.SetFailure(err)
 	default:
 		return authFailure(res, err)

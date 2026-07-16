@@ -135,7 +135,7 @@ func TestBucketStore(t *testing.T) {
 				}
 			})
 
-			t.Run("ListByTenant isolates and paginates by tenant", func(t *testing.T) {
+			t.Run("ListByTenant isolates and paginates by tenant in name order", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				other := testutil.RandomDID(t)
 				seed(t, tenantID)
@@ -145,6 +145,13 @@ func TestBucketStore(t *testing.T) {
 				}
 				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "lbt-other"))
 
+				// A truncated page's cursor is the name of its last record.
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithLimit(2))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 2)
+				require.NotNil(t, page.Cursor)
+				require.Equal(t, "lbt-1", *page.Cursor)
+
 				all, err := store.Collect(t.Context(), func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
 					listOpts := []bucket.ListOption{bucket.WithLimit(2)}
 					if opts.Cursor != nil {
@@ -153,9 +160,61 @@ func TestBucketStore(t *testing.T) {
 					return s.ListByTenant(ctx, tenantID, listOpts...)
 				})
 				require.NoError(t, err)
-				require.Len(t, all, 5)
+				names := make([]string, 0, len(all))
 				for _, b := range all {
 					require.Equal(t, tenantID, b.Tenant)
+					names = append(names, b.Name)
+				}
+				require.Equal(t, []string{"lbt-0", "lbt-1", "lbt-2", "lbt-3", "lbt-4"}, names)
+			})
+
+			t.Run("ListByTenant filters by prefix and paginates within it", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				for _, name := range []string{"pfx-app-a", "pfx-app-b", "pfx-app-c", "pfx-web-a"} {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, name))
+				}
+
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithPrefix("pfx-app-"), bucket.WithLimit(2))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 2)
+				require.Equal(t, "pfx-app-a", page.Results[0].Name)
+				require.Equal(t, "pfx-app-b", page.Results[1].Name)
+				require.NotNil(t, page.Cursor)
+
+				page, err = s.ListByTenant(t.Context(), tenantID, bucket.WithPrefix("pfx-app-"), bucket.WithLimit(2), bucket.WithCursor(*page.Cursor))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, "pfx-app-c", page.Results[0].Name)
+				require.Nil(t, page.Cursor)
+			})
+
+			t.Run("ListByTenant cursor resumes strictly after a non-existent name", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				for _, name := range []string{"nec-a", "nec-c", "nec-e"} {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, name))
+				}
+
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithCursor("nec-b"))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 2)
+				require.Equal(t, "nec-c", page.Results[0].Name)
+				require.Equal(t, "nec-e", page.Results[1].Name)
+			})
+
+			t.Run("ListByTenant prefix matches literally, not as a pattern", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "wild-a"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "wildxa"))
+
+				// A LIKE-style implementation would treat _ / % as wildcards and
+				// match both buckets; a literal match finds neither.
+				for _, prefix := range []string{"wild_", "wild%"} {
+					page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithPrefix(prefix))
+					require.NoError(t, err)
+					require.Empty(t, page.Results, "prefix %q", prefix)
 				}
 			})
 

@@ -11,6 +11,7 @@ const (
 	BucketNotEmptyErrorName    = "BucketNotEmpty"
 	UnknownBucketErrorName     = "UnknownBucket"
 	UnknownAccessKeyErrorName  = "UnknownAccessKey"
+	InvalidArgumentErrorName   = "InvalidArgument"
 )
 
 // Known errors returned by the bucket [Service]. Handlers pass these to
@@ -29,4 +30,8 @@ var (
 	ErrUnknownBucket = errors.New(UnknownBucketErrorName, "unknown bucket")
 	// ErrUnknownAccessKey is returned when the access key does not exist.
 	ErrUnknownAccessKey = errors.New(UnknownAccessKeyErrorName, "unknown access key")
+	// ErrInvalidArgument is returned when a request parameter is malformed or out
+	// of range (e.g. ListBuckets max-buckets). The name matches the canonical S3
+	// error code.
+	ErrInvalidArgument = errors.New(InvalidArgumentErrorName, "invalid request parameter")
 )
