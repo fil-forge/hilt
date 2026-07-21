@@ -1,4 +1,4 @@
-package client
+package upload
 
 import (
 	"context"
@@ -26,6 +26,7 @@ type clientConfig struct {
 	httpClient *http.Client
 	logger     *zap.Logger
 	product    did.DID
+	proofs     ucanlib.ProofStore
 }
 
 func WithHTTPClient(httpClient *http.Client) Option {
@@ -35,7 +36,7 @@ func WithHTTPClient(httpClient *http.Client) Option {
 }
 
 // WithProduct sets the default product/plan DID used when registering customers
-// (see [UploadClient.RegisterCustomer]).
+// (see [Client.RegisterCustomer]).
 func WithProduct(product did.DID) Option {
 	return func(cfg *clientConfig) {
 		cfg.product = product
@@ -46,6 +47,16 @@ func WithLogger(logger *zap.Logger) Option {
 	return func(cfg *clientConfig) {
 		if logger != nil {
 			cfg.logger = logger
+		}
+	}
+}
+
+// WithBaseProofs sets the default proof store used when invoking methods on the
+// upload service. Individual method calls may override this with [WithProofs].
+func WithBaseProofs(proofs ucanlib.ProofStore) Option {
+	return func(cfg *clientConfig) {
+		if proofs != nil {
+			cfg.proofs = proofs
 		}
 	}
 }
@@ -73,7 +84,7 @@ func WithProofs(proofs ucanlib.ProofStore) MethodOption {
 	}
 }
 
-type UploadClient struct {
+type Client struct {
 	ServiceID did.DID
 	Issuer    ucan.Issuer
 	Proofs    ucanlib.ProofStore
@@ -82,10 +93,10 @@ type UploadClient struct {
 	Logger    *zap.Logger
 }
 
-// NewUploadClient creates a new [UploadClient] for interacting with the upload
-// service. The issuer and proofs parameters are used as the default issuer and
+// NewClient creates a new [Client] for interacting with the upload
+// service. The issuer and proofs parameters are used as the issuer and
 // proof set if none are provided as individual method options.
-func NewUploadClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, proofs ucanlib.ProofStore, opts ...Option) (*UploadClient, error) {
+func NewClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, opts ...Option) (*Client, error) {
 	cfg := &clientConfig{
 		logger: zap.NewNop(),
 	}
@@ -107,11 +118,12 @@ func NewUploadClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, 
 	if issuer == nil {
 		return nil, fmt.Errorf("issuer is required")
 	}
+	proofs := cfg.proofs
 	if proofs == nil {
 		proofs = ucanlib.NewContainerProofStore(container.New())
 	}
 
-	return &UploadClient{
+	return &Client{
 		ServiceID: serviceID,
 		Issuer:    issuer,
 		Proofs:    proofs,
@@ -122,7 +134,7 @@ func NewUploadClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, 
 }
 
 // RegisterCustomer registers a new customer with the upload service.
-func (c *UploadClient) RegisterCustomer(ctx context.Context, customer did.DID, product did.DID, details map[string]string, opts ...MethodOption) error {
+func (c *Client) RegisterCustomer(ctx context.Context, customer did.DID, product did.DID, details map[string]string, opts ...MethodOption) error {
 	cfg := &methodConfig{issuer: c.Issuer, proofs: c.Proofs}
 	for _, opt := range opts {
 		opt(cfg)
@@ -161,7 +173,7 @@ func (c *UploadClient) RegisterCustomer(ctx context.Context, customer did.DID, p
 
 // ProvisionSpace provisions a new space with the upload service. It returns the
 // ID of the subscription that was set up.
-func (c *UploadClient) ProvisionSpace(ctx context.Context, account ucan.Issuer, space did.DID) (string, error) {
+func (c *Client) ProvisionSpace(ctx context.Context, account ucan.Issuer, space did.DID) (string, error) {
 	inv, err := providercmds.Add.Invoke(
 		account,
 		account.DID(),
@@ -190,7 +202,7 @@ func (c *UploadClient) ProvisionSpace(ctx context.Context, account ucan.Issuer, 
 }
 
 // SpaceEmpty checks whether the given space is empty (contains no blobs).
-func (c *UploadClient) SpaceEmpty(ctx context.Context, space did.DID, opts ...MethodOption) (bool, error) {
+func (c *Client) SpaceEmpty(ctx context.Context, space did.DID, opts ...MethodOption) (bool, error) {
 	cfg := &methodConfig{issuer: c.Issuer, proofs: c.Proofs}
 	for _, opt := range opts {
 		opt(cfg)

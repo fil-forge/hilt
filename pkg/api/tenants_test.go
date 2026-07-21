@@ -14,7 +14,7 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
-	"github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -162,9 +162,10 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 
 	sprueURL, err := url.Parse("http://sprue.test")
 	require.NoError(t, err)
-	upload, err := client.NewUploadClient(sprue.DID(), *sprueURL, hilt, proofs,
-		client.WithProduct(deps.product),
-		client.WithHTTPClient(&http.Client{Transport: srv}))
+	upload, err := upload.NewClient(sprue.DID(), *sprueURL, hilt,
+		upload.WithBaseProofs(proofs),
+		upload.WithProduct(deps.product),
+		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.providers, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), deps.secrets, plcClient, upload)
