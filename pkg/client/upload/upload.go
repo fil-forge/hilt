@@ -118,15 +118,14 @@ func NewClient(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, opts .
 	if issuer == nil {
 		return nil, fmt.Errorf("issuer is required")
 	}
-	proofs := cfg.proofs
-	if proofs == nil {
-		proofs = ucanlib.NewContainerProofStore(container.New())
+	if cfg.proofs == nil {
+		cfg.proofs = ucanlib.NewContainerProofStore(container.New())
 	}
 
 	return &Client{
 		ServiceID: serviceID,
 		Issuer:    issuer,
-		Proofs:    proofs,
+		Proofs:    cfg.proofs,
 		Product:   cfg.product,
 		Executor:  httpExecutor,
 		Logger:    cfg.logger,
