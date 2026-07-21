@@ -43,8 +43,8 @@ func WithLogger(logger *zap.Logger) Option {
 	}
 }
 
-// WithBaseProofs sets the default proof store used when invoking methods on the
-// upload service. Individual method calls may override this with [WithProofs].
+// WithBaseProofs sets the default proof store used when invoking Hilt RPC
+// methods. Individual method calls may override this with [WithProofs].
 func WithBaseProofs(proofs ucanlib.ProofStore) Option {
 	return func(cfg *clientConfig) {
 		if proofs != nil {
@@ -90,9 +90,10 @@ type Client struct {
 }
 
 // New creates a Client for Hilt's UCAN RPC API at serviceURL, identified by
-// serviceID (Hilt's DID). issuer signs invocations and proofs supplies the
-// delegation chains from Hilt to the issuer; both are defaults, overridable per
-// call with [WithIssuer] / [WithProofs].
+// serviceID (Hilt's DID). The issuer argument signs invocations. Proofs
+// supplied via the [WithBaseProofs] option are the default pool for which
+// proofs may be drawn. Both the issuer and base proofs may be overridden per
+// call with [WithIssuer] and [WithProofs] options.
 func New(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, opts ...Option) (*Client, error) {
 	cfg := &clientConfig{logger: zap.NewNop()}
 	for _, opt := range opts {
@@ -113,14 +114,14 @@ func New(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, opts ...Opti
 	if issuer == nil {
 		return nil, fmt.Errorf("issuer is required")
 	}
-	if proofs == nil {
-		proofs = ucanlib.NewContainerProofStore(container.New())
+	if cfg.proofs == nil {
+		cfg.proofs = ucanlib.NewContainerProofStore(container.New())
 	}
 
 	return &Client{
 		ServiceID: serviceID,
 		Issuer:    issuer,
-		Proofs:    proofs,
+		Proofs:    cfg.proofs,
 		Executor:  httpExecutor,
 		Logger:    cfg.logger,
 	}, nil

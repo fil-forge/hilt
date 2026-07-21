@@ -39,7 +39,7 @@ import (
 const maxListBuckets = 10000
 
 // UploadClient is the subset of the upload service (Sprue) the bucket operations
-// need. It is satisfied by [*client.UploadClient]; the interface lets the logic be
+// need. It is satisfied by [*upload.Client]; the interface lets the logic be
 // unit tested without a live Sprue.
 type UploadClient interface {
 	ProvisionSpace(ctx context.Context, account ucan.Issuer, space did.DID) (string, error)
