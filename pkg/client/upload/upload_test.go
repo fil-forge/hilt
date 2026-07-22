@@ -241,7 +241,7 @@ func TestSpaceEmpty(t *testing.T) {
 
 		u, err := url.Parse("http://upload.test")
 		require.NoError(t, err)
-		c, err := upload.NewClient(service.DID(), *u, alice, nil,
+		c, err := upload.NewClient(service.DID(), *u, alice,
 			upload.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
 		require.NoError(t, err)
 
