@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"time"
 
-	client "github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -39,11 +39,11 @@ import (
 const maxListBuckets = 10000
 
 // UploadClient is the subset of the upload service (Sprue) the bucket operations
-// need. It is satisfied by [*client.UploadClient]; the interface lets the logic be
+// need. It is satisfied by [*upload.Client]; the interface lets the logic be
 // unit tested without a live Sprue.
 type UploadClient interface {
 	ProvisionSpace(ctx context.Context, account ucan.Issuer, space did.DID) (string, error)
-	SpaceEmpty(ctx context.Context, space did.DID, opts ...client.MethodOption) (bool, error)
+	SpaceEmpty(ctx context.Context, space did.DID, opts ...upload.MethodOption) (bool, error)
 }
 
 // Service implements the S3 bucket operations shared by the UCAN command handlers.
@@ -243,7 +243,7 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	if err != nil {
 		return nil, err
 	}
-	empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, client.WithIssuer(account), client.WithProofs(s.delegations))
+	empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, upload.WithIssuer(account), upload.WithProofs(s.delegations))
 	if err != nil {
 		return nil, fmt.Errorf("checking bucket is empty: %w", err)
 	}

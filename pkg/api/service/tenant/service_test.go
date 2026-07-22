@@ -10,7 +10,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
-	"github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -75,9 +75,10 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 		}))
 	sprueURL, err := url.Parse("http://sprue.test")
 	require.NoError(t, err)
-	upload, err := client.NewUploadClient(sprue.DID(), *sprueURL, hilt, proofs,
-		client.WithProduct(testutil.RandomDID(t)),
-		client.WithHTTPClient(&http.Client{Transport: srv}))
+	upload, err := upload.NewClient(sprue.DID(), *sprueURL, hilt,
+		upload.WithBaseProofs(proofs),
+		upload.WithProduct(testutil.RandomDID(t)),
+		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),

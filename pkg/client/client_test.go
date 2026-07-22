@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,9 +28,24 @@ func newHiltClient(t *testing.T, hilt ucan.Issuer, srv *server.HTTPServer, issue
 	t.Helper()
 	u, err := url.Parse("http://hilt.test")
 	require.NoError(t, err)
-	c, err := client.New(hilt.DID(), *u, issuer, proofs, client.WithHTTPClient(&http.Client{Transport: srv}))
+	c, err := client.New(hilt.DID(), *u, issuer, client.WithBaseProofs(proofs), client.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 	return c
+}
+
+// errProofStore is a ProofStore whose ProofChain always fails.
+type errProofStore struct{ err error }
+
+func (e errProofStore) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
+	return nil, nil, e.err
+}
+
+// errRoundTripper is an http.RoundTripper that always fails, forcing Execute to
+// return an error.
+type errRoundTripper struct{}
+
+func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("transport boom")
 }
 
 // rootProofs returns a proof store holding a root delegation from hilt to issuer
@@ -190,7 +207,7 @@ func TestClientErrors(t *testing.T) {
 	t.Run("execution error", func(t *testing.T) {
 		u, err := url.Parse("http://hilt.test")
 		require.NoError(t, err)
-		c, err := client.New(hilt.DID(), *u, ingot, rootProofs(t, s3req.Authorize, hilt, ingot.DID()),
+		c, err := client.New(hilt.DID(), *u, ingot, client.WithBaseProofs(rootProofs(t, s3req.Authorize, hilt, ingot.DID())),
 			client.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
 		require.NoError(t, err)
 		_, _, err = c.AuthorizeRequest(t.Context(), req)

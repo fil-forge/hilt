@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 
 	"github.com/fil-forge/hilt/pkg/lib/zapucan"
@@ -20,6 +21,61 @@ import (
 	"go.uber.org/zap"
 )
 
+type Option func(*clientConfig)
+
+type clientConfig struct {
+	httpClient *http.Client
+	logger     *zap.Logger
+	proofs     ucanlib.ProofStore
+}
+
+func WithHTTPClient(httpClient *http.Client) Option {
+	return func(cfg *clientConfig) {
+		cfg.httpClient = httpClient
+	}
+}
+
+func WithLogger(logger *zap.Logger) Option {
+	return func(cfg *clientConfig) {
+		if logger != nil {
+			cfg.logger = logger
+		}
+	}
+}
+
+// WithBaseProofs sets the default proof store used when invoking Hilt RPC
+// methods. Individual method calls may override this with [WithProofs].
+func WithBaseProofs(proofs ucanlib.ProofStore) Option {
+	return func(cfg *clientConfig) {
+		if proofs != nil {
+			cfg.proofs = proofs
+		}
+	}
+}
+
+type MethodOption func(*methodConfig)
+
+type methodConfig struct {
+	issuer ucan.Issuer
+	proofs ucanlib.ProofStore
+}
+
+func WithIssuer(iss ucan.Issuer) MethodOption {
+	return func(cfg *methodConfig) {
+		if iss != nil {
+			cfg.issuer = iss
+		}
+	}
+}
+
+func WithProofs(proofs ucanlib.ProofStore) MethodOption {
+	return func(cfg *methodConfig) {
+		if proofs != nil {
+			cfg.proofs = proofs
+		}
+	}
+}
+
 // Client invokes Hilt's S3 UCAN RPC commands (the caller is typically Ingot).
 // Construct it with [New]; each method invokes one /s3/* command. Commands whose
 // result carries re-delegated proof chains (AuthorizeRequest, CreateBucket,
@@ -34,10 +90,11 @@ type Client struct {
 }
 
 // New creates a Client for Hilt's UCAN RPC API at serviceURL, identified by
-// serviceID (Hilt's DID). issuer signs invocations and proofs supplies the
-// delegation chains from Hilt to the issuer; both are defaults, overridable per
-// call with [WithIssuer] / [WithProofs].
-func New(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, proofs ucanlib.ProofStore, opts ...Option) (*Client, error) {
+// serviceID (Hilt's DID). The issuer argument signs invocations. Proofs
+// supplied via the [WithBaseProofs] option are the default pool for which
+// proofs may be drawn. Both the issuer and base proofs may be overridden per
+// call with [WithIssuer] and [WithProofs] options.
+func New(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, opts ...Option) (*Client, error) {
 	cfg := &clientConfig{logger: zap.NewNop()}
 	for _, opt := range opts {
 		opt(cfg)
@@ -57,14 +114,14 @@ func New(serviceID did.DID, serviceURL url.URL, issuer ucan.Issuer, proofs ucanl
 	if issuer == nil {
 		return nil, fmt.Errorf("issuer is required")
 	}
-	if proofs == nil {
-		proofs = ucanlib.NewContainerProofStore(container.New())
+	if cfg.proofs == nil {
+		cfg.proofs = ucanlib.NewContainerProofStore(container.New())
 	}
 
 	return &Client{
 		ServiceID: serviceID,
 		Issuer:    issuer,
-		Proofs:    proofs,
+		Proofs:    cfg.proofs,
 		Executor:  httpExecutor,
 		Logger:    cfg.logger,
 	}, nil
