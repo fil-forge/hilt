@@ -175,9 +175,12 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 
 	// Issue tenant→access-key delegations: one per (command × subject), where
 	// subject is each bucket DID or a single powerline (undefined subject).
-	var opts []delegation.Option
+	// They live as long as the key does: its expiry when set, otherwise forever —
+	// without WithNoExpiration, ucantone defaults to a 30-second expiry, which
+	// killed every proof chain through the key.
+	opts := []delegation.Option{delegation.WithNoExpiration()}
 	if expiresAt != nil {
-		opts = append(opts, delegation.WithExpiration(ucan.UnixTimestamp(expiresAt.Unix())))
+		opts = []delegation.Option{delegation.WithExpiration(ucan.UnixTimestamp(expiresAt.Unix()))}
 	}
 	subjects := bucketIDs
 	if len(subjects) == 0 {
