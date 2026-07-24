@@ -127,8 +127,10 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	}
 
 	// Root delegation: the bucket delegates top authority over itself to the tenant
-	// (iss == sub == bucket, aud == tenant).
-	root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), authz.Tenant.ID, bucketID, command.Top())
+	// (iss == sub == bucket, aud == tenant). It lives as long as the bucket does —
+	// without WithNoExpiration, ucantone defaults to a 30-second expiry, which
+	// killed every proof chain through the bucket root.
+	root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), authz.Tenant.ID, bucketID, command.Top(), delegation.WithNoExpiration())
 	if err != nil {
 		rollback()
 		return nil, nil, fmt.Errorf("issuing root delegation: %w", err)
