@@ -16,8 +16,13 @@ import (
 // command identifiers stay in sync with their definitions.
 var (
 	cmdsRetrieve = []ucan.Command{content.Retrieve.Command}
-	cmdsAdd      = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command}
-	cmdsRemove   = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
+	// blob.Abort rides with the write set: a key that may park bytes on a
+	// provider (multipart UploadPart) must be able to abort its own parked
+	// upload — the abort leg of ingot's multipart lifecycle and the proof
+	// store ingot captures at UploadPart for off-request cleanup (the
+	// session-expiry sweeper, DeleteBucket's implicit abort).
+	cmdsAdd    = []ucan.Command{blob.Add.Command, blob.Abort.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command}
+	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
 )
 
 // permissionCommands maps each supported S3 permission to the Forge commands

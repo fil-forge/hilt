@@ -124,11 +124,12 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.NoError(t, err)
 
-		// 4 delegations: /content/retrieve + /blob/add + /index/add + /upload/add,
-		// all scoped to the bucket, issued by the tenant to the access key.
+		// 5 delegations: /content/retrieve + /blob/add + /blob/abort +
+		// /index/add + /upload/add, all scoped to the bucket, issued by the
+		// tenant to the access key.
 		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
-		require.Len(t, dels.Results, 4)
+		require.Len(t, dels.Results, 5)
 		cmds := map[string]bool{}
 		for _, d := range dels.Results {
 			cmds[d.Command().String()] = true
@@ -139,6 +140,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.Equal(t, map[string]bool{
 			"/content/retrieve": true,
 			"/blob/add":         true,
+			"/blob/abort":       true,
 			"/index/add":        true,
 			"/upload/add":       true,
 		}, cmds)
