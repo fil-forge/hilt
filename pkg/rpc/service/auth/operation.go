@@ -93,7 +93,11 @@ func OperationFor(req s3.Request) (Operation, error) {
 //
 // Multipart uploads are distinguished only by their query parameters — S3 spells
 // them `uploads`, `uploadId` and `partNumber`, and the names are case-sensitive.
-// Those branches are checked before the plain-object fallbacks they shadow.
+// Those branches are checked before the plain-object fallbacks they shadow, and
+// each is reachable only via the method S3 defines for it: a part is uploaded with
+// PUT, while an upload is initiated and completed with POST. A shape whose method
+// does not match is not a multipart request and falls back to its plain-object
+// classification, which requires the same permission.
 //
 // UploadPartCopy is not distinguished from UploadPart: S3 requires s3:PutObject on
 // the target and s3:GetObject on the source object, but the source arrives in the
@@ -110,7 +114,8 @@ func classifyRequest(req s3.Request) (op Operation, bucket, key string, err erro
 	uploads := query.Has("uploads") // valueless flag: `?uploads`
 	uploadID := query.Get("uploadId")
 
-	switch strings.ToUpper(req.Method) {
+	method := strings.ToUpper(req.Method)
+	switch method {
 	case http.MethodGet, http.MethodHead:
 		switch {
 		case bucket == "":
@@ -131,11 +136,11 @@ func classifyRequest(req s3.Request) (op Operation, bucket, key string, err erro
 		switch {
 		case key == "":
 			return OpCreateBucket, bucket, key, nil
-		case uploads:
+		case method == http.MethodPost && uploads:
 			return OpCreateMultipartUpload, bucket, key, nil
-		case uploadID != "" && query.Has("partNumber"):
+		case method == http.MethodPut && uploadID != "" && query.Has("partNumber"):
 			return OpUploadPart, bucket, key, nil
-		case uploadID != "":
+		case method == http.MethodPost && uploadID != "" && !query.Has("partNumber"):
 			return OpCompleteMultipartUpload, bucket, key, nil
 		default:
 			return OpPutObject, bucket, key, nil

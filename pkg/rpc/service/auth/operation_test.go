@@ -40,6 +40,14 @@ func TestClassifyRequest(t *testing.T) {
 		// A part copy is an upload part: the copy source is not classified.
 		{name: "upload part copy", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=2&uploadId=abc", want: OpUploadPart, wantBucket: "bkt", wantKey: "k"},
 
+		// Each multipart write shape is reachable only via the method S3 defines for
+		// it. A mismatched shape is not a multipart request and falls back to
+		// PutObject, which requires the same permission.
+		{name: "part upload shape on POST is not an upload part", method: "POST", url: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "initiate shape on PUT is not an initiate", method: "PUT", url: "https://s3.example.com/bkt/k?uploads", want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "complete shape on PUT is not a complete", method: "PUT", url: "https://s3.example.com/bkt/k?uploadId=abc", want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "part upload without partNumber is not an upload part", method: "PUT", url: "https://s3.example.com/bkt/k?uploadId=abc&partNo=1", want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+
 		// Unrelated query parameters do not change the classification, and the
 		// multipart parameter names are case-sensitive.
 		{name: "list objects with prefix", method: "GET", url: "https://s3.example.com/bkt?prefix=a/", want: OpListBucket, wantBucket: "bkt"},
@@ -47,7 +55,7 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "uploadid wrong case is not multipart", method: "DELETE", url: "https://s3.example.com/bkt/k?uploadid=abc", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
 
 		// Nested keys keep their full remainder as the key.
-		{name: "nested key", method: "PUT", url: "https://s3.example.com/bkt/a/b/c?uploads", want: OpCreateMultipartUpload, wantBucket: "bkt", wantKey: "a/b/c"},
+		{name: "nested key", method: "POST", url: "https://s3.example.com/bkt/a/b/c?uploads", want: OpCreateMultipartUpload, wantBucket: "bkt", wantKey: "a/b/c"},
 
 		// Lowercase methods classify the same.
 		{name: "lowercase method", method: "delete", url: "https://s3.example.com/bkt/k?uploadId=abc", want: OpAbortMultipartUpload, wantBucket: "bkt", wantKey: "k"},
