@@ -16,8 +16,14 @@ import (
 // command identifiers stay in sync with their definitions.
 var (
 	cmdsRetrieve = []ucan.Command{content.Retrieve.Command}
-	cmdsAdd      = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command}
-	cmdsRemove   = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
+	// An add may not complete: /blob/abort abandons a blob that was allocated and
+	// uploaded but never accepted, so it belongs to the write path.
+	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command, blob.Abort.Command}
+	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
+	// Stopping a multipart upload discards the parts uploaded so far: those still
+	// parked are abandoned with /blob/abort, those already accepted released with
+	// /blob/remove.
+	cmdsAbort = []ucan.Command{blob.Abort.Command, blob.Remove.Command}
 )
 
 // permissionCommands maps each supported S3 permission to the Forge commands
@@ -40,6 +46,12 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:CreateBucket":        nil,
 	"s3:ListAllMyBuckets":    nil,
 	"s3:DeleteBucket":        nil,
+
+	// Multipart uploads. Initiating an upload, uploading a part and completing an
+	// upload all require s3:PutObject, so they need no permission of their own.
+	"s3:AbortMultipartUpload":       cmdsAbort,
+	"s3:ListMultipartUploadParts":   cmdsRetrieve,
+	"s3:ListBucketMultipartUploads": cmdsRetrieve,
 }
 
 // Valid reports whether p is a recognized S3 permission.
