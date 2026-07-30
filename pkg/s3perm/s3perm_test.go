@@ -44,13 +44,19 @@ func TestCommandsFor(t *testing.T) {
 		require.Contains(t, strs("s3:PutObject"), "/blob/abort")
 	})
 
+	t.Run("the write path can release a superseded body", func(t *testing.T) {
+		// Overwriting an existing key (put or multipart complete) releases the
+		// replaced body's blobs with /blob/remove.
+		require.Contains(t, strs("s3:PutObject"), "/blob/remove")
+	})
+
 	t.Run("bucket-level permissions map to no commands", func(t *testing.T) {
 		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets", "s3:DeleteBucket"))
 	})
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {
 		require.Equal(t, []string{
-			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/blob/abort",
+			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/blob/abort", "/blob/remove",
 		}, strs("s3:GetObject", "s3:PutObject"))
 	})
 

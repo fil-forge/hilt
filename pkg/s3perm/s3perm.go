@@ -18,7 +18,13 @@ var (
 	cmdsRetrieve = []ucan.Command{content.Retrieve.Command}
 	// An add may not complete: /blob/abort abandons a blob that was allocated and
 	// uploaded but never accepted, so it belongs to the write path.
-	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command, blob.Abort.Command}
+	// An add may also supersede: a put (or multipart complete) to a key that
+	// already exists must release the replaced body's blobs with /blob/remove.
+	// Without the grant those releases go out proofless and are rejected, and
+	// the superseded blobs' registrations leak in the space — invisible to the
+	// S3 client (removal is best-effort), but the space can never be emptied
+	// and keeps the tenant's bytes registered with no way to release them.
+	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
 	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
