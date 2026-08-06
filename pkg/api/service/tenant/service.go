@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -34,7 +34,7 @@ type Service struct {
 	delegations delegation.Store
 	secrets     vault.Vault
 	plcClient   *plc.DirectoryClient
-	upload      *client.UploadClient
+	upload      *upload.Client
 }
 
 // New constructs the tenant service.
@@ -47,7 +47,7 @@ func New(
 	delegations delegation.Store,
 	secrets vault.Vault,
 	plcClient *plc.DirectoryClient,
-	upload *client.UploadClient,
+	upload *upload.Client,
 ) *Service {
 	return &Service{
 		logger:      logger,

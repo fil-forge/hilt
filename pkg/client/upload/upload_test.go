@@ -1,4 +1,4 @@
-package client_test
+package upload_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/fil-forge/hilt/pkg/client"
+	upload "github.com/fil-forge/hilt/pkg/client/upload"
 	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
@@ -24,12 +24,13 @@ import (
 
 // newClient builds an UploadClient whose transport is the given in-process
 // server, exercising NewUploadClient itself.
-func newClient(t *testing.T, service ucan.Issuer, srv *server.HTTPServer, issuer ucan.Issuer, proofs ucanlib.ProofStore) *client.UploadClient {
+func newClient(t *testing.T, service ucan.Issuer, srv *server.HTTPServer, issuer ucan.Issuer, proofs ucanlib.ProofStore) *upload.Client {
 	t.Helper()
 	u, err := url.Parse("http://upload.test")
 	require.NoError(t, err)
-	c, err := client.NewUploadClient(service.DID(), *u, issuer, proofs,
-		client.WithHTTPClient(&http.Client{Transport: srv}))
+	c, err := upload.NewClient(service.DID(), *u, issuer,
+		upload.WithBaseProofs(proofs),
+		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 	return c
 }
@@ -103,8 +104,9 @@ func TestRegisterCustomer(t *testing.T) {
 
 		u, err := url.Parse("http://upload.test")
 		require.NoError(t, err)
-		c, err := client.NewUploadClient(service.DID(), *u, alice, proofs,
-			client.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
+		c, err := upload.NewClient(service.DID(), *u, alice,
+			upload.WithBaseProofs(proofs),
+			upload.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
 		require.NoError(t, err)
 
 		err = c.RegisterCustomer(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t), nil)
@@ -189,7 +191,7 @@ func TestSpaceEmpty(t *testing.T) {
 		srv, captured := newListServer(t, service, nil)
 
 		c := newClient(t, service, srv, alice, proofs)
-		empty, err := c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		empty, err := c.SpaceEmpty(t.Context(), space.DID(), upload.WithIssuer(alice), upload.WithProofs(proofs))
 		require.NoError(t, err)
 		require.True(t, empty)
 
@@ -212,7 +214,7 @@ func TestSpaceEmpty(t *testing.T) {
 		srv, _ := newListServer(t, service, []blobcmds.ListBlobItem{{}})
 
 		c := newClient(t, service, srv, alice, nil)
-		empty, err := c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		empty, err := c.SpaceEmpty(t.Context(), space.DID(), upload.WithIssuer(alice), upload.WithProofs(proofs))
 		require.NoError(t, err)
 		require.False(t, empty)
 	})
@@ -223,7 +225,7 @@ func TestSpaceEmpty(t *testing.T) {
 		srv := server.NewHTTP(service)
 
 		c := newClient(t, service, srv, alice, nil)
-		_, err := c.SpaceEmpty(t.Context(), testutil.RandomDID(t), client.WithIssuer(alice), client.WithProofs(errProofStore{err: errors.New("boom")}))
+		_, err := c.SpaceEmpty(t.Context(), testutil.RandomDID(t), upload.WithIssuer(alice), upload.WithProofs(errProofStore{err: errors.New("boom")}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "getting proof chain")
 	})
@@ -239,11 +241,11 @@ func TestSpaceEmpty(t *testing.T) {
 
 		u, err := url.Parse("http://upload.test")
 		require.NoError(t, err)
-		c, err := client.NewUploadClient(service.DID(), *u, alice, nil,
-			client.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
+		c, err := upload.NewClient(service.DID(), *u, alice,
+			upload.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
 		require.NoError(t, err)
 
-		_, err = c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		_, err = c.SpaceEmpty(t.Context(), space.DID(), upload.WithIssuer(alice), upload.WithProofs(proofs))
 		require.Error(t, err)
 	})
 
@@ -263,7 +265,7 @@ func TestSpaceEmpty(t *testing.T) {
 			}))
 
 		c := newClient(t, service, srv, alice, nil)
-		_, err = c.SpaceEmpty(t.Context(), space.DID(), client.WithIssuer(alice), client.WithProofs(proofs))
+		_, err = c.SpaceEmpty(t.Context(), space.DID(), upload.WithIssuer(alice), upload.WithProofs(proofs))
 		require.Error(t, err)
 	})
 }

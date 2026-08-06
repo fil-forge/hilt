@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/libforge/identity"
 	ucanlib "github.com/fil-forge/libforge/ucan"
@@ -17,7 +17,7 @@ import (
 // NewUploadClient builds the Sprue upload-service client from configuration. Its
 // proof store — the delegations it presents to Sprue — is loaded from
 // upload.proofs (see [uploadProofs]).
-func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.Logger) (*client.UploadClient, error) {
+func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.Logger) (*upload.Client, error) {
 	serviceID, err := did.Parse(cfg.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("parsing upload.service_id %q: %w", cfg.ServiceID, err)
@@ -40,8 +40,14 @@ func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.
 	if err != nil {
 		return nil, fmt.Errorf("loading upload.proofs: %w", err)
 	}
-	return client.NewUploadClient(serviceID, *serviceURL, id, proofs,
-		client.WithProduct(product), client.WithLogger(logger))
+	return upload.NewClient(
+		serviceID,
+		*serviceURL,
+		id,
+		upload.WithBaseProofs(proofs),
+		upload.WithProduct(product),
+		upload.WithLogger(logger),
+	)
 }
 
 // uploadProofs builds the upload client's proof store from cfg.Proofs, which is

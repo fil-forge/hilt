@@ -146,7 +146,7 @@ func Start(t *testing.T) *Network {
 	infoDlg, err := s3bkt.Info.Delegate(hiltIssuer, ingotDID, hiltDID)
 	require.NoError(t, err)
 	ingotProofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(authDlg, createDlg, infoDlg)))
-	hiltClient, err := client.New(hiltDID, *hiltU, ingotIssuer, ingotProofs, client.WithLogger(logger))
+	hiltClient, err := client.New(hiltDID, *hiltU, ingotIssuer, client.WithBaseProofs(ingotProofs), client.WithLogger(logger))
 	require.NoError(t, err)
 
 	// The Ingot also calls Sprue directly (/blob/add on object upload), issuing as

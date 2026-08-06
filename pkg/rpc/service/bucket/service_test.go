@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/sigv4"
@@ -59,7 +59,7 @@ func (f *fakeSprue) ProvisionSpace(_ context.Context, account ucan.Issuer, space
 	return f.sub, f.provErr
 }
 
-func (f *fakeSprue) SpaceEmpty(_ context.Context, space did.DID, _ ...client.MethodOption) (bool, error) {
+func (f *fakeSprue) SpaceEmpty(_ context.Context, space did.DID, _ ...upload.MethodOption) (bool, error) {
 	f.emptyCalled = true
 	f.emptySpace = space
 	return f.empty, f.emptyErr
