@@ -26,11 +26,22 @@ import (
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
+	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
 	"go.uber.org/zap"
 )
 
 const maxNameLength = 64
+
+// RevocationClient is the subset of the revocation service (Swarf) that access
+// key deletion needs. It is satisfied by [*swarfclient.Client]; the interface
+// lets the logic be unit tested without a live revocation service.
+type RevocationClient interface {
+	// Publish submits a /ucan/revoke invocation self-signed by revoker for
+	// revoked, using path as its delegation witness. path is ordered root first
+	// and ends with the delegation being revoked.
+	Publish(ctx context.Context, revoker ucan.Issuer, revoked cid.Cid, path []ucan.Delegation) error
+}
 
 // Service implements S3 access-key operations shared by the REST handlers.
 type Service struct {
@@ -40,6 +51,7 @@ type Service struct {
 	buckets     bucket.Store
 	delegations delegationstore.Store
 	secrets     vault.Vault
+	revocations RevocationClient
 }
 
 // New constructs the access-key service.
@@ -50,6 +62,7 @@ func New(
 	buckets bucket.Store,
 	delegations delegationstore.Store,
 	secrets vault.Vault,
+	revocations RevocationClient,
 ) *Service {
 	return &Service{
 		logger:      logger,
@@ -58,6 +71,7 @@ func New(
 		buckets:     buckets,
 		delegations: delegations,
 		secrets:     secrets,
+		revocations: revocations,
 	}
 }
 
@@ -88,15 +102,10 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 
 	// Load the tenant signer up front: it is required to issue delegations and its
 	// absence is unrecoverable, so fail before creating any state.
-	tenantKeyBytes, err := s.secrets.Read(ctx, vault.TenantKeyPath(tenantRec.ID))
+	issuer, err := s.tenantIssuer(ctx, tenantRec.ID)
 	if err != nil {
-		return accesskeystore.Record{}, "", fmt.Errorf("reading tenant key: %w", err)
+		return accesskeystore.Record{}, "", err
 	}
-	tenantSigner, err := secp256k1.Decode(tenantKeyBytes)
-	if err != nil {
-		return accesskeystore.Record{}, "", fmt.Errorf("decoding tenant key: %w", err)
-	}
-	issuer := multikey.NewIssuer(tenantRec.ID, tenantSigner)
 
 	// Resolve the named buckets to DIDs in a single tenant-scoped list query. The
 	// query is scoped to the tenant, so a name owned by another tenant (or one that
@@ -269,9 +278,11 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 	return rec, names, nil
 }
 
-// Delete revokes an access key belonging to the tenant: removing its delegations,
-// vault key, and record. Sending UCAN revocations to a revocation service is out
-// of scope (no such service exists yet, as with Sprue deprovisioning).
+// Delete revokes an access key belonging to the tenant: publishing UCAN
+// revocations for its delegations, then removing those delegations, its vault
+// key, and its record. Revocations are published first so that a revocation
+// service failure leaves the key intact and the call cleanly retryable —
+// otherwise the delegations would live on with nothing for a verifier to check.
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -291,6 +302,10 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
+	if err := s.revokeDelegations(ctx, tenantRec.ID, id); err != nil {
+		return err
+	}
+
 	if err := s.delegations.DeleteByAudience(ctx, id); err != nil {
 		return fmt.Errorf("deleting access key delegations: %w", err)
 	}
@@ -301,6 +316,118 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("deleting access key: %w", err)
 	}
 	return nil
+}
+
+// revokeDelegations publishes a UCAN revocation for every delegation issued to
+// the access key, signed by the tenant that issued them.
+//
+// Each revocation carries a path witness proving the tenant's place in the
+// delegation's chain: the proof chain from the bucket (the subject, and the root
+// of its own chain) to the tenant, with the revoked delegation appended. A
+// delegation whose chain cannot be assembled is skipped with a warning — it
+// cannot be used either, since a verifier resolves the same chain.
+func (s *Service) revokeDelegations(ctx context.Context, tenantID, accessKeyID did.DID) error {
+	dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+		var listOpts []store.PaginationOption
+		if opts.Cursor != nil {
+			listOpts = append(listOpts, store.WithCursor(*opts.Cursor))
+		}
+		return s.delegations.ListByAudience(ctx, accessKeyID, listOpts...)
+	})
+	if err != nil {
+		return fmt.Errorf("listing access key delegations: %w", err)
+	}
+	if len(dels) == 0 {
+		return nil
+	}
+
+	issuer, err := s.tenantIssuer(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("access_key", accessKeyID))
+
+	// Powerline delegations (undefined subject) have no root of their own, so they
+	// are witnessed by one of the tenant's bucket roots. Resolved lazily: most keys
+	// are scoped to named buckets and never need it.
+	var fallback did.DID
+	fallbackResolved := false
+
+	// A key scoped to N buckets holds one delegation per (bucket × command), and the
+	// chain above the tenant is the same for every command it covers, so cache the
+	// witness prefix per (subject, command).
+	type prefixKey struct {
+		sub did.DID
+		cmd ucan.Command
+	}
+	prefixes := map[prefixKey][]ucan.Delegation{}
+	for _, d := range dels {
+		sub := d.Subject()
+		if !sub.Defined() {
+			if !fallbackResolved {
+				fallback, err = s.anyBucket(ctx, tenantID)
+				if err != nil {
+					return err
+				}
+				fallbackResolved = true
+			}
+			if !fallback.Defined() {
+				log.Warn("skipping revocation: tenant has no bucket to witness a powerline delegation",
+					zap.Stringer("delegation", d.Link()))
+				continue
+			}
+			sub = fallback
+		}
+
+		key := prefixKey{sub: sub, cmd: d.Command()}
+		prefix, ok := prefixes[key]
+		if !ok {
+			prefix, _, err = s.delegations.ProofChain(ctx, tenantID, d.Command(), sub)
+			if err != nil {
+				return fmt.Errorf("building revocation witness: %w", err)
+			}
+			prefixes[key] = prefix
+		}
+		if len(prefix) == 0 {
+			log.Warn("skipping revocation: no delegation chain to witness it",
+				zap.Stringer("delegation", d.Link()), zap.Stringer("subject", sub))
+			continue
+		}
+
+		path := append(slices.Clone(prefix), d)
+		if err := s.revocations.Publish(ctx, issuer, d.Link(), path); err != nil {
+			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
+		}
+		log.Info("published revocation", zap.Stringer("delegation", d.Link()))
+	}
+	return nil
+}
+
+// anyBucket returns one bucket belonging to the tenant, or [did.Undef] when it
+// owns none.
+func (s *Service) anyBucket(ctx context.Context, tenantID did.DID) (did.DID, error) {
+	page, err := s.buckets.ListByTenant(ctx, tenantID, bucket.WithLimit(1))
+	if err != nil {
+		return did.Undef, fmt.Errorf("listing tenant buckets: %w", err)
+	}
+	if len(page.Results) == 0 {
+		return did.Undef, nil
+	}
+	return page.Results[0].ID, nil
+}
+
+// tenantIssuer loads the tenant's secp256k1 signing key from the vault and
+// returns an issuer that signs as the tenant.
+func (s *Service) tenantIssuer(ctx context.Context, tenantID did.DID) (ucan.Issuer, error) {
+	keyBytes, err := s.secrets.Read(ctx, vault.TenantKeyPath(tenantID))
+	if err != nil {
+		return nil, fmt.Errorf("reading tenant key: %w", err)
+	}
+	signer, err := secp256k1.Decode(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decoding tenant key: %w", err)
+	}
+	return multikey.NewIssuer(tenantID, signer), nil
 }
 
 // bucketNamesByID returns a DID→name map for the given bucket IDs owned by the

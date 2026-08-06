@@ -38,6 +38,18 @@ type Config struct {
 	PLC      PLCConfig      `mapstructure:"plc"`
 	Auth     AuthConfig     `mapstructure:"auth"`
 	Upload   UploadConfig   `mapstructure:"upload"`
+	// Revocation holds settings for the Swarf revocation service.
+	Revocation RevocationConfig `mapstructure:"revocation"`
+}
+
+// RevocationConfig holds settings for the Swarf revocation service, which Hilt
+// publishes UCAN revocations to when a delegation it issued is withdrawn (e.g.
+// when an access key is deleted).
+type RevocationConfig struct {
+	// ServiceID is the Swarf service's DID (e.g. "did:web:swarf.example.com").
+	ServiceID string `mapstructure:"service_id"`
+	// ServiceURL is the Swarf service's HTTP endpoint.
+	ServiceURL string `mapstructure:"service_url"`
 }
 
 // UploadConfig holds settings for the Sprue upload service, which Hilt calls to
@@ -173,6 +185,9 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("upload.service_id", "did:web:upload.forgery.network")
 	v.SetDefault("upload.service_url", "https://upload.forgery.network")
 	v.SetDefault("upload.product_id", "did:web:hilt.forgery.network")
+
+	v.SetDefault("revocation.service_id", "did:web:revocation.forgery.network")
+	v.SetDefault("revocation.service_url", "https://revocation.forgery.network")
 }
 
 // flagBindings maps each config key to its serve-command flag name.
@@ -199,6 +214,8 @@ var flagBindings = map[string]string{
 	"upload.service_url":                "upload-service-url",
 	"upload.product_id":                 "upload-product-id",
 	"upload.proofs":                     "upload-proofs",
+	"revocation.service_id":             "revocation-service-id",
+	"revocation.service_url":            "revocation-service-url",
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix. Each

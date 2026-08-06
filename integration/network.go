@@ -57,6 +57,7 @@ type Network struct {
 	Console *Console
 	Ingot   *mockIngot
 	Sprue   *mockSprue
+	Swarf   *mockSwarf
 	PLC     *mockPLC
 }
 
@@ -81,6 +82,10 @@ func Start(t *testing.T) *Network {
 	require.NoError(t, err)
 	sprueDID := sprueIssuer.DID()
 
+	swarfIssuer, err := ed25519.GenerateIssuer()
+	require.NoError(t, err)
+	swarfDID := swarfIssuer.DID()
+
 	ingotIssuer, err := ed25519.GenerateIssuer()
 	require.NoError(t, err)
 	ingotDID := ingotIssuer.DID()
@@ -101,11 +106,14 @@ func Start(t *testing.T) *Network {
 	require.NoError(t, os.WriteFile(proofsPath, proofsBytes, 0o600))
 
 	// Mock PLC directory + mock Sprue (Sprue needs the PLC-backed resolver to verify
-	// the tenant's did:plc issued /provider/add during bucket provisioning).
+	// the tenant's did:plc issued /provider/add during bucket provisioning) + mock
+	// Swarf (which likewise verifies revocations the tenant signs).
 	plc := newMockPLC()
 	t.Cleanup(plc.Close)
 	sprue := newMockSprue(sprueIssuer, plc.resolver())
 	t.Cleanup(sprue.Close)
+	swarf := newMockSwarf(swarfIssuer, plc.resolver())
+	t.Cleanup(swarf.Close)
 
 	// Boot the real Hilt (memory storage + vault) on a free port.
 	port := freePort(t)
@@ -120,6 +128,10 @@ func Start(t *testing.T) *Network {
 			ServiceURL: sprue.URL(),
 			ProductID:  testutil.RandomDID(t).String(),
 			Proofs:     proofsPath,
+		},
+		Revocation: config.RevocationConfig{
+			ServiceID:  swarfDID.String(),
+			ServiceURL: swarf.URL(),
 		},
 		Auth: config.AuthConfig{PartnerKey: partnerKey},
 		Log:  config.LogConfig{Level: "error"},
@@ -167,6 +179,7 @@ func Start(t *testing.T) *Network {
 		Console:  newConsole(t, hiltURL, partnerKey),
 		Ingot:    ingot,
 		Sprue:    sprue,
+		Swarf:    swarf,
 		PLC:      plc,
 	}
 }

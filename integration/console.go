@@ -35,3 +35,13 @@ func (c *Console) ProvisionTenant(ctx context.Context, tenantID, region string) 
 func (c *Console) CreateAccessKey(ctx context.Context, tenantID, name string, perms []string) (api.CreatedAccessKey, error) {
 	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{Name: name, Permissions: perms})
 }
+
+// DeleteAccessKey revokes and removes an access key.
+func (c *Console) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID string) error {
+	return c.client.DeleteAccessKey(ctx, tenantID, accessKeyID)
+}
+
+// GetAccessKey returns a single access key.
+func (c *Console) GetAccessKey(ctx context.Context, tenantID, accessKeyID string) (api.AccessKey, error) {
+	return c.client.GetAccessKey(ctx, tenantID, accessKeyID)
+}

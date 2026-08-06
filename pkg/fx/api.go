@@ -11,6 +11,12 @@ import (
 // collected into the "routes" group and registered on the echo server.
 var APIModule = fx.Module("api",
 	fx.Provide(
+		// Clients
+		fx.Annotate(
+			NewRevocationClient,
+			fx.As(fx.Self()),
+			fx.As(new(accesskeysvc.RevocationClient)),
+		),
 		// Services
 		tenantsvc.New,
 		accesskeysvc.New,

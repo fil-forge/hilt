@@ -65,6 +65,10 @@ func main() {
 	serveCmd.Flags().String("upload-product-id", "did:web:hilt.forgery.network", "Upload service product/plan DID that tenants are registered under")
 	serveCmd.Flags().String("upload-proofs", "", "Upload service proofs: an encoded UCAN container or a path to a file containing one")
 
+	// revocation service config
+	serveCmd.Flags().String("revocation-service-id", "did:web:revocation.forgery.network", "Revocation service DID")
+	serveCmd.Flags().String("revocation-service-url", "https://revocation.forgery.network", "Revocation service HTTP endpoint")
+
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(client.Cmd)
 

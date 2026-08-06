@@ -93,3 +93,13 @@ Pre-shared bearer token required on Tenant API requests.
 
 The Sprue service DID + HTTP endpoint Hilt calls to provision bucket space, and
 the product/plan DID tenants are registered under.
+
+### Revocation service (Swarf)
+
+| Key | Flag | Env var | Default |
+| --- | --- | --- | --- |
+| `revocation.service_id` | `--revocation-service-id` | `HILT_REVOCATION_SERVICE_ID` | `did:web:revocation.forgery.network` |
+| `revocation.service_url` | `--revocation-service-url` | `HILT_REVOCATION_SERVICE_URL` | `https://revocation.forgery.network` |
+
+The Swarf service DID + HTTP endpoint Hilt publishes UCAN revocations to when a
+delegation it issued is withdrawn (e.g. when an access key is deleted).

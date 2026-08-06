@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,10 +24,19 @@ import (
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/ipfs/go-cid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+// noopRevocations stands in for the revocation service: these tests exercise the
+// HTTP layer, not revocation (see the accesskey service tests for that).
+type noopRevocations struct{}
+
+func (noopRevocations) Publish(context.Context, ucan.Issuer, cid.Cid, []ucan.Delegation) error {
+	return nil
+}
 
 type accessKeyDeps struct {
 	tenants     *tenantmemory.Store
@@ -72,7 +82,7 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	deps.tenantID, deps.bucketID = addTenant(t, deps, "tenant-1", "bucket-a")
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets, deps.delegations, deps.vault)
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets, deps.delegations, deps.vault, noopRevocations{})
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
