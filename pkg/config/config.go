@@ -30,15 +30,14 @@ const (
 
 // Config holds the hilt service configuration.
 type Config struct {
-	Identity IdentityConfig `mapstructure:"identity"`
-	Server   ServerConfig   `mapstructure:"server"`
-	Log      LogConfig      `mapstructure:"log"`
-	Storage  StorageConfig  `mapstructure:"storage"`
-	Vault    VaultConfig    `mapstructure:"vault"`
-	PLC      PLCConfig      `mapstructure:"plc"`
-	Auth     AuthConfig     `mapstructure:"auth"`
-	Upload   UploadConfig   `mapstructure:"upload"`
-	// Revocation holds settings for the Swarf revocation service.
+	Identity   IdentityConfig   `mapstructure:"identity"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Log        LogConfig        `mapstructure:"log"`
+	Storage    StorageConfig    `mapstructure:"storage"`
+	Vault      VaultConfig      `mapstructure:"vault"`
+	PLC        PLCConfig        `mapstructure:"plc"`
+	Auth       AuthConfig       `mapstructure:"auth"`
+	Upload     UploadConfig     `mapstructure:"upload"`
 	Revocation RevocationConfig `mapstructure:"revocation"`
 }
 
