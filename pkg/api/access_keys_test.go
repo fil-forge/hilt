@@ -20,11 +20,11 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
-	"github.com/ipfs/go-cid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -34,7 +34,7 @@ import (
 // HTTP layer, not revocation (see the accesskey service tests for that).
 type noopRevocations struct{}
 
-func (noopRevocations) Publish(context.Context, ucan.Issuer, cid.Cid, []ucan.Delegation) error {
+func (noopRevocations) Publish(context.Context, ucan.Issuer, ucan.Delegation, ...swarfclient.PublishOption) error {
 	return nil
 }
 

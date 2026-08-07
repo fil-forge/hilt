@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.4
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/fil-forge/libforge v0.0.0-20260724113901-7fc3b2cec1ef
-	github.com/fil-forge/swarf v0.0.1-0.20260807090325-695ba4a4be87
+	github.com/fil-forge/swarf v0.0.1-0.20260807111306-896cf60c6bda
 	github.com/fil-forge/ucantone v0.0.0-20260706102443-79141c5cc52e
 	github.com/hashicorp/vault-client-go v0.4.3
 	github.com/ipfs/go-cid v0.6.1

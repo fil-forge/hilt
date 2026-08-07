@@ -20,13 +20,14 @@ import (
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/vault"
+	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
-	"github.com/ipfs/go-cid"
+	"github.com/fil-forge/ucantone/validator"
 	"github.com/multiformats/go-multibase"
 	"go.uber.org/zap"
 )
@@ -37,10 +38,10 @@ const maxNameLength = 64
 // key deletion needs. It is satisfied by [*swarfclient.Client]; the interface
 // lets the logic be unit tested without a live revocation service.
 type RevocationClient interface {
-	// Publish submits a /ucan/revoke invocation self-signed by revoker for
-	// revoked, using path as its delegation witness. path is ordered root first
-	// and ends with the delegation being revoked.
-	Publish(ctx context.Context, revoker ucan.Issuer, revoked cid.Cid, path []ucan.Delegation) error
+	// Publish submits a /ucan/revoke invocation self-signed by revoker for the
+	// revoked delegation, which revoker must have issued unless a witness path is
+	// supplied with [swarfclient.WithWitnessPath].
+	Publish(ctx context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error
 }
 
 // Service implements S3 access-key operations shared by the REST handlers.
@@ -321,11 +322,9 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 // revokeDelegations publishes a UCAN revocation for every delegation issued to
 // the access key, signed by the tenant that issued them.
 //
-// Each revocation carries a path witness proving the tenant's place in the
-// delegation's chain: the proof chain from the bucket (the subject, and the root
-// of its own chain) to the tenant, with the revoked delegation appended. A
-// delegation whose chain cannot be assembled is skipped with a warning — it
-// cannot be used either, since a verifier resolves the same chain.
+// No witness path accompanies them: the revocation service only requires one to
+// prove authority over a delegation the revoker did not issue, and the tenant
+// issues every delegation its access keys hold.
 func (s *Service) revokeDelegations(ctx context.Context, tenantID, accessKeyID did.DID) error {
 	dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
 		var listOpts []store.PaginationOption
@@ -347,73 +346,20 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, accessKeyID d
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("access_key", accessKeyID))
 
-	// Powerline delegations (undefined subject) have no root of their own, so they
-	// are witnessed by one of the tenant's bucket roots. Resolved lazily: most keys
-	// are scoped to named buckets and never need it.
-	var fallback did.DID
-	fallbackResolved := false
-
-	// A key scoped to N buckets holds one delegation per (bucket × command), and the
-	// chain above the tenant is the same for every command it covers, so cache the
-	// witness prefix per (subject, command).
-	type prefixKey struct {
-		sub did.DID
-		cmd ucan.Command
-	}
-	prefixes := map[prefixKey][]ucan.Delegation{}
+	now := ucan.UnixTimestamp(time.Now().Unix())
 	for _, d := range dels {
-		sub := d.Subject()
-		if !sub.Defined() {
-			if !fallbackResolved {
-				fallback, err = s.anyBucket(ctx, tenantID)
-				if err != nil {
-					return err
-				}
-				fallbackResolved = true
-			}
-			if !fallback.Defined() {
-				log.Warn("skipping revocation: tenant has no bucket to witness a powerline delegation",
-					zap.Stringer("delegation", d.Link()))
-				continue
-			}
-			sub = fallback
-		}
-
-		key := prefixKey{sub: sub, cmd: d.Command()}
-		prefix, ok := prefixes[key]
-		if !ok {
-			prefix, _, err = s.delegations.ProofChain(ctx, tenantID, d.Command(), sub)
-			if err != nil {
-				return fmt.Errorf("building revocation witness: %w", err)
-			}
-			prefixes[key] = prefix
-		}
-		if len(prefix) == 0 {
-			log.Warn("skipping revocation: no delegation chain to witness it",
-				zap.Stringer("delegation", d.Link()), zap.Stringer("subject", sub))
+		// An expired delegation is rejected by the revocation service, and is
+		// unusable regardless, so revoking it is moot.
+		if err := validator.ValidateNotExpired(d, now); err != nil {
+			log.Info("skipping revocation of expired delegation", zap.Stringer("delegation", d.Link()))
 			continue
 		}
-
-		path := append(slices.Clone(prefix), d)
-		if err := s.revocations.Publish(ctx, issuer, d.Link(), path); err != nil {
+		if err := s.revocations.Publish(ctx, issuer, d); err != nil {
 			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
 		}
 		log.Info("published revocation", zap.Stringer("delegation", d.Link()))
 	}
 	return nil
-}
-
-// anyBucket returns one bucket belonging to the tenant, or [did.Undef] when it
-// owns none.
-func (s *Service) anyBucket(ctx context.Context, tenantID did.DID) (did.DID, error) {
-	page, err := s.buckets.ListByTenant(ctx, tenantID, bucket.WithLimit(1))
-	if err != nil {
-		return did.Undef, fmt.Errorf("listing tenant buckets: %w", err)
-	}
-	if len(page.Results) == 0 {
-		return did.Undef, nil
-	}
-	return page.Results[0].ID, nil
 }
 
 // tenantIssuer loads the tenant's secp256k1 signing key from the vault and
