@@ -24,12 +24,14 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
+	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
+	"github.com/fil-forge/ucantone/validator"
 	"github.com/ipfs/go-cid"
 	"go.uber.org/zap"
 )
@@ -46,6 +48,16 @@ type UploadClient interface {
 	SpaceEmpty(ctx context.Context, space did.DID, opts ...upload.MethodOption) (bool, error)
 }
 
+// RevocationClient is the subset of the revocation service (Swarf) the bucket
+// operations need. It is satisfied by [*swarfclient.Client]; the interface lets the
+// logic be unit tested without a live revocation service.
+type RevocationClient interface {
+	// Publish submits a /ucan/revoke invocation self-signed by revoker for the
+	// revoked delegation, which revoker must have issued unless a witness path is
+	// supplied with [swarfclient.WithWitnessPath].
+	Publish(ctx context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error
+}
+
 // Service implements the S3 bucket operations shared by the UCAN command handlers.
 type Service struct {
 	logger      *zap.Logger
@@ -54,6 +66,7 @@ type Service struct {
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
 	uploads     UploadClient
+	revocations RevocationClient
 }
 
 // New constructs the bucket service.
@@ -64,6 +77,7 @@ func New(
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
 	uploads UploadClient,
+	revocations RevocationClient,
 ) *Service {
 	return &Service{
 		logger:      logger,
@@ -72,6 +86,7 @@ func New(
 		delegations: delegations,
 		accessKeys:  accessKeys,
 		uploads:     uploads,
+		revocations: revocations,
 	}
 }
 
@@ -226,9 +241,13 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	}, blocks, nil
 }
 
-// Delete authenticates the request, checks the s3:DeleteBucket permission, resolves
-// the bucket, verifies its space is empty via Sprue (acting as the tenant), then
-// deletes the bucket's delegations (subject == bucket) and the bucket record.
+// Delete authenticates the request, checks the s3:DeleteBucket permission,
+// resolves the bucket, verifies its space is empty via Sprue (acting as the
+// tenant), publishes revocations for the delegations over the bucket, then
+// deletes those delegations and the bucket record. Revocations are published
+// first so that a revocation service failure leaves the bucket intact and the
+// call cleanly retryable — otherwise the delegations would live on with nothing
+// for a verifier to check.
 func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.DeleteArguments) (*s3bkt.DeleteOK, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -253,8 +272,9 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 		return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
 	}
 
-	// TODO: revoke the delegations where subject == bucket, via external revocation
-	// service to inform Ingot that these are no longer valid.
+	if err := s.revokeDelegations(ctx, authz.Tenant.ID, authz.Bucket.ID, account); err != nil {
+		return nil, err
+	}
 
 	// Remove the bucket's delegations (subject == bucket), then the record.
 	if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
@@ -266,6 +286,52 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 
 	s.logger.Debug("deleted bucket", zap.Stringer("bucket", authz.Bucket.ID), zap.String("name", authz.BucketName))
 	return &s3bkt.DeleteOK{}, nil
+}
+
+// revokeDelegations publishes a UCAN revocation for the delegations over the
+// bucket that the tenant issued — the grants held by its access keys — signed by
+// the tenant. No witness path accompanies them: the revocation service only
+// requires one to prove authority over a delegation the revoker did not issue.
+//
+// Powerline delegations are not affected: they carry no subject because they grant
+// access to every bucket the tenant owns, so deleting one bucket must not revoke
+// them.
+func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.DID, revoker ucan.Issuer) error {
+	dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+		var listOpts []store.PaginationOption
+		if opts.Cursor != nil {
+			listOpts = append(listOpts, store.WithCursor(*opts.Cursor))
+		}
+		return s.delegations.ListBySubject(ctx, bucketID, listOpts...)
+	})
+	if err != nil {
+		return fmt.Errorf("listing bucket delegations: %w", err)
+	}
+	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
+
+	now := ucan.UnixTimestamp(time.Now().Unix())
+	for _, d := range dels {
+		// The bucket→tenant root is signed by the bucket's own key, which was
+		// discarded once it had issued the root, and a root is the start of its own
+		// chain — so no witness path can prove the tenant may revoke it. It is inert
+		// anyway once the bucket record is gone.
+		if d.Issuer() != tenantID {
+			log.Debug("skipping revocation of a delegation the tenant did not issue",
+				zap.Stringer("delegation", d.Link()), zap.Stringer("issuer", d.Issuer()))
+			continue
+		}
+		// An expired delegation is rejected by the revocation service, and is
+		// unusable regardless, so revoking it is moot.
+		if err := validator.ValidateNotExpired(d, now); err != nil {
+			log.Info("skipping revocation of expired delegation", zap.Stringer("delegation", d.Link()))
+			continue
+		}
+		if err := s.revocations.Publish(ctx, revoker, d); err != nil {
+			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
+		}
+		log.Info("published revocation", zap.Stringer("delegation", d.Link()))
+	}
+	return nil
 }
 
 // List authorizes the request (which also verifies the access key holds the
