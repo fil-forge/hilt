@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,10 +17,14 @@ import (
 // mockPLC is a stand-in for the did:plc directory. When Hilt provisions a tenant it
 // POSTs the signed genesis operation to POST /<did:plc>; the mock records the
 // tenant's verification key (a did:key carried in the operation) and answers 200.
-// It also acts as a did.Resolver for those captured did:plc identities, which the
-// mock Sprue needs to verify invocations the tenant issues (e.g. /provider/add
+// GET /<did:plc> then serves the corresponding DID document, which is how the real
+// Swarf (whose did:plc resolver is an HTTP client for this directory) verifies the
+// revocations the tenant signs.
+//
+// It also acts as an in-process did.Resolver for those captured identities, which
+// the mock Sprue needs to verify invocations the tenant issues (e.g. /provider/add
 // during bucket provisioning). The real Hilt only ever validates did:key issuers, so
-// it does not need this resolver — only the mock Sprue does.
+// it does not need either — only the services it calls do.
 type mockPLC struct {
 	server *httptest.Server
 
@@ -41,13 +46,21 @@ func (m *mockPLC) URL() string { return m.server.URL }
 func (m *mockPLC) Close() { m.server.Close() }
 
 func (m *mockPLC) handle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "only POST is supported", http.StatusMethodNotAllowed)
-		return
-	}
 	// Path is "/<did:plc:...>".
 	tenantDID := strings.TrimPrefix(r.URL.Path, "/")
 
+	switch r.Method {
+	case http.MethodPost:
+		m.publish(w, r, tenantDID)
+	case http.MethodGet:
+		m.document(w, r, tenantDID)
+	default:
+		http.Error(w, "only GET and POST are supported", http.StatusMethodNotAllowed)
+	}
+}
+
+// publish records the verification key from a genesis operation.
+func (m *mockPLC) publish(w http.ResponseWriter, r *http.Request, tenantDID string) {
 	var op plc.SignedOperation
 	if err := op.UnmarshalDagJSON(r.Body); err != nil {
 		http.Error(w, fmt.Sprintf("decoding genesis operation: %v", err), http.StatusBadRequest)
@@ -66,6 +79,25 @@ func (m *mockPLC) handle(w http.ResponseWriter, r *http.Request) {
 	m.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// document serves the DID document for a recorded did:plc, as the real directory's
+// resolution endpoint does.
+func (m *mockPLC) document(w http.ResponseWriter, r *http.Request, tenantDID string) {
+	d, err := did.Parse(tenantDID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("parsing DID: %v", err), http.StatusBadRequest)
+		return
+	}
+	doc, err := m.Resolve(r.Context(), d)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/did+json")
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		http.Error(w, fmt.Sprintf("encoding DID document: %v", err), http.StatusInternalServerError)
+	}
 }
 
 // Resolve resolves a captured did:plc to a DID document by delegating to the did:key
