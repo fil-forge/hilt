@@ -79,7 +79,32 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 	return nil
 }
 
+// listColumn is a delegation column a list query may filter on. The named type
+// keeps the value a package-controlled constant rather than caller input, since it
+// is interpolated into the query text.
+type listColumn string
+
+const (
+	byAudience listColumn = "audience"
+	bySubject  listColumn = "subject"
+)
+
 func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	return s.listBy(ctx, byAudience, audience.String(), opts)
+}
+
+func (s *Store) ListBySubject(ctx context.Context, subject did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	if !subject.Defined() {
+		return store.Page[ucan.Delegation]{}, fmt.Errorf("cannot list powerline delegations: %w", store.ErrInvalidArgument)
+	}
+	// Powerline delegations store a NULL subject, which never matches an equality
+	// filter, so they are excluded for free.
+	return s.listBy(ctx, bySubject, subject.String(), opts)
+}
+
+// listBy returns a page of delegations whose column equals value, ordered by id so
+// the keyset cursor is stable.
+func (s *Store) listBy(ctx context.Context, column listColumn, value string, opts []store.PaginationOption) (store.Page[ucan.Delegation], error) {
 	cfg := store.PaginationConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -89,11 +114,11 @@ func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...st
 		limit = *cfg.Limit
 	}
 
-	args := []any{audience.String(), limit + 1}
+	args := []any{value, limit + 1}
 	query := `
 		SELECT id, data
 		FROM delegation
-		WHERE audience = $1
+		WHERE ` + string(column) + ` = $1
 	`
 	if cfg.Cursor != nil {
 		args = append(args, *cfg.Cursor)
@@ -103,7 +128,7 @@ func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...st
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return store.Page[ucan.Delegation]{}, fmt.Errorf("querying delegations by audience: %w", err)
+		return store.Page[ucan.Delegation]{}, fmt.Errorf("querying delegations by %s: %w", column, err)
 	}
 	defer rows.Close()
 

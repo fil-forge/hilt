@@ -153,9 +153,11 @@ func Start(t *testing.T) *Network {
 	require.NoError(t, err)
 	createDlg, err := s3bkt.Create.Delegate(hiltIssuer, ingotDID, hiltDID)
 	require.NoError(t, err)
+	deleteDlg, err := s3bkt.Delete.Delegate(hiltIssuer, ingotDID, hiltDID)
+	require.NoError(t, err)
 	infoDlg, err := s3bkt.Info.Delegate(hiltIssuer, ingotDID, hiltDID)
 	require.NoError(t, err)
-	ingotProofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(authDlg, createDlg, infoDlg)))
+	ingotProofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(authDlg, createDlg, deleteDlg, infoDlg)))
 	hiltClient, err := client.New(hiltDID, *hiltU, ingotIssuer, client.WithBaseProofs(ingotProofs), client.WithLogger(logger))
 	require.NoError(t, err)
 

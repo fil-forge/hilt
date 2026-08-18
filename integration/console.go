@@ -31,9 +31,14 @@ func (c *Console) ProvisionTenant(ctx context.Context, tenantID, region string) 
 }
 
 // CreateAccessKey creates an S3 access key with the given permissions and returns
-// it, including the one-time secret access key.
-func (c *Console) CreateAccessKey(ctx context.Context, tenantID, name string, perms []string) (api.CreatedAccessKey, error) {
-	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{Name: name, Permissions: perms})
+// it, including the one-time secret access key. Naming buckets scopes the key's
+// delegations to them; with none it gets tenant-wide (powerline) access.
+func (c *Console) CreateAccessKey(ctx context.Context, tenantID, name string, perms, buckets []string) (api.CreatedAccessKey, error) {
+	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name:        name,
+		Permissions: perms,
+		Buckets:     buckets,
+	})
 }
 
 // DeleteAccessKey revokes and removes an access key.
