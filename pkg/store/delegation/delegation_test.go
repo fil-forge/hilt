@@ -189,6 +189,21 @@ func TestDelegationStore(t *testing.T) {
 				require.Len(t, all, 5)
 			})
 
+			t.Run("ListBySubject falls back to the default limit for a non-positive limit", func(t *testing.T) {
+				subject := testutil.RandomDID(t)
+				for range 3 {
+					dlg := makeDelegation(t, testutil.RandomIssuer(t), testutil.RandomDID(t), subject, command.MustParse("/test/run"))
+					require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dlg}))
+				}
+
+				for _, limit := range []int{0, -1} {
+					page, err := s.ListBySubject(t.Context(), subject, store.WithLimit(limit))
+					require.NoError(t, err)
+					require.Len(t, page.Results, 3)
+					require.Nil(t, page.Cursor)
+				}
+			})
+
 			t.Run("ListBySubject returns ErrInvalidArgument for undef subject", func(t *testing.T) {
 				_, err := s.ListBySubject(t.Context(), did.Undef)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)

@@ -85,8 +85,6 @@ github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
 github.com/fil-forge/libforge v0.0.0-20260724113901-7fc3b2cec1ef h1:xgkciShyWdCQ2Pyl2qEwP7JMbsdbHdECj/v6E5+fj6U=
 github.com/fil-forge/libforge v0.0.0-20260724113901-7fc3b2cec1ef/go.mod h1:0kXihIQ4L2uZ00nR5XrZ/Y8Db7Ht/qQNuiWslwMJ95M=
-github.com/fil-forge/swarf v0.0.1-0.20260807111306-896cf60c6bda h1:6tNyyeFq1iz45lk1cqlyz5SgYdc7gFMNsZrnrNNrlzs=
-github.com/fil-forge/swarf v0.0.1-0.20260807111306-896cf60c6bda/go.mod h1:8op1A7qf+uePjEObRqnfXbPUZfdmyfFMnc8manoZ3y8=
 github.com/fil-forge/swarf v0.0.1-0.20260818180033-fabf8b413177 h1:mbSP1vlXbgXt6nQ8rzUJQ7rG/8gj4hsnNNZuz271rY8=
 github.com/fil-forge/swarf v0.0.1-0.20260818180033-fabf8b413177/go.mod h1:nXuOxD3DR2OhgTi8M/BsaR/4tBiwxmHP0H00XqEAF4o=
 github.com/fil-forge/ucantone v0.0.0-20260706102443-79141c5cc52e h1:di/SseJVEO6bznSH/UEnAE2nSwwp/gqgnPLgE9/x2Zg=

@@ -110,8 +110,14 @@ func page(dlgs []ucan.Delegation, opts []store.PaginationOption) store.Page[ucan
 		}
 	}
 
+	// A non-positive limit falls back to the default, matching the postgres
+	// backend; without the guard, truncating to zero would panic below.
+	if cfg.Limit == nil || *cfg.Limit <= 0 {
+		cfg.Limit = &limit
+	}
+
 	var cursor *string
-	if cfg.Limit != nil && len(dlgs) > *cfg.Limit {
+	if len(dlgs) > *cfg.Limit {
 		dlgs = dlgs[:*cfg.Limit]
 		last := dlgs[len(dlgs)-1].Link().String()
 		cursor = &last

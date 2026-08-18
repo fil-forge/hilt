@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -106,4 +107,75 @@ func TestDeleteBucketRevokes(t *testing.T) {
 		require.Equal(t, "plc", record.Cause.Issuer().Method())
 		require.Equal(t, revokedDlg.Issuer(), record.Cause.Issuer())
 	}
+}
+
+// TestDeleteBucketRevokesOnlyThatBucket covers an access key scoped to multiple
+// buckets when one of them is deleted: only the deleted bucket's delegations are
+// revoked, and the key keeps working against the surviving bucket.
+func TestDeleteBucketRevokesOnlyThatBucket(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test boots a real Hilt server; skipped under -short")
+	}
+	ctx := t.Context()
+
+	net := Start(t)
+	require.NoError(t, net.Admin.AddProvider(ctx, net.IngotDID, Region))
+
+	const tenantID = "tenant-1"
+	const keptBucket, doomedBucket = "kept-bucket", "doomed-bucket"
+	_, err := net.Console.ProvisionTenant(ctx, tenantID, Region)
+	require.NoError(t, err)
+
+	admin, err := net.Console.CreateAccessKey(ctx, tenantID,
+		"admin-key", []string{"s3:CreateBucket", "s3:DeleteBucket"}, nil)
+	require.NoError(t, err)
+	adminS3 := net.S3Client(t, admin.AccessKeyID, admin.SecretAccessKey)
+	for _, bucket := range []string{keptBucket, doomedBucket} {
+		_, err = adminS3.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		require.NoError(t, err)
+	}
+
+	// A writer key scoped to both buckets holds one delegation per
+	// (bucket × command); deleting one bucket must revoke only that bucket's half.
+	writerPerms := []string{"s3:PutObject"}
+	writer, err := net.Console.CreateAccessKey(ctx, tenantID,
+		"writer-key", writerPerms, []string{keptBucket, doomedBucket})
+	require.NoError(t, err)
+
+	_, err = adminS3.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(doomedBucket)})
+	require.NoError(t, err)
+
+	// Exactly one bucket's share of the writer's delegations lands on the
+	// firehose: one revocation per command, all with the same subject.
+	revoked := net.Swarf.awaitRevocations(t, ctx, len(s3perm.CommandsFor(writerPerms...)))
+	writerDID := "did:key:" + writer.AccessKeyID
+	subjects := map[string]struct{}{}
+	for _, link := range revoked {
+		record, err := net.Swarf.revocation(ctx, link)
+		require.NoError(t, err)
+		require.Len(t, record.Path, 1)
+		revokedDlg := record.Path[0]
+		require.Equal(t, writerDID, revokedDlg.Audience().String())
+		subjects[revokedDlg.Subject().String()] = struct{}{}
+	}
+	require.Len(t, subjects, 1, "revocations should cover a single bucket")
+
+	// The revoked subject is the deleted bucket: the key's record still resolves
+	// the kept bucket by name and renders the deleted one as its raw DID.
+	got, err := net.Console.GetAccessKey(ctx, tenantID, writer.AccessKeyID)
+	require.NoError(t, err)
+	require.Contains(t, got.Buckets, keptBucket)
+	for subject := range subjects {
+		require.Contains(t, got.Buckets, subject, "the revoked subject should be the deleted bucket's DID")
+	}
+
+	// The kept bucket's delegations survive: a real upload still authorizes
+	// through the writer's remaining proof chain.
+	writerS3 := net.S3Client(t, writer.AccessKeyID, writer.SecretAccessKey)
+	_, err = writerS3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(keptBucket),
+		Key:    aws.String("hello.txt"),
+		Body:   bytes.NewReader([]byte("still works")),
+	})
+	require.NoError(t, err, "the writer key should still work for the surviving bucket")
 }
