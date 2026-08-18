@@ -60,9 +60,9 @@ func main() {
 	serveCmd.Flags().String("partner-key", "", "CSV partner bearer key(s) required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
 
 	// upload service config
-	serveCmd.Flags().String("upload-service-id", "did:web:upload.forgery.network", "Upload service DID")
-	serveCmd.Flags().String("upload-service-url", "https://upload.forgery.network", "Upload service HTTP endpoint")
-	serveCmd.Flags().String("upload-product-id", "did:web:hilt.forgery.network", "Upload service product/plan DID that tenants are registered under")
+	serveCmd.Flags().String("upload-service-id", "did:web:upload.fil-forge.com", "Upload service DID")
+	serveCmd.Flags().String("upload-service-url", "https://upload.fil-forge.com", "Upload service HTTP endpoint")
+	serveCmd.Flags().String("upload-product-id", "did:web:hilt.fil-forge.com", "Upload service product/plan DID that tenants are registered under")
 	serveCmd.Flags().String("upload-proofs", "", "Upload service proofs: an encoded UCAN container or a path to a file containing one")
 
 	rootCmd.AddCommand(serveCmd)
