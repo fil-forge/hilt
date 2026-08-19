@@ -181,12 +181,12 @@ func SetDefaults(v *viper.Viper) {
 
 	v.SetDefault("plc.directory", "https://plc.directory")
 
-	v.SetDefault("upload.service_id", "did:web:upload.forgery.network")
-	v.SetDefault("upload.service_url", "https://upload.forgery.network")
-	v.SetDefault("upload.product_id", "did:web:hilt.forgery.network")
-
-	v.SetDefault("revocation.service_id", "did:web:revocation.forgery.network")
-	v.SetDefault("revocation.service_url", "https://revocation.forgery.network")
+	v.SetDefault("upload.service_id", "did:web:upload.fil-forge.com")
+	v.SetDefault("upload.service_url", "https://upload.fil-forge.com")
+	v.SetDefault("upload.product_id", "did:web:hilt.fil-forge.com")
+  
+	v.SetDefault("revocation.service_id", "did:web:revoke.fil-forge.com")
+	v.SetDefault("revocation.service_url", "https://revoke.fil-forge.com")
 }
 
 // flagBindings maps each config key to its serve-command flag name.
