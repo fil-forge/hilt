@@ -1,4 +1,4 @@
-package integration
+package itest
 
 import (
 	"net/http/httptest"
@@ -19,8 +19,9 @@ import (
 // mockSprue is a stand-in for the Sprue upload service. It is a real ucantone UCAN
 // server (so it returns properly signed receipts) handling the commands Hilt and the
 // gateway invoke on the happy path: /customer/add (tenant provisioning),
-// /provider/add (bucket space provisioning), and /blob/add (object upload, from the
-// mock Ingot). It is configured with a DID resolver that can resolve the tenant's
+// /provider/add (bucket space provisioning), /blob/list (the bucket emptiness check
+// before a delete), and /blob/add (object upload, from the mock Ingot). It is
+// configured with a DID resolver that can resolve the tenant's
 // did:plc (via the mock PLC directory), needed to verify the /provider/add
 // invocation (issued by the tenant) and the /blob/add proof chain (rooted at the
 // bucket, through the tenant).
@@ -31,6 +32,7 @@ type mockSprue struct {
 	customerAdds int
 	providerAdds int
 	blobAdds     int
+	blobLists    int
 }
 
 // newMockSprue starts the mock Sprue UCAN server. issuer is Sprue's identity (it
@@ -54,6 +56,16 @@ func newMockSprue(issuer ucan.Issuer, resolver did.Resolver) *mockSprue {
 			m.providerAdds++
 			m.mu.Unlock()
 			return res.SetSuccess(&providercmds.AddOK{ID: "sub-1"})
+		}))
+
+	// Hilt lists a space's blobs to check a bucket is empty before deleting it. The
+	// mock reports every space as empty: object teardown is out of scope here.
+	srv.Handle(blobcmds.List.Command, blobcmds.List.Handler(
+		func(req *binding.Request[*blobcmds.ListArguments], res *binding.Response[*blobcmds.ListOK]) error {
+			m.mu.Lock()
+			m.blobLists++
+			m.mu.Unlock()
+			return res.SetSuccess(&blobcmds.ListOK{})
 		}))
 
 	srv.Handle(blobcmds.Add.Command, blobcmds.Add.Handler(
@@ -83,4 +95,11 @@ func (m *mockSprue) counts() (customerAdds, providerAdds, blobAdds int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.customerAdds, m.providerAdds, m.blobAdds
+}
+
+// blobListCount returns how many times a space's blobs were listed.
+func (m *mockSprue) blobListCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.blobLists
 }

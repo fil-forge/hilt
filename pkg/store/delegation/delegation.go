@@ -19,6 +19,10 @@ type Store interface {
 	// ListByAudience retrieves a paginated list of delegation records for a given
 	// audience.
 	ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error)
+	// ListBySubject retrieves a paginated list of delegation records for a given
+	// subject. Powerline delegations (undefined subject) are not returned by this
+	// method: it returns [store.ErrInvalidArgument] for an undef subject.
+	ListBySubject(ctx context.Context, subject did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error)
 	// ProofChain recursively builds a proof chain of delegations from the given
 	// audience to the given subject for the specified command. It returns the list
 	// of delegations and their corresponding links in the order required for

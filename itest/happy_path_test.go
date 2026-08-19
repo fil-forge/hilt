@@ -1,4 +1,4 @@
-package integration
+package itest
 
 import (
 	"bytes"
@@ -34,7 +34,7 @@ func TestHappyPath(t *testing.T) {
 	customerAdds, _, _ := net.Sprue.counts()
 	require.Equal(t, 1, customerAdds, "tenant provisioning should register one customer with Sprue")
 
-	ak, err := net.Console.CreateAccessKey(ctx, tenantID, "key-1", []string{"s3:CreateBucket", "s3:PutObject"})
+	ak, err := net.Console.CreateAccessKey(ctx, tenantID, "key-1", []string{"s3:CreateBucket", "s3:PutObject"}, nil)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(ak.SecretAccessKey, "u"), "secret should be a multibase base64url string")
 

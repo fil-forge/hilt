@@ -16,6 +16,7 @@ import (
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/libforge/testutil"
+	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -27,7 +28,9 @@ func TestHandlerCommands(t *testing.T) {
 
 	up, err := upload.NewClient(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "sprue.test"}, testutil.RandomIssuer(t), upload.WithBaseProofs(delegationmemory.New()))
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), up)
+	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
+	require.NoError(t, err)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), up, revocations)
 
 	t.Run("list", func(t *testing.T) {
 		route := rpc.NewListBucketsHandler(zap.NewNop(), buckets)
