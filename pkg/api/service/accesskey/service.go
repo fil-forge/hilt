@@ -34,10 +34,10 @@ import (
 
 const maxNameLength = 64
 
-// RevocationClient is the subset of the revocation service (Swarf) that access
+// RevocationPublisher is the subset of the revocation service (Swarf) that access
 // key deletion needs. It is satisfied by [*swarfclient.Client]; the interface
 // lets the logic be unit tested without a live revocation service.
-type RevocationClient interface {
+type RevocationPublisher interface {
 	// Publish submits a /ucan/revoke invocation self-signed by revoker for the
 	// revoked delegation, which revoker must have issued unless a witness path is
 	// supplied with [swarfclient.WithWitnessPath].
@@ -52,7 +52,7 @@ type Service struct {
 	buckets     bucket.Store
 	delegations delegationstore.Store
 	secrets     vault.Vault
-	revocations RevocationClient
+	revocations RevocationPublisher
 }
 
 // New constructs the access-key service.
@@ -63,7 +63,7 @@ func New(
 	buckets bucket.Store,
 	delegations delegationstore.Store,
 	secrets vault.Vault,
-	revocations RevocationClient,
+	revocations RevocationPublisher,
 ) *Service {
 	return &Service{
 		logger:      logger,

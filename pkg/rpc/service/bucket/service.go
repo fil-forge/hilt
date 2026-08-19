@@ -48,10 +48,10 @@ type UploadClient interface {
 	SpaceEmpty(ctx context.Context, space did.DID, opts ...upload.MethodOption) (bool, error)
 }
 
-// RevocationClient is the subset of the revocation service (Swarf) the bucket
+// RevocationPublisher is the subset of the revocation service (Swarf) the bucket
 // operations need. It is satisfied by [*swarfclient.Client]; the interface lets the
 // logic be unit tested without a live revocation service.
-type RevocationClient interface {
+type RevocationPublisher interface {
 	// Publish submits a /ucan/revoke invocation self-signed by revoker for the
 	// revoked delegation, which revoker must have issued unless a witness path is
 	// supplied with [swarfclient.WithWitnessPath].
@@ -66,7 +66,7 @@ type Service struct {
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
 	uploads     UploadClient
-	revocations RevocationClient
+	revocations RevocationPublisher
 }
 
 // New constructs the bucket service.
@@ -77,7 +77,7 @@ func New(
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
 	uploads UploadClient,
-	revocations RevocationClient,
+	revocations RevocationPublisher,
 ) *Service {
 	return &Service{
 		logger:      logger,

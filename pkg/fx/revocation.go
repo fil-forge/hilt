@@ -21,8 +21,8 @@ var RevocationModule = fx.Module("revocation",
 		fx.Annotate(
 			NewRevocationClient,
 			fx.As(fx.Self()),
-			fx.As(new(accesskeysvc.RevocationClient)),
-			fx.As(new(bucketsvc.RevocationClient)),
+			fx.As(new(accesskeysvc.RevocationPublisher)),
+			fx.As(new(bucketsvc.RevocationPublisher)),
 		),
 	),
 )
