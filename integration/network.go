@@ -1,20 +1,17 @@
 // Package integration contains an end-to-end test harness that stands up a real
-// Hilt in-process alongside mocks of the services it talks to — a management
-// console (REST), the Ingot S3 gateway (UCAN RPC), and the Sprue upload service
-// (UCAN RPC) plus a mock did:plc directory — so the REST and RPC APIs can be
-// exercised together with the real AWS S3 SDK.
+// Hilt in-process alongside the services it talks to — mocks of a management
+// console (REST), the Ingot S3 gateway (UCAN RPC), the Sprue upload service (UCAN
+// RPC) and the did:plc directory, plus a real Swarf revocation service over its
+// memory store — so the REST and RPC APIs can be exercised together with the real
+// AWS S3 SDK.
 package integration
 
 import (
 	"context"
-	"fmt"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -33,6 +30,7 @@ import (
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
@@ -57,6 +55,7 @@ type Network struct {
 	Console *Console
 	Ingot   *mockIngot
 	Sprue   *mockSprue
+	Swarf   *swarfService
 	PLC     *mockPLC
 }
 
@@ -101,17 +100,22 @@ func Start(t *testing.T) *Network {
 	require.NoError(t, os.WriteFile(proofsPath, proofsBytes, 0o600))
 
 	// Mock PLC directory + mock Sprue (Sprue needs the PLC-backed resolver to verify
-	// the tenant's did:plc issued /provider/add during bucket provisioning).
+	// the tenant's did:plc issued /provider/add during bucket provisioning) + a real
+	// Swarf over its memory store (it resolves the same directory over HTTP to verify
+	// the revocations the tenant signs).
 	plc := newMockPLC()
 	t.Cleanup(plc.Close)
 	sprue := newMockSprue(sprueIssuer, plc.resolver())
 	t.Cleanup(sprue.Close)
+	swarf := startSwarf(t, dir, plc.URL())
 
-	// Boot the real Hilt (memory storage + vault) on a free port.
-	port := freePort(t)
+	// Boot the real Hilt (memory storage + vault). Port 0 lets the kernel assign a
+	// free port, avoiding the race in picking one ourselves; Hilt binds its listener
+	// while starting up, so the assigned port is readable from the echo server as
+	// soon as startup returns.
 	cfg := &config.Config{
 		Identity: config.IdentityConfig{KeyFile: pemPath},
-		Server:   config.ServerConfig{Host: "127.0.0.1", Port: port},
+		Server:   config.ServerConfig{Host: "127.0.0.1", Port: 0},
 		Storage:  config.StorageConfig{Type: config.StorageTypeMemory},
 		Vault:    config.VaultConfig{Type: config.VaultTypeMemory},
 		PLC:      config.PLCConfig{Directory: plc.URL()},
@@ -121,15 +125,21 @@ func Start(t *testing.T) *Network {
 			ProductID:  testutil.RandomDID(t).String(),
 			Proofs:     proofsPath,
 		},
+		Revocation: config.RevocationConfig{
+			ServiceID:  swarf.DID.String(),
+			ServiceURL: swarf.URL,
+		},
 		Auth: config.AuthConfig{PartnerKey: partnerKey},
 		Log:  config.LogConfig{Level: "error"},
 	}
-	app := fxtest.New(t, appfx.AppModule(cfg), fx.NopLogger)
+	var hiltServer *echo.Echo
+	app := fxtest.New(t, appfx.AppModule(cfg), fx.Populate(&hiltServer), fx.NopLogger)
 	app.RequireStart()
 	t.Cleanup(app.RequireStop)
 
-	hiltURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForHealth(t, hiltURL)
+	hiltAddr := hiltServer.ListenerAddr()
+	require.NotNil(t, hiltAddr, "hilt did not bind a listener")
+	hiltURL := "http://" + hiltAddr.String()
 	hiltU, err := url.Parse(hiltURL)
 	require.NoError(t, err)
 
@@ -143,9 +153,11 @@ func Start(t *testing.T) *Network {
 	require.NoError(t, err)
 	createDlg, err := s3bkt.Create.Delegate(hiltIssuer, ingotDID, hiltDID)
 	require.NoError(t, err)
+	deleteDlg, err := s3bkt.Delete.Delegate(hiltIssuer, ingotDID, hiltDID)
+	require.NoError(t, err)
 	infoDlg, err := s3bkt.Info.Delegate(hiltIssuer, ingotDID, hiltDID)
 	require.NoError(t, err)
-	ingotProofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(authDlg, createDlg, infoDlg)))
+	ingotProofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(authDlg, createDlg, deleteDlg, infoDlg)))
 	hiltClient, err := client.New(hiltDID, *hiltU, ingotIssuer, client.WithBaseProofs(ingotProofs), client.WithLogger(logger))
 	require.NoError(t, err)
 
@@ -167,6 +179,7 @@ func Start(t *testing.T) *Network {
 		Console:  newConsole(t, hiltURL, partnerKey),
 		Ingot:    ingot,
 		Sprue:    sprue,
+		Swarf:    swarf,
 		PLC:      plc,
 	}
 }
@@ -187,31 +200,4 @@ func (n *Network) S3Client(t *testing.T, accessKeyID, secret string) *s3.Client 
 		o.BaseEndpoint = &endpoint
 		o.UsePathStyle = true
 	})
-}
-
-// freePort returns a currently-free TCP port on the loopback interface.
-func freePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
-}
-
-func waitForHealth(t *testing.T, baseURL string) {
-	t.Helper()
-
-	httpc := &http.Client{Timeout: 250 * time.Millisecond}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := httpc.Get(baseURL + "/health")
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("hilt did not become healthy at %s", baseURL)
 }

@@ -26,7 +26,8 @@ import (
 
 // mockIngot is a stand-in for the Ingot S3 gateway. It exposes an S3 HTTP endpoint
 // (which the real AWS SDK targets) and, for each request, calls Hilt's UCAN RPC:
-//   - CreateBucket (PUT /<bucket>)      -> Hilt /s3/bucket/create
+//   - CreateBucket (PUT /<bucket>)       -> Hilt /s3/bucket/create
+//   - DeleteBucket (DELETE /<bucket>)    -> Hilt /s3/bucket/delete
 //   - PutObject    (PUT /<bucket>/<key>) -> Hilt /s3/request/authorize (verify the
 //     signature) + /s3/bucket/info (fetch proofs), then it stores the object by
 //     invoking /blob/add on Sprue with a bucket-rooted proof chain.
@@ -81,6 +82,8 @@ func (m *mockIngot) handle(w http.ResponseWriter, r *http.Request) {
 		m.createBucket(w, r)
 	case r.Method == http.MethodPut && bucket != "" && objectKey != "":
 		m.putObject(w, r, bucket, objectKey)
+	case r.Method == http.MethodDelete && bucket != "" && objectKey == "":
+		m.deleteBucket(w, r)
 	default:
 		http.Error(w, "unsupported S3 operation", http.StatusNotImplemented)
 	}
@@ -93,6 +96,15 @@ func (m *mockIngot) createBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// deleteBucket forwards a DeleteBucket to Hilt's /s3/bucket/delete.
+func (m *mockIngot) deleteBucket(w http.ResponseWriter, r *http.Request) {
+	if err := m.hilt.DeleteBucket(r.Context(), s3RequestFrom(r)); err != nil {
+		http.Error(w, fmt.Sprintf("delete bucket rejected: %v", err), http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // putObject authorizes the request with Hilt, verifies the caller's SigV4 signature

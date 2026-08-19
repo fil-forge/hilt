@@ -25,6 +25,7 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	"github.com/fil-forge/libforge/testutil"
+	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -32,6 +33,7 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
+	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -100,7 +102,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue, &fakeSwarf{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -167,6 +169,41 @@ func (f failingListDelegations) ListByAudience(context.Context, did.DID, ...stor
 	return store.Page[ucan.Delegation]{}, f.err
 }
 
+// revocation records one published revocation. options counts the [PublishOption]s
+// it was published with: Swarf's publishConfig is unexported, so the count is how
+// a witness path being sent is detected.
+type revocation struct {
+	revoker did.DID
+	revoked cid.Cid
+	options int
+}
+
+// fakeSwarf is a stub of the revocation service, recording what it was asked to
+// publish.
+type fakeSwarf struct {
+	err         error
+	revocations []revocation
+}
+
+func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: revoked.Link(), options: len(opts)})
+	return nil
+}
+
+// deleteDeps is the world a Delete subtest operates on.
+type deleteDeps struct {
+	svc         *bucketsvc.Service
+	buckets     *bucketmemory.Store
+	delegations *delegationmemory.Store
+	swarf       *fakeSwarf
+	bucketID    did.DID
+	root        ucan.Delegation // bucket→tenant, signed by the bucket's discarded key
+	grant       ucan.Delegation // tenant→access key, scoped to the bucket
+}
+
 func TestDelete(t *testing.T) {
 	ctx := t.Context()
 	const region, bucketName = "us-west-2", "delbucket"
@@ -179,7 +216,8 @@ func TestDelete(t *testing.T) {
 	tenantID := tenantSigner.KeyDID()
 	providerID := testutil.RandomDID(t)
 
-	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient) (*bucketsvc.Service, *bucketmemory.Store, did.DID) {
+	// grantOpts lets a subtest vary the tenant→access-key grant's expiry.
+	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, grantOpts ...delegation.Option) deleteDeps {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
@@ -192,13 +230,30 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err)
 		bucketID := bucketSigner.KeyDID()
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
-		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top())
+		// Both live as long as the bucket does, as the real ones do — without
+		// WithNoExpiration ucantone defaults to a 30-second expiry, which would make
+		// the expiry-skip behaviour timing-dependent.
+		root, err := delegation.Delegate(
+			multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 		require.NoError(t, err)
-		grant, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, bucketID, content.Retrieve.Command)
+		if len(grantOpts) == 0 {
+			grantOpts = []delegation.Option{delegation.WithNoExpiration()}
+		}
+		grant, err := delegation.Delegate(
+			multikey.NewIssuer(tenantID, tenantSigner), akDID, bucketID, content.Retrieve.Command, grantOpts...)
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue), buckets, bucketID
+		swarf := &fakeSwarf{}
+		return deleteDeps{
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue, swarf),
+			buckets:     buckets,
+			delegations: delegations,
+			swarf:       swarf,
+			bucketID:    bucketID,
+			root:        root,
+			grant:       grant,
+		}
 	}
 
 	del := func(name string) *s3bkt.DeleteArguments {
@@ -207,38 +262,92 @@ func TestDelete(t *testing.T) {
 
 	t.Run("deletes an empty bucket", func(t *testing.T) {
 		sprue := &fakeSprue{empty: true}
-		svc, buckets, bucketID := setup(t, []string{"s3:DeleteBucket"}, sprue)
-		_, err := svc.Delete(ctx, providerID, del(bucketName))
+		d := setup(t, []string{"s3:DeleteBucket"}, sprue)
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
 		require.True(t, sprue.emptyCalled)
-		require.Equal(t, bucketID, sprue.emptySpace)
-		_, err = buckets.GetByName(ctx, bucketName)
+		require.Equal(t, d.bucketID, sprue.emptySpace)
+		_, err = d.buckets.GetByName(ctx, bucketName)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
+	t.Run("revokes the tenant's grant over the bucket, with no witness path", func(t *testing.T) {
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.NoError(t, err)
+
+		require.Len(t, d.swarf.revocations, 1)
+		r := d.swarf.revocations[0]
+		// The tenant issued the grant, so the tenant revokes it directly.
+		require.Equal(t, tenantID, r.revoker)
+		require.Equal(t, d.grant.Link(), r.revoked)
+		require.Zero(t, r.options)
+	})
+
+	t.Run("does not revoke the bucket root", func(t *testing.T) {
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.NoError(t, err)
+
+		// The root was signed by the bucket's discarded key: the tenant is only its
+		// audience, so no revocation it could sign would be accepted.
+		for _, r := range d.swarf.revocations {
+			require.NotEqual(t, d.root.Link(), r.revoked)
+		}
+	})
+
+	t.Run("skips an expired grant", func(t *testing.T) {
+		expired := delegation.WithExpiration(ucan.UnixTimestamp(time.Now().Add(-time.Hour).Unix()))
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true}, expired)
+
+		// The revocation service rejects expired delegations, and they are unusable
+		// anyway — so the bucket is still deleted, just with nothing published.
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.NoError(t, err)
+		require.Empty(t, d.swarf.revocations)
+		_, err = d.buckets.GetByName(ctx, bucketName)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("a revocation failure leaves the bucket intact", func(t *testing.T) {
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d.swarf.err = errors.New("swarf is down")
+
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.ErrorContains(t, err, "publishing revocation")
+
+		// Nothing was removed, so the call can simply be retried.
+		_, err = d.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err)
+		remaining, err := d.delegations.ListBySubject(ctx, d.bucketID)
+		require.NoError(t, err)
+		require.Len(t, remaining.Results, 2)
+	})
+
 	t.Run("rejects a key without s3:DeleteBucket", func(t *testing.T) {
-		svc, _, _ := setup(t, []string{"s3:GetObject"}, &fakeSprue{empty: true})
-		_, err := svc.Delete(ctx, providerID, del(bucketName))
+		d := setup(t, []string{"s3:GetObject"}, &fakeSprue{empty: true})
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects an unknown bucket", func(t *testing.T) {
-		svc, _, _ := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
-		_, err := svc.Delete(ctx, providerID, del("nope"))
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		_, err := d.svc.Delete(ctx, providerID, del("nope"))
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
 	})
 
 	t.Run("rejects a non-empty bucket and keeps it", func(t *testing.T) {
-		svc, buckets, _ := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: false})
-		_, err := svc.Delete(ctx, providerID, del(bucketName))
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: false})
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.ErrorIs(t, err, bucketsvc.ErrBucketNotEmpty)
-		_, err = buckets.GetByName(ctx, bucketName)
+		_, err = d.buckets.GetByName(ctx, bucketName)
 		require.NoError(t, err)
+		require.Empty(t, d.swarf.revocations, "nothing is revoked when the delete is refused")
 	})
 
 	t.Run("propagates a SpaceEmpty error", func(t *testing.T) {
-		svc, _, _ := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{emptyErr: errors.New("sprue unavailable")})
-		_, err := svc.Delete(ctx, providerID, del(bucketName))
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{emptyErr: errors.New("sprue unavailable")})
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.Error(t, err)
 	})
 }
@@ -262,7 +371,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -374,7 +483,7 @@ func TestInfo(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		// Info does not use the authorizer; a minimal one over empty stores suffices.
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{})
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{})
 	}
 
 	t.Run("returns the bucket, permissions, and delegation chain", func(t *testing.T) {

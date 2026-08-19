@@ -60,13 +60,43 @@ func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...st
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
+	return page(slices.Clone(s.byAudience[audience]), opts), nil
+}
+
+func (s *Store) ListBySubject(ctx context.Context, subject did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	if !subject.Defined() {
+		return store.Page[ucan.Delegation]{}, fmt.Errorf("cannot list powerline delegations: %w", store.ErrInvalidArgument)
+	}
+
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// The store indexes only by audience, so scan each audience's delegations and
+	// collect those whose subject matches. The result is sorted by link because map
+	// iteration order is not stable, and pagination needs a stable order.
+	var dlgs []ucan.Delegation
+	for _, existing := range s.byAudience {
+		for _, d := range existing {
+			if d.Subject() == subject {
+				dlgs = append(dlgs, d)
+			}
+		}
+	}
+	slices.SortFunc(dlgs, func(a, b ucan.Delegation) int {
+		return strings.Compare(a.Link().String(), b.Link().String())
+	})
+	return page(dlgs, opts), nil
+}
+
+// page applies the pagination options to a link-sorted list of delegations. The
+// cursor is the link string of the last item of the previous page.
+func page(dlgs []ucan.Delegation, opts []store.PaginationOption) store.Page[ucan.Delegation] {
 	limit := defaultListLimit
 	cfg := store.PaginationConfig{Limit: &limit}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	dlgs := slices.Clone(s.byAudience[audience])
 	if cfg.Cursor != nil {
 		for i, d := range dlgs {
 			if d.Link().String() == *cfg.Cursor {
@@ -80,13 +110,19 @@ func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...st
 		}
 	}
 
+	// A non-positive limit falls back to the default, matching the postgres
+	// backend; without the guard, truncating to zero would panic below.
+	if cfg.Limit == nil || *cfg.Limit <= 0 {
+		cfg.Limit = &limit
+	}
+
 	var cursor *string
-	if cfg.Limit != nil && len(dlgs) > *cfg.Limit {
+	if len(dlgs) > *cfg.Limit {
 		dlgs = dlgs[:*cfg.Limit]
 		last := dlgs[len(dlgs)-1].Link().String()
 		cursor = &last
 	}
-	return store.Page[ucan.Delegation]{Cursor: cursor, Results: dlgs}, nil
+	return store.Page[ucan.Delegation]{Cursor: cursor, Results: dlgs}
 }
 
 func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {

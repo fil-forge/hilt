@@ -77,13 +77,15 @@ func RegisterServerLifecycle(
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 
 			// Bind synchronously so a failure (e.g. port already in use) is
-			// returned from OnStart and aborts fx startup.
+			// returned from OnStart and aborts fx startup. Binding here also means
+			// the listener's address is available once startup completes, which is
+			// the only way to learn the port when configured with port 0.
 			ln, err := net.Listen("tcp", addr)
 			if err != nil {
 				return fmt.Errorf("binding %s: %w", addr, err)
 			}
 			e.Listener = ln
-			logger.Info("starting Hilt service", zap.String("address", addr))
+			logger.Info("starting Hilt service", zap.String("address", ln.Addr().String()))
 			go func() {
 				// e.Start reuses the listener bound above and blocks serving
 				// until Shutdown, which returns http.ErrServerClosed.

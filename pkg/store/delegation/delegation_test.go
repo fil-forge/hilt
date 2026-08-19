@@ -141,6 +141,74 @@ func TestDelegationStore(t *testing.T) {
 				require.Len(t, pagePowerline.Results, 1, "powerline delegation should remain")
 			})
 
+			t.Run("ListBySubject returns only that subject's delegations", func(t *testing.T) {
+				subjectA, subjectB := testutil.RandomDID(t), testutil.RandomDID(t)
+				audA1, audA2 := testutil.RandomDID(t), testutil.RandomDID(t)
+				audB, audPowerline := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+
+				dA1 := makeDelegation(t, testutil.RandomIssuer(t), audA1, subjectA, cmd)
+				dA2 := makeDelegation(t, testutil.RandomIssuer(t), audA2, subjectA, cmd)
+				dB := makeDelegation(t, testutil.RandomIssuer(t), audB, subjectB, cmd)
+				// Powerline delegation (undefined subject): it grants access to every
+				// subject, so it belongs to none of them.
+				dPowerline := makeDelegation(t, testutil.RandomIssuer(t), audPowerline, did.DID{}, cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dA1, dA2, dB, dPowerline}))
+
+				page, err := s.ListBySubject(t.Context(), subjectA)
+				require.NoError(t, err)
+				links := make([]string, 0, len(page.Results))
+				for _, d := range page.Results {
+					links = append(links, d.Link().String())
+				}
+				require.ElementsMatch(t, []string{dA1.Link().String(), dA2.Link().String()}, links)
+			})
+
+			t.Run("ListBySubject returns empty page for unknown subject", func(t *testing.T) {
+				page, err := s.ListBySubject(t.Context(), testutil.RandomDID(t))
+				require.NoError(t, err)
+				require.Empty(t, page.Results)
+			})
+
+			t.Run("ListBySubject paginates results", func(t *testing.T) {
+				subject := testutil.RandomDID(t)
+				for range 5 {
+					dlg := makeDelegation(t, testutil.RandomIssuer(t), testutil.RandomDID(t), subject, command.MustParse("/test/run"))
+					require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dlg}))
+				}
+
+				all, err := store.Collect(t.Context(), func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+					var listOpts []store.PaginationOption
+					if opts.Cursor != nil {
+						listOpts = append(listOpts, store.WithCursor(*opts.Cursor))
+					}
+					listOpts = append(listOpts, store.WithLimit(2))
+					return s.ListBySubject(ctx, subject, listOpts...)
+				})
+				require.NoError(t, err)
+				require.Len(t, all, 5)
+			})
+
+			t.Run("ListBySubject falls back to the default limit for a non-positive limit", func(t *testing.T) {
+				subject := testutil.RandomDID(t)
+				for range 3 {
+					dlg := makeDelegation(t, testutil.RandomIssuer(t), testutil.RandomDID(t), subject, command.MustParse("/test/run"))
+					require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dlg}))
+				}
+
+				for _, limit := range []int{0, -1} {
+					page, err := s.ListBySubject(t.Context(), subject, store.WithLimit(limit))
+					require.NoError(t, err)
+					require.Len(t, page.Results, 3)
+					require.Nil(t, page.Cursor)
+				}
+			})
+
+			t.Run("ListBySubject returns ErrInvalidArgument for undef subject", func(t *testing.T) {
+				_, err := s.ListBySubject(t.Context(), did.Undef)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
 			t.Run("PutBatch returns ErrInvalidArgument for a nil delegation", func(t *testing.T) {
 				issuer := testutil.RandomIssuer(t)
 				audience := testutil.RandomDID(t)

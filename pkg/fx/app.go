@@ -20,6 +20,7 @@ func AppModule(cfg *config.Config) fx.Option {
 		LoggerModule,
 		IdentityModule,
 		PLCModule,
+		RevocationModule,
 		APIModule,
 		RPCModule,
 		ServerModule,

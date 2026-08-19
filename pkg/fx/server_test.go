@@ -61,6 +61,30 @@ func TestServerInfoRoute(t *testing.T) {
 	})
 }
 
+func TestHealthRoute(t *testing.T) {
+	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
+	require.NoError(t, err)
+
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Logger: zap.NewNop()})
+	require.NoError(t, err)
+
+	e := appfx.NewEchoServer(appfx.ServerParams{
+		Logger:     zap.NewNop(),
+		Identity:   id,
+		UCANServer: ucanSrv,
+		Auth:       config.AuthConfig{PartnerKey: "a-partner-key"},
+	})
+
+	// Public route: reachable without a partner-key bearer token, so deployments
+	// can probe it.
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "OK", rec.Body.String())
+}
+
 func TestDIDDocumentRoute(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
