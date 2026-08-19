@@ -1,10 +1,10 @@
-// Package integration contains an end-to-end test harness that stands up a real
+// Package itest contains an end-to-end test harness that stands up a real
 // Hilt in-process alongside the services it talks to — mocks of a management
 // console (REST), the Ingot S3 gateway (UCAN RPC), the Sprue upload service (UCAN
 // RPC) and the did:plc directory, plus a real Swarf revocation service over its
 // memory store — so the REST and RPC APIs can be exercised together with the real
 // AWS S3 SDK.
-package integration
+package itest
 
 import (
 	"context"
