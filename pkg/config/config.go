@@ -184,7 +184,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("upload.service_id", "did:web:upload.fil-forge.com")
 	v.SetDefault("upload.service_url", "https://upload.fil-forge.com")
 	v.SetDefault("upload.product_id", "did:web:hilt.fil-forge.com")
-  
+
 	v.SetDefault("revocation.service_id", "did:web:revoke.fil-forge.com")
 	v.SetDefault("revocation.service_url", "https://revoke.fil-forge.com")
 }
