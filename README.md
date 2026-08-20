@@ -103,3 +103,27 @@ the product/plan DID tenants are registered under.
 
 The Swarf service DID + HTTP endpoint Hilt publishes UCAN revocations to when a
 delegation it issued is withdrawn (e.g. when an access key is deleted).
+
+## Container images
+
+A push to `main` publishes to GHCR from the `Container` workflow. The `prod`
+target becomes `ghcr.io/fil-forge/hilt:main`, a stripped binary on a slim Debian
+base. The `dev` target becomes `ghcr.io/fil-forge/hilt:main-dev` and adds delve
+plus a handful of debugging tools. Both cover `linux/amd64` and `linux/arm64`,
+and both also carry a `sha-<short-sha>` tag, the dev image with a `-dev` suffix.
+
+## Deploying to dev
+
+The same run asks [infra-central][] to deploy the prod image. It dispatches a
+`bump-deployed-image` event carrying the manifest digest it just pushed, and
+infra-central's [Bump deployed image][receiver] workflow opens a pull request
+pinning that digest in `terraform/envs/dev/apps/terraform.tfvars`, with
+auto-merge enabled. HCP Terraform applies the dev workspace on every commit to
+infra-central's `main`, so merging that pull request is what deploys.
+
+The dispatch runs as the `fil-forge-bot` GitHub App and needs the
+`FORGE_BOT_APP_ID` variable and the `FORGE_BOT_PRIVATE_KEY` secret. Prod pins
+are promoted by hand.
+
+[infra-central]: https://github.com/fil-forge/infra-central
+[receiver]: https://github.com/fil-forge/infra-central/blob/main/.github/workflows/bump-deployed-image.yml
