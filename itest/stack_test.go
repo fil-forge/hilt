@@ -44,10 +44,6 @@ import (
 // registers ingot under (INGOT_REGION) — tenants are provisioned per region.
 const forgeRegion = "us-west-1"
 
-// partnerKey is smelt's local-dev pre-shared partner key
-// (HILT_AUTH_PARTNER_KEY in smelt's systems/hilt/compose.yml).
-const partnerKey = "dev-partner-key"
-
 // TestMain sweeps containers/volumes leaked by prior crashed itest runs (same
 // smeltery- project prefix as any smelt-SDK stack). Best-effort: a missing
 // docker only matters once a test actually boots a stack.
@@ -169,7 +165,7 @@ func startForge(t *testing.T) *forgeNet {
 
 	return &forgeNet{
 		stack:   s,
-		console: &console{client: management.NewClient(*hiltURL, partnerKey)},
+		console: &console{client: management.NewClient(*hiltURL, s.HiltPartnerKey())},
 		swarf:   swarf,
 		s3URL:   s.IngotEndpoint(),
 	}
