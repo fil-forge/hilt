@@ -37,8 +37,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `go vet -tags itest ./itest`. Peer services are pulled as mutable `:main`
   images Docker never re-pulls — `docker pull` them when the stack misbehaves,
   or override per run with `HILT_ITEST_UPLOAD_IMAGE` / `HILT_ITEST_PIRI_IMAGE`
-  / `HILT_ITEST_INGOT_IMAGE` / `HILT_ITEST_PIRI_BINARY`. CI runs the suite on
-  every PR and push to main, after the unit job (`.github/workflows/go-test.yml`).
+  / `HILT_ITEST_INGOT_IMAGE` / `HILT_ITEST_SWARF_IMAGE` / `HILT_ITEST_PIRI_BINARY`
+  / `HILT_ITEST_SWARF_BINARY`. CI runs the suite on
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 

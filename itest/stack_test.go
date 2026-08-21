@@ -266,8 +266,9 @@ func (c *console) GetAccessKey(ctx context.Context, tenantID, accessKeyID string
 func waitHTTPOK(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 5 * time.Second}
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
