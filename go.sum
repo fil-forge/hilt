@@ -160,8 +160,8 @@ github.com/felixge/httpsnoop v1.1.0 h1:3YtUj32ZZkqZtt3sZZsClsymw/QDuVfpNhoA31zeO
 github.com/felixge/httpsnoop v1.1.0/go.mod h1:Zqxgdd+1Rkcz8euOqdr7lqgCRJztwr5hp9vDSi5UZCE=
 github.com/fil-forge/libforge v0.0.0-20260807225550-3e6895b41be5 h1:Pu7Xk/LdaQyv1560k1MbL6CQUdWxZJIG9elEE0vkgLY=
 github.com/fil-forge/libforge v0.0.0-20260807225550-3e6895b41be5/go.mod h1:aL/KcXZ0KVs1ymAYqIwQyCnl2p481InN+gYbRLNM8fI=
-github.com/fil-forge/smelt v0.0.0-20260821072816-ab27deb68729 h1:yak2KnT7GQw+e2B5yHOZ8MGVzztZscy3nDH/46kMfTg=
-github.com/fil-forge/smelt v0.0.0-20260821072816-ab27deb68729/go.mod h1:OUO2GxgUihmYfywNIfvWTQocg6jqaNiTd04cG5BbdII=
+github.com/fil-forge/smelt v0.0.0-20260821100146-defc6a7d7e27 h1:gKHfg4uBSXIH2aRsT1tTp8gH7/b8CCQVF8V011FJ/jg=
+github.com/fil-forge/smelt v0.0.0-20260821100146-defc6a7d7e27/go.mod h1:OUO2GxgUihmYfywNIfvWTQocg6jqaNiTd04cG5BbdII=
 github.com/fil-forge/swarf v0.0.1-0.20260818180033-fabf8b413177 h1:mbSP1vlXbgXt6nQ8rzUJQ7rG/8gj4hsnNNZuz271rY8=
 github.com/fil-forge/swarf v0.0.1-0.20260818180033-fabf8b413177/go.mod h1:nXuOxD3DR2OhgTi8M/BsaR/4tBiwxmHP0H00XqEAF4o=
 github.com/fil-forge/ucantone v0.0.0-20260817170631-3a20cd59fabc h1:s6QNgj3hWY2neeAWyq2FckpQoTaRZhK2utgLkauGsqA=
