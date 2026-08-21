@@ -26,6 +26,19 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - Postgres and Vault-backed tests use testcontainers and **skip when Docker is
   unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
   only exercises the memory backends; run with Docker for full coverage.
+- Integration tests: `make itest`. The `itest/` package is gated by the `itest`
+  build tag, so `go test ./...` never compiles or runs it. It boots the full
+  Forge stack in Docker via `smelt/pkg/stack` (the working tree's hilt is
+  compiled as a static linux binary and mounted over the published
+  `ghcr.io/fil-forge/hilt:main` image) and tests against real ingot, sprue,
+  piri, plc, and swarf. ~5-10 min; needs Docker; **one itest run per Docker
+  host at a time** (TestMain's `CleanupLeaked` sweeps every `smeltery-*`
+  compose project, including another run's live containers). Vet it with
+  `go vet -tags itest ./itest`. Peer services are pulled as mutable `:main`
+  images Docker never re-pulls — `docker pull` them when the stack misbehaves,
+  or override per run with `HILT_ITEST_UPLOAD_IMAGE` / `HILT_ITEST_PIRI_IMAGE`
+  / `HILT_ITEST_INGOT_IMAGE` / `HILT_ITEST_PIRI_BINARY`. CI runs the suite on
+  every PR and push to main, after the unit job (`.github/workflows/go-test.yml`).
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 
