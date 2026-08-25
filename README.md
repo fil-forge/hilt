@@ -12,7 +12,7 @@ has an env var: `HILT_` + the key uppercased with `.` replaced by `_` (e.g.
 `storage.postgres.dsn` → `HILT_STORAGE_POSTGRES_DSN`). Config-file keys are the
 dotted paths below (nested YAML), e.g. `storage: { postgres: { dsn: ... } }`.
 
-Secrets (partner key, Vault token, AppRole secret ID) should be provided via env
+Secrets (partner key, OpenBao token, AppRole secret ID) should be provided via env
 var or config file, **not** flags, to avoid exposing them in process args.
 
 ### Identity (UCAN RPC service identity)
@@ -56,18 +56,18 @@ var or config file, **not** flags, to avoid exposing them in process args.
 
 | Key | Flag | Env var | Default |
 | --- | --- | --- | --- |
-| `vault.type` | `--vault` | `HILT_VAULT_TYPE` | `hashicorp` |
-| `vault.hashicorp.address` | `--hashicorp-address` | `HILT_VAULT_HASHICORP_ADDRESS` | `http://127.0.0.1:8200` |
-| `vault.hashicorp.mount` | `--hashicorp-mount` | `HILT_VAULT_HASHICORP_MOUNT` | `secret` |
-| `vault.hashicorp.auth_method` | `--hashicorp-auth-method` | `HILT_VAULT_HASHICORP_AUTH_METHOD` | `approle` |
-| `vault.hashicorp.token` | `--hashicorp-token` | `HILT_VAULT_HASHICORP_TOKEN` | _(none)_ — **secret** |
-| `vault.hashicorp.approle.role_id` | `--hashicorp-approle-role-id` | `HILT_VAULT_HASHICORP_APPROLE_ROLE_ID` | _(none)_ |
-| `vault.hashicorp.approle.secret_id` | `--hashicorp-approle-secret-id` | `HILT_VAULT_HASHICORP_APPROLE_SECRET_ID` | _(none)_ — **secret** |
-| `vault.hashicorp.approle.mount` | `--hashicorp-approle-mount` | `HILT_VAULT_HASHICORP_APPROLE_MOUNT` | `approle` |
+| `vault.type` | `--vault` | `HILT_VAULT_TYPE` | `openbao` |
+| `vault.openbao.address` | `--openbao-address` | `HILT_VAULT_OPENBAO_ADDRESS` | `http://127.0.0.1:8200` |
+| `vault.openbao.mount` | `--openbao-mount` | `HILT_VAULT_OPENBAO_MOUNT` | `secret` |
+| `vault.openbao.auth_method` | `--openbao-auth-method` | `HILT_VAULT_OPENBAO_AUTH_METHOD` | `approle` |
+| `vault.openbao.token` | `--openbao-token` | `HILT_VAULT_OPENBAO_TOKEN` | _(none)_ — **secret** |
+| `vault.openbao.approle.role_id` | `--openbao-approle-role-id` | `HILT_VAULT_OPENBAO_APPROLE_ROLE_ID` | _(none)_ |
+| `vault.openbao.approle.secret_id` | `--openbao-approle-secret-id` | `HILT_VAULT_OPENBAO_APPROLE_SECRET_ID` | _(none)_ — **secret** |
+| `vault.openbao.approle.mount` | `--openbao-approle-mount` | `HILT_VAULT_OPENBAO_APPROLE_MOUNT` | `approle` |
 
-`vault.type` is `hashicorp` or `memory`. HashiCorp keys apply when
-`type=hashicorp`; `auth_method` is `approle` or `token` (use `token` with
-`vault.hashicorp.token`, or `approle` with the role/secret IDs).
+`vault.type` is `openbao` or `memory`. OpenBao keys apply when
+`type=openbao`; `auth_method` is `approle` or `token` (use `token` with
+`vault.openbao.token`, or `approle` with the role/secret IDs).
 
 ### PLC directory
 

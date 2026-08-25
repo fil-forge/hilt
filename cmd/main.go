@@ -44,14 +44,14 @@ func main() {
 	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
 
 	// vault config
-	serveCmd.Flags().String("vault", "hashicorp", "vault backend for private keys (hashicorp or memory)")
-	serveCmd.Flags().String("hashicorp-address", "http://127.0.0.1:8200", "hashicorp vault server address")
-	serveCmd.Flags().String("hashicorp-mount", "secret", "hashicorp vault KV v2 secrets engine mount path")
-	serveCmd.Flags().String("hashicorp-auth-method", "approle", "hashicorp vault auth method (approle or token)")
-	serveCmd.Flags().String("hashicorp-token", "", "hashicorp vault token (auth-method=token; prefer HILT_VAULT_HASHICORP_TOKEN env var or config file to avoid exposing via process args)")
-	serveCmd.Flags().String("hashicorp-approle-role-id", "", "hashicorp vault AppRole role ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_ROLE_ID env var or config file)")
-	serveCmd.Flags().String("hashicorp-approle-secret-id", "", "hashicorp vault AppRole secret ID (auth-method=approle; prefer HILT_VAULT_HASHICORP_APPROLE_SECRET_ID env var or config file)")
-	serveCmd.Flags().String("hashicorp-approle-mount", "approle", "hashicorp vault AppRole auth mount path")
+	serveCmd.Flags().String("vault", "openbao", "vault backend for private keys (openbao or memory)")
+	serveCmd.Flags().String("openbao-address", "http://127.0.0.1:8200", "openbao server address")
+	serveCmd.Flags().String("openbao-mount", "secret", "openbao KV v2 secrets engine mount path")
+	serveCmd.Flags().String("openbao-auth-method", "approle", "openbao auth method (approle or token)")
+	serveCmd.Flags().String("openbao-token", "", "openbao token (auth-method=token; prefer HILT_VAULT_OPENBAO_TOKEN env var or config file to avoid exposing via process args)")
+	serveCmd.Flags().String("openbao-approle-role-id", "", "openbao AppRole role ID (auth-method=approle; prefer HILT_VAULT_OPENBAO_APPROLE_ROLE_ID env var or config file)")
+	serveCmd.Flags().String("openbao-approle-secret-id", "", "openbao AppRole secret ID (auth-method=approle; prefer HILT_VAULT_OPENBAO_APPROLE_SECRET_ID env var or config file)")
+	serveCmd.Flags().String("openbao-approle-mount", "approle", "openbao AppRole auth mount path")
 
 	// plc config
 	serveCmd.Flags().String("plc-directory", "https://plc.directory", "did:plc directory endpoint")

@@ -53,12 +53,12 @@ func TestAppModuleVaultSelection(t *testing.T) {
 		require.NoError(t, validate(cfg(config.VaultTypeMemory)))
 	})
 
-	t.Run("empty defaults to hashicorp", func(t *testing.T) {
+	t.Run("empty defaults to openbao", func(t *testing.T) {
 		require.NoError(t, validate(cfg("")))
 	})
 
-	t.Run("hashicorp", func(t *testing.T) {
-		require.NoError(t, validate(cfg(config.VaultTypeHashicorp)))
+	t.Run("openbao", func(t *testing.T) {
+		require.NoError(t, validate(cfg(config.VaultTypeOpenBao)))
 	})
 
 	t.Run("unknown type errors", func(t *testing.T) {

@@ -10,26 +10,29 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// VaultRootToken is the dev-mode root token used by the throwaway Vault
+// VaultRootToken is the dev-mode root token used by the throwaway OpenBao
 // container created by CreateVault.
 const VaultRootToken = "root"
 
-// CreateVault starts a throwaway HashiCorp Vault dev-mode container (which
-// auto-mounts a KV v2 engine at "secret") and returns its address and root
-// token. The container is cleaned up when the test finishes.
+// CreateVault starts a throwaway OpenBao dev-mode container (which auto-mounts
+// a KV v2 engine at "secret") and returns its address and root token. The
+// container is cleaned up when the test finishes.
+//
+// The image tag mirrors the one Smelt runs, so the unit tests exercise the same
+// server as the local stack and production.
 func CreateVault(t *testing.T) (address, token string) {
 	t.Helper()
 
 	ctx := t.Context()
 	req := testcontainers.ContainerRequest{
-		Image:        "hashicorp/vault:1.15",
+		Image:        "openbao/openbao:2.6",
 		ExposedPorts: []string{"8200/tcp"},
 		Cmd:          []string{"server", "-dev"},
 		Env: map[string]string{
-			"VAULT_DEV_ROOT_TOKEN_ID":  VaultRootToken,
-			"VAULT_DEV_LISTEN_ADDRESS": "0.0.0.0:8200",
+			"BAO_DEV_ROOT_TOKEN_ID":  VaultRootToken,
+			"BAO_DEV_LISTEN_ADDRESS": "0.0.0.0:8200",
 		},
-		WaitingFor: wait.ForLog("Vault server started!").WithStartupTimeout(30 * time.Second),
+		WaitingFor: wait.ForLog("OpenBao server started!").WithStartupTimeout(30 * time.Second),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -44,6 +47,6 @@ func CreateVault(t *testing.T) (address, token string) {
 	require.NoError(t, err)
 
 	address = fmt.Sprintf("http://%s:%s", host, port.Port())
-	t.Logf("Vault address: %s", address)
+	t.Logf("OpenBao address: %s", address)
 	return address, VaultRootToken
 }
