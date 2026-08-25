@@ -18,8 +18,8 @@ const VaultRootToken = "root"
 // a KV v2 engine at "secret") and returns its address and root token. The
 // container is cleaned up when the test finishes.
 //
-	// The image tag mirrors the one Smelt runs, so the unit tests exercise the same
-	// server as the local stack and production.
+// The image tag mirrors the one Smelt runs, so the unit tests exercise the same
+// server as the local stack and production.
 func CreateVault(t *testing.T) (address, token string) {
 	t.Helper()
 
