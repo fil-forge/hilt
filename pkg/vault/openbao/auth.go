@@ -1,4 +1,4 @@
-package hashicorp
+package openbao
 
 import (
 	"context"

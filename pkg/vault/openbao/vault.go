@@ -1,6 +1,7 @@
-// Package hashicorp provides a HashiCorp Vault (KV v2) backed implementation of
-// vault.Vault, using github.com/hashicorp/vault-client-go.
-package hashicorp
+// Package openbao provides an OpenBao (KV v2) backed implementation of
+// vault.Vault over the Vault-compatible HTTP API, using
+// github.com/hashicorp/vault-client-go.
+package openbao
 
 import (
 	"context"
@@ -19,7 +20,7 @@ import (
 // base64-encoded.
 const dataKey = "value"
 
-// Store is a vault.Vault backed by a HashiCorp Vault KV v2 secrets engine.
+// Store is a vault.Vault backed by an OpenBao KV v2 secrets engine.
 type Store struct {
 	client *vaultclient.Client
 	mount  string

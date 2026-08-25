@@ -23,7 +23,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   three after changes — this is the standard loop.
 - Run locally: `go run ./cmd serve` (flags: `--storage=memory --vault=memory` to
   avoid external deps; see `cmd/main.go` / `pkg/config`).
-- Postgres and Vault-backed tests use testcontainers and **skip when Docker is
+- Postgres and OpenBao-backed tests use testcontainers and **skip when Docker is
   unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
   only exercises the memory backends; run with Docker for full coverage.
 - Integration tests: `make itest`. The `itest/` package is gated by the `itest`
@@ -46,7 +46,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 
 - `cmd/main.go` — cobra entrypoint (`serve`).
 - `pkg/fx` — uber-fx wiring. `AppModule` picks the storage (`memory`/`postgres`)
-  and vault (`memory`/`hashicorp`) backend from config; `ProvideConfigs` splits
+  and vault (`memory`/`openbao`) backend from config; `ProvideConfigs` splits
   `config.Config` into injectable sub-configs; handlers/services are registered
   here. DI is **by type** — a constructor just declares the deps it needs and the
   provider must exist in the graph.
@@ -59,7 +59,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider}` — each an interface
   with `memory` and `postgres` backends.
-- `pkg/vault` (`memory`, `hashicorp`) — private-key storage; `paths.go` has the
+- `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
 - `pkg/client` — clients for external services (the Sprue `UploadClient`).
 - `pkg/migrations` — goose SQL migrations run on startup (unless skipped).

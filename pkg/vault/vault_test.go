@@ -6,8 +6,8 @@ import (
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/vault"
-	vaulthashicorp "github.com/fil-forge/hilt/pkg/vault/hashicorp"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	vaultopenbao "github.com/fil-forge/hilt/pkg/vault/openbao"
 	vaultclient "github.com/hashicorp/vault-client-go"
 	"github.com/stretchr/testify/require"
 )
@@ -15,23 +15,23 @@ import (
 type VaultKind string
 
 const (
-	Memory    VaultKind = "memory"
-	Hashicorp VaultKind = "hashicorp"
+	Memory  VaultKind = "memory"
+	OpenBao VaultKind = "openbao"
 )
 
-var vaultKinds = []VaultKind{Memory, Hashicorp}
+var vaultKinds = []VaultKind{Memory, OpenBao}
 
 func makeVault(t *testing.T, k VaultKind) vault.Vault {
 	switch k {
 	case Memory:
 		return vaultmemory.New()
-	case Hashicorp:
-		return createHashicorpVault(t)
+	case OpenBao:
+		return createOpenBaoVault(t)
 	}
 	panic("unknown vault kind")
 }
 
-func createHashicorpVault(t *testing.T) vault.Vault {
+func createOpenBaoVault(t *testing.T) vault.Vault {
 	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
 		if !htestutil.IsDockerAvailable(t) {
 			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
@@ -44,7 +44,7 @@ func createHashicorpVault(t *testing.T) vault.Vault {
 	client, err := vaultclient.New(vaultclient.WithAddress(address))
 	require.NoError(t, err)
 	require.NoError(t, client.SetToken(token))
-	return vaulthashicorp.New(client, "secret")
+	return vaultopenbao.New(client, "secret")
 }
 
 func TestVault(t *testing.T) {

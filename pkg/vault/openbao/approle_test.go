@@ -1,4 +1,4 @@
-package hashicorp_test
+package openbao_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/vault"
-	vaulthashicorp "github.com/fil-forge/hilt/pkg/vault/hashicorp"
+	vaultopenbao "github.com/fil-forge/hilt/pkg/vault/openbao"
 	vaultclient "github.com/hashicorp/vault-client-go"
 	"github.com/hashicorp/vault-client-go/schema"
 	"github.com/stretchr/testify/require"
@@ -70,10 +70,10 @@ func TestAppRoleLogin(t *testing.T) {
 		client, err := vaultclient.New(vaultclient.WithAddress(address))
 		require.NoError(t, err)
 
-		require.NoError(t, vaulthashicorp.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
+		require.NoError(t, vaultopenbao.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
 
 		// The issued token must be able to read/write the KV engine.
-		store := vaulthashicorp.New(client, "secret")
+		store := vaultopenbao.New(client, "secret")
 		require.NoError(t, store.Write(t.Context(), "/tenant/alice", []byte("secret")))
 		got, err := store.Read(t.Context(), "/tenant/alice")
 		require.NoError(t, err)
@@ -84,14 +84,14 @@ func TestAppRoleLogin(t *testing.T) {
 		client, err := vaultclient.New(vaultclient.WithAddress(address))
 		require.NoError(t, err)
 
-		err = vaulthashicorp.AppRoleLogin(context.Background(), client, "approle", roleID, "not-a-real-secret-id")
+		err = vaultopenbao.AppRoleLogin(context.Background(), client, "approle", roleID, "not-a-real-secret-id")
 		require.Error(t, err)
 	})
 
 	t.Run("login result satisfies the Vault interface", func(t *testing.T) {
 		client, err := vaultclient.New(vaultclient.WithAddress(address))
 		require.NoError(t, err)
-		require.NoError(t, vaulthashicorp.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
-		var _ vault.Vault = vaulthashicorp.New(client, "secret")
+		require.NoError(t, vaultopenbao.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
+		var _ vault.Vault = vaultopenbao.New(client, "secret")
 	})
 }

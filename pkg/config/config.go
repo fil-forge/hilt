@@ -18,11 +18,11 @@ const (
 
 // Valid values for VaultConfig.Type.
 const (
-	VaultTypeMemory    = "memory"
-	VaultTypeHashicorp = "hashicorp"
+	VaultTypeMemory  = "memory"
+	VaultTypeOpenBao = "openbao"
 )
 
-// Valid values for HashicorpConfig.AuthMethod.
+// Valid values for OpenBaoConfig.AuthMethod.
 const (
 	VaultAuthToken   = "token"
 	VaultAuthAppRole = "approle"
@@ -118,27 +118,27 @@ type StorageConfig struct {
 
 // VaultConfig selects and configures the vault backend for private key material.
 type VaultConfig struct {
-	// Type selects the backend: "hashicorp" or "memory". Defaults to "hashicorp".
-	Type      string          `mapstructure:"type"`
-	Hashicorp HashicorpConfig `mapstructure:"hashicorp"`
+	// Type selects the backend: "openbao" or "memory". Defaults to "openbao".
+	Type    string        `mapstructure:"type"`
+	OpenBao OpenBaoConfig `mapstructure:"openbao"`
 }
 
-// HashicorpConfig holds settings for the HashiCorp Vault backend.
-type HashicorpConfig struct {
-	// Address is the Vault server address, e.g. "http://127.0.0.1:8200".
+// OpenBaoConfig holds settings for the OpenBao backend (Vault-compatible HTTP API).
+type OpenBaoConfig struct {
+	// Address is the OpenBao server address, e.g. "http://127.0.0.1:8200".
 	Address string `mapstructure:"address"`
 	// Mount is the KV v2 secrets engine mount path. Defaults to "secret".
 	Mount string `mapstructure:"mount"`
 	// AuthMethod selects how to authenticate: "token" or "approle". Defaults to
 	// "approle".
 	AuthMethod string `mapstructure:"auth_method"`
-	// Token is the Vault auth token (used when AuthMethod is "token").
+	// Token is the OpenBao auth token (used when AuthMethod is "token").
 	Token string `mapstructure:"token"`
 	// AppRole holds the AppRole credentials (used when AuthMethod is "approle").
 	AppRole AppRoleConfig `mapstructure:"approle"`
 }
 
-// AppRoleConfig holds HashiCorp Vault AppRole authentication credentials.
+// AppRoleConfig holds OpenBao AppRole authentication credentials.
 type AppRoleConfig struct {
 	// RoleID is the AppRole role ID.
 	RoleID string `mapstructure:"role_id"`
@@ -173,11 +173,11 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("storage.postgres.max_conns", 10)
 	v.SetDefault("storage.postgres.min_conns", 0)
 
-	v.SetDefault("vault.type", VaultTypeHashicorp)
-	v.SetDefault("vault.hashicorp.address", "http://127.0.0.1:8200")
-	v.SetDefault("vault.hashicorp.mount", "secret")
-	v.SetDefault("vault.hashicorp.auth_method", VaultAuthAppRole)
-	v.SetDefault("vault.hashicorp.approle.mount", "approle")
+	v.SetDefault("vault.type", VaultTypeOpenBao)
+	v.SetDefault("vault.openbao.address", "http://127.0.0.1:8200")
+	v.SetDefault("vault.openbao.mount", "secret")
+	v.SetDefault("vault.openbao.auth_method", VaultAuthAppRole)
+	v.SetDefault("vault.openbao.approle.mount", "approle")
 
 	v.SetDefault("plc.directory", "https://plc.directory")
 
@@ -191,30 +191,30 @@ func SetDefaults(v *viper.Viper) {
 
 // flagBindings maps each config key to its serve-command flag name.
 var flagBindings = map[string]string{
-	"identity.key_file":                 "identity-key-file",
-	"identity.service_id":               "identity-service-id",
-	"server.host":                       "host",
-	"server.port":                       "port",
-	"server.insecure_did_resolution":    "insecure-did-resolution",
-	"storage.type":                      "storage",
-	"storage.postgres.dsn":              "postgres-dsn",
-	"storage.postgres.skip_migrations":  "skip-migrations",
-	"vault.type":                        "vault",
-	"vault.hashicorp.address":           "hashicorp-address",
-	"vault.hashicorp.mount":             "hashicorp-mount",
-	"vault.hashicorp.auth_method":       "hashicorp-auth-method",
-	"vault.hashicorp.token":             "hashicorp-token",
-	"vault.hashicorp.approle.role_id":   "hashicorp-approle-role-id",
-	"vault.hashicorp.approle.secret_id": "hashicorp-approle-secret-id",
-	"vault.hashicorp.approle.mount":     "hashicorp-approle-mount",
-	"plc.directory":                     "plc-directory",
-	"auth.partner_key":                  "partner-key",
-	"upload.service_id":                 "upload-service-id",
-	"upload.service_url":                "upload-service-url",
-	"upload.product_id":                 "upload-product-id",
-	"upload.proofs":                     "upload-proofs",
-	"revocation.service_id":             "revocation-service-id",
-	"revocation.service_url":            "revocation-service-url",
+	"identity.key_file":                "identity-key-file",
+	"identity.service_id":              "identity-service-id",
+	"server.host":                      "host",
+	"server.port":                      "port",
+	"server.insecure_did_resolution":   "insecure-did-resolution",
+	"storage.type":                     "storage",
+	"storage.postgres.dsn":             "postgres-dsn",
+	"storage.postgres.skip_migrations": "skip-migrations",
+	"vault.type":                       "vault",
+	"vault.openbao.address":            "openbao-address",
+	"vault.openbao.mount":              "openbao-mount",
+	"vault.openbao.auth_method":        "openbao-auth-method",
+	"vault.openbao.token":              "openbao-token",
+	"vault.openbao.approle.role_id":    "openbao-approle-role-id",
+	"vault.openbao.approle.secret_id":  "openbao-approle-secret-id",
+	"vault.openbao.approle.mount":      "openbao-approle-mount",
+	"plc.directory":                    "plc-directory",
+	"auth.partner_key":                 "partner-key",
+	"upload.service_id":                "upload-service-id",
+	"upload.service_url":               "upload-service-url",
+	"upload.product_id":                "upload-product-id",
+	"upload.proofs":                    "upload-proofs",
+	"revocation.service_id":            "revocation-service-id",
+	"revocation.service_url":           "revocation-service-url",
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix. Each

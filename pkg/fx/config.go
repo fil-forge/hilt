@@ -20,7 +20,7 @@ type Configs struct {
 	Storage    config.StorageConfig
 	Postgres   config.PostgresConfig
 	Vault      config.VaultConfig
-	Hashicorp  config.HashicorpConfig
+	OpenBao    config.OpenBaoConfig
 	PLC        config.PLCConfig
 	Auth       config.AuthConfig
 	Upload     config.UploadConfig
@@ -36,7 +36,7 @@ func ProvideConfigs(cfg *config.Config) Configs {
 		Storage:    cfg.Storage,
 		Postgres:   cfg.Storage.Postgres,
 		Vault:      cfg.Vault,
-		Hashicorp:  cfg.Vault.Hashicorp,
+		OpenBao:    cfg.Vault.OpenBao,
 		PLC:        cfg.PLC,
 		Auth:       cfg.Auth,
 		Upload:     cfg.Upload,
