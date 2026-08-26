@@ -336,8 +336,9 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 
 // List authorizes the request (which also verifies the access key holds the
 // operation's permission), confirms the request is a ListBuckets operation, and
-// returns one page of the tenant's buckets in name order, honouring the
-// request's prefix, continuation-token and max-buckets parameters.
+// returns one page of the tenant's buckets within the access key's bucket scope
+// (all of them for an unscoped key) in name order, honouring the request's
+// prefix, continuation-token and max-buckets parameters.
 func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArguments) (*s3bkt.ListOK, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -367,6 +368,12 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	}
 
 	listOpts := []bucketstore.ListOption{bucketstore.WithLimit(max)}
+	// An access key scoped to specific buckets sees only those; an unscoped key
+	// (empty Buckets) sees all of the tenant's — the same reading of the scope
+	// Authorize applies to bucket-addressing operations.
+	if len(authz.AccessKey.Buckets) > 0 {
+		listOpts = append(listOpts, bucketstore.WithIDs(authz.AccessKey.Buckets...))
+	}
 	if prefix != "" {
 		listOpts = append(listOpts, bucketstore.WithPrefix(prefix))
 	}

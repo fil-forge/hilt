@@ -8,9 +8,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// NewListBucketsHandler handles /s3/bucket/list — list the tenant's buckets. The
-// caller is identified and authenticated by the access key in the request's
-// SigV4/SigV4a signature.
+// NewListBucketsHandler handles /s3/bucket/list — list the tenant's buckets
+// within the access key's bucket scope. The caller is identified and
+// authenticated by the access key in the request's SigV4/SigV4a signature.
 func NewListBucketsHandler(logger *zap.Logger, buckets *bucketsvc.Service) server.Route {
 	log := logger.With(zap.Stringer("command", s3bkt.List.Command))
 	return s3bkt.List.Route(func(req *binding.Request[*s3bkt.ListArguments], res *binding.Response[*s3bkt.ListOK]) error {

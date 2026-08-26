@@ -361,14 +361,16 @@ func TestList(t *testing.T) {
 	akDID := signer.KeyDID()
 	providerID := testutil.RandomDID(t)
 
-	setup := func(t *testing.T, perms []string) (*bucketsvc.Service, *bucketmemory.Store, did.DID) {
+	// setup seeds a tenant and an access key with the given permissions; scope,
+	// when given, restricts the key to those bucket DIDs (none = all buckets).
+	setup := func(t *testing.T, perms []string, scope ...did.DID) (*bucketsvc.Service, *bucketmemory.Store, did.DID) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
+		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", scope, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
@@ -399,6 +401,39 @@ func TestList(t *testing.T) {
 		require.Equal(t, []string{"alpha", "bravo"}, bucketNames(ok))
 		require.Empty(t, ok.ContinuationToken)
 		require.Empty(t, ok.Prefix)
+	})
+
+	t.Run("a scoped key lists only its buckets", func(t *testing.T) {
+		alpha, bravo, charlie := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, alpha, charlie)
+		require.NoError(t, buckets.Add(ctx, alpha, tenantID, "alpha"))
+		require.NoError(t, buckets.Add(ctx, bravo, tenantID, "bravo"))
+		require.NoError(t, buckets.Add(ctx, charlie, tenantID, "charlie"))
+		ok, err := svc.List(ctx, providerID, listArgs())
+		require.NoError(t, err)
+		require.Equal(t, []string{"alpha", "charlie"}, bucketNames(ok))
+		require.Empty(t, ok.ContinuationToken)
+	})
+
+	t.Run("scope composes with prefix and pagination", func(t *testing.T) {
+		// Four buckets, three in scope. "apple" is out of scope and must not
+		// appear on any page, and the continuation token must step over the
+		// in-scope buckets only.
+		alpha, apple, avocado, bravo := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, alpha, avocado, bravo)
+		for id, name := range map[did.DID]string{alpha: "alpha", apple: "apple", avocado: "avocado", bravo: "bravo"} {
+			require.NoError(t, buckets.Add(ctx, id, tenantID, name))
+		}
+
+		ok, err := svc.List(ctx, providerID, listArgs("prefix=a", "max-buckets=1"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"alpha"}, bucketNames(ok))
+		require.Equal(t, "alpha", ok.ContinuationToken)
+
+		ok, err = svc.List(ctx, providerID, listArgs("prefix=a", "max-buckets=1", "continuation-token="+ok.ContinuationToken))
+		require.NoError(t, err)
+		require.Equal(t, []string{"avocado"}, bucketNames(ok))
+		require.Empty(t, ok.ContinuationToken)
 	})
 
 	t.Run("filters by prefix and echoes it", func(t *testing.T) {
