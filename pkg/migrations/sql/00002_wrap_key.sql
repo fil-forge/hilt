@@ -11,7 +11,7 @@ CREATE TABLE wrap_key (
     status      TEXT        NOT NULL,             -- active, archived
     epoch       INTEGER     NOT NULL DEFAULT 0,   -- at-rest protection epoch (Tier-0 groundwork)
     vault_key   TEXT        NOT NULL,             -- vault path of the sealed private half
-    created_at  TIMESTAMPTZ NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at TIMESTAMPTZ,                      -- NULL while active
     PRIMARY KEY (tenant_id, version)
 );

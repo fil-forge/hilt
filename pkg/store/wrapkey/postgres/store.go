@@ -28,9 +28,9 @@ func New(pool *pgxpool.Pool) *Store {
 
 func (s *Store) Add(ctx context.Context, input wrapkey.Input) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO wrap_key (tenant_id, version, kid, status, epoch, vault_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, input.Tenant.String(), input.Version, input.KID, wrapkey.Active, input.Epoch, input.VaultKey, time.Now().UTC())
+		INSERT INTO wrap_key (tenant_id, version, kid, status, epoch, vault_key)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, input.Tenant.String(), input.Version, input.KID, wrapkey.Active, input.Epoch, input.VaultKey)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
