@@ -143,11 +143,7 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID) error {
 	return nil
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRecord(row rowScanner) (wrapkey.Record, error) {
+func scanRecord(row pgx.Row) (wrapkey.Record, error) {
 	var (
 		tenantStr  string
 		version    int

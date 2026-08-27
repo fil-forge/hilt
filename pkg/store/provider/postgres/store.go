@@ -66,11 +66,7 @@ func (s *Store) GetByRegion(ctx context.Context, region string) (provider.Record
 	return rec, nil
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRecord(row rowScanner) (provider.Record, error) {
+func scanRecord(row pgx.Row) (provider.Record, error) {
 	var (
 		idStr     string
 		region    *string

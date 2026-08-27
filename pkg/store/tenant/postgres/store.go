@@ -110,11 +110,7 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	return nil
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRecord(row rowScanner) (tenant.Record, error) {
+func scanRecord(row pgx.Row) (tenant.Record, error) {
 	var (
 		idStr      string
 		externalID *string
