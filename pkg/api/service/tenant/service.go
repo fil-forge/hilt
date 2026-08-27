@@ -26,6 +26,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// fragment is the fixed DID document verification-method name under which a
+// tenant's signing key is published, for discovery of the current key. It is
+// replaced in place on rotation.
+const fragment = "hilt"
+
 // Service implements tenant-management operations shared by the REST handlers.
 type Service struct {
 	logger      *zap.Logger
@@ -113,7 +118,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 		signer,
 		plc.WithRotationKeys(key),
 		plc.WithVerificationMethods(map[string]did.DID{
-			"hilt":           key,
+			fragment:         key,
 			wrapkey.Fragment: wrapKeyPair.KeyDID(),
 		}),
 	)
