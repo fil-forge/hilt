@@ -121,7 +121,7 @@ func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE wrap_key
 		SET status = 'archived', archived_at = $1
-		WHERE tenant_id = $2 AND version = $3
+		WHERE tenant_id = $2 AND version = $3 AND status = 'active'
 	`, time.Now().UTC(), tenant.String(), version)
 	if err != nil {
 		return fmt.Errorf("archiving wrap key: %w", err)

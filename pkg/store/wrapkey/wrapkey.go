@@ -95,8 +95,9 @@ type Store interface {
 	GetByKID(ctx context.Context, kid string) (Record, error)
 	// List returns all wrap-key records for a tenant, newest version first.
 	List(ctx context.Context, tenant did.DID) ([]Record, error)
-	// Archive marks a version archived, recording the archival time. It returns
-	// [store.ErrRecordNotFound] if no such version exists.
+	// Archive marks an active version archived, recording the archival time.
+	// It returns [store.ErrRecordNotFound] if no such version exists or it is
+	// already archived, so an original archival timestamp is never re-stamped.
 	Archive(ctx context.Context, tenant did.DID, version int) error
 	// Delete removes every wrap-key record for a tenant (all versions,
 	// active and archived). It is used by tenant deletion — the "true deletion"
@@ -104,13 +105,6 @@ type Store interface {
 	// records is a no-op.
 	Delete(ctx context.Context, tenant did.DID) error
 }
-
-// Fragment is the fixed DID document verification-method name under which a
-// tenant's current wrap public key is published, for discovery of the current
-// key. It is replaced in place on rotation (never an incrementing #wrap-N) — the
-// same pattern the signing key uses — so the fragment carries no correctness
-// weight: it is not the kid and never appears in ciphertext or the registry.
-const Fragment = "wrap"
 
 // VaultKey returns the vault path under which a tenant wrap key's private half
 // is sealed, e.g. /tenant/did:plc:abc123/wrap/1.

@@ -184,6 +184,22 @@ func TestWrapKeyStore(t *testing.T) {
 				require.Equal(t, 1, all[1].Version)
 			})
 
+			t.Run("Archive of an already-archived version returns ErrRecordNotFound", func(t *testing.T) {
+				rec := randomInput(t)
+				require.NoError(t, s.Add(t.Context(), rec))
+				require.NoError(t, s.Archive(t.Context(), rec.Tenant, 1))
+
+				first, err := s.GetVersion(t.Context(), rec.Tenant, 1)
+				require.NoError(t, err)
+
+				// Re-archiving must not re-stamp the original archival time.
+				require.ErrorIs(t, s.Archive(t.Context(), rec.Tenant, 1), store.ErrRecordNotFound)
+				again, err := s.GetVersion(t.Context(), rec.Tenant, 1)
+				require.NoError(t, err)
+				require.Equal(t, wrapkey.Archived, again.Status)
+				require.True(t, first.ArchivedAt.Equal(again.ArchivedAt))
+			})
+
 			t.Run("Archive returns ErrRecordNotFound for unknown version", func(t *testing.T) {
 				err := s.Archive(t.Context(), testutil.RandomDID(t), 1)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
@@ -222,6 +238,5 @@ func TestHelpers(t *testing.T) {
 	tenant, err := did.Parse("did:plc:abc123")
 	require.NoError(t, err)
 
-	require.Equal(t, "wrap", wrapkey.Fragment)
 	require.Equal(t, "/tenant/did:plc:abc123/wrap/1", wrapkey.VaultKey(tenant, 1))
 }

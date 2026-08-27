@@ -116,7 +116,7 @@ func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error 
 
 	k := key{tenant: tenant.String(), version: version}
 	rec, ok := s.keys[k]
-	if !ok {
+	if !ok || rec.Status != wrapkey.Active {
 		return store.ErrRecordNotFound
 	}
 	rec.Status = wrapkey.Archived

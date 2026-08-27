@@ -103,6 +103,13 @@ func TestFromRawRejectsBadLength(t *testing.T) {
 	}
 }
 
+// TestFragment pins the fixed DID-document fragment the wrap key publishes at.
+func TestFragment(t *testing.T) {
+	if Fragment != "wrap" {
+		t.Errorf("Fragment = %q, want %q", Fragment, "wrap")
+	}
+}
+
 // TestKeyDIDMethod confirms the published verification method is a did:key.
 func TestKeyDIDMethod(t *testing.T) {
 	kp, err := Generate()

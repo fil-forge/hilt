@@ -113,8 +113,8 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 		signer,
 		plc.WithRotationKeys(key),
 		plc.WithVerificationMethods(map[string]did.DID{
-			"hilt":                key,
-			wrapkeystore.Fragment: wrapKeyPair.KeyDID(),
+			"hilt":           key,
+			wrapkey.Fragment: wrapKeyPair.KeyDID(),
 		}),
 	)
 	if err != nil {

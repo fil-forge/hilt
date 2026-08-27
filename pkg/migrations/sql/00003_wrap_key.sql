@@ -8,7 +8,8 @@ CREATE TABLE wrap_key (
     tenant_id   TEXT        NOT NULL,             -- tenant DID (did:plc)
     version     INTEGER     NOT NULL,             -- 1-based; increments on rotation
     kid         TEXT        NOT NULL UNIQUE,      -- public-key fingerprint: multibase multicodec-tagged X25519 pubkey
-    status      TEXT        NOT NULL,             -- active, archived
+    status      TEXT        NOT NULL              -- active, archived
+                CHECK (status IN ('active', 'archived')),
     epoch       INTEGER     NOT NULL DEFAULT 0,   -- at-rest protection epoch (Tier-0 groundwork)
     vault_key   TEXT        NOT NULL,             -- vault path of the sealed private half
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),

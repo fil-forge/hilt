@@ -36,6 +36,13 @@ const (
 // KeySize is the length in bytes of a raw X25519 public or private key.
 const KeySize = 32
 
+// Fragment is the fixed DID document verification-method name under which a
+// tenant's current wrap public key is published, for discovery of the current
+// key. It is replaced in place on rotation (never an incrementing #wrap-N) — the
+// same pattern the signing key uses — so the fragment carries no correctness
+// weight: it is not the kid and never appears in ciphertext or the registry.
+const Fragment = "wrap"
+
 var curve = ecdh.X25519()
 
 // tag prepends the multiformats varint for code to b.
@@ -132,7 +139,13 @@ func (p *PublicKey) Bytes() []byte { return tag(PublicKeyCode, p.pub.Bytes()) }
 // the fingerprint used as the FEE recipient kid, and the identifier of the key's
 // did:key DID.
 func (p *PublicKey) String() string {
-	s, _ := multibase.Encode(multibase.Base58BTC, p.Bytes())
+	s, err := multibase.Encode(multibase.Base58BTC, p.Bytes())
+	if err != nil {
+		// Base58BTC encoding of in-memory bytes cannot fail. This string is the
+		// FEE recipient kid, so silently returning "" on the impossible branch
+		// would corrupt envelopes; make the broken invariant loud instead.
+		panic(fmt.Errorf("encoding X25519 public key: %w", err))
+	}
 	return s
 }
 

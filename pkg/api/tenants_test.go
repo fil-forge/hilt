@@ -91,9 +91,54 @@ func (s addFailTenantStore) Add(context.Context, did.DID, string, did.DID, tenan
 	return s.err
 }
 
+// spyWrapKeyStore wraps a wrap-key store, recording Add inputs and optionally
+// failing them, so tests can target the registry write and find the generated
+// tenant's records afterwards.
+type spyWrapKeyStore struct {
+	wrapkeystore.Store
+	mu     sync.Mutex
+	added  []wrapkeystore.Input
+	addErr error
+}
+
+func (s *spyWrapKeyStore) Add(ctx context.Context, input wrapkeystore.Input) error {
+	s.mu.Lock()
+	s.added = append(s.added, input)
+	s.mu.Unlock()
+	if s.addErr != nil {
+		return s.addErr
+	}
+	return s.Store.Add(ctx, input)
+}
+
+func (s *spyWrapKeyStore) lastAdded() (wrapkeystore.Input, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.added) == 0 {
+		return wrapkeystore.Input{}, false
+	}
+	return s.added[len(s.added)-1], true
+}
+
+// loseRaceTenantStore simulates losing a concurrent create: Add lands the
+// winner's row (another request's tenant) and reports ErrRecordExists to the
+// caller.
+type loseRaceTenantStore struct {
+	tenant.Store
+	winnerID did.DID
+}
+
+func (s *loseRaceTenantStore) Add(ctx context.Context, _ did.DID, externalID string, provider did.DID, status tenant.Status) error {
+	if err := s.Store.Add(ctx, s.winnerID, externalID, provider, status); err != nil {
+		return err
+	}
+	return store.ErrRecordExists
+}
+
 type setupConfig struct {
 	plcStatus int
 	tenants   tenant.Store
+	wrapKeys  wrapkeystore.Store
 }
 
 type provisionDeps struct {
@@ -123,10 +168,16 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 	} else {
 		tenants = tenantmemory.New()
 	}
+	var wrapKeys wrapkeystore.Store
+	if cfg != nil && cfg.wrapKeys != nil {
+		wrapKeys = cfg.wrapKeys
+	} else {
+		wrapKeys = wrapkeymemory.New()
+	}
 	deps := &provisionDeps{
 		tenants:   tenants,
 		providers: providermemory.New(),
-		wrapKeys:  wrapkeymemory.New(),
+		wrapKeys:  wrapKeys,
 		secrets:   newSpyVault(),
 		product:   testutil.RandomDID(t),
 	}
@@ -340,6 +391,46 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.Positive(t, deps.secrets.writes)
 		require.Zero(t, deps.secrets.liveKeys())
 	})
+
+	t.Run("cleans up both vault keys when storing the wrap key record fails", func(t *testing.T) {
+		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New(), addErr: errors.New("boom")}
+		e, deps := setupProvision(t, &setupConfig{wrapKeys: wrapKeys})
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+
+		rec := provisionRequest(t, e, "tenant-8", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+		// Both the signing and wrap vault keys were written, then unwound.
+		require.Equal(t, 2, deps.secrets.writes)
+		require.Zero(t, deps.secrets.liveKeys())
+		_, err := deps.tenants.GetByExternalID(ctx, "tenant-8")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("losing a concurrent create returns the winner and unwinds the loser", func(t *testing.T) {
+		winnerID := testutil.RandomDID(t)
+		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New()}
+		e, deps := setupProvision(t, &setupConfig{
+			tenants:  &loseRaceTenantStore{Store: tenantmemory.New(), winnerID: winnerID},
+			wrapKeys: wrapKeys,
+		})
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+
+		rec := provisionRequest(t, e, "tenant-9", api.ProvisionTenantRequest{Region: "us-east-1"})
+
+		// The loser reports the winner's (already-committed) tenant, not an error.
+		require.Equal(t, http.StatusOK, rec.Code)
+		stored, err := deps.tenants.GetByExternalID(ctx, "tenant-9")
+		require.NoError(t, err)
+		require.Equal(t, winnerID, stored.ID)
+
+		// The loser's wrap-key row and both its vault keys were unwound.
+		loser, ok := wrapKeys.lastAdded()
+		require.True(t, ok)
+		_, err = deps.wrapKeys.GetByKID(ctx, loser.KID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.Zero(t, deps.secrets.liveKeys())
+	})
 }
 
 // serve wraps a single Route in an echo server.
@@ -517,13 +608,16 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 	}
 	require.NoError(t, deps.tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), status))
 	require.NoError(t, deps.secrets.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
-	// Every provisioned tenant has an active wrap key; seed one so deletion has
-	// wrap-key state to cascade.
-	require.NoError(t, deps.secrets.Write(ctx, wrapkeystore.VaultKey(tenantID, 1), []byte("wrap-key")))
+	// Every provisioned tenant has an active wrap key; seed a real keypair —
+	// sealed exactly as provisioning would — so deletion has wrap-key state to
+	// cascade and any path/encoding mismatch surfaces here too.
+	wrapKP, err := wrapkey.Generate()
+	require.NoError(t, err)
+	require.NoError(t, deps.secrets.Write(ctx, wrapkeystore.VaultKey(tenantID, 1), wrapKP.Bytes()))
 	require.NoError(t, deps.wrapKeys.Add(ctx, wrapkeystore.Input{
 		Tenant:   tenantID,
 		Version:  1,
-		KID:      "z6LSseedWrapKid",
+		KID:      wrapKP.Public().String(),
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
