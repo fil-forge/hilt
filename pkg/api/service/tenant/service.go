@@ -17,12 +17,19 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
+	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/vault"
+	"github.com/fil-forge/hilt/pkg/wrapkey"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"go.uber.org/zap"
 )
+
+// fragment is the fixed DID document verification-method name under which a
+// tenant's signing key is published, for discovery of the current key. It is
+// replaced in place on rotation.
+const fragment = "hilt"
 
 // Service implements tenant-management operations shared by the REST handlers.
 type Service struct {
@@ -33,6 +40,7 @@ type Service struct {
 	accessKeys  accesskey.Store
 	delegations delegation.Store
 	secrets     vault.Vault
+	wrapKeys    wrapkeystore.Store
 	plcClient   *plc.DirectoryClient
 	upload      *upload.Client
 }
@@ -46,6 +54,7 @@ func New(
 	accessKeys accesskey.Store,
 	delegations delegation.Store,
 	secrets vault.Vault,
+	wrapKeys wrapkeystore.Store,
 	plcClient *plc.DirectoryClient,
 	upload *upload.Client,
 ) *Service {
@@ -58,6 +67,7 @@ func New(
 		delegations: delegations,
 		secrets:     secrets,
 		plcClient:   plcClient,
+		wrapKeys:    wrapKeys,
 		upload:      upload,
 	}
 }
@@ -92,10 +102,25 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 		return tenantstore.Record{}, false, fmt.Errorf("generating tenant key: %w", err)
 	}
 	key := signer.KeyDID()
+
+	// Generate the tenant's X25519 FEE wrap key. This is distinct from the
+	// signing/rotation key above: it is only ever used as an ECDH recipient
+	// for wrapping content-encryption keys, never for signing. It is published
+	// in the genesis operation at the fixed fragment #wrap for discovery of
+	// the current key; recovery keys off the fingerprint (kid), not the
+	// fragment.
+	wrapKeyPair, err := wrapkey.Generate()
+	if err != nil {
+		return tenantstore.Record{}, false, fmt.Errorf("generating wrap key: %w", err)
+	}
+
 	tenantID, genesis, err := plc.New(
 		signer,
 		plc.WithRotationKeys(key),
-		plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
+		plc.WithVerificationMethods(map[string]did.DID{
+			fragment:         key,
+			wrapkey.Fragment: wrapKeyPair.KeyDID(),
+		}),
 	)
 	if err != nil {
 		return tenantstore.Record{}, false, fmt.Errorf("building genesis operation: %w", err)
@@ -103,18 +128,45 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 
 	log := s.logger.With(zap.String("external_id", externalID), zap.Stringer("tenant", tenantID))
 
-	// Persist the private key before publishing so it is never lost. Store the
-	// multiformat-tagged bytes (signer.Bytes()) so the key type is recoverable on
-	// decode rather than assuming secp256k1.
-	vaultKey := vault.TenantKeyPath(tenantID)
-	if err := s.secrets.Write(ctx, vaultKey, signer.Bytes()); err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("storing tenant key: %w", err)
+	signingVaultKey := vault.TenantKeyPath(tenantID)
+	wrapVaultKey := wrapkeystore.VaultKey(tenantID, 1)
+
+	// cleanups accumulates best-effort rollbacks for the durable state written
+	// so far. A later failure calls runCleanups, which unwinds them in reverse
+	// (LIFO) order under a detached context so a client disconnect can't cancel
+	// the rollback.
+	var cleanups []func(context.Context)
+	runCleanups := func() {
+		dctx := context.WithoutCancel(ctx)
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i](dctx)
+		}
 	}
+
+	// Persist the private keys before publishing so they are never lost, signing
+	// key then wrap key. Store the multiformat-tagged bytes (Bytes()) so each key
+	// type is recoverable on decode rather than assumed.
+	if err := s.secrets.Write(ctx, signingVaultKey, signer.Bytes()); err != nil {
+		log.Error("storing signing key", zap.Error(err))
+		return tenantstore.Record{}, false, fmt.Errorf("storing signing key: %w", err)
+	}
+	cleanups = append(cleanups, func(ctx context.Context) {
+		s.cleanupKey(ctx, log, signingVaultKey)
+	})
+
+	if err := s.secrets.Write(ctx, wrapVaultKey, wrapKeyPair.Bytes()); err != nil {
+		log.Error("storing wrap key", zap.Error(err))
+		runCleanups()
+		return tenantstore.Record{}, false, fmt.Errorf("storing wrap key: %w", err)
+	}
+	cleanups = append(cleanups, func(ctx context.Context) {
+		s.cleanupKey(ctx, log, wrapVaultKey)
+	})
 
 	// Publish the genesis operation to register the did:plc.
 	if err := s.plcClient.Update(ctx, tenantID, genesis); err != nil {
 		log.Error("publishing genesis operation", zap.Error(err))
-		s.cleanupKey(ctx, log, vaultKey)
+		runCleanups()
 		return tenantstore.Record{}, false, ErrDIDRegistration
 	}
 
@@ -125,14 +177,35 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	details := map[string]string{"external_id": externalID, "region": region}
 	if err := s.upload.RegisterCustomer(ctx, tenantID, s.upload.Product, details); err != nil {
 		log.Error("registering tenant with upload service", zap.Error(err))
-		s.cleanupKey(ctx, log, vaultKey)
+		runCleanups()
 		return tenantstore.Record{}, false, ErrUploadRegistration
 	}
 
+	// Record the active wrap key (version 1) before the tenant row. The tenant
+	// row is the final "commit" write and the key the idempotency check reads,
+	// so recording the wrap key first guarantees a persisted tenant always has
+	// a wrap-key entry. Its kid is the public-key fingerprint (the multibase
+	// multicodec-tagged X25519 public key); the private half stays sealed in
+	// the vault.
+	if err := s.wrapKeys.Add(ctx, wrapkeystore.Input{
+		Tenant:   tenantID,
+		Version:  1,
+		KID:      wrapKeyPair.Public().String(),
+		VaultKey: wrapVaultKey,
+	}); err != nil {
+		log.Error("storing wrap key record", zap.Error(err))
+		runCleanups()
+		return tenantstore.Record{}, false, fmt.Errorf("storing wrap key record: %w", err)
+	}
+	cleanups = append(cleanups, func(ctx context.Context) {
+		if err := s.wrapKeys.Delete(ctx, tenantID); err != nil {
+			log.Error("cleaning up orphaned wrap key record", zap.Error(err))
+		}
+	})
+
 	// Record the tenant.
 	if err := s.tenants.Add(ctx, tenantID, externalID, prov.ID, tenantstore.Active); err != nil {
-		// The tenant was not recorded, so its key is now orphaned; clean it up.
-		s.cleanupKey(ctx, log, vaultKey)
+		runCleanups()
 		// Concurrent create with the same external id: return the winner.
 		if errors.Is(err, store.ErrRecordExists) {
 			if winner, gerr := s.tenants.GetByExternalID(ctx, externalID); gerr == nil {
@@ -200,11 +273,11 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return ErrTenantNotDisabled
 	}
 
-	tenantKey := vault.TenantKeyPath(rec.ID)
+	signingVaultKey := vault.TenantKeyPath(rec.ID)
 
 	// Deactivate the did:plc first — it requires the (still-present) tenant key.
 	// Aborting here leaves all local state intact for a retry.
-	if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, tenantKey, rec.ID); err != nil {
+	if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, signingVaultKey, rec.ID); err != nil {
 		log.Error("deactivating tenant DID", zap.Error(err))
 		return ErrDIDDeactivation
 	}
@@ -224,6 +297,25 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.accessKeys.Delete(ctx, ak.ID); err != nil {
 			return fmt.Errorf("deleting access key: %w", err)
 		}
+	}
+
+	// Cascade: wrap keys (registry rows + their sealed private halves). Every
+	// version, active and archived, is destroyed — tenant deletion is the
+	// "true deletion" that ends the envelope-recovery path, so archive-don't-
+	// destroy (which governs rotation) does not apply.
+	wrapKeyRecs, err := s.wrapKeys.List(ctx, rec.ID)
+	if err != nil {
+		log.Error("listing wrap keys", zap.Error(err))
+		return fmt.Errorf("listing wrap keys: %w", err)
+	}
+	for _, wk := range wrapKeyRecs {
+		if err := s.secrets.Delete(ctx, wk.VaultKey); err != nil {
+			log.Warn("removing wrap key from vault", zap.Error(err))
+		}
+	}
+	if err := s.wrapKeys.Delete(ctx, rec.ID); err != nil {
+		log.Error("deleting wrap keys", zap.Error(err))
+		return fmt.Errorf("deleting wrap keys: %w", err)
 	}
 
 	// Cascade: buckets (records; bucket keys are discarded at creation).
@@ -260,8 +352,8 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("deleting tenant: %w", err)
 	}
 	// Best-effort removal of the tenant's key material.
-	if err := s.secrets.Delete(ctx, tenantKey); err != nil {
-		log.Warn("removing tenant key from vault", zap.Error(err))
+	if err := s.secrets.Delete(ctx, signingVaultKey); err != nil {
+		log.Warn("removing signing key from vault", zap.Error(err))
 	}
 	log.Info("deleted tenant")
 	return nil

@@ -1,9 +1,9 @@
 module github.com/fil-forge/hilt
 
-go 1.26.4
+go 1.27.0
 
 require (
-	github.com/alanshaw/dag-json-gen v0.0.8
+	github.com/alanshaw/dag-json-gen v0.0.9
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.24
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.23
@@ -13,18 +13,20 @@ require (
 	github.com/fil-forge/libforge v0.0.0-20260807225550-3e6895b41be5
 	github.com/fil-forge/smelt v0.0.0-20260825195303-2d623ae3f04e
 	github.com/fil-forge/swarf v0.0.1-0.20260821142121-d5d1a0a56f00
-	github.com/fil-forge/ucantone v0.0.0-20260817170631-3a20cd59fabc
+	github.com/fil-forge/ucantone v0.0.0-20260827134420-25cf8340b9a1
 	github.com/hashicorp/vault-client-go v0.4.3
 	github.com/ipfs/go-cid v0.6.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/labstack/echo/v4 v4.15.0
 	github.com/multiformats/go-multibase v0.3.0
+	github.com/multiformats/go-multicodec v0.10.0
+	github.com/multiformats/go-varint v0.1.0
 	github.com/pressly/goose/v3 v3.27.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/whyrusleeping/cbor-gen v0.3.1
@@ -69,7 +71,6 @@ require (
 	github.com/containerd/ttrpc v1.2.8 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/buildx v0.35.0 // indirect
 	github.com/docker/cli v29.6.0+incompatible // indirect
@@ -143,16 +144,13 @@ require (
 	github.com/mr-tron/base58 v1.3.0 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
-	github.com/multiformats/go-multicodec v0.10.0 // indirect
 	github.com/multiformats/go-multihash v0.2.3 // indirect
-	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/pelletier/go-toml/v2 v2.4.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
@@ -203,7 +201,7 @@ require (
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/dig v1.19.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260603202125-055de637280b // indirect

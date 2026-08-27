@@ -2,7 +2,6 @@ package sigv4
 
 import (
 	"bytes"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -131,15 +130,11 @@ func deriveKeyV4a(accessKeyID, secretAccessKey string) (*ecdsa.PrivateKey, error
 		return nil, errors.New("sigv4a: exhausted key-derivation counter")
 	}
 
-	// Derive the public point via crypto/ecdh (validates the scalar range) and
-	// bridge to an *ecdsa.PrivateKey without the deprecated raw-coordinate APIs.
-	ecdhKey, err := ecdh.P256().NewPrivateKey(d.FillBytes(make([]byte, 32)))
+	// ParseRawPrivateKey checks the scalar is in [1, N-1] and derives the public
+	// point, so the key is built without touching the deprecated raw fields.
+	priv, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), d.FillBytes(make([]byte, 32)))
 	if err != nil {
 		return nil, fmt.Errorf("sigv4a: invalid derived scalar: %w", err)
 	}
-	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), ecdhKey.PublicKey().Bytes())
-	if err != nil {
-		return nil, fmt.Errorf("sigv4a: parsing derived public key: %w", err)
-	}
-	return &ecdsa.PrivateKey{PublicKey: *pub, D: d}, nil
+	return priv, nil
 }

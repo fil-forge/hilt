@@ -12,7 +12,7 @@ them. It exposes two APIs and talks to one external service:
 - **Sprue** (the Forge upload service) — Hilt calls it to provision/inspect a
   bucket's storage space (`pkg/client`).
 
-Module: `github.com/fil-forge/hilt` (Go 1.26). Sibling repos it builds on:
+Module: `github.com/fil-forge/hilt` (Go 1.27). Sibling repos it builds on:
 `ucantone` (UCAN primitives: `did`, `multikey`, `ucan/delegation`, `binding`,
 `server`, `execution`), `libforge` (bound `commands/*`, `identity`, ucan helpers),
 and `sprue` (the upload service; mirror its patterns where relevant).

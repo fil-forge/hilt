@@ -18,6 +18,7 @@ import (
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	wrapkeysmemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
@@ -82,7 +83,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), plcClient, upload)
+		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -143,7 +144,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), nil, nil)
+		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -248,7 +249,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), secrets, plcClient, nil)
+		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
 	return deleteEnv{svc: svc, tenants: tenants, directory: directory}
 }
 
