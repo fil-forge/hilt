@@ -53,15 +53,14 @@ func dummyKID(tenant did.DID, version int) string {
 	return fmt.Sprintf("z6LSkid-%s-%d", tenant.String(), version)
 }
 
-// activeRecord builds an active v1 wrap-key record for a fresh tenant.
-func activeRecord(t *testing.T) wrapkey.Record {
+// randomInput builds an active v1 wrap-key record for a fresh tenant.
+func randomInput(t *testing.T) wrapkey.Input {
 	t.Helper()
 	tenant := testutil.RandomDID(t)
-	return wrapkey.Record{
+	return wrapkey.Input{
 		Tenant:   tenant,
 		Version:  1,
 		KID:      dummyKID(tenant, 1),
-		Status:   wrapkey.Active,
 		Epoch:    0,
 		VaultKey: wrapkey.VaultKey(tenant, 1),
 	}
@@ -73,10 +72,10 @@ func TestWrapKeyStore(t *testing.T) {
 			s := makeStore(t, k)
 
 			t.Run("adds and retrieves an active key", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				require.NoError(t, s.Add(t.Context(), rec))
 
-				got, err := s.GetActive(t.Context(), rec.Tenant)
+				got, err := s.Get(t.Context(), rec.Tenant)
 				require.NoError(t, err)
 				require.Equal(t, rec.Tenant, got.Tenant)
 				require.Equal(t, 1, got.Version)
@@ -88,26 +87,26 @@ func TestWrapKeyStore(t *testing.T) {
 			})
 
 			t.Run("Get returns a specific version", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				require.NoError(t, s.Add(t.Context(), rec))
 
-				got, err := s.Get(t.Context(), rec.Tenant, 1)
+				got, err := s.GetVersion(t.Context(), rec.Tenant, 1)
 				require.NoError(t, err)
 				require.Equal(t, rec.KID, got.KID)
 			})
 
 			t.Run("GetActive returns ErrRecordNotFound for unknown tenant", func(t *testing.T) {
-				_, err := s.GetActive(t.Context(), testutil.RandomDID(t))
+				_, err := s.Get(t.Context(), testutil.RandomDID(t))
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
 			t.Run("Get returns ErrRecordNotFound for unknown version", func(t *testing.T) {
-				_, err := s.Get(t.Context(), testutil.RandomDID(t), 7)
+				_, err := s.GetVersion(t.Context(), testutil.RandomDID(t), 7)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
 			t.Run("GetByKID returns the matching key", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				require.NoError(t, s.Add(t.Context(), rec))
 
 				got, err := s.GetByKID(t.Context(), rec.KID)
@@ -122,14 +121,14 @@ func TestWrapKeyStore(t *testing.T) {
 			})
 
 			t.Run("Add rejects a duplicate (tenant, version)", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				require.NoError(t, s.Add(t.Context(), rec))
 				err := s.Add(t.Context(), rec)
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("Add rejects a second active key for a tenant", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				require.NoError(t, s.Add(t.Context(), rec))
 
 				second := rec
@@ -141,40 +140,39 @@ func TestWrapKeyStore(t *testing.T) {
 			})
 
 			t.Run("Add rejects a duplicate kid", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				require.NoError(t, s.Add(t.Context(), rec))
 
 				// A different tenant reusing the same kid must be rejected — the
 				// kid (fingerprint) is globally unique.
-				dup := activeRecord(t)
+				dup := randomInput(t)
 				dup.KID = rec.KID
 				err := s.Add(t.Context(), dup)
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("archive then add a new active version (rotation)", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				tenant := rec.Tenant
 				require.NoError(t, s.Add(t.Context(), rec))
 
 				// Archive v1, then a new active v2 can be added.
 				require.NoError(t, s.Archive(t.Context(), tenant, 1))
 
-				v1, err := s.Get(t.Context(), tenant, 1)
+				v1, err := s.GetVersion(t.Context(), tenant, 1)
 				require.NoError(t, err)
 				require.Equal(t, wrapkey.Archived, v1.Status)
 				require.False(t, v1.ArchivedAt.IsZero())
 
-				v2 := wrapkey.Record{
+				v2 := wrapkey.Input{
 					Tenant:   tenant,
 					Version:  2,
 					KID:      dummyKID(tenant, 2),
-					Status:   wrapkey.Active,
 					VaultKey: wrapkey.VaultKey(tenant, 2),
 				}
 				require.NoError(t, s.Add(t.Context(), v2))
 
-				active, err := s.GetActive(t.Context(), tenant)
+				active, err := s.Get(t.Context(), tenant)
 				require.NoError(t, err)
 				require.Equal(t, 2, active.Version)
 
@@ -192,30 +190,29 @@ func TestWrapKeyStore(t *testing.T) {
 			})
 
 			t.Run("DeleteByTenant removes every version", func(t *testing.T) {
-				rec := activeRecord(t)
+				rec := randomInput(t)
 				tenant := rec.Tenant
 				require.NoError(t, s.Add(t.Context(), rec))
 				require.NoError(t, s.Archive(t.Context(), tenant, 1))
-				v2 := wrapkey.Record{
+				v2 := wrapkey.Input{
 					Tenant:   tenant,
 					Version:  2,
 					KID:      dummyKID(tenant, 2),
-					Status:   wrapkey.Active,
 					VaultKey: wrapkey.VaultKey(tenant, 2),
 				}
 				require.NoError(t, s.Add(t.Context(), v2))
 
-				require.NoError(t, s.DeleteByTenant(t.Context(), tenant))
+				require.NoError(t, s.Delete(t.Context(), tenant))
 
 				all, err := s.List(t.Context(), tenant)
 				require.NoError(t, err)
 				require.Empty(t, all)
-				_, err = s.GetActive(t.Context(), tenant)
+				_, err = s.Get(t.Context(), tenant)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
 			t.Run("DeleteByTenant is idempotent for an unknown tenant", func(t *testing.T) {
-				require.NoError(t, s.DeleteByTenant(t.Context(), testutil.RandomDID(t)))
+				require.NoError(t, s.Delete(t.Context(), testutil.RandomDID(t)))
 			})
 		})
 	}

@@ -26,15 +26,11 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-func (s *Store) Add(ctx context.Context, rec wrapkey.Record) error {
-	createdAt := rec.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
+func (s *Store) Add(ctx context.Context, input wrapkey.Input) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO wrap_key (tenant_id, version, kid, status, epoch, vault_key, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, rec.Tenant.String(), rec.Version, rec.KID, string(rec.Status), rec.Epoch, rec.VaultKey, createdAt)
+	`, input.Tenant.String(), input.Version, input.KID, wrapkey.Active, input.Epoch, input.VaultKey, time.Now().UTC())
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -47,7 +43,7 @@ func (s *Store) Add(ctx context.Context, rec wrapkey.Record) error {
 	return nil
 }
 
-func (s *Store) GetActive(ctx context.Context, tenant did.DID) (wrapkey.Record, error) {
+func (s *Store) Get(ctx context.Context, tenant did.DID) (wrapkey.Record, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT tenant_id, version, kid, status, epoch, vault_key, created_at, archived_at
 		FROM wrap_key
@@ -63,7 +59,7 @@ func (s *Store) GetActive(ctx context.Context, tenant did.DID) (wrapkey.Record, 
 	return rec, nil
 }
 
-func (s *Store) Get(ctx context.Context, tenant did.DID, version int) (wrapkey.Record, error) {
+func (s *Store) GetVersion(ctx context.Context, tenant did.DID, version int) (wrapkey.Record, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT tenant_id, version, kid, status, epoch, vault_key, created_at, archived_at
 		FROM wrap_key
@@ -136,7 +132,7 @@ func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error 
 	return nil
 }
 
-func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) error {
+func (s *Store) Delete(ctx context.Context, tenant did.DID) error {
 	_, err := s.pool.Exec(ctx, `
 		DELETE FROM wrap_key
 		WHERE tenant_id = $1

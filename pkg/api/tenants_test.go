@@ -238,7 +238,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 		// An active wrap key (version 1) was registered, keyed by its fingerprint
 		// (the multicodec-tagged public key), not a DID URL.
-		wrapRec, err := deps.wrapKeys.GetActive(ctx, stored.ID)
+		wrapRec, err := deps.wrapKeys.Get(ctx, stored.ID)
 		require.NoError(t, err)
 		require.Equal(t, 1, wrapRec.Version)
 		require.Equal(t, wrapkeystore.Active, wrapRec.Status)
@@ -520,11 +520,10 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 	// Every provisioned tenant has an active wrap key; seed one so deletion has
 	// wrap-key state to cascade.
 	require.NoError(t, deps.secrets.Write(ctx, wrapkeystore.VaultKey(tenantID, 1), []byte("wrap-key")))
-	require.NoError(t, deps.wrapKeys.Add(ctx, wrapkeystore.Record{
+	require.NoError(t, deps.wrapKeys.Add(ctx, wrapkeystore.Input{
 		Tenant:   tenantID,
 		Version:  1,
 		KID:      "z6LSseedWrapKid",
-		Status:   wrapkeystore.Active,
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
@@ -568,7 +567,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		require.ErrorIs(t, err, vault.ErrNotFound)
 
 		// Wrap keys (registry rows + sealed private half) gone.
-		_, err = deps.wrapKeys.GetActive(ctx, deps.tenantID)
+		_, err = deps.wrapKeys.Get(ctx, deps.tenantID)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		wks, err := deps.wrapKeys.List(ctx, deps.tenantID)
 		require.NoError(t, err)

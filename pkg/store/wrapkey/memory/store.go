@@ -28,9 +28,19 @@ func New() *Store {
 	return &Store{keys: map[key]wrapkey.Record{}}
 }
 
-func (s *Store) Add(ctx context.Context, rec wrapkey.Record) error {
+func (s *Store) Add(ctx context.Context, input wrapkey.Input) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
+	rec := wrapkey.Record{
+		Tenant:    input.Tenant,
+		Version:   input.Version,
+		KID:       input.KID,
+		Status:    wrapkey.Active,
+		Epoch:     input.Epoch,
+		VaultKey:  input.VaultKey,
+		CreatedAt: time.Now().UTC(),
+	}
 
 	k := key{tenant: rec.Tenant.String(), version: rec.Version}
 	if _, ok := s.keys[k]; ok {
@@ -46,14 +56,11 @@ func (s *Store) Add(ctx context.Context, rec wrapkey.Record) error {
 			return store.ErrRecordExists
 		}
 	}
-	if rec.CreatedAt.IsZero() {
-		rec.CreatedAt = time.Now().UTC()
-	}
 	s.keys[k] = rec
 	return nil
 }
 
-func (s *Store) GetActive(ctx context.Context, tenant did.DID) (wrapkey.Record, error) {
+func (s *Store) Get(ctx context.Context, tenant did.DID) (wrapkey.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -65,7 +72,7 @@ func (s *Store) GetActive(ctx context.Context, tenant did.DID) (wrapkey.Record, 
 	return wrapkey.Record{}, store.ErrRecordNotFound
 }
 
-func (s *Store) Get(ctx context.Context, tenant did.DID, version int) (wrapkey.Record, error) {
+func (s *Store) GetVersion(ctx context.Context, tenant did.DID, version int) (wrapkey.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -118,7 +125,7 @@ func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error 
 	return nil
 }
 
-func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) error {
+func (s *Store) Delete(ctx context.Context, tenant did.DID) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
