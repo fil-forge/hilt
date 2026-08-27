@@ -7,10 +7,11 @@
 // key-agreement key, not a signing key: it is not a ucan.Signer/Verifier and has
 // no UCAN role, so it cannot register as a multikey decoder and does not belong
 // in a UCAN library. The heavy FEE crypto (ECDH-ES+A256KW wrap/unwrap) lives in
-// Ingot's fee tree; Hilt only mints a keypair and encodes its public half. The
-// one thing both sides share is the did:key/Multikey wire format (multicodec
-// x25519-pub 0xec + base58btc), which each implements independently against the
-// standard — pinned here by TestEncodingVector so the two can't drift.
+// github.com/filecoin-project/go-fee; Hilt only mints a keypair and encodes its
+// public half. The one thing both sides share is the did:key/Multikey wire
+// format (multicodec x25519-pub 0xec + base58btc), which each implements
+// independently against the standard — pinned here by TestEncodingVector so the
+// two can't drift.
 package wrapkey
 
 import (
