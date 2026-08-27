@@ -365,7 +365,7 @@ func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), nil, nil)
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -386,7 +386,7 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	tenants := tenantmemory.New()
 	id := testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, id, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), nil, nil)
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), svc))
 
 	statusBody := func(s api.TenantStatus) []byte {
