@@ -131,7 +131,7 @@ func AuthorizeRequest(
 		zap.String("permission", perm),
 		zap.Int("delegations", len(proofSet)),
 	)
-return &s3req.AuthorizeOK{
+	return &s3req.AuthorizeOK{
 		Bucket: bucketID,
 		Tenant: authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
