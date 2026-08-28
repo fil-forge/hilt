@@ -90,6 +90,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, &bucketID, ok.Bucket)
+		require.Equal(t, tenantID, ok.Tenant)
 		require.Equal(t, []string{"s3:GetObject"}, ok.Permissions.Entries[akDID])
 
 		// The derived key verifies the request locally (the gateway path).

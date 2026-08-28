@@ -133,6 +133,7 @@ func AuthorizeRequest(
 	)
 	return &s3req.AuthorizeOK{
 		Bucket: bucketID,
+		Tenant: authz.AccessKey.Tenant,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
 			accessKeyID: authz.AccessKey.Permissions,
 		}},
