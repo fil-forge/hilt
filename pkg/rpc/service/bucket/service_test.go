@@ -118,6 +118,7 @@ func TestCreate(t *testing.T) {
 		rec, err := buckets.GetByName(ctx, bucketName)
 		require.NoError(t, err)
 		require.Equal(t, &rec.ID, ok.Bucket)
+		require.Equal(t, tenantID, ok.Tenant)
 		require.True(t, sprue.provCalled)
 		require.Equal(t, tenantID, sprue.provAccount)
 		require.Equal(t, *ok.Bucket, sprue.provSpace)
