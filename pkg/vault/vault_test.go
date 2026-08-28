@@ -44,7 +44,7 @@ func createOpenBaoVault(t *testing.T) vault.Vault {
 	client, err := vaultclient.New(vaultclient.WithAddress(address))
 	require.NoError(t, err)
 	require.NoError(t, client.SetToken(token))
-	return vaultopenbao.New(client, "secret")
+	return vaultopenbao.New(client, "secret", nil)
 }
 
 func TestVault(t *testing.T) {

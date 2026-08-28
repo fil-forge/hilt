@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	hiltvault "github.com/fil-forge/hilt/pkg/vault"
 	vaultclient "github.com/hashicorp/vault-client-go"
@@ -24,18 +25,35 @@ const dataKey = "value"
 type Store struct {
 	client *vaultclient.Client
 	mount  string
+
+	// reauth logs the client in again and installs the new token. When set, an
+	// operation rejected with 403 is retried once after a re-login. nil
+	// disables the retry (static tokens cannot be refreshed).
+	reauth func(context.Context) error
+
+	// loginMu and loginGen make concurrent re-logins single-flight: callers
+	// that observed the same generation share one login.
+	loginMu  sync.Mutex
+	loginGen uint64
 }
 
 var _ hiltvault.Vault = (*Store)(nil)
 
 // New returns a Store that stores secrets in the KV v2 engine mounted at mount
-// (e.g. "secret") using the given client.
-func New(client *vaultclient.Client, mount string) *Store {
-	return &Store{client: client, mount: mount}
+// (e.g. "secret") using the given client. reauth, when non-nil, is called to
+// log in again after OpenBao rejects the client's token with 403 Forbidden;
+// the failed operation is then retried once.
+func New(client *vaultclient.Client, mount string, reauth func(context.Context) error) *Store {
+	return &Store{client: client, mount: mount, reauth: reauth}
 }
 
 func (s *Store) Read(ctx context.Context, key string) ([]byte, error) {
-	resp, err := s.client.Secrets.KvV2Read(ctx, secretPath(key), vaultclient.WithMountPath(s.mount))
+	var resp *vaultclient.Response[schema.KvV2ReadResponse]
+	err := s.withReauth(ctx, func() error {
+		var err error
+		resp, err = s.client.Secrets.KvV2Read(ctx, secretPath(key), vaultclient.WithMountPath(s.mount))
+		return err
+	})
 	if err != nil {
 		if vaultclient.IsErrorStatus(err, http.StatusNotFound) {
 			return nil, hiltvault.ErrNotFound
@@ -58,11 +76,14 @@ func (s *Store) Read(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (s *Store) Write(ctx context.Context, key string, value []byte) error {
-	_, err := s.client.Secrets.KvV2Write(ctx, secretPath(key), schema.KvV2WriteRequest{
-		Data: map[string]any{
-			dataKey: base64.StdEncoding.EncodeToString(value),
-		},
-	}, vaultclient.WithMountPath(s.mount))
+	err := s.withReauth(ctx, func() error {
+		_, err := s.client.Secrets.KvV2Write(ctx, secretPath(key), schema.KvV2WriteRequest{
+			Data: map[string]any{
+				dataKey: base64.StdEncoding.EncodeToString(value),
+			},
+		}, vaultclient.WithMountPath(s.mount))
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("writing secret: %w", err)
 	}
@@ -72,13 +93,54 @@ func (s *Store) Write(ctx context.Context, key string, value []byte) error {
 func (s *Store) Delete(ctx context.Context, key string) error {
 	// Permanently remove the secret (all versions + metadata). Idempotent: a
 	// missing secret is not an error.
-	_, err := s.client.Secrets.KvV2DeleteMetadataAndAllVersions(ctx, secretPath(key), vaultclient.WithMountPath(s.mount))
+	err := s.withReauth(ctx, func() error {
+		_, err := s.client.Secrets.KvV2DeleteMetadataAndAllVersions(ctx, secretPath(key), vaultclient.WithMountPath(s.mount))
+		return err
+	})
 	if err != nil {
 		if vaultclient.IsErrorStatus(err, http.StatusNotFound) {
 			return nil
 		}
 		return fmt.Errorf("deleting secret: %w", err)
 	}
+	return nil
+}
+
+// withReauth runs op. If op fails with 403 Forbidden and a reauth function is
+// configured, it logs in again and runs op one more time. A second 403 is
+// returned as is: it means the new token genuinely lacks permission, and
+// looping would not help.
+func (s *Store) withReauth(ctx context.Context, op func() error) error {
+	gen := s.currentLoginGen()
+	err := op()
+	if err == nil || s.reauth == nil || !vaultclient.IsErrorStatus(err, http.StatusForbidden) {
+		return err
+	}
+	if loginErr := s.reauthOnce(ctx, gen); loginErr != nil {
+		return fmt.Errorf("%w; re-login after 403 failed: %w", err, loginErr)
+	}
+	return op()
+}
+
+func (s *Store) currentLoginGen() uint64 {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	return s.loginGen
+}
+
+// reauthOnce logs in again unless another caller already did so since the
+// caller observed generation seenGen, in which case the fresh token is
+// already installed and the caller just retries.
+func (s *Store) reauthOnce(ctx context.Context, seenGen uint64) error {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	if s.loginGen != seenGen {
+		return nil
+	}
+	if err := s.reauth(ctx); err != nil {
+		return err
+	}
+	s.loginGen++
 	return nil
 }
 

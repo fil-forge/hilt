@@ -2,6 +2,7 @@ package openbao_test
 
 import (
 	"context"
+	"net/http"
 	"runtime"
 	"testing"
 
@@ -73,7 +74,7 @@ func TestAppRoleLogin(t *testing.T) {
 		require.NoError(t, vaultopenbao.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
 
 		// The issued token must be able to read/write the KV engine.
-		store := vaultopenbao.New(client, "secret")
+		store := vaultopenbao.New(client, "secret", nil)
 		require.NoError(t, store.Write(t.Context(), "/tenant/alice", []byte("secret")))
 		got, err := store.Read(t.Context(), "/tenant/alice")
 		require.NoError(t, err)
@@ -92,6 +93,74 @@ func TestAppRoleLogin(t *testing.T) {
 		client, err := vaultclient.New(vaultclient.WithAddress(address))
 		require.NoError(t, err)
 		require.NoError(t, vaultopenbao.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
-		var _ vault.Vault = vaultopenbao.New(client, "secret")
+		var _ vault.Vault = vaultopenbao.New(client, "secret", nil)
+	})
+
+	// invalidateToken simulates an expired token: OpenBao answers a bogus
+	// token with the same 403 as an expired one.
+	invalidateToken := func(t *testing.T, client *vaultclient.Client) {
+		t.Helper()
+		require.NoError(t, client.SetToken("bogus-token"))
+	}
+
+	newLoggedInClient := func(t *testing.T) *vaultclient.Client {
+		t.Helper()
+		client, err := vaultclient.New(vaultclient.WithAddress(address))
+		require.NoError(t, err)
+		require.NoError(t, vaultopenbao.AppRoleLogin(t.Context(), client, "approle", roleID, secretID))
+		return client
+	}
+
+	reauthWith := func(client *vaultclient.Client, secret string) func(context.Context) error {
+		return func(ctx context.Context) error {
+			return vaultopenbao.AppRoleLogin(ctx, client, "approle", roleID, secret)
+		}
+	}
+
+	operations := map[string]func(ctx context.Context, store vault.Vault) error{
+		"Write": func(ctx context.Context, store vault.Vault) error {
+			return store.Write(ctx, "/tenant/reauth", []byte("secret"))
+		},
+		"Read": func(ctx context.Context, store vault.Vault) error {
+			_, err := store.Read(ctx, "/tenant/reauth")
+			return err
+		},
+		"Delete": func(ctx context.Context, store vault.Vault) error {
+			return store.Delete(ctx, "/tenant/reauth")
+		},
+	}
+
+	for _, name := range []string{"Write", "Read", "Delete"} {
+		op := operations[name]
+		t.Run(name+" re-logs in and succeeds after the token is invalidated", func(t *testing.T) {
+			client := newLoggedInClient(t)
+			store := vaultopenbao.New(client, "secret", reauthWith(client, secretID))
+			// Seed the secret so Read has something to find.
+			require.NoError(t, store.Write(t.Context(), "/tenant/reauth", []byte("secret")))
+
+			invalidateToken(t, client)
+			require.NoError(t, op(t.Context(), store))
+		})
+	}
+
+	t.Run("without reauth the 403 propagates", func(t *testing.T) {
+		client := newLoggedInClient(t)
+		store := vaultopenbao.New(client, "secret", nil)
+
+		invalidateToken(t, client)
+		err := store.Write(t.Context(), "/tenant/noreauth", []byte("secret"))
+		require.True(t, vaultclient.IsErrorStatus(err, http.StatusForbidden), "expected 403, got: %v", err)
+	})
+
+	t.Run("a failing reauth surfaces both the 403 and the login error", func(t *testing.T) {
+		client := newLoggedInClient(t)
+		store := vaultopenbao.New(client, "secret", reauthWith(client, "not-a-real-secret-id"))
+
+		invalidateToken(t, client)
+		err := store.Write(t.Context(), "/tenant/badreauth", []byte("secret"))
+		require.Error(t, err)
+		require.True(t, vaultclient.IsErrorStatus(err, http.StatusForbidden), "expected 403, got: %v", err)
+		require.Contains(t, err.Error(), "re-login after 403 failed")
+		require.Contains(t, err.Error(), "approle login")
 	})
 }

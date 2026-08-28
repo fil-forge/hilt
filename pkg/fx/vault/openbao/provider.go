@@ -11,6 +11,7 @@ import (
 	vaultopenbao "github.com/fil-forge/hilt/pkg/vault/openbao"
 	vaultclient "github.com/hashicorp/vault-client-go"
 	"go.uber.org/fx"
+	"go.uber.org/zap"
 )
 
 // Module provides the OpenBao-backed vault implementation.
@@ -19,8 +20,10 @@ var Module = fx.Module("openbao-vault",
 )
 
 // NewVault builds an OpenBao-backed vault from configuration and
-// authenticates the client on startup (via token or AppRole).
-func NewVault(cfg config.OpenBaoConfig, lc fx.Lifecycle) (hiltvault.Vault, error) {
+// authenticates the client on startup (via token or AppRole). With AppRole,
+// the store also logs in again and retries once when OpenBao rejects the
+// token with 403, which is what an expired token looks like.
+func NewVault(cfg config.OpenBaoConfig, logger *zap.Logger, lc fx.Lifecycle) (hiltvault.Vault, error) {
 	if cfg.Address == "" {
 		return nil, fmt.Errorf("vault.openbao.address is required when vault.type is %q", config.VaultTypeOpenBao)
 	}
@@ -33,37 +36,53 @@ func NewVault(cfg config.OpenBaoConfig, lc fx.Lifecycle) (hiltvault.Vault, error
 		mount = "secret"
 	}
 
+	login, refreshable, err := loginFunc(client, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	// Authenticate on start so network/auth happens at startup rather than at
 	// construction (mirrors the postgres pool lifecycle).
-	lc.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
-			return authenticate(ctx, client, cfg)
-		},
-	})
+	lc.Append(fx.Hook{OnStart: login})
 
-	return vaultopenbao.New(client, mount), nil
+	var reauth func(context.Context) error
+	if refreshable {
+		reauth = func(ctx context.Context) error {
+			logger.Warn("openbao rejected the vault token; logging in again via approle")
+			return login(ctx)
+		}
+	}
+
+	return vaultopenbao.New(client, mount, reauth), nil
 }
 
-func authenticate(ctx context.Context, client *vaultclient.Client, cfg config.OpenBaoConfig) error {
+// loginFunc validates the auth configuration and returns the login function
+// for the configured method. refreshable reports whether calling login again
+// yields a new token (AppRole); a static token cannot be refreshed.
+func loginFunc(client *vaultclient.Client, cfg config.OpenBaoConfig) (login func(context.Context) error, refreshable bool, err error) {
 	switch cfg.AuthMethod {
 	case config.VaultAuthToken, "":
 		if cfg.Token == "" {
-			return fmt.Errorf("vault.openbao.token is required when vault.openbao.auth_method is %q", config.VaultAuthToken)
+			return nil, false, fmt.Errorf("vault.openbao.token is required when vault.openbao.auth_method is %q", config.VaultAuthToken)
 		}
-		if err := client.SetToken(cfg.Token); err != nil {
-			return fmt.Errorf("setting vault token: %w", err)
-		}
-		return nil
+		return func(context.Context) error {
+			if err := client.SetToken(cfg.Token); err != nil {
+				return fmt.Errorf("setting vault token: %w", err)
+			}
+			return nil
+		}, false, nil
 	case config.VaultAuthAppRole:
 		if cfg.AppRole.RoleID == "" || cfg.AppRole.SecretID == "" {
-			return fmt.Errorf("vault.openbao.approle.role_id and secret_id are required when vault.openbao.auth_method is %q", config.VaultAuthAppRole)
+			return nil, false, fmt.Errorf("vault.openbao.approle.role_id and secret_id are required when vault.openbao.auth_method is %q", config.VaultAuthAppRole)
 		}
 		mount := cfg.AppRole.Mount
 		if mount == "" {
 			mount = "approle"
 		}
-		return vaultopenbao.AppRoleLogin(ctx, client, mount, cfg.AppRole.RoleID, cfg.AppRole.SecretID)
+		return func(ctx context.Context) error {
+			return vaultopenbao.AppRoleLogin(ctx, client, mount, cfg.AppRole.RoleID, cfg.AppRole.SecretID)
+		}, true, nil
 	default:
-		return fmt.Errorf("unknown vault.openbao.auth_method %q (valid: token, approle)", cfg.AuthMethod)
+		return nil, false, fmt.Errorf("unknown vault.openbao.auth_method %q (valid: token, approle)", cfg.AuthMethod)
 	}
 }
