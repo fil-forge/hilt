@@ -67,7 +67,10 @@ var or config file, **not** flags, to avoid exposing them in process args.
 
 `vault.type` is `openbao` or `memory`. OpenBao keys apply when
 `type=openbao`; `auth_method` is `approle` or `token` (use `token` with
-`vault.openbao.token`, or `approle` with the role/secret IDs).
+`vault.openbao.token`, or `approle` with the role/secret IDs). With `approle`,
+hilt logs in again and retries the operation once when OpenBao rejects its
+token (the token infra-central issues lives one hour); with `token`, a rejected
+token is a hard error.
 
 ### PLC directory
 
