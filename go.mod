@@ -11,7 +11,7 @@ require (
 	github.com/aws/smithy-go v1.27.2
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/fil-forge/libforge v0.0.0-20260904125112-81372e7200bf
-	github.com/fil-forge/smelt v0.0.0-20260828105933-8ba0939fb9a7
+	github.com/fil-forge/smelt v0.0.0-20260828121926-640b11ba6376
 	github.com/fil-forge/swarf v0.0.1-0.20260821142121-d5d1a0a56f00
 	github.com/fil-forge/ucantone v0.0.0-20260827134420-25cf8340b9a1
 	github.com/ipfs/go-cid v0.6.2
