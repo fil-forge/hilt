@@ -9,7 +9,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/config"
 	hiltvault "github.com/fil-forge/hilt/pkg/vault"
 	vaultopenbao "github.com/fil-forge/hilt/pkg/vault/openbao"
-	vaultclient "github.com/hashicorp/vault-client-go"
+	api "github.com/openbao/openbao/api/v2"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
@@ -27,7 +27,9 @@ func NewVault(cfg config.OpenBaoConfig, logger *zap.Logger, lc fx.Lifecycle) (hi
 	if cfg.Address == "" {
 		return nil, fmt.Errorf("vault.openbao.address is required when vault.type is %q", config.VaultTypeOpenBao)
 	}
-	client, err := vaultclient.New(vaultclient.WithAddress(cfg.Address))
+	clientCfg := api.DefaultConfig()
+	clientCfg.Address = cfg.Address
+	client, err := api.NewClient(clientCfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating vault client: %w", err)
 	}
@@ -59,16 +61,14 @@ func NewVault(cfg config.OpenBaoConfig, logger *zap.Logger, lc fx.Lifecycle) (hi
 // loginFunc validates the auth configuration and returns the login function
 // for the configured method. refreshable reports whether calling login again
 // yields a new token (AppRole); a static token cannot be refreshed.
-func loginFunc(client *vaultclient.Client, cfg config.OpenBaoConfig) (login func(context.Context) error, refreshable bool, err error) {
+func loginFunc(client *api.Client, cfg config.OpenBaoConfig) (login func(context.Context) error, refreshable bool, err error) {
 	switch cfg.AuthMethod {
 	case config.VaultAuthToken, "":
 		if cfg.Token == "" {
 			return nil, false, fmt.Errorf("vault.openbao.token is required when vault.openbao.auth_method is %q", config.VaultAuthToken)
 		}
 		return func(context.Context) error {
-			if err := client.SetToken(cfg.Token); err != nil {
-				return fmt.Errorf("setting vault token: %w", err)
-			}
+			client.SetToken(cfg.Token)
 			return nil
 		}, false, nil
 	case config.VaultAuthAppRole:
