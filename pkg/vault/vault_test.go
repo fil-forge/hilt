@@ -8,7 +8,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	vaultopenbao "github.com/fil-forge/hilt/pkg/vault/openbao"
-	vaultclient "github.com/hashicorp/vault-client-go"
+	api "github.com/openbao/openbao/api/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,9 +41,11 @@ func createOpenBaoVault(t *testing.T) vault.Vault {
 		t.SkipNow()
 	}
 	address, token := htestutil.CreateVault(t)
-	client, err := vaultclient.New(vaultclient.WithAddress(address))
+	cfg := api.DefaultConfig()
+	cfg.Address = address
+	client, err := api.NewClient(cfg)
 	require.NoError(t, err)
-	require.NoError(t, client.SetToken(token))
+	client.SetToken(token)
 	return vaultopenbao.New(client, "secret", nil)
 }
 

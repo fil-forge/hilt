@@ -1,19 +1,18 @@
 // Package openbao provides an OpenBao (KV v2) backed implementation of
-// vault.Vault over the Vault-compatible HTTP API, using
-// github.com/hashicorp/vault-client-go.
+// vault.Vault, using github.com/openbao/openbao/api/v2.
 package openbao
 
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 
 	hiltvault "github.com/fil-forge/hilt/pkg/vault"
-	vaultclient "github.com/hashicorp/vault-client-go"
-	"github.com/hashicorp/vault-client-go/schema"
+	api "github.com/openbao/openbao/api/v2"
 )
 
 // dataKey is the field within a KV v2 secret under which the (base64-encoded)
@@ -23,7 +22,7 @@ const dataKey = "value"
 
 // Store is a vault.Vault backed by an OpenBao KV v2 secrets engine.
 type Store struct {
-	client *vaultclient.Client
+	client *api.Client
 	mount  string
 
 	// reauth logs the client in again and installs the new token. When set, an
@@ -43,28 +42,28 @@ var _ hiltvault.Vault = (*Store)(nil)
 // (e.g. "secret") using the given client. reauth, when non-nil, is called to
 // log in again after OpenBao rejects the client's token with 403 Forbidden;
 // the failed operation is then retried once.
-func New(client *vaultclient.Client, mount string, reauth func(context.Context) error) *Store {
+func New(client *api.Client, mount string, reauth func(context.Context) error) *Store {
 	return &Store{client: client, mount: mount, reauth: reauth}
 }
 
 func (s *Store) Read(ctx context.Context, key string) ([]byte, error) {
-	var resp *vaultclient.Response[schema.KvV2ReadResponse]
+	var secret *api.KVSecret
 	err := s.withReauth(ctx, func() error {
 		var err error
-		resp, err = s.client.Secrets.KvV2Read(ctx, secretPath(key), vaultclient.WithMountPath(s.mount))
+		secret, err = s.kv().Get(ctx, secretPath(key))
 		return err
 	})
 	if err != nil {
-		if vaultclient.IsErrorStatus(err, http.StatusNotFound) {
+		if errors.Is(err, api.ErrSecretNotFound) {
 			return nil, hiltvault.ErrNotFound
 		}
 		return nil, fmt.Errorf("reading secret: %w", err)
 	}
 	// A soft-deleted secret reads back with nil data.
-	if resp.Data.Data == nil {
+	if secret.Data == nil {
 		return nil, hiltvault.ErrNotFound
 	}
-	encoded, ok := resp.Data.Data[dataKey].(string)
+	encoded, ok := secret.Data[dataKey].(string)
 	if !ok {
 		return nil, fmt.Errorf("secret missing %q field", dataKey)
 	}
@@ -77,11 +76,9 @@ func (s *Store) Read(ctx context.Context, key string) ([]byte, error) {
 
 func (s *Store) Write(ctx context.Context, key string, value []byte) error {
 	err := s.withReauth(ctx, func() error {
-		_, err := s.client.Secrets.KvV2Write(ctx, secretPath(key), schema.KvV2WriteRequest{
-			Data: map[string]any{
-				dataKey: base64.StdEncoding.EncodeToString(value),
-			},
-		}, vaultclient.WithMountPath(s.mount))
+		_, err := s.kv().Put(ctx, secretPath(key), map[string]any{
+			dataKey: base64.StdEncoding.EncodeToString(value),
+		})
 		return err
 	})
 	if err != nil {
@@ -92,18 +89,18 @@ func (s *Store) Write(ctx context.Context, key string, value []byte) error {
 
 func (s *Store) Delete(ctx context.Context, key string) error {
 	// Permanently remove the secret (all versions + metadata). Idempotent: a
-	// missing secret is not an error.
+	// missing secret is not an error, OpenBao answers the delete with 204.
 	err := s.withReauth(ctx, func() error {
-		_, err := s.client.Secrets.KvV2DeleteMetadataAndAllVersions(ctx, secretPath(key), vaultclient.WithMountPath(s.mount))
-		return err
+		return s.kv().DeleteMetadata(ctx, secretPath(key))
 	})
 	if err != nil {
-		if vaultclient.IsErrorStatus(err, http.StatusNotFound) {
-			return nil
-		}
 		return fmt.Errorf("deleting secret: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) kv() *api.KVv2 {
+	return s.client.KVv2(s.mount)
 }
 
 // withReauth runs op. If op fails with 403 Forbidden and a reauth function is
@@ -113,7 +110,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 func (s *Store) withReauth(ctx context.Context, op func() error) error {
 	gen := s.currentLoginGen()
 	err := op()
-	if err == nil || s.reauth == nil || !vaultclient.IsErrorStatus(err, http.StatusForbidden) {
+	if err == nil || s.reauth == nil || !isStatus(err, http.StatusForbidden) {
 		return err
 	}
 	if loginErr := s.reauthOnce(ctx, gen); loginErr != nil {
@@ -144,9 +141,16 @@ func (s *Store) reauthOnce(ctx context.Context, seenGen uint64) error {
 	return nil
 }
 
+// isStatus reports whether err is an OpenBao API error carrying the given HTTP
+// status code.
+func isStatus(err error, status int) bool {
+	var respErr *api.ResponseError
+	return errors.As(err, &respErr) && respErr.StatusCode == status
+}
+
 // secretPath normalizes a vault key into a KV v2 secret path. Hilt keys are
 // path-like (e.g. "/tenant/{id}"); a leading slash would create an empty path
-// segment in the Vault API URL, so it is trimmed.
+// segment in the OpenBao API URL, so it is trimmed.
 func secretPath(key string) string {
 	return strings.TrimPrefix(key, "/")
 }
