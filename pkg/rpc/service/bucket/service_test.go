@@ -131,11 +131,20 @@ func TestCreate(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
-	t.Run("rejects a duplicate bucket name", func(t *testing.T) {
+	t.Run("rejects a duplicate name owned by another tenant", func(t *testing.T) {
 		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New())
-		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, bucketName))
+		// Owner is a different tenant → BucketAlreadyExists.
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), testutil.RandomDID(t), bucketName))
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.ErrorIs(t, err, bucketsvc.ErrBucketExists)
+	})
+
+	t.Run("rejects re-creating a bucket you already own", func(t *testing.T) {
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New())
+		// Owner is the requesting tenant → BucketAlreadyOwnedByYou.
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, bucketName))
+		_, _, err := svc.Create(ctx, providerID, args())
+		require.ErrorIs(t, err, bucketsvc.ErrBucketAlreadyOwned)
 	})
 
 	t.Run("rolls back the bucket when provisioning fails", func(t *testing.T) {
