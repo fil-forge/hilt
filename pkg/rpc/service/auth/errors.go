@@ -13,6 +13,7 @@ const (
 	SignatureExpiredErrorName      = "SignatureExpired"
 	AccessKeyExpiredErrorName      = "AccessKeyExpired"
 	TenantDisabledErrorName        = "TenantDisabled"
+	TenantWriteLockedErrorName     = "TenantWriteLocked"
 	IssuerForbiddenErrorName       = "IssuerForbidden"
 	RegionNotServedErrorName       = "RegionNotServed"
 	UnsupportedOperationErrorName  = "UnsupportedOperation"
@@ -47,6 +48,9 @@ var (
 	ErrAccessKeyExpired = errors.New(AccessKeyExpiredErrorName, "access key has expired")
 	// ErrTenantDisabled is returned when the tenant is disabled.
 	ErrTenantDisabled = errors.New(TenantDisabledErrorName, "tenant is disabled")
+	// ErrTenantWriteLocked is returned when the tenant is write-locked and the
+	// request performs a mutating operation. Reads stay authorized.
+	ErrTenantWriteLocked = errors.New(TenantWriteLockedErrorName, "tenant is write-locked")
 	// ErrIssuerForbidden is returned when the invocation issuer is not allowed to
 	// act on the tenant's behalf (it is not the tenant's provider).
 	ErrIssuerForbidden = errors.New(IssuerForbiddenErrorName, "issuer is not allowed to act for this tenant")
