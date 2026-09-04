@@ -8,7 +8,7 @@ import "github.com/fil-forge/ucantone/errors"
 const (
 	OperationMismatchErrorName  = "OperationMismatch"
 	BucketExistsErrorName       = "BucketExists"
-	BucketAlreadyOwnedErrorName = "BucketAlreadyOwnedByYou"
+	BucketAlreadyOwnedErrorName = "BucketAlreadyOwnedByTenant"
 	BucketNotEmptyErrorName     = "BucketNotEmpty"
 	UnknownBucketErrorName      = "UnknownBucket"
 	UnknownAccessKeyErrorName   = "UnknownAccessKey"
@@ -27,9 +27,10 @@ var (
 	// under a different owner.
 	ErrBucketExists = errors.New(BucketExistsErrorName, "bucket already exists")
 	// ErrBucketAlreadyOwned is returned when creating a bucket whose name already
-	// exists and is owned by the requesting tenant (the S3
-	// BucketAlreadyOwnedByYou case, distinct from BucketAlreadyExists).
-	ErrBucketAlreadyOwned = errors.New(BucketAlreadyOwnedErrorName, "bucket already exists and is owned by you")
+	// exists and is owned by the requesting tenant. Ingot maps it to the S3
+	// BucketAlreadyOwnedByYou response, distinct from BucketAlreadyExists (a
+	// name owned by a different tenant).
+	ErrBucketAlreadyOwned = errors.New(BucketAlreadyOwnedErrorName, "bucket already exists and is owned by the requesting tenant")
 	// ErrBucketNotEmpty is returned when deleting a bucket whose space is not empty.
 	ErrBucketNotEmpty = errors.New(BucketNotEmptyErrorName, "bucket is not empty")
 	// ErrUnknownBucket is returned when the named bucket does not exist.
