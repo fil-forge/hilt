@@ -107,8 +107,13 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		return nil, nil, fmt.Errorf("%w: %s", ErrOperationMismatch, authz.Operation)
 	}
 
-	_, err = s.buckets.GetByName(ctx, authz.BucketName)
+	rec, err := s.buckets.GetByName(ctx, authz.BucketName)
 	if err == nil {
+		// An existing name owned by the requesting tenant is
+		// BucketAlreadyOwnedByYou; owned by anyone else is BucketAlreadyExists.
+		if rec.Tenant == authz.Tenant.ID {
+			return nil, nil, fmt.Errorf("%w: %q", ErrBucketAlreadyOwned, authz.BucketName)
+		}
 		return nil, nil, fmt.Errorf("%w: %q", ErrBucketExists, authz.BucketName)
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, fmt.Errorf("looking up bucket: %w", err)

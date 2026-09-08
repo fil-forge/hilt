@@ -6,12 +6,13 @@ import "github.com/fil-forge/ucantone/errors"
 // Ingot, mapping to canonical S3 error responses) can match on the stable Name()
 // of a serialized failure.
 const (
-	OperationMismatchErrorName = "OperationMismatch"
-	BucketExistsErrorName      = "BucketExists"
-	BucketNotEmptyErrorName    = "BucketNotEmpty"
-	UnknownBucketErrorName     = "UnknownBucket"
-	UnknownAccessKeyErrorName  = "UnknownAccessKey"
-	InvalidArgumentErrorName   = "InvalidArgument"
+	OperationMismatchErrorName  = "OperationMismatch"
+	BucketExistsErrorName       = "BucketExists"
+	BucketAlreadyOwnedErrorName = "BucketAlreadyOwnedByTenant"
+	BucketNotEmptyErrorName     = "BucketNotEmpty"
+	UnknownBucketErrorName      = "UnknownBucket"
+	UnknownAccessKeyErrorName   = "UnknownAccessKey"
+	InvalidArgumentErrorName    = "InvalidArgument"
 )
 
 // Known errors returned by the bucket [Service]. Handlers pass these to
@@ -22,8 +23,14 @@ var (
 	// ErrOperationMismatch is returned when the signed request's S3 operation does
 	// not match the invoked bucket command (create/delete/list).
 	ErrOperationMismatch = errors.New(OperationMismatchErrorName, "request operation does not match the command")
-	// ErrBucketExists is returned when creating a bucket whose name already exists.
+	// ErrBucketExists is returned when creating a bucket whose name already exists
+	// under a different owner.
 	ErrBucketExists = errors.New(BucketExistsErrorName, "bucket already exists")
+	// ErrBucketAlreadyOwned is returned when creating a bucket whose name already
+	// exists and is owned by the requesting tenant. Ingot maps it to the S3
+	// BucketAlreadyOwnedByYou response, distinct from BucketAlreadyExists (a
+	// name owned by a different tenant).
+	ErrBucketAlreadyOwned = errors.New(BucketAlreadyOwnedErrorName, "bucket already exists and is owned by the requesting tenant")
 	// ErrBucketNotEmpty is returned when deleting a bucket whose space is not empty.
 	ErrBucketNotEmpty = errors.New(BucketNotEmptyErrorName, "bucket is not empty")
 	// ErrUnknownBucket is returned when the named bucket does not exist.

@@ -55,6 +55,7 @@ func bucketFailure(res failer, err error) error {
 	switch {
 	case errors.Is(err, bucketsvc.ErrOperationMismatch),
 		errors.Is(err, bucketsvc.ErrBucketExists),
+		errors.Is(err, bucketsvc.ErrBucketAlreadyOwned),
 		errors.Is(err, bucketsvc.ErrBucketNotEmpty),
 		errors.Is(err, bucketsvc.ErrUnknownBucket),
 		errors.Is(err, bucketsvc.ErrUnknownAccessKey),

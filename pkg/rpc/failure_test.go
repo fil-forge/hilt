@@ -41,6 +41,14 @@ func TestBucketFailure(t *testing.T) {
 		requireName(t, f.got, bucketsvc.BucketExistsErrorName)
 	})
 
+	t.Run("wrapped already-owned sentinel is set as failure with its name", func(t *testing.T) {
+		f := &recordingFailer{}
+		err := fmt.Errorf("%w: %q", bucketsvc.ErrBucketAlreadyOwned, "foo")
+		require.NoError(t, bucketFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, bucketsvc.BucketAlreadyOwnedErrorName)
+	})
+
 	t.Run("propagated auth sentinel is set as failure with its name", func(t *testing.T) {
 		f := &recordingFailer{}
 		require.NoError(t, bucketFailure(f, auth.ErrOperationNotPermitted))
