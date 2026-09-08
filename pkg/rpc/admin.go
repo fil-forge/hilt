@@ -99,6 +99,22 @@ func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, pro
 		}
 		policy = &policyID
 	}
+	if args.Provider == did.Undef {
+		return nil, fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
+	}
+	if args.Region == "" {
+		return nil, fmt.Errorf("provider region is required: %w", store.ErrInvalidArgument)
+	}
+	if _, err := providers.Get(ctx, args.Provider); err == nil {
+		return nil, fmt.Errorf("%w: provider %s region %q", ErrProviderExists, args.Provider, args.Region)
+	} else if !errors.Is(err, store.ErrRecordNotFound) {
+		return nil, fmt.Errorf("checking provider: %w", err)
+	}
+	if _, err := providers.GetByRegion(ctx, args.Region); err == nil {
+		return nil, fmt.Errorf("%w: provider %s region %q", ErrProviderExists, args.Provider, args.Region)
+	} else if !errors.Is(err, store.ErrRecordNotFound) {
+		return nil, fmt.Errorf("checking provider region: %w", err)
+	}
 
 	if err := providers.Add(ctx, args.Provider, args.Region, policy); err != nil {
 		if errors.Is(err, store.ErrRecordExists) {

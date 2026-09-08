@@ -108,10 +108,26 @@ func TestAddProvider(t *testing.T) {
 
 	t.Run("rejects a duplicate provider or region", func(t *testing.T) {
 		providers := providermemory.New()
+		routing := &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
-		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), &fakeRouting{}, serviceID,
+		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, serviceID,
 			&adminprovider.AddArguments{Provider: testutil.RandomDID(t), Region: "us-east-1", Nodes: nodes})
 		require.ErrorIs(t, err, rpc.ErrProviderExists)
+		require.False(t, routing.called)
+	})
+
+	t.Run("rejects invalid provider arguments before issuing policy material", func(t *testing.T) {
+		for name, args := range map[string]*adminprovider.AddArguments{
+			"missing provider": {Region: "us-east-1", Nodes: nodes},
+			"missing region":   {Provider: providerID, Nodes: nodes},
+		} {
+			t.Run(name, func(t *testing.T) {
+				routing := &fakeRouting{}
+				_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing, serviceID, args)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+				require.False(t, routing.called)
+			})
+		}
 	})
 }
 
