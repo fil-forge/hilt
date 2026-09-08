@@ -68,7 +68,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
 
-		require.NoError(t, providers.Add(ctx, providerID, region))
+		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))

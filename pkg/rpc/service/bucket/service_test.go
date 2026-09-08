@@ -52,6 +52,12 @@ type fakeSprue struct {
 	emptyErr    error
 	emptyCalled bool
 	emptySpace  did.DID
+
+	useErr    error
+	useCalled bool
+	useSpace  did.DID
+	usePolicy *did.DID
+	useIssuer did.DID
 }
 
 func (f *fakeSprue) ProvisionSpace(_ context.Context, account ucan.Issuer, space did.DID) (string, error) {
@@ -65,6 +71,16 @@ func (f *fakeSprue) SpaceEmpty(_ context.Context, space did.DID, _ ...upload.Met
 	f.emptyCalled = true
 	f.emptySpace = space
 	return f.empty, f.emptyErr
+}
+
+func (f *fakeSprue) UseRoutingPolicy(_ context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error {
+	f.useCalled = true
+	f.useSpace = space
+	f.usePolicy = policy
+	if cfg := upload.MethodConfigOf(opts...); cfg.Issuer != nil {
+		f.useIssuer = cfg.Issuer.DID()
+	}
+	return f.useErr
 }
 
 func presign(t *testing.T, signer ed25519.Signer, method, url, region string) s3.Request {
@@ -87,13 +103,14 @@ func TestCreate(t *testing.T) {
 	require.NoError(t, err)
 	tenantID := tenantSigner.KeyDID()
 	providerID := testutil.RandomDID(t)
+	providerPolicy := testutil.RandomDID(t)
 
 	// setup seeds a powerline tenant→access-key delegation for /content/retrieve.
 	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, delegations delegationstore.Store) (*bucketsvc.Service, *bucketmemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region))
+		require.NoError(t, providers.Add(ctx, providerID, region, providerPolicy))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
@@ -123,6 +140,27 @@ func TestCreate(t *testing.T) {
 		require.Equal(t, *ok.Bucket, sprue.provSpace)
 		require.Len(t, ok.Delegations.Entries, 1)
 		require.Len(t, blocks, 2) // bucket→tenant root + tenant→access-key powerline
+	})
+
+	t.Run("points the bucket at the provider's routing policy as the tenant", func(t *testing.T) {
+		sprue := &fakeSprue{sub: "sub-1"}
+		svc, _ := setup(t, []string{"s3:CreateBucket"}, sprue, delegationmemory.New())
+		ok, _, err := svc.Create(ctx, providerID, args())
+		require.NoError(t, err)
+
+		require.True(t, sprue.useCalled)
+		require.Equal(t, *ok.Bucket, sprue.useSpace)
+		require.NotNil(t, sprue.usePolicy)
+		require.Equal(t, providerPolicy, *sprue.usePolicy)
+		require.Equal(t, tenantID, sprue.useIssuer)
+	})
+
+	t.Run("rolls back the bucket when applying the routing policy fails", func(t *testing.T) {
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{useErr: errors.New("sprue unavailable")}, delegationmemory.New())
+		_, _, err := svc.Create(ctx, providerID, args())
+		require.Error(t, err)
+		_, err = buckets.GetByName(ctx, bucketName)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("rejects a key without s3:CreateBucket", func(t *testing.T) {
@@ -230,7 +268,7 @@ func TestDelete(t *testing.T) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region))
+		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
@@ -374,7 +412,7 @@ func TestList(t *testing.T) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region))
+		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))

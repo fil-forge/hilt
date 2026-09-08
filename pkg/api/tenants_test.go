@@ -260,7 +260,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("provisions a new tenant", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 
 		rec := provisionRequest(t, e, "tenant-1", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusCreated, rec.Code)
@@ -320,7 +320,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("is idempotent on the external id", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 
 		first := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusCreated, first.Code)
@@ -340,7 +340,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("upload service failure aborts provisioning", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 		deps.sprueFailure = true
 
 		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
@@ -367,7 +367,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("cleans up the orphaned key when PLC publication fails", func(t *testing.T) {
 		e, deps := setupProvision(t, &setupConfig{plcStatus: http.StatusInternalServerError})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 
 		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusBadGateway, rec.Code)
@@ -383,7 +383,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		tenants := addFailTenantStore{Store: tenantmemory.New(), err: errors.New("boom")}
 
 		e, deps := setupProvision(t, &setupConfig{tenants: tenants})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 		rec := provisionRequest(t, e, "tenant-7", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 
@@ -395,7 +395,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 	t.Run("cleans up both vault keys when storing the wrap key record fails", func(t *testing.T) {
 		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New(), addErr: errors.New("boom")}
 		e, deps := setupProvision(t, &setupConfig{wrapKeys: wrapKeys})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 
 		rec := provisionRequest(t, e, "tenant-8", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -414,7 +414,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 			tenants:  &loseRaceTenantStore{Store: tenantmemory.New(), winnerID: winnerID},
 			wrapKeys: wrapKeys,
 		})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", testutil.RandomDID(t)))
 
 		rec := provisionRequest(t, e, "tenant-9", api.ProvisionTenantRequest{Region: "us-east-1"})
 

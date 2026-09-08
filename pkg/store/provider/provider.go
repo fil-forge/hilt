@@ -12,6 +12,10 @@ type Record struct {
 	ID did.DID
 	// Region the provider operates in.
 	Region string
+	// Policy is the DID of the routing policy the provider's buckets use. Hilt
+	// issues the policy when the provider is registered and holds its root
+	// delegation; the upload service holds the policy's candidate set.
+	Policy did.DID
 	// When the provider record was created.
 	CreatedAt time.Time
 	// When the provider record was last updated.
@@ -20,9 +24,13 @@ type Record struct {
 
 type Store interface {
 	// Add creates a new provider record. It returns [store.ErrInvalidArgument]
-	// if the ID is undef or the region is empty, and [store.ErrRecordExists] if
-	// a record with the same ID already exists.
-	Add(ctx context.Context, id did.DID, region string) error
+	// if the ID or policy is undef or the region is empty, and
+	// [store.ErrRecordExists] if a record with the same ID or region already
+	// exists.
+	Add(ctx context.Context, id did.DID, region string, policy did.DID) error
+	// Get retrieves the provider record by ID. It returns
+	// [store.ErrRecordNotFound] if no record exists.
+	Get(ctx context.Context, id did.DID) (Record, error)
 	// GetByRegion retrieves the provider record for a given region. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified region.
 	GetByRegion(ctx context.Context, region string) (Record, error)

@@ -29,17 +29,20 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
+func (s *Store) Add(ctx context.Context, id did.DID, region string, policy did.DID) error {
 	if id == did.Undef {
 		return fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
 	}
 	if region == "" {
 		return fmt.Errorf("provider region is required: %w", store.ErrInvalidArgument)
 	}
+	if policy == did.Undef {
+		return fmt.Errorf("provider policy is required: %w", store.ErrInvalidArgument)
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO provider (id, region)
-		VALUES ($1, $2)
-	`, id.String(), region)
+		INSERT INTO provider (id, region, policy)
+		VALUES ($1, $2, $3)
+	`, id.String(), region, policy.String())
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -50,9 +53,25 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string) error {
 	return nil
 }
 
+func (s *Store) Get(ctx context.Context, id did.DID) (provider.Record, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, region, policy, created_at, updated_at
+		FROM provider
+		WHERE id = $1
+	`, id.String())
+	rec, err := scanRecord(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return provider.Record{}, store.ErrRecordNotFound
+	}
+	if err != nil {
+		return provider.Record{}, fmt.Errorf("getting provider: %w", err)
+	}
+	return rec, nil
+}
+
 func (s *Store) GetByRegion(ctx context.Context, region string) (provider.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, region, created_at, updated_at
+		SELECT id, region, policy, created_at, updated_at
 		FROM provider
 		WHERE region = $1
 	`, region)
@@ -70,18 +89,24 @@ func scanRecord(row pgx.Row) (provider.Record, error) {
 	var (
 		idStr     string
 		region    *string
+		policyStr string
 		createdAt time.Time
 		updatedAt *time.Time
 	)
-	if err := row.Scan(&idStr, &region, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&idStr, &region, &policyStr, &createdAt, &updatedAt); err != nil {
 		return provider.Record{}, err
 	}
 	id, err := did.Parse(idStr)
 	if err != nil {
 		return provider.Record{}, fmt.Errorf("parsing provider DID: %w", err)
 	}
+	policy, err := did.Parse(policyStr)
+	if err != nil {
+		return provider.Record{}, fmt.Errorf("parsing provider policy DID: %w", err)
+	}
 	rec := provider.Record{
 		ID:        id,
+		Policy:    policy,
 		CreatedAt: createdAt,
 	}
 	if region != nil {
