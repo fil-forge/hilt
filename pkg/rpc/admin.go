@@ -78,8 +78,8 @@ func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers p
 // policy DID delegates top authority over itself to the service (a non-expiring
 // root, stored in the delegation store) and is then discarded. The provider's
 // nodes are put as the policy's candidates on the upload service, and the provider
-// record is stored last: the provider store has no delete, and an orphaned root
-// delegation or upload-service policy that no record references is inert.
+// record is stored last. Provider arguments and uniqueness are checked before
+// issuing any policy material.
 //
 // It is factored out of the handler so it can be unit tested without constructing
 // a UCAN invocation.
@@ -89,6 +89,22 @@ func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, pro
 	}
 	if len(args.Nodes) == 0 {
 		return nil, ErrInvalidNodes
+	}
+	if args.Provider == did.Undef {
+		return nil, fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
+	}
+	if args.Region == "" {
+		return nil, fmt.Errorf("provider region is required: %w", store.ErrInvalidArgument)
+	}
+	if _, err := providers.Get(ctx, args.Provider); err == nil {
+		return nil, fmt.Errorf("%w: provider %s region %q", ErrProviderExists, args.Provider, args.Region)
+	} else if !errors.Is(err, store.ErrRecordNotFound) {
+		return nil, fmt.Errorf("checking provider: %w", err)
+	}
+	if _, err := providers.GetByRegion(ctx, args.Region); err == nil {
+		return nil, fmt.Errorf("%w: provider %s region %q", ErrProviderExists, args.Provider, args.Region)
+	} else if !errors.Is(err, store.ErrRecordNotFound) {
+		return nil, fmt.Errorf("checking provider region: %w", err)
 	}
 
 	policySigner, err := ed25519.Generate()
