@@ -9,15 +9,17 @@ import (
 )
 
 var addCmd = &cobra.Command{
-	Use:   "add <provider-did> <region> <node-did>...",
+	Use:   "add <provider-did> <region> [node-did...]",
 	Short: "Register a regional provider with Hilt",
-	Long: "Register a regional provider (its DID, the region it serves and the storage " +
-		"nodes it operates). Hilt issues a routing policy for the provider with the nodes " +
-		"as its candidates; every bucket created in the region is routed to them.\n\n" +
+	Long: "Register a regional provider (its DID, the region it serves and, optionally, " +
+		"the storage nodes it operates). With nodes, Hilt issues a routing policy for the " +
+		"provider with the nodes as its candidates and every bucket created in the region " +
+		"is routed to them. Without nodes the region's buckets use default routing until " +
+		"`provider nodes set` is run.\n\n" +
 		"This is an admin operation: it must be run with the Hilt service identity " +
 		"config (identity.key_file / HILT_IDENTITY_KEY_FILE) so the signed invocation " +
 		"is accepted by the server.",
-	Args: cobra.MinimumNArgs(3),
+	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		providerID, err := did.Parse(args[0])
 		if err != nil {

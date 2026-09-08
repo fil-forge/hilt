@@ -178,13 +178,17 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	// Route the space to the provider's storage nodes. The tenant issues the
 	// invocation, proven by the bucket→tenant root stored above. A bucket that
 	// cannot be routed is not created: the provisioned space is left behind, inert,
-	// as it is on every later failure (a retry generates a fresh bucket key).
-	policy := authz.Provider.Policy
-	if err := s.uploads.UseRoutingPolicy(ctx, bucketID, &policy, upload.WithIssuer(account), upload.WithProofs(s.delegations)); err != nil {
-		rollback()
-		return nil, nil, fmt.Errorf("applying routing policy %s: %w", policy, err)
+	// as it is on every later failure (a retry generates a fresh bucket key). A
+	// provider without a policy leaves the space on default routing.
+	if policy := authz.Provider.Policy; policy != nil {
+		if err := s.uploads.UseRoutingPolicy(ctx, bucketID, policy, upload.WithIssuer(account), upload.WithProofs(s.delegations)); err != nil {
+			rollback()
+			return nil, nil, fmt.Errorf("applying routing policy %s: %w", policy, err)
+		}
+		log.Debug("applied routing policy", zap.Stringer("policy", policy))
+	} else {
+		log.Debug("provider has no routing policy, using default routing")
 	}
-	log.Debug("applied routing policy", zap.Stringer("policy", policy))
 
 	// Derive the verification key the gateway uses to validate the caller's request
 	// signatures for this bucket.

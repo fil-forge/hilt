@@ -56,9 +56,9 @@ type RoutingClient interface {
 }
 
 // NewAddProviderHandler handles /admin/provider/add — register a regional provider
-// (DID + region + storage nodes). It is an admin command: only an invocation issued
-// by the service's own identity is accepted (no delegation proofs, since the
-// subject is the service).
+// (DID + region, optionally with the storage nodes it operates). It is an admin
+// command: only an invocation issued by the service's own identity is accepted (no
+// delegation proofs, since the subject is the service).
 func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient) server.Route {
 	log := logger.With(zap.Stringer("command", adminprovider.Add.Command))
 	return adminprovider.Add.Route(func(req *binding.Request[*adminprovider.AddArguments], res *binding.Response[*adminprovider.AddOK]) error {
@@ -74,12 +74,12 @@ func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers p
 // AddProvider registers a provider. Only the service identity (issuer == serviceID)
 // may call it; there are no delegation proofs because the subject is the service.
 //
-// It issues the provider's routing policy: a fresh ed25519 key whose DID is the
-// policy DID delegates top authority over itself to the service (a non-expiring
-// root, stored in the delegation store) and is then discarded. The provider's
-// nodes are put as the policy's candidates on the upload service, and the provider
-// record is stored last: the provider store has no delete, and an orphaned root
-// delegation or upload-service policy that no record references is inert.
+// When nodes are given, the provider's routing policy is issued and the nodes are
+// put as its candidates on the upload service before the provider record is
+// stored. The record goes last: the provider store has no delete, and an orphaned
+// root delegation or upload-service policy that no record references is inert.
+// Without nodes the provider is stored with no policy and its buckets use default
+// routing until nodes are set.
 //
 // It is factored out of the handler so it can be unit tested without constructing
 // a UCAN invocation.
@@ -87,39 +87,34 @@ func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, pro
 	if issuer != serviceID {
 		return nil, ErrUnauthorized
 	}
-	if len(args.Nodes) == 0 {
-		return nil, ErrInvalidNodes
+
+	var policy *did.DID
+	if len(args.Nodes) > 0 {
+		policyID, err := issuePolicy(ctx, serviceID, delegations)
+		if err != nil {
+			return nil, err
+		}
+		if err := setPolicyNodes(ctx, uploads, delegations, policyID, args.Nodes); err != nil {
+			return nil, err
+		}
+		policy = &policyID
 	}
 
-	policySigner, err := ed25519.Generate()
-	if err != nil {
-		return nil, fmt.Errorf("generating policy key: %w", err)
-	}
-	policyID := policySigner.KeyDID()
-	root, err := delegation.Delegate(multikey.NewIssuer(policyID, policySigner), serviceID, policyID, command.Top(), delegation.WithNoExpiration())
-	if err != nil {
-		return nil, fmt.Errorf("issuing policy root delegation: %w", err)
-	}
-	if err := delegations.PutBatch(ctx, []ucan.Delegation{root}); err != nil {
-		return nil, fmt.Errorf("storing policy root delegation: %w", err)
-	}
-
-	if err := setPolicyNodes(ctx, uploads, delegations, policyID, args.Nodes); err != nil {
-		return nil, err
-	}
-
-	if err := providers.Add(ctx, args.Provider, args.Region, policyID); err != nil {
+	if err := providers.Add(ctx, args.Provider, args.Region, policy); err != nil {
 		if errors.Is(err, store.ErrRecordExists) {
 			return nil, fmt.Errorf("%w: provider %s region %q", ErrProviderExists, args.Provider, args.Region)
 		}
 		return nil, fmt.Errorf("adding provider: %w", err)
 	}
-	logger.Info("added provider",
+	log := logger.With(
 		zap.Stringer("provider", args.Provider),
 		zap.String("region", args.Region),
-		zap.Stringer("policy", policyID),
 		zap.Int("nodes", len(args.Nodes)),
 	)
+	if policy != nil {
+		log = log.With(zap.Stringer("policy", *policy))
+	}
+	log.Info("added provider")
 	return &adminprovider.AddOK{}, nil
 }
 
@@ -139,9 +134,9 @@ func NewSetProviderNodesHandler(logger *zap.Logger, id identity.Identity, provid
 }
 
 // SetProviderNodes replaces the candidates of a registered provider's routing
-// policy on the upload service. Only the service identity (issuer == serviceID)
-// may call it. Hilt stores no node list itself: the upload service holds the
-// policy's candidate set.
+// policy on the upload service, issuing the policy first if the provider has
+// none. Only the service identity (issuer == serviceID) may call it. Hilt stores
+// no node list itself: the upload service holds the policy's candidate set.
 func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient, issuer did.DID, args *adminnodes.SetArguments) (*adminnodes.SetOK, error) {
 	if issuer != serviceID {
 		return nil, ErrUnauthorized
@@ -155,15 +150,49 @@ func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID
 	} else if err != nil {
 		return nil, fmt.Errorf("looking up provider: %w", err)
 	}
-	if err := setPolicyNodes(ctx, uploads, delegations, rec.Policy, args.Nodes); err != nil {
+	if rec.Policy == nil {
+		// Issue the policy and put its candidates before recording it on the
+		// provider, so a failure leaves only inert orphans (see AddProvider).
+		policyID, err := issuePolicy(ctx, serviceID, delegations)
+		if err != nil {
+			return nil, err
+		}
+		if err := setPolicyNodes(ctx, uploads, delegations, policyID, args.Nodes); err != nil {
+			return nil, err
+		}
+		if err := providers.SetPolicy(ctx, args.Provider, policyID); err != nil {
+			return nil, fmt.Errorf("recording provider policy: %w", err)
+		}
+		rec.Policy = &policyID
+	} else if err := setPolicyNodes(ctx, uploads, delegations, *rec.Policy, args.Nodes); err != nil {
 		return nil, err
 	}
 	logger.Info("set provider nodes",
 		zap.Stringer("provider", args.Provider),
-		zap.Stringer("policy", rec.Policy),
+		zap.Stringer("policy", *rec.Policy),
 		zap.Int("nodes", len(args.Nodes)),
 	)
 	return &adminnodes.SetOK{}, nil
+}
+
+// issuePolicy creates a routing policy: a fresh ed25519 key whose DID is the
+// policy DID delegates top authority over itself to the service (a non-expiring
+// root, stored in the delegation store) and is then discarded. The delegation is
+// the service's proof for every later put on the policy.
+func issuePolicy(ctx context.Context, serviceID did.DID, delegations delegationstore.Store) (did.DID, error) {
+	policySigner, err := ed25519.Generate()
+	if err != nil {
+		return did.Undef, fmt.Errorf("generating policy key: %w", err)
+	}
+	policyID := policySigner.KeyDID()
+	root, err := delegation.Delegate(multikey.NewIssuer(policyID, policySigner), serviceID, policyID, command.Top(), delegation.WithNoExpiration())
+	if err != nil {
+		return did.Undef, fmt.Errorf("issuing policy root delegation: %w", err)
+	}
+	if err := delegations.PutBatch(ctx, []ucan.Delegation{root}); err != nil {
+		return did.Undef, fmt.Errorf("storing policy root delegation: %w", err)
+	}
+	return policyID, nil
 }
 
 // setPolicyNodes puts nodes as the candidate set of the routing policy on the

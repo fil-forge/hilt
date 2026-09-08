@@ -71,7 +71,7 @@ func TestAuthorize(t *testing.T) {
 		t.Helper()
 		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		tenantStatus := tenant.Active
 		if setupConfig != nil && setupConfig.tenantStatus != "" {
@@ -138,7 +138,7 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, err)
 		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
@@ -166,7 +166,7 @@ func TestAuthorize(t *testing.T) {
 		// vault — a store/vault inconsistency the signer load must reject.
 		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
@@ -179,7 +179,7 @@ func TestAuthorize(t *testing.T) {
 	t.Run("rejects a region the tenant's provider does not serve", func(t *testing.T) {
 		az, providers, _ := setup(t, accessKey, nil)
 		// A provider exists in eu-west-1, but it isn't the tenant's provider.
-		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", testutil.RandomDID(t)))
+		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "eu-west-1", time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrRegionNotServed)
 	})

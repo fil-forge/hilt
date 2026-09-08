@@ -106,11 +106,12 @@ func TestCreate(t *testing.T) {
 	providerPolicy := testutil.RandomDID(t)
 
 	// setup seeds a powerline tenant→access-key delegation for /content/retrieve.
-	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, delegations delegationstore.Store) (*bucketsvc.Service, *bucketmemory.Store) {
+	// policy is the provider's routing policy; nil registers a provider without one.
+	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, delegations delegationstore.Store, policy *did.DID) (*bucketsvc.Service, *bucketmemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, providerPolicy))
+		require.NoError(t, providers.Add(ctx, providerID, region, policy))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
@@ -128,7 +129,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("creates and provisions the bucket, returning the powerline chain", func(t *testing.T) {
 		sprue := &fakeSprue{sub: "sub-1"}
-		svc, buckets := setup(t, []string{"s3:CreateBucket", "s3:GetObject"}, sprue, delegationmemory.New())
+		svc, buckets := setup(t, []string{"s3:CreateBucket", "s3:GetObject"}, sprue, delegationmemory.New(), &providerPolicy)
 		ok, blocks, err := svc.Create(ctx, providerID, args())
 		require.NoError(t, err)
 
@@ -144,7 +145,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("points the bucket at the provider's routing policy as the tenant", func(t *testing.T) {
 		sprue := &fakeSprue{sub: "sub-1"}
-		svc, _ := setup(t, []string{"s3:CreateBucket"}, sprue, delegationmemory.New())
+		svc, _ := setup(t, []string{"s3:CreateBucket"}, sprue, delegationmemory.New(), &providerPolicy)
 		ok, _, err := svc.Create(ctx, providerID, args())
 		require.NoError(t, err)
 
@@ -155,8 +156,18 @@ func TestCreate(t *testing.T) {
 		require.Equal(t, tenantID, sprue.useIssuer)
 	})
 
+	t.Run("leaves the bucket on default routing when the provider has no policy", func(t *testing.T) {
+		sprue := &fakeSprue{sub: "sub-1"}
+		svc, _ := setup(t, []string{"s3:CreateBucket"}, sprue, delegationmemory.New(), nil)
+		ok, _, err := svc.Create(ctx, providerID, args())
+		require.NoError(t, err)
+		require.NotNil(t, ok.Bucket)
+		require.True(t, sprue.provCalled)
+		require.False(t, sprue.useCalled)
+	})
+
 	t.Run("rolls back the bucket when applying the routing policy fails", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{useErr: errors.New("sprue unavailable")}, delegationmemory.New())
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{useErr: errors.New("sprue unavailable")}, delegationmemory.New(), &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
@@ -164,13 +175,13 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rejects a key without s3:CreateBucket", func(t *testing.T) {
-		svc, _ := setup(t, []string{"s3:GetObject"}, &fakeSprue{}, delegationmemory.New())
+		svc, _ := setup(t, []string{"s3:GetObject"}, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects a duplicate name owned by another tenant", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New())
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
 		// Owner is a different tenant → BucketAlreadyExists.
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), testutil.RandomDID(t), bucketName))
 		_, _, err := svc.Create(ctx, providerID, args())
@@ -178,7 +189,7 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rejects re-creating a bucket you already own", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New())
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
 		// Owner is the requesting tenant → BucketAlreadyOwnedByYou.
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, bucketName))
 		_, _, err := svc.Create(ctx, providerID, args())
@@ -186,7 +197,7 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rolls back the bucket when provisioning fails", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{provErr: errors.New("sprue unavailable")}, delegationmemory.New())
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{provErr: errors.New("sprue unavailable")}, delegationmemory.New(), &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
@@ -197,7 +208,7 @@ func TestCreate(t *testing.T) {
 		// A failure after provisioning (listing the access key's delegations) must
 		// still roll the bucket record back.
 		delegations := failingListDelegations{Store: delegationmemory.New(), err: errors.New("boom")}
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegations)
+		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegations, &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
@@ -268,7 +279,7 @@ func TestDelete(t *testing.T) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
@@ -412,7 +423,7 @@ func TestList(t *testing.T) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, testutil.RandomDID(t)))
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
