@@ -88,17 +88,8 @@ func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, pro
 		return nil, ErrUnauthorized
 	}
 
-	var policy *did.DID
-	if len(args.Nodes) > 0 {
-		policyID, err := issuePolicy(ctx, serviceID, delegations)
-		if err != nil {
-			return nil, err
-		}
-		if err := setPolicyNodes(ctx, uploads, delegations, policyID, args.Nodes); err != nil {
-			return nil, err
-		}
-		policy = &policyID
-	}
+	// Validate the arguments and check for an existing registration before any
+	// policy material is issued or sent to the upload service.
 	if args.Provider == did.Undef {
 		return nil, fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
 	}
@@ -114,6 +105,18 @@ func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, pro
 		return nil, fmt.Errorf("%w: provider %s region %q", ErrProviderExists, args.Provider, args.Region)
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
 		return nil, fmt.Errorf("checking provider region: %w", err)
+	}
+
+	var policy *did.DID
+	if len(args.Nodes) > 0 {
+		policyID, err := issuePolicy(ctx, serviceID, delegations)
+		if err != nil {
+			return nil, err
+		}
+		if err := setPolicyNodes(ctx, uploads, delegations, policyID, args.Nodes); err != nil {
+			return nil, err
+		}
+		policy = &policyID
 	}
 
 	if err := providers.Add(ctx, args.Provider, args.Region, policy); err != nil {
