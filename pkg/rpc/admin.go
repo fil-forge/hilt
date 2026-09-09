@@ -160,6 +160,9 @@ func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID
 	if issuer != serviceID {
 		return nil, ErrUnauthorized
 	}
+	if args.Provider == did.Undef {
+		return nil, fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
+	}
 	if len(args.Nodes) == 0 {
 		return nil, ErrInvalidNodes
 	}
