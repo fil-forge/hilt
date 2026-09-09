@@ -11,13 +11,17 @@ import (
 	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
+	routingcmds "github.com/fil-forge/libforge/commands/routing"
 	"github.com/fil-forge/libforge/testutil"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
+	ucanerrors "github.com/fil-forge/ucantone/errors"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 )
@@ -267,5 +271,140 @@ func TestSpaceEmpty(t *testing.T) {
 		c := newClient(t, service, srv, alice, nil)
 		_, err = c.SpaceEmpty(t.Context(), space.DID(), upload.WithIssuer(alice), upload.WithProofs(proofs))
 		require.Error(t, err)
+	})
+}
+
+func TestPutRoutingPolicy(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		hilt := testutil.RandomIssuer(t)
+		policy := testutil.RandomIssuer(t)
+		nodes := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}
+
+		// policy delegates / to hilt (root: subject == issuer == policy).
+		root, err := delegation.Delegate(policy, hilt.DID(), policy.DID(), command.Top(), delegation.WithNoExpiration())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(root)))
+
+		var gotArgs *routingcmds.PutArguments
+		var gotSub, gotAud, gotIss did.DID
+		srv := server.NewHTTP(service)
+		srv.Handle(routingcmds.Put.Command, routingcmds.Put.Handler(
+			func(req *binding.Request[*routingcmds.PutArguments], res *binding.Response[*routingcmds.PutOK]) error {
+				gotArgs = req.Task().Arguments()
+				gotSub = req.Invocation().Subject()
+				gotAud = req.Invocation().Audience()
+				gotIss = req.Invocation().Issuer()
+				return res.SetSuccess(&routingcmds.PutOK{})
+			}))
+
+		c := newClient(t, service, srv, hilt, nil)
+		require.NoError(t, c.PutRoutingPolicy(t.Context(), policy.DID(), nodes, upload.WithProofs(proofs)))
+
+		require.Equal(t, policy.DID(), gotSub)
+		require.Equal(t, service.DID(), gotAud)
+		require.Equal(t, hilt.DID(), gotIss)
+		require.Len(t, gotArgs.Candidates.Entries, len(nodes))
+		for _, n := range nodes {
+			require.Contains(t, gotArgs.Candidates.Entries, n)
+		}
+	})
+
+	t.Run("proof chain error", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		hilt := testutil.RandomIssuer(t)
+		srv := server.NewHTTP(service)
+
+		c := newClient(t, service, srv, hilt, nil)
+		err := c.PutRoutingPolicy(t.Context(), testutil.RandomDID(t), []did.DID{testutil.RandomDID(t)}, upload.WithProofs(errProofStore{err: errors.New("boom")}))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "getting proof chain")
+	})
+
+	t.Run("failure receipt", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		hilt := testutil.RandomIssuer(t)
+		policy := testutil.RandomIssuer(t)
+
+		root, err := delegation.Delegate(policy, hilt.DID(), policy.DID(), command.Top(), delegation.WithNoExpiration())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(root)))
+
+		srv := server.NewHTTP(service)
+		srv.Handle(routingcmds.Put.Command, routingcmds.Put.Handler(
+			func(req *binding.Request[*routingcmds.PutArguments], res *binding.Response[*routingcmds.PutOK]) error {
+				return res.SetFailure(ucanerrors.New(routingcmds.InvalidCandidatesErrorName, "unregistered node"))
+			}))
+
+		c := newClient(t, service, srv, hilt, nil)
+		err = c.PutRoutingPolicy(t.Context(), policy.DID(), []did.DID{testutil.RandomDID(t)}, upload.WithProofs(proofs))
+		require.Error(t, err)
+		var named ucanerrors.Named
+		require.ErrorAs(t, err, &named)
+		require.Equal(t, routingcmds.InvalidCandidatesErrorName, named.Name())
+	})
+}
+
+func TestUseRoutingPolicy(t *testing.T) {
+	newUseServer := func(t *testing.T, service ucan.Issuer) (*server.HTTPServer, func() (*routingcmds.UseArguments, did.DID, did.DID)) {
+		t.Helper()
+		var gotArgs *routingcmds.UseArguments
+		var gotSub, gotIss did.DID
+		srv := server.NewHTTP(service)
+		srv.Handle(routingcmds.Use.Command, routingcmds.Use.Handler(
+			func(req *binding.Request[*routingcmds.UseArguments], res *binding.Response[*routingcmds.UseOK]) error {
+				gotArgs = req.Task().Arguments()
+				gotSub = req.Invocation().Subject()
+				gotIss = req.Invocation().Issuer()
+				return res.SetSuccess(&routingcmds.UseOK{})
+			}))
+		return srv, func() (*routingcmds.UseArguments, did.DID, did.DID) { return gotArgs, gotSub, gotIss }
+	}
+
+	t.Run("sets the policy as the tenant", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		hilt := testutil.RandomIssuer(t)
+		tenant := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+		policy := testutil.RandomDID(t)
+
+		// space delegates / to the tenant (root: subject == issuer == space).
+		root, err := delegation.Delegate(space, tenant.DID(), space.DID(), command.Top(), delegation.WithNoExpiration())
+		require.NoError(t, err)
+		proofs := ucanlib.NewContainerProofStore(container.New(container.WithDelegations(root)))
+
+		srv, captured := newUseServer(t, service)
+		c := newClient(t, service, srv, hilt, nil)
+		require.NoError(t, c.UseRoutingPolicy(t.Context(), space.DID(), &policy, upload.WithIssuer(tenant), upload.WithProofs(proofs)))
+
+		gotArgs, gotSub, gotIss := captured()
+		require.NotNil(t, gotArgs.Policy)
+		require.Equal(t, policy, *gotArgs.Policy)
+		require.Equal(t, space.DID(), gotSub)
+		require.Equal(t, tenant.DID(), gotIss)
+	})
+
+	t.Run("clears the policy", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+
+		srv, captured := newUseServer(t, service)
+		// The space itself issues the invocation: no proofs needed.
+		c := newClient(t, service, srv, space, nil)
+		require.NoError(t, c.UseRoutingPolicy(t.Context(), space.DID(), nil))
+
+		gotArgs, _, _ := captured()
+		require.Nil(t, gotArgs.Policy)
+	})
+
+	t.Run("proof chain error", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		hilt := testutil.RandomIssuer(t)
+		srv := server.NewHTTP(service)
+
+		c := newClient(t, service, srv, hilt, nil)
+		err := c.UseRoutingPolicy(t.Context(), testutil.RandomDID(t), nil, upload.WithProofs(errProofStore{err: errors.New("boom")}))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "getting proof chain")
 	})
 }

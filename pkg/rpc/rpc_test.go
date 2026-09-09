@@ -65,8 +65,16 @@ func TestHandlerCommands(t *testing.T) {
 	t.Run("provider add", func(t *testing.T) {
 		id, err := identity.New("", "")
 		require.NoError(t, err)
-		route := rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New())
+		route := rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), up)
 		require.Equal(t, "/admin/provider/add", route.Command.String())
+		require.NotNil(t, route.Handler)
+	})
+
+	t.Run("provider nodes set", func(t *testing.T) {
+		id, err := identity.New("", "")
+		require.NoError(t, err)
+		route := rpc.NewSetProviderNodesHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), up)
+		require.Equal(t, "/admin/provider/nodes/set", route.Command.String())
 		require.NotNil(t, route.Handler)
 	})
 }

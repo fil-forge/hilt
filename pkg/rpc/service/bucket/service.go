@@ -46,6 +46,7 @@ const maxListBuckets = 10000
 type UploadClient interface {
 	ProvisionSpace(ctx context.Context, account ucan.Issuer, space did.DID) (string, error)
 	SpaceEmpty(ctx context.Context, space did.DID, opts ...upload.MethodOption) (bool, error)
+	UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error
 }
 
 // RevocationPublisher is the subset of the revocation service (Swarf) the bucket
@@ -93,9 +94,10 @@ func New(
 // Create authenticates the request, checks the s3:CreateBucket permission, creates
 // the bucket (an ephemeral bucket key signs a bucket→tenant "top" root delegation
 // and is then discarded), provisions the bucket's space with Sprue as the tenant,
-// and returns the AuthorizeOK: the new bucket DID, the access key's permissions and
-// derived verification key, and the proof chains for the access key's powerline
-// delegations (which now reach the new bucket).
+// points the space at the provider's routing policy so its writes land on the
+// provider's storage nodes, and returns the AuthorizeOK: the new bucket DID, the
+// access key's permissions and derived verification key, and the proof chains for
+// the access key's powerline delegations (which now reach the new bucket).
 func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.CreateArguments) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -172,6 +174,21 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		return nil, nil, fmt.Errorf("provisioning bucket space: %w", err)
 	}
 	log.Debug("provisioned bucket space", zap.String("subscription", subscription))
+
+	// Route the space to the provider's storage nodes. The tenant issues the
+	// invocation, proven by the bucket→tenant root stored above. A bucket that
+	// cannot be routed is not created: the provisioned space is left behind, inert,
+	// as it is on every later failure (a retry generates a fresh bucket key). A
+	// provider without a policy leaves the space on default routing.
+	if policy := authz.Provider.Policy; policy != nil {
+		if err := s.uploads.UseRoutingPolicy(ctx, bucketID, policy, upload.WithIssuer(account), upload.WithProofs(s.delegations)); err != nil {
+			rollback()
+			return nil, nil, fmt.Errorf("applying routing policy %s: %w", policy, err)
+		}
+		log.Debug("applied routing policy", zap.Stringer("policy", policy))
+	} else {
+		log.Debug("provider has no routing policy, using default routing")
+	}
 
 	// Derive the verification key the gateway uses to validate the caller's request
 	// signatures for this bucket.

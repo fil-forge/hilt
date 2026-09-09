@@ -5,6 +5,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	ucanerrors "github.com/fil-forge/ucantone/errors"
 )
 
 // failer is the subset of *binding.Response[OK] used to record a receipt failure.
@@ -37,12 +38,18 @@ func authFailure(res failer, err error) error {
 }
 
 // adminFailure records a known admin-command rejection as the receipt failure so
-// its stable Name() reaches the caller; other errors are returned unchanged (→
-// "HandlerExecutionError").
+// its stable Name() reaches the caller. A named failure returned by the upload
+// service (e.g. InvalidCandidates from a routing policy put) is recorded under its
+// own name so the operator sees the upstream rejection; other errors are returned
+// unchanged (→ "HandlerExecutionError").
 func adminFailure(res failer, err error) error {
+	var named ucanerrors.Named
 	switch {
 	case errors.Is(err, ErrUnauthorized),
-		errors.Is(err, ErrProviderExists):
+		errors.Is(err, ErrProviderExists),
+		errors.Is(err, ErrProviderNotFound),
+		errors.Is(err, ErrInvalidNodes),
+		errors.As(err, &named):
 		return res.SetFailure(err)
 	default:
 		return err

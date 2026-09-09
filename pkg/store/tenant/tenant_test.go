@@ -38,7 +38,7 @@ func makeStore(t *testing.T, k StoreKind) (tenant.Store, seedFunc) {
 		pool := createPostgresPool(t)
 		providers := providerpostgres.New(pool)
 		seed := func(t *testing.T, providerID did.DID) {
-			require.NoError(t, providers.Add(t.Context(), providerID, providerID.String()))
+			require.NoError(t, providers.Add(t.Context(), providerID, providerID.String(), nil))
 		}
 		return tenantpostgres.New(pool), seed
 	}

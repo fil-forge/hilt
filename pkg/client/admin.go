@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	adminprovider "github.com/fil-forge/hilt/pkg/commands/admin/provider"
+	adminnodes "github.com/fil-forge/hilt/pkg/commands/admin/provider/nodes"
 	"github.com/fil-forge/hilt/pkg/lib/zapucan"
 	"github.com/fil-forge/ucantone/client"
 	"github.com/fil-forge/ucantone/did"
@@ -42,13 +43,13 @@ func NewAdminClient(issuer ucan.Issuer, serviceURL url.URL, logger *zap.Logger) 
 	return &AdminClient{Issuer: issuer, Executor: executor, Logger: logger}, nil
 }
 
-// AddProvider invokes /admin/provider/add to register a regional provider. No
-// proofs are attached: the subject is the service itself, so authority is implicit
-// in the issuer being the service identity.
-func (c *AdminClient) AddProvider(ctx context.Context, providerID did.DID, region string) error {
+// AddProvider invokes /admin/provider/add to register a regional provider and the
+// storage nodes it operates. No proofs are attached: the subject is the service
+// itself, so authority is implicit in the issuer being the service identity.
+func (c *AdminClient) AddProvider(ctx context.Context, providerID did.DID, region string, nodes []did.DID) error {
 	serviceID := c.Issuer.DID()
 	inv, err := adminprovider.Add.Invoke(c.Issuer, serviceID,
-		&adminprovider.AddArguments{Provider: providerID, Region: region},
+		&adminprovider.AddArguments{Provider: providerID, Region: region, Nodes: nodes},
 		invocation.WithAudience(serviceID),
 	)
 	if err != nil {
@@ -63,6 +64,30 @@ func (c *AdminClient) AddProvider(ctx context.Context, providerID did.DID, regio
 	}
 	if _, err := adminprovider.Add.Unpack(res.Receipt()); err != nil {
 		return fmt.Errorf("adding provider: %w", err)
+	}
+	return nil
+}
+
+// SetProviderNodes invokes /admin/provider/nodes/set to replace the storage nodes
+// a registered provider operates.
+func (c *AdminClient) SetProviderNodes(ctx context.Context, providerID did.DID, nodes []did.DID) error {
+	serviceID := c.Issuer.DID()
+	inv, err := adminnodes.Set.Invoke(c.Issuer, serviceID,
+		&adminnodes.SetArguments{Provider: providerID, Nodes: nodes},
+		invocation.WithAudience(serviceID),
+	)
+	if err != nil {
+		return fmt.Errorf("invoking %s: %w", adminnodes.Set.Command, err)
+	}
+	log := zapucan.WithInvocation(c.Logger, inv)
+	log.Debug("executing invocation")
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv))
+	if err != nil {
+		log.Error("failed to execute invocation", zap.Error(err))
+		return fmt.Errorf("executing %s invocation: %w", adminnodes.Set.Command, err)
+	}
+	if _, err := adminnodes.Set.Unpack(res.Receipt()); err != nil {
+		return fmt.Errorf("setting provider nodes: %w", err)
 	}
 	return nil
 }
