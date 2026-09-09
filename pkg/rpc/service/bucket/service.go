@@ -183,7 +183,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	if policy := authz.Provider.Policy; policy != nil {
 		if err := s.uploads.UseRoutingPolicy(ctx, bucketID, policy, upload.WithIssuer(account), upload.WithProofs(s.delegations)); err != nil {
 			rollback()
-			return nil, nil, fmt.Errorf("applying routing policy %s: %w", policy, err)
+			return nil, nil, fmt.Errorf("applying routing policy %s: %w", *policy, err)
 		}
 		log.Debug("applied routing policy", zap.Stringer("policy", policy))
 	} else {
