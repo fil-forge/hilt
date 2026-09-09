@@ -14,7 +14,7 @@ import (
 // AddOK is the (empty) result of a successful /admin/provider/add.
 type AddOK = commands.Unit
 
-// Add registers a regional provider (DID + region + storage nodes) with Hilt.
-// Hilt issues a routing policy for the provider and sets the nodes as its
-// candidates on the upload service.
+// Add registers a regional provider (DID + region, optionally with storage nodes) with Hilt.
+// When nodes are provided, Hilt issues a routing policy for the provider and sets the nodes
+// as its candidates on the upload service.
 var Add = binding.Bind[*AddArguments, *AddOK](command.MustParse("/admin/provider/add"))
