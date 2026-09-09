@@ -8,6 +8,6 @@ type AddArguments struct {
 	Provider did.DID `cborgen:"provider" dagjsongen:"provider"`
 	Region   string  `cborgen:"region" dagjsongen:"region"`
 	// Nodes are the DIDs of the storage nodes the provider operates. They become
-	// the candidates of the provider's routing policy and MUST be non-empty.
+	// the candidates of the provider's routing policy if they are non-empty.
 	Nodes []did.DID `cborgen:"nodes" dagjsongen:"nodes"`
 }
