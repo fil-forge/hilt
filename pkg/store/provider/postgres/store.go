@@ -38,6 +38,9 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string, policy *did.
 	}
 	var policyStr *string
 	if policy != nil {
+		if *policy == did.Undef {
+			return fmt.Errorf("provider policy must be defined when set: %w", store.ErrInvalidArgument)
+		}
 		str := policy.String()
 		policyStr = &str
 	}
