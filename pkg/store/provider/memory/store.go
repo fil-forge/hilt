@@ -38,10 +38,12 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string, policy *did.
 			return store.ErrRecordExists
 		}
 	}
+	now := time.Now().UTC()
 	rec := provider.Record{
 		ID:        id,
 		Region:    region,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if policy != nil {
 		if *policy == did.Undef {
