@@ -44,12 +44,14 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 			return store.ErrRecordExists
 		}
 	}
+	now := time.Now().UTC()
 	s.tenants[id] = tenant.Record{
 		ID:         id,
 		ExternalID: externalID,
 		Provider:   provider,
 		Status:     status,
-		CreatedAt:  time.Now().UTC(),
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	return nil
 }

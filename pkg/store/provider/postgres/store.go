@@ -114,7 +114,7 @@ func scanRecord(row pgx.Row) (provider.Record, error) {
 		region    *string
 		policyStr *string
 		createdAt time.Time
-		updatedAt *time.Time
+		updatedAt time.Time
 	)
 	if err := row.Scan(&idStr, &region, &policyStr, &createdAt, &updatedAt); err != nil {
 		return provider.Record{}, err
@@ -126,6 +126,7 @@ func scanRecord(row pgx.Row) (provider.Record, error) {
 	rec := provider.Record{
 		ID:        id,
 		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 	if policyStr != nil {
 		policy, err := did.Parse(*policyStr)
@@ -136,9 +137,6 @@ func scanRecord(row pgx.Row) (provider.Record, error) {
 	}
 	if region != nil {
 		rec.Region = *region
-	}
-	if updatedAt != nil {
-		rec.UpdatedAt = *updatedAt
 	}
 	return rec, nil
 }

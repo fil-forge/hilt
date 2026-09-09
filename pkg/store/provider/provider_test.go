@@ -62,6 +62,7 @@ func TestProviderStore(t *testing.T) {
 				require.NotNil(t, rec.Policy)
 				require.Equal(t, policy, *rec.Policy)
 				require.False(t, rec.CreatedAt.IsZero())
+				require.Equal(t, rec.CreatedAt, rec.UpdatedAt)
 			})
 
 			t.Run("retrieves a provider by ID", func(t *testing.T) {

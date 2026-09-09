@@ -75,6 +75,7 @@ func TestTenantStore(t *testing.T) {
 				require.Equal(t, provider, rec.Provider)
 				require.Equal(t, tenant.Active, rec.Status)
 				require.False(t, rec.CreatedAt.IsZero())
+				require.Equal(t, rec.CreatedAt, rec.UpdatedAt)
 			})
 
 			t.Run("Get returns ErrRecordNotFound for unknown id", func(t *testing.T) {
