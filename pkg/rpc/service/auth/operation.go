@@ -62,6 +62,21 @@ func (o Operation) Permission() string { return operationPermission[o] }
 
 func (o Operation) String() string { return string(o) }
 
+// Mutates reports whether the operation modifies tenant state — creating or
+// deleting a bucket, or writing or deleting object data. Read-only operations are
+// enumerated, so anything not listed (including an operation added later) counts
+// as mutating: [Authorizer.Authorize] rejects these for a write-locked tenant, and
+// failing closed is the safe default there.
+func (o Operation) Mutates() bool {
+	switch o {
+	case OpListBuckets, OpListBucket, OpGetObject,
+		OpListMultipartUploadParts, OpListBucketMultipartUploads:
+		return false
+	default:
+		return true
+	}
+}
+
 // addressesExistingBucket reports whether the operation acts on a bucket that must
 // already exist, so it can be resolved and scope-checked. ListBuckets addresses no
 // bucket; CreateBucket's bucket does not exist yet. Every multipart operation acts

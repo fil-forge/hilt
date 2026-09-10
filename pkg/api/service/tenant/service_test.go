@@ -2,6 +2,7 @@ package tenant_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -23,15 +24,29 @@ import (
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	ucanlib "github.com/fil-forge/libforge/ucan"
+	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
+	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+type recordingRevocations struct {
+	published []ucan.Delegation
+}
+
+func (r *recordingRevocations) Publish(_ context.Context, _ ucan.Issuer, revoked ucan.Delegation, _ ...swarfclient.PublishOption) error {
+	r.published = append(r.published, revoked)
+	return nil
+}
 
 type provisionEnv struct {
 	svc         *tenantsvc.Service
@@ -83,7 +98,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload, nil)
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -144,7 +159,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil, nil)
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -175,6 +190,35 @@ func TestGetAndSetStatus(t *testing.T) {
 		rec, err := tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)
 		require.Equal(t, tenant.WriteLocked, rec.Status)
+	})
+
+	t.Run("write-lock revokes tenant-issued access-key delegations once", func(t *testing.T) {
+		tenants := tenantmemory.New()
+		accessKeys := accesskeymemory.New()
+		delegations := delegationmemory.New()
+		secrets := vaultmemory.New()
+		signer, err := secp256k1.Generate()
+		require.NoError(t, err)
+		tenantID := signer.KeyDID()
+		accessKey := testutil.RandomIssuer(t).DID()
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+		require.NoError(t, accessKeys.Add(ctx, accessKey, tenantID, "key", nil, []string{"s3:GetObject"}, nil))
+		root, err := delegation.Delegate(multikey.NewIssuer(tenantID, signer), accessKey, did.Undef,
+			command.MustParse("/test/run"), delegation.WithNoExpiration())
+		require.NoError(t, err)
+		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
+
+		revocations := &recordingRevocations{}
+		svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
+			accessKeys, delegations, secrets, wrapkeysmemory.New(), nil, nil, revocations)
+		require.NoError(t, svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Len(t, revocations.published, 1)
+		require.Equal(t, root.Link(), revocations.published[0].Link())
+
+		// Repeating the same status must not publish duplicate revocations.
+		require.NoError(t, svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Len(t, revocations.published, 1)
 	})
 
 	t.Run("set status rejects an invalid status", func(t *testing.T) {
@@ -249,7 +293,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
+		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil, nil)
 	return deleteEnv{svc: svc, tenants: tenants, directory: directory}
 }
 

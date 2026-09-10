@@ -98,6 +98,13 @@ func TestAuthFailure(t *testing.T) {
 		requireName(t, f.got, auth.SignatureMismatchErrorName)
 	})
 
+	t.Run("write-lock sentinel is set as failure with its name", func(t *testing.T) {
+		f := &recordingFailer{}
+		require.NoError(t, authFailure(f, auth.ErrTenantWriteLocked))
+		require.True(t, f.called)
+		requireName(t, f.got, auth.TenantWriteLockedErrorName)
+	})
+
 	t.Run("bucket sentinel is unknown to authFailure and returned", func(t *testing.T) {
 		f := &recordingFailer{}
 		require.ErrorIs(t, authFailure(f, bucketsvc.ErrBucketExists), bucketsvc.ErrBucketExists)

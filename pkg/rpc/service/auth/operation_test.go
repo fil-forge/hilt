@@ -110,3 +110,22 @@ func TestOperationPermission(t *testing.T) {
 
 	require.Empty(t, Operation("Unknown").Permission())
 }
+
+func TestOperationMutates(t *testing.T) {
+	for _, op := range []Operation{
+		OpPutObject, OpCreateBucket, OpDeleteObject, OpDeleteBucket,
+		OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload, OpAbortMultipartUpload,
+	} {
+		require.True(t, op.Mutates(), "%s mutates tenant state", op)
+	}
+	for _, op := range []Operation{
+		OpListBuckets, OpListBucket, OpGetObject,
+		OpListMultipartUploadParts, OpListBucketMultipartUploads,
+	} {
+		require.False(t, op.Mutates(), "%s is read-only", op)
+	}
+
+	// Unrecognized operations fail closed, so a write-locked tenant is not opened
+	// up by an operation added without revisiting this.
+	require.True(t, Operation("Unknown").Mutates())
+}

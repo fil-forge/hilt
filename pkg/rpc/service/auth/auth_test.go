@@ -37,9 +37,10 @@ func signedRequest(t *testing.T, signer multikey.Signer, region string, signedAt
 }
 
 type setupConfig struct {
-	accessKeyExpires *time.Time
-	accessKeyBuckets []did.DID
-	tenantStatus     tenant.Status
+	accessKeyExpires     *time.Time
+	accessKeyBuckets     []did.DID
+	tenantStatus         tenant.Status
+	accessKeyPermissions []string
 }
 
 // signedObjectRequest presigns a GET of an object in the named bucket.
@@ -48,6 +49,18 @@ func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, regio
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
 	req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/" + bucketName + "/object-key"}
+	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+	require.NoError(t, err)
+	return s3.Request{Method: signed.Method, URL: signed.URL}
+}
+
+// signedOpRequest presigns an arbitrary method + path, for exercising the
+// operations that classifyRequest derives from them.
+func signedOpRequest(t *testing.T, signer multikey.Signer, method, path, region string) s3.Request {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	req := sigv4.Request{Method: method, URL: "https://s3.fil.one" + path}
 	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
 	require.NoError(t, err)
 	return s3.Request{Method: signed.Method, URL: signed.URL}
@@ -82,11 +95,15 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bucket"))
 		var accessKeyExpires *time.Time
 		var accessKeyBuckets []did.DID
+		accessKeyPermissions := []string{"s3:GetObject"}
 		if setupConfig != nil {
 			accessKeyExpires = setupConfig.accessKeyExpires
 			accessKeyBuckets = setupConfig.accessKeyBuckets
+			if len(setupConfig.accessKeyPermissions) > 0 {
+				accessKeyPermissions = setupConfig.accessKeyPermissions
+			}
 		}
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, []string{"s3:GetObject"}, accessKeyExpires))
+		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, accessKeyPermissions, accessKeyExpires))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), providers, tenantID
 	}
@@ -219,6 +236,31 @@ func TestAuthorize(t *testing.T) {
 		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.Disabled})
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrTenantDisabled)
+	})
+
+	t.Run("rejects mutating operations for a write-locked tenant", func(t *testing.T) {
+		// The access key holds every permission the requests below need, so the
+		// write lock is the only variable.
+		cfg := &setupConfig{
+			tenantStatus:         tenant.WriteLocked,
+			accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:CreateBucket", "s3:DeleteObject", "s3:DeleteBucket"},
+		}
+		az, _, _ := setup(t, accessKey, cfg)
+
+		for _, req := range []s3.Request{
+			signedOpRequest(t, accessKey, "PUT", "/bucket/object-key", region),                         // PutObject
+			signedOpRequest(t, accessKey, "PUT", "/bucket", region),                                    // CreateBucket
+			signedOpRequest(t, accessKey, "PUT", "/bucket/object-key?partNumber=1&uploadId=u", region), // UploadPart
+			signedOpRequest(t, accessKey, "DELETE", "/bucket/object-key", region),                      // DeleteObject
+			signedOpRequest(t, accessKey, "DELETE", "/bucket", region),                                 // DeleteBucket
+		} {
+			_, err := az.Authorize(ctx, providerID, req)
+			require.ErrorIs(t, err, auth.ErrTenantWriteLocked, req.URL)
+		}
+
+		// Reads stay authorized.
+		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
+		require.NoError(t, err)
 	})
 }
 

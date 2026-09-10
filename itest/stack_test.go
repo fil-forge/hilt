@@ -180,6 +180,7 @@ func TestForge(t *testing.T) {
 	t.Run("DeleteAccessKeyRevokes", func(t *testing.T) { testDeleteAccessKeyRevokes(t, net) })
 	t.Run("DeleteBucketRevokes", func(t *testing.T) { testDeleteBucketRevokes(t, net) })
 	t.Run("DeleteBucketRevokesOnlyThatBucket", func(t *testing.T) { testDeleteBucketRevokesOnlyThatBucket(t, net) })
+	t.Run("WriteLockBlocksWrites", func(t *testing.T) { testWriteLockBlocksWrites(t, net) })
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot
@@ -238,6 +239,12 @@ type console struct {
 // external id and region.
 func (c *console) ProvisionTenant(ctx context.Context, tenantID, region string) (api.Tenant, error) {
 	return c.client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
+}
+
+// SetTenantStatus moves the tenant to the given status (active, write-locked
+// or disabled).
+func (c *console) SetTenantStatus(ctx context.Context, tenantID string, status api.TenantStatus) error {
+	return c.client.UpdateTenantStatus(ctx, tenantID, status)
 }
 
 // CreateAccessKey creates an S3 access key with the given permissions and
