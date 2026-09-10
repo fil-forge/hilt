@@ -16,6 +16,7 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -41,10 +42,11 @@ func (noopRevocations) Publish(context.Context, ucan.Issuer, ucan.Delegation, ..
 type accessKeyDeps struct {
 	tenants     *tenantmemory.Store
 	accessKeys  *accesskeymemory.Store
+	principals  *principalmemory.Store
 	buckets     *bucketmemory.Store
 	delegations *delegationmemory.Store
 	vault       vault.Vault
-	tenantID    did.DID // owner of "tenant-1" + "bucket-a"
+	tenantID    did.DID // owner of "tenant-1" + "bucket-a", with principal "alice"
 	bucketID    did.DID // "bucket-a", owned by tenant-1
 	otherBucket string  // "bucket-b", owned by a different tenant
 }
@@ -74,6 +76,7 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	deps := &accessKeyDeps{
 		tenants:     tenantmemory.New(),
 		accessKeys:  accesskeymemory.New(),
+		principals:  principalmemory.New(),
 		buckets:     bucketmemory.New(),
 		delegations: delegationmemory.New(),
 		vault:       vaultmemory.New(),
@@ -81,8 +84,9 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	}
 	deps.tenantID, deps.bucketID = addTenant(t, deps, "tenant-1", "bucket-a")
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
+	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "alice"))
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.buckets, deps.delegations, deps.vault, noopRevocations{})
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, deps.delegations, deps.vault, noopRevocations{})
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
@@ -243,11 +247,16 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 	t.Run("invalid requests are 422", func(t *testing.T) {
 		e, _ := setupAccessKeys(t)
 		cases := map[string]api.CreateAccessKeyRequest{
-			"empty name":         {Name: "", Permissions: []string{"s3:GetObject"}},
-			"empty permissions":  {Name: "k", Permissions: nil},
-			"unknown permission": {Name: "k", Permissions: []string{"s3:Frobnicate"}},
-			"unknown bucket":     {Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"ghost"}},
-			"foreign bucket":     {Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"bucket-b"}},
+			"empty name":                       {Name: "", Permissions: []string{"s3:GetObject"}},
+			"empty permissions":                {Name: "k", Permissions: nil},
+			"unknown permission":               {Name: "k", Permissions: []string{"s3:Frobnicate"}},
+			"unknown bucket":                   {Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"ghost"}},
+			"foreign bucket":                   {Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"bucket-b"}},
+			"principal with permissions":       {Name: "k", PrincipalID: "alice", Permissions: []string{"s3:GetObject"}},
+			"principal with buckets":           {Name: "k", PrincipalID: "alice", Buckets: []string{"bucket-a"}},
+			"principal with both":              {Name: "k", PrincipalID: "alice", Permissions: []string{"s3:GetObject"}, Buckets: []string{"bucket-a"}},
+			"unknown principal":                {Name: "k", PrincipalID: "ghost"},
+			"empty name for a principal's key": {Name: "", PrincipalID: "alice"},
 		}
 		for name, body := range cases {
 			t.Run(name, func(t *testing.T) {
@@ -258,25 +267,99 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 	})
 }
 
+func TestCreatePrincipalBoundAccessKeyHandler(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("creates a key bound to the principal with no delegations", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"})
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		// The body carries the principal in place of permissions and buckets.
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Contains(t, body, "principal")
+		require.NotContains(t, body, "permissions")
+		require.NotContains(t, body, "buckets")
+
+		var created api.CreatedAccessKey
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		require.NotEmpty(t, created.AccessKeyID)
+		require.True(t, strings.HasPrefix(created.SecretAccessKey, "u"), "secret is multibase base64url")
+		require.Equal(t, "laptop", created.Name)
+		require.Equal(t, "alice", created.Principal)
+		require.Nil(t, created.ExpiresAt)
+
+		akID, err := did.Parse(did.KeyPrefix + created.AccessKeyID)
+		require.NoError(t, err)
+		storedRec, err := deps.accessKeys.Get(ctx, akID)
+		require.NoError(t, err)
+		require.NotNil(t, storedRec.Principal)
+		require.Equal(t, "alice", *storedRec.Principal)
+		require.Empty(t, storedRec.Permissions)
+		require.Empty(t, storedRec.Buckets)
+
+		// The key pair is in the vault under the access-key path, and nothing was
+		// delegated to it.
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
+		require.NoError(t, err)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
+		require.NoError(t, err)
+		require.Empty(t, dels.Results)
+	})
+
+	t.Run("a service key's body carries no principal", func(t *testing.T) {
+		e, _ := setupAccessKeys(t)
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "ci", Permissions: []string{"s3:GetObject"}})
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Contains(t, body, "permissions")
+		require.NotContains(t, body, "principal")
+	})
+
+	t.Run("duplicate name within the principal is 409, across principals and kinds it is not", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		require.NoError(t, deps.principals.Add(ctx, deps.tenantID, "bob"))
+		require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"}).Code)
+		require.Equal(t, http.StatusConflict, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"}).Code)
+		require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "bob"}).Code)
+		require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", Permissions: []string{"s3:GetObject"}}).Code)
+	})
+
+	t.Run("unknown tenant is 404", func(t *testing.T) {
+		e, _ := setupAccessKeys(t)
+		rec := createAccessKey(t, e, "missing", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"})
+		require.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
 func TestListAccessKeysHandler(t *testing.T) {
 	e, _ := setupAccessKeys(t)
 	require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "a", Permissions: []string{"s3:GetObject"}, Buckets: []string{"bucket-a"}}).Code)
 	require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "b", Permissions: []string{"s3:PutObject"}}).Code)
+	require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"}).Code)
 
-	t.Run("lists keys without secrets", func(t *testing.T) {
+	t.Run("lists both kinds without secrets", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.NotContains(t, rec.Body.String(), "secretAccessKey")
 
 		var list api.AccessKeyList
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
-		require.Len(t, list.Items, 2)
-		names := map[string][]string{}
+		require.Len(t, list.Items, 3)
+		byName := map[string]api.AccessKey{}
 		for _, k := range list.Items {
-			names[k.Name] = k.Buckets
+			byName[k.Name] = k
 		}
-		require.Equal(t, []string{"bucket-a"}, names["a"]) // bucket DID resolved back to name
-		require.Empty(t, names["b"])
+		require.Equal(t, []string{"bucket-a"}, byName["a"].Buckets) // bucket DID resolved back to name
+		require.Equal(t, []string{"s3:GetObject"}, byName["a"].Permissions)
+		require.Empty(t, byName["a"].Principal)
+		require.Empty(t, byName["b"].Buckets)
+		require.Empty(t, byName["b"].Principal)
+		require.Equal(t, "alice", byName["laptop"].Principal)
+		require.Empty(t, byName["laptop"].Permissions)
+		require.Empty(t, byName["laptop"].Buckets)
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {
@@ -311,6 +394,24 @@ func TestGetAccessKeyHandler(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-2/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+
+	t.Run("a principal-bound key carries its principal", func(t *testing.T) {
+		created := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"})
+		require.Equal(t, http.StatusCreated, created.Code)
+		var bound api.CreatedAccessKey
+		require.NoError(t, json.Unmarshal(created.Body.Bytes(), &bound))
+
+		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys/"+bound.AccessKeyID, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.NotContains(t, body, "permissions")
+		require.NotContains(t, body, "buckets")
+		var ak api.AccessKey
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ak))
+		require.Equal(t, bound.AccessKeyID, ak.AccessKeyID)
+		require.Equal(t, "alice", ak.Principal)
+	})
 }
 
 func TestDeleteAccessKeyHandler(t *testing.T) {
@@ -335,6 +436,27 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		dels, err := deps.delegations.ListByAudience(ctx, akID)
 		require.NoError(t, err)
 		require.Empty(t, dels.Results)
+
+		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
+		require.Equal(t, http.StatusNotFound, again.Code)
+	})
+
+	t.Run("deletes a principal-bound key and its vault entry; idempotent", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		created := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "laptop", PrincipalID: "alice"})
+		require.Equal(t, http.StatusCreated, created.Code)
+		var ck api.CreatedAccessKey
+		require.NoError(t, json.Unmarshal(created.Body.Bytes(), &ck))
+		akID, err := did.Parse(did.KeyPrefix + ck.AccessKeyID)
+		require.NoError(t, err)
+
+		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+
+		_, err = deps.accessKeys.Get(ctx, akID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
+		require.ErrorIs(t, err, vault.ErrNotFound)
 
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
@@ -30,52 +29,58 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error {
-	if id == did.Undef {
-		return fmt.Errorf("access key ID is required: %w", store.ErrInvalidArgument)
+const selectColumns = `SELECT id, tenant_id, name, buckets, permissions, principal, expires_at, created_at FROM access_key`
+
+func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
+	if err := in.Validate(); err != nil {
+		return err
 	}
-	if tenant == did.Undef {
-		return fmt.Errorf("access key tenant is required: %w", store.ErrInvalidArgument)
-	}
-	if name == "" {
-		return fmt.Errorf("access key name is required: %w", store.ErrInvalidArgument)
-	}
-	if slices.Contains(buckets, did.Undef) {
-		return fmt.Errorf("access key bucket DIDs must be defined: %w", store.ErrInvalidArgument)
-	}
-	bucketStrs := make([]string, len(buckets))
-	for i, b := range buckets {
+	bucketStrs := make([]string, len(in.Buckets))
+	for i, b := range in.Buckets {
 		bucketStrs[i] = b.String()
 	}
+	permissions := in.Permissions
 	if permissions == nil {
 		permissions = []string{}
 	}
 	var expires *time.Time
-	if expiresAt != nil {
-		e := expiresAt.UTC()
+	if in.ExpiresAt != nil {
+		e := in.ExpiresAt.UTC()
 		expires = &e
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, id.String(), tenant.String(), name, bucketStrs, permissions, expires)
+		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, principal, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, in.ID.String(), in.Tenant.String(), in.Name, bucketStrs, permissions, in.Principal, expires)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-			return store.ErrRecordExists
+		if errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case pgerrcode.UniqueViolation:
+				// The primary key, or one of the two partial unique name indexes.
+				return store.ErrRecordExists
+			case pgerrcode.ForeignKeyViolation:
+				if in.Principal != nil {
+					return fmt.Errorf("principal %q is not a principal of tenant %s: %w", *in.Principal, in.Tenant, store.ErrInvalidArgument)
+				}
+				return fmt.Errorf("tenant %s does not exist: %w", in.Tenant, store.ErrInvalidArgument)
+			case pgerrcode.CheckViolation:
+				return fmt.Errorf("a principal-bound access key holds no permissions or buckets: %w", store.ErrInvalidArgument)
+			}
 		}
 		return fmt.Errorf("adding access key: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, name, buckets, permissions, expires_at, created_at
-		FROM access_key
-		WHERE id = $1
-	`, id.String())
-	rec, err := scanRecord(row)
+// Get reads the row, with FOR SHARE when [store.LockShare] is requested so the
+// read waits on a Delete that holds the row FOR UPDATE.
+func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
+	query := selectColumns + ` WHERE id = $1`
+	if store.NewReadConfig(opts...).Lock == store.LockShare {
+		query += ` FOR SHARE`
+	}
+	rec, err := scanRecord(s.pool.QueryRow(ctx, query, id.String()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accesskey.Record{}, store.ErrRecordNotFound
 	}
@@ -85,13 +90,17 @@ func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 	return rec, nil
 }
 
-func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]accesskey.Record, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, name, buckets, permissions, expires_at, created_at
-		FROM access_key
-		WHERE tenant_id = $1
-		ORDER BY id ASC
-	`, tenant.String())
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...accesskey.ListOption) ([]accesskey.Record, error) {
+	cfg := accesskey.NewListConfig(opts...)
+	query := selectColumns + ` WHERE tenant_id = $1`
+	args := []any{tenant.String()}
+	if cfg.Principal != nil {
+		args = append(args, *cfg.Principal)
+		query += fmt.Sprintf(` AND principal = $%d`, len(args))
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing access keys by tenant: %w", err)
 	}
@@ -111,9 +120,36 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]accesskey.R
 	return recs, nil
 }
 
-func (s *Store) Delete(ctx context.Context, id did.DID) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM access_key WHERE id = $1`, id.String()); err != nil {
+// Delete runs in one transaction: it locks the row FOR UPDATE, runs
+// beforeCommit while holding the lock, deletes the row and commits. A locked
+// read of the row (see [Store.Get]) waits for the commit or the rollback.
+func (s *Store) Delete(ctx context.Context, id did.DID, beforeCommit func(ctx context.Context) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	var found bool
+	err = tx.QueryRow(ctx, `SELECT TRUE FROM access_key WHERE id = $1 FOR UPDATE`, id.String()).Scan(&found)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // idempotent: nothing to publish and nothing to delete
+	}
+	if err != nil {
+		return fmt.Errorf("locking access key: %w", err)
+	}
+
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
+			return fmt.Errorf("before deleting access key: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM access_key WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting access key: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
@@ -121,36 +157,33 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 func scanRecord(row pgx.Row) (accesskey.Record, error) {
 	var (
 		idStr      string
-		tenantID   *string
-		name       *string
+		tenantStr  string
+		name       string
 		bucketStrs []string
 		perms      []string
+		principal  *string
 		expiresAt  *time.Time
 		createdAt  time.Time
 	)
-	if err := row.Scan(&idStr, &tenantID, &name, &bucketStrs, &perms, &expiresAt, &createdAt); err != nil {
+	if err := row.Scan(&idStr, &tenantStr, &name, &bucketStrs, &perms, &principal, &expiresAt, &createdAt); err != nil {
 		return accesskey.Record{}, err
 	}
-
 	id, err := did.Parse(idStr)
 	if err != nil {
 		return accesskey.Record{}, fmt.Errorf("parsing access key DID: %w", err)
 	}
+	tenant, err := did.Parse(tenantStr)
+	if err != nil {
+		return accesskey.Record{}, fmt.Errorf("parsing tenant DID: %w", err)
+	}
 	rec := accesskey.Record{
 		ID:          id,
+		Tenant:      tenant,
+		Name:        name,
 		Permissions: perms,
+		Principal:   principal,
 		ExpiresAt:   expiresAt,
 		CreatedAt:   createdAt,
-	}
-	if tenantID != nil && *tenantID != "" {
-		tenant, err := did.Parse(*tenantID)
-		if err != nil {
-			return accesskey.Record{}, fmt.Errorf("parsing tenant DID: %w", err)
-		}
-		rec.Tenant = tenant
-	}
-	if name != nil {
-		rec.Name = *name
 	}
 	if len(bucketStrs) > 0 {
 		buckets := make([]did.DID, len(bucketStrs))

@@ -302,7 +302,7 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.secrets.Delete(ctx, vault.AccessKeyPath(rec.ID, ak.ID)); err != nil {
 			log.Warn("removing access key from vault", zap.Error(err))
 		}
-		if err := s.accessKeys.Delete(ctx, ak.ID); err != nil {
+		if err := s.accessKeys.Delete(ctx, ak.ID, nil); err != nil {
 			return fmt.Errorf("deleting access key: %w", err)
 		}
 	}

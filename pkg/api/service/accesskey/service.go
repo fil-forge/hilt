@@ -1,8 +1,10 @@
 // Package accesskey provides the S3 access-key business logic for the REST API:
-// creation (key-pair generation + tenant→access-key delegation issuance), listing,
-// retrieval, and revocation. It returns the known errors in errors.go so handlers
-// can map them to HTTP responses; unexpected failures are returned wrapped for the
-// handler to log.
+// creation (key-pair generation and, for a service key, tenant→access-key
+// delegation issuance), listing, retrieval, and revocation. A key created with
+// a principal is bound to it: it holds no permissions, buckets or delegations
+// of its own and is authorized from the tenant's bucket policies. It returns
+// the known errors in errors.go so handlers can map them to HTTP responses;
+// unexpected failures are returned wrapped for the handler to log.
 package accesskey
 
 import (
@@ -18,6 +20,7 @@ import (
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	"github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/vault"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
@@ -49,6 +52,7 @@ type Service struct {
 	logger      *zap.Logger
 	tenants     tenant.Store
 	accessKeys  accesskeystore.Store
+	principals  principal.Store
 	buckets     bucket.Store
 	delegations delegationstore.Store
 	secrets     vault.Vault
@@ -60,6 +64,7 @@ func New(
 	logger *zap.Logger,
 	tenants tenant.Store,
 	accessKeys accesskeystore.Store,
+	principals principal.Store,
 	buckets bucket.Store,
 	delegations delegationstore.Store,
 	secrets vault.Vault,
@@ -69,6 +74,7 @@ func New(
 		logger:      logger,
 		tenants:     tenants,
 		accessKeys:  accessKeys,
+		principals:  principals,
 		buckets:     buckets,
 		delegations: delegations,
 		secrets:     secrets,
@@ -76,20 +82,29 @@ func New(
 	}
 }
 
-// Create creates an S3 access key for the tenant and issues the tenant→access-key
-// delegations for the requested permissions (scoped to the named buckets, or
-// tenant-wide when none are given). It returns the stored record and the secret
-// access key (the one time it is exposed).
-func (s *Service) Create(ctx context.Context, externalID, name string, permissions, bucketNames []string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
+// Create creates an S3 access key for the tenant. With no principal it is a
+// service key: the tenant→access-key delegations for the requested permissions
+// are issued (scoped to the named buckets, or tenant-wide when none are given)
+// and the name must be unique within the tenant. With a principal the key is
+// bound to it: permissions and buckets must be empty, no delegation is issued,
+// and the name must be unique within the principal. It returns the stored
+// record and the secret access key (the one time it is exposed).
+func (s *Service) Create(ctx context.Context, externalID, name string, permissions, bucketNames []string, principalID string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
 	if name == "" || len(name) > maxNameLength {
 		return accesskeystore.Record{}, "", ErrInvalidName
 	}
-	if len(permissions) == 0 {
-		return accesskeystore.Record{}, "", ErrNoPermissions
-	}
-	for _, p := range permissions {
-		if !s3perm.Valid(p) {
-			return accesskeystore.Record{}, "", fmt.Errorf("%w: %s", ErrInvalidPermission, p)
+	if principalID != "" {
+		if len(permissions) > 0 || len(bucketNames) > 0 {
+			return accesskeystore.Record{}, "", ErrPrincipalScoped
+		}
+	} else {
+		if len(permissions) == 0 {
+			return accesskeystore.Record{}, "", ErrNoPermissions
+		}
+		for _, p := range permissions {
+			if !s3perm.Valid(p) {
+				return accesskeystore.Record{}, "", fmt.Errorf("%w: %s", ErrInvalidPermission, p)
+			}
 		}
 	}
 
@@ -101,11 +116,27 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
 
-	// Load the tenant signer up front: it is required to issue delegations and its
-	// absence is unrecoverable, so fail before creating any state.
-	issuer, err := s.tenantIssuer(ctx, tenantRec.ID)
-	if err != nil {
-		return accesskeystore.Record{}, "", err
+	var principalRef *string
+	if principalID != "" {
+		_, err := s.principals.Get(ctx, tenantRec.ID, principalID)
+		if errors.Is(err, store.ErrRecordNotFound) {
+			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		} else if err != nil {
+			return accesskeystore.Record{}, "", fmt.Errorf("looking up principal: %w", err)
+		}
+		principalRef = &principalID
+		log = log.With(zap.String("principal", principalID))
+	}
+
+	// Load the tenant signer up front: it is required to issue a service key's
+	// delegations and its absence is unrecoverable, so fail before creating any
+	// state. A principal-bound key is issued nothing.
+	var issuer ucan.Issuer
+	if principalRef == nil {
+		issuer, err = s.tenantIssuer(ctx, tenantRec.ID)
+		if err != nil {
+			return accesskeystore.Record{}, "", err
+		}
 	}
 
 	// Resolve the named buckets to DIDs in a single tenant-scoped list query. The
@@ -165,7 +196,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if err := s.delegations.DeleteByAudience(cleanupCtx, accessKeyID); err != nil {
 			log.Warn("rollback: deleting delegations", zap.Error(err))
 		}
-		if err := s.accessKeys.Delete(cleanupCtx, accessKeyID); err != nil {
+		if err := s.accessKeys.Delete(cleanupCtx, accessKeyID, nil); err != nil {
 			log.Warn("rollback: deleting access key", zap.Error(err))
 		}
 		if err := s.secrets.Delete(cleanupCtx, vaultPath); err != nil {
@@ -173,14 +204,38 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		}
 	}
 
-	if err := s.accessKeys.Add(ctx, accessKeyID, tenantRec.ID, name, bucketIDs, permissions, expiresAt); err != nil {
+	if err := s.accessKeys.Add(ctx, accesskeystore.Input{
+		ID:          accessKeyID,
+		Tenant:      tenantRec.ID,
+		Name:        name,
+		Buckets:     bucketIDs,
+		Permissions: permissions,
+		Principal:   principalRef,
+		ExpiresAt:   expiresAt,
+	}); err != nil {
 		rollback()
-		// Name uniqueness is enforced by the store's (tenant, name) constraint; a
-		// fresh random access-key DID colliding is not a realistic case.
+		// Name uniqueness is enforced by the store: per tenant for a service key,
+		// per principal for a principal-bound key. A fresh random access-key DID
+		// colliding is not a realistic case.
 		if errors.Is(err, store.ErrRecordExists) {
 			return accesskeystore.Record{}, "", ErrNameConflict
 		}
+		// The principal was looked up above, so a rejected reference means it was
+		// removed in between.
+		if principalRef != nil && errors.Is(err, store.ErrInvalidArgument) {
+			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
+	}
+
+	if principalRef != nil {
+		rec, err := s.accessKeys.Get(ctx, accessKeyID)
+		if err != nil {
+			rollback()
+			return accesskeystore.Record{}, "", fmt.Errorf("loading created access key: %w", err)
+		}
+		log.Info("created principal-bound access key")
+		return rec, secretAccessKey, nil
 	}
 
 	// Issue tenant→access-key delegations: one per (command × subject), where
@@ -284,6 +339,7 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 // key, and its record. Revocations are published first so that a revocation
 // service failure leaves the key intact and the call cleanly retryable —
 // otherwise the delegations would live on with nothing for a verifier to check.
+// A principal-bound key holds no delegation, so nothing is published for it.
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -313,7 +369,7 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
-	if err := s.accessKeys.Delete(ctx, id); err != nil {
+	if err := s.accessKeys.Delete(ctx, id, nil); err != nil {
 		return fmt.Errorf("deleting access key: %w", err)
 	}
 	return nil
