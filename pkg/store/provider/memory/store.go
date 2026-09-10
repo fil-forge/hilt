@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +86,20 @@ func (s *Store) SetPolicy(ctx context.Context, id did.DID, policy did.DID) error
 		}
 	}
 	return store.ErrRecordNotFound
+}
+
+func (s *Store) List(ctx context.Context) ([]provider.Record, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	recs := slices.Clone(s.providers)
+	if recs == nil {
+		recs = []provider.Record{}
+	}
+	slices.SortFunc(recs, func(a, b provider.Record) int {
+		return strings.Compare(a.ID.String(), b.ID.String())
+	})
+	return recs, nil
 }
 
 func (s *Store) GetByRegion(ctx context.Context, region string) (provider.Record, error) {

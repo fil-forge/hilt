@@ -70,6 +70,14 @@ func TestHandlerCommands(t *testing.T) {
 		require.NotNil(t, route.Handler)
 	})
 
+	t.Run("provider list", func(t *testing.T) {
+		id, err := identity.New("", "")
+		require.NoError(t, err)
+		route := rpc.NewListProvidersHandler(zap.NewNop(), id, providermemory.New())
+		require.Equal(t, "/admin/provider/list", route.Command.String())
+		require.NotNil(t, route.Handler)
+	})
+
 	t.Run("provider nodes set", func(t *testing.T) {
 		id, err := identity.New("", "")
 		require.NoError(t, err)

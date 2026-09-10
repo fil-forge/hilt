@@ -9,7 +9,7 @@ them. It exposes two APIs and talks to one external service:
 - **Hilt UCAN RPC API** (`pkg/rpc`, ucantone server mounted at `POST /`) — the
   `/s3/*` commands Ingot (the S3 gateway) invokes: `/s3/request/authorize`,
   `/s3/bucket/{create,delete,info,list}`; and the self-issued admin commands
-  `/admin/provider/add` and `/admin/provider/nodes/set` (`hilt client admin`).
+  `/admin/provider/{add,list}` and `/admin/provider/nodes/set` (`hilt client admin`).
 - **Sprue** (the Forge upload service) — Hilt calls it to provision/inspect a
   bucket's storage space and to manage routing policies (`pkg/client`): each
   provider owns a policy whose candidates are its storage nodes, and every

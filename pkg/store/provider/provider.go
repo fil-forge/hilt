@@ -39,4 +39,8 @@ type Store interface {
 	// GetByRegion retrieves the provider record for a given region. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified region.
 	GetByRegion(ctx context.Context, region string) (Record, error)
+	// List retrieves every provider record, ordered by ID (byte-wise, so the
+	// order is the same for every backend). It returns an empty slice when no
+	// provider is registered.
+	List(ctx context.Context) ([]Record, error)
 }

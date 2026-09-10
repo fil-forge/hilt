@@ -3,6 +3,8 @@ package rpc_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
@@ -206,5 +208,41 @@ func TestSetProviderNodes(t *testing.T) {
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.ErrorIs(t, err, rpc.ErrProviderNotFound)
 		require.False(t, routing.called)
+	})
+}
+
+func TestListProviders(t *testing.T) {
+	ctx := t.Context()
+	serviceID := testutil.RandomDID(t)
+
+	t.Run("reports an empty list when no provider is registered", func(t *testing.T) {
+		ok, err := rpc.ListProviders(ctx, zap.NewNop(), serviceID, providermemory.New(), serviceID, &adminprovider.ListArguments{})
+		require.NoError(t, err)
+		require.NotNil(t, ok.Providers)
+		require.Empty(t, ok.Providers)
+	})
+
+	t.Run("reports every provider with its region and policy, ordered by DID", func(t *testing.T) {
+		providers := providermemory.New()
+		ids := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)}
+		slices.SortFunc(ids, func(a, b did.DID) int { return strings.Compare(a.String(), b.String()) })
+		policy := testutil.RandomDID(t)
+		// Added in reverse so the order comes from the list, not from insertion.
+		require.NoError(t, providers.Add(ctx, ids[2], "eu-west-1", nil))
+		require.NoError(t, providers.Add(ctx, ids[1], "us-east-1", &policy))
+		require.NoError(t, providers.Add(ctx, ids[0], "ap-south-1", nil))
+
+		ok, err := rpc.ListProviders(ctx, zap.NewNop(), serviceID, providers, serviceID, &adminprovider.ListArguments{})
+		require.NoError(t, err)
+		require.Equal(t, []adminprovider.Provider{
+			{Provider: ids[0], Region: "ap-south-1"},
+			{Provider: ids[1], Region: "us-east-1", Policy: &policy},
+			{Provider: ids[2], Region: "eu-west-1"},
+		}, ok.Providers)
+	})
+
+	t.Run("rejects an issuer that is not the service", func(t *testing.T) {
+		_, err := rpc.ListProviders(ctx, zap.NewNop(), serviceID, providermemory.New(), testutil.RandomDID(t), &adminprovider.ListArguments{})
+		require.ErrorIs(t, err, rpc.ErrUnauthorized)
 	})
 }

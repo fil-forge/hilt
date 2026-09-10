@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
@@ -129,6 +131,32 @@ func TestProviderStore(t *testing.T) {
 			t.Run("Add returns ErrInvalidArgument for empty region", func(t *testing.T) {
 				err := s.Add(t.Context(), testutil.RandomDID(t), "", nil)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("lists every provider ordered by ID", func(t *testing.T) {
+				withPolicy, policy := testutil.RandomDID(t), testutil.RandomDID(t)
+				withoutPolicy := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), withPolicy, "ca-central-1", &policy))
+				require.NoError(t, s.Add(t.Context(), withoutPolicy, "me-south-1", nil))
+
+				recs, err := s.List(t.Context())
+				require.NoError(t, err)
+
+				// The store is shared with the other subtests, so only the two
+				// added here are asserted on.
+				byID := map[did.DID]provider.Record{}
+				for _, rec := range recs {
+					byID[rec.ID] = rec
+				}
+				require.Equal(t, "ca-central-1", byID[withPolicy].Region)
+				require.NotNil(t, byID[withPolicy].Policy)
+				require.Equal(t, policy, *byID[withPolicy].Policy)
+				require.Equal(t, "me-south-1", byID[withoutPolicy].Region)
+				require.Nil(t, byID[withoutPolicy].Policy)
+
+				require.True(t, slices.IsSortedFunc(recs, func(a, b provider.Record) int {
+					return strings.Compare(a.ID.String(), b.ID.String())
+				}), "records not ordered by ID")
 			})
 
 			t.Run("Add returns ErrRecordExists for duplicate id", func(t *testing.T) {
