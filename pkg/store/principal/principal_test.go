@@ -10,6 +10,8 @@ import (
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
@@ -416,7 +418,8 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 // each other. Removal holds the principal row FOR UPDATE across a callback
 // that rewrites policies in transactions of its own, while a policy write
 // reaches back onto the same row through the bucket_policy_principal foreign
-// key; re-adding the principal and locking it for a policy write take the
+// key; re-adding the principal, locking it for a policy write, and adding a
+// key bound to it (FOR KEY SHARE through the access_key foreign key) take the
 // row itself. Neither edge is visible to Postgres, so the wait is bounded and
 // one side is told to retry. Postgres only: the memory stores hold no lock
 // across calls.
@@ -475,6 +478,20 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 				})
 			},
 			unwritten: func(*testing.T, did.DID) {},
+		},
+		{
+			name: "adding a key bound to the principal",
+			op: func(ctx context.Context, tenantID did.DID) error {
+				principal := "held"
+				return accesskeypostgres.New(pool).Add(ctx, accesskey.Input{
+					ID: testutil.RandomDID(t), Tenant: tenantID, Name: "laptop", Principal: &principal,
+				})
+			},
+			unwritten: func(t *testing.T, tenantID did.DID) {
+				recs, err := accesskeypostgres.New(pool).ListByTenant(t.Context(), tenantID)
+				require.NoError(t, err)
+				require.Empty(t, recs)
+			},
 		},
 	}
 	for _, tc := range cases {
