@@ -22,7 +22,6 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
@@ -36,7 +35,7 @@ import (
 // HTTP layer, not revocation (see the accesskey service tests for that).
 type noopRevocations struct{}
 
-func (noopRevocations) Publish(context.Context, ucan.Issuer, ucan.Delegation, ...swarfclient.PublishOption) error {
+func (noopRevocations) PublishBatch(context.Context, ucan.Issuer, []ucan.Delegation) error {
 	return nil
 }
 
