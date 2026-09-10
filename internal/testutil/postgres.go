@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -51,4 +52,18 @@ func CreatePostgres(t *testing.T) *pgxpool.Pool {
 
 	require.NoError(t, migrations.Up(ctx, pool, zap.NewNop()))
 	return pool
+}
+
+// PostgresOrSkip is [CreatePostgres] for a test that runs only where Docker
+// is: without it the test skips, except on a Linux CI runner, where Docker is
+// expected and its absence fails the test.
+func PostgresOrSkip(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	if IsRunningInCI(t) && runtime.GOOS == "linux" && !IsDockerAvailable(t) {
+		t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
+	}
+	if !IsDockerAvailable(t) {
+		t.SkipNow()
+	}
+	return CreatePostgres(t)
 }
