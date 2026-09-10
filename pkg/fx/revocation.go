@@ -4,32 +4,31 @@ import (
 	"fmt"
 	"net/url"
 
-	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/config"
-	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	"github.com/fil-forge/hilt/pkg/grant"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"go.uber.org/fx"
 )
 
-// RevocationModule provides the Swarf revocation-service client, published as the
-// narrow interface each consumer declares as well as the concrete type. Both the
-// REST access-key service and the UCAN bucket service revoke delegations, so the
-// client is shared rather than owned by either module.
+// RevocationModule provides the Swarf revocation-service client, published as
+// [grant.RevocationPublisher] as well as the concrete type. The REST access-key
+// service, the UCAN bucket service and the grant rotator all revoke delegations
+// through it, so the client is shared rather than owned by any of their modules.
 var RevocationModule = fx.Module("revocation",
 	fx.Provide(
 		fx.Annotate(
 			NewRevocationClient,
 			fx.As(fx.Self()),
-			fx.As(new(accesskeysvc.RevocationPublisher)),
-			fx.As(new(bucketsvc.RevocationPublisher)),
+			fx.As(new(grant.RevocationPublisher)),
 		),
+		grant.NewRotator,
 	),
 )
 
 // NewRevocationClient builds the Swarf revocation-service client from
 // configuration. It takes no issuer: revocations are signed by the tenant that
-// issued the revoked delegation, which is passed per Publish call.
+// issued the revoked delegations, which is passed per publish call.
 func NewRevocationClient(cfg config.RevocationConfig) (*swarfclient.Client, error) {
 	serviceID, err := did.Parse(cfg.ServiceID)
 	if err != nil {
