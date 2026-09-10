@@ -68,3 +68,16 @@ type CreateAccessKeyRequest struct {
 	PrincipalID string     `json:"principalId,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
+
+// Principal is a console user of a tenant, identified by the console's userId.
+// It holds no key material and no delegation: its access to the tenant's
+// buckets is computed from the bucket policies naming it.
+type Principal struct {
+	UserID    string    `json:"userId"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// PrincipalList is the body of GET /tenants/{tenantId}/principals.
+type PrincipalList struct {
+	Items []Principal `json:"items"`
+}

@@ -115,7 +115,9 @@ type Store interface {
 	// Get retrieves the record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID. With
 	// [store.WithLock]([store.LockShare]) the read waits for an in-flight
-	// [Store.Delete] of the same row to commit or roll back.
+	// [Store.Delete] of the same row to commit or roll back; on Postgres the
+	// wait is bounded at [store.LockTimeout] and returns
+	// [store.ErrLockTimeout] when it runs out.
 	Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (Record, error)
 	// ListByTenant retrieves the tenant's records, ordered by ID, optionally
 	// restricted to one principal's keys (see [WithPrincipal]).
@@ -124,7 +126,8 @@ type Store interface {
 	// call, runs beforeCommit (nil allowed) while holding the lock, then deletes
 	// the row and commits. An error from beforeCommit is returned and leaves the
 	// row in place. It is idempotent: when no row exists it returns nil without
-	// running beforeCommit.
+	// running beforeCommit. On Postgres the wait for the row lock is bounded at
+	// [store.LockTimeout] and returns [store.ErrLockTimeout].
 	//
 	// beforeCommit must not read or write this store: on the memory backend it
 	// runs under the store mutex, and on Postgres a locked read of the same row
