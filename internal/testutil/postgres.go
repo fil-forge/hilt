@@ -24,6 +24,15 @@ const (
 // cleaned up when the test finishes.
 func CreatePostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	pool := CreateUnmigratedPostgres(t)
+	require.NoError(t, migrations.Up(t.Context(), pool, zap.NewNop()))
+	return pool
+}
+
+// CreateUnmigratedPostgres is CreatePostgres without the migrations, for tests
+// that drive the migrations themselves.
+func CreateUnmigratedPostgres(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 
 	ctx := t.Context()
 	container, err := tcpostgres.Run(ctx,
@@ -48,7 +57,5 @@ func CreatePostgres(t *testing.T) *pgxpool.Pool {
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-
-	require.NoError(t, migrations.Up(ctx, pool, zap.NewNop()))
 	return pool
 }
