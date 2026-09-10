@@ -3,6 +3,7 @@ package fx
 import (
 	"github.com/fil-forge/hilt/pkg/api"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"go.uber.org/fx"
 )
@@ -14,6 +15,7 @@ var APIModule = fx.Module("api",
 		// Services
 		tenantsvc.New,
 		accesskeysvc.New,
+		principalsvc.New,
 		// Tenants
 		asRoute(api.NewProvisionTenantHandler),
 		asRoute(api.NewGetTenantHandler),
@@ -24,6 +26,12 @@ var APIModule = fx.Module("api",
 		asRoute(api.NewListAccessKeysHandler),
 		asRoute(api.NewGetAccessKeyHandler),
 		asRoute(api.NewDeleteAccessKeyHandler),
+		// Principals
+		asRoute(api.NewCreatePrincipalHandler),
+		asRoute(api.NewListPrincipalsHandler),
+		asRoute(api.NewGetPrincipalHandler),
+		asRoute(api.NewDeletePrincipalHandler),
+		asRoute(api.NewListPrincipalAccessKeysHandler),
 	),
 )
 
