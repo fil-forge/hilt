@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -15,6 +16,19 @@ import (
 	"github.com/fil-forge/ucantone/validator"
 	"go.uber.org/zap"
 )
+
+// BatchTimeout bounds every rotation of one write together. A policy write
+// rotates the markers of each principal whose actions changed, the wildcard
+// fanning out to all of the tenant's, and a principal removal revokes each of
+// its keys' markers; both hold a row lock throughout, while a share-locked
+// reader of that row gives up after [store.LockTimeout]. The batch as a whole
+// gets this deadline, below the reader's bound, so a large batch cannot lock
+// the data path out.
+const BatchTimeout = 8 * time.Second
+
+// The batch bound must stay below the reader's; a negative difference fails
+// to compile.
+const _ = uint(store.LockTimeout - BatchTimeout)
 
 // RevocationPublisher is the subset of the revocation service (Swarf) that
 // marker rotation needs. It is satisfied by [*swarfclient.Client]; the

@@ -19,7 +19,7 @@ ALTER TABLE bucket ADD CONSTRAINT bucket_id_tenant_key UNIQUE (id, tenant_id);
 CREATE TABLE bucket_policy_principal (
     bucket_id  TEXT NOT NULL, -- DID
     tenant_id  TEXT NOT NULL, -- DID (did:plc)
-    principal  TEXT,          -- console userId; NULL for '*'
+    principal  TEXT,          -- console principalId; NULL for '*'
     -- The bucket is the tenant's own. The store maps a violation of this key,
     -- which it tells apart by name, to an invalid-argument error.
     CONSTRAINT bucket_policy_principal_bucket_fkey FOREIGN KEY (bucket_id, tenant_id) REFERENCES bucket (id, tenant_id) ON DELETE CASCADE,
