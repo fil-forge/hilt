@@ -107,7 +107,7 @@ func TestProvision(t *testing.T) {
 
 	t.Run("provisions a new tenant", func(t *testing.T) {
 		env := provisionSetup(t, 0)
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 		rec, created, err := env.svc.Provision(ctx, "tenant-1", "us-east-1")
 		require.NoError(t, err)
 		require.True(t, created)
@@ -117,7 +117,7 @@ func TestProvision(t *testing.T) {
 
 	t.Run("is idempotent on the external id", func(t *testing.T) {
 		env := provisionSetup(t, 0)
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 		first, created, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
 		require.NoError(t, err)
 		require.True(t, created)
@@ -141,7 +141,7 @@ func TestProvision(t *testing.T) {
 
 	t.Run("maps a PLC failure to ErrDIDRegistration", func(t *testing.T) {
 		env := provisionSetup(t, http.StatusInternalServerError)
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 		_, _, err := env.svc.Provision(ctx, "tenant-4", "us-east-1")
 		require.ErrorIs(t, err, tenantsvc.ErrDIDRegistration)
 	})
@@ -149,7 +149,7 @@ func TestProvision(t *testing.T) {
 	t.Run("maps an upload failure to ErrUploadRegistration", func(t *testing.T) {
 		env := provisionSetup(t, 0)
 		*env.sprueFailed = true
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1"))
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 		_, _, err := env.svc.Provision(ctx, "tenant-5", "us-east-1")
 		require.ErrorIs(t, err, tenantsvc.ErrUploadRegistration)
 	})

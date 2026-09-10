@@ -44,7 +44,7 @@ func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seedFunc) {
 		tenants := tenantpostgres.New(pool)
 		seed := func(t *testing.T, tenantID did.DID) {
 			providerID := testutil.RandomDID(t)
-			require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String()))
+			require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
 			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
 		}
 		return accesskeypostgres.New(pool), seed

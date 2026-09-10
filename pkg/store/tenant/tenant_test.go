@@ -38,7 +38,7 @@ func makeStore(t *testing.T, k StoreKind) (tenant.Store, seedFunc) {
 		pool := createPostgresPool(t)
 		providers := providerpostgres.New(pool)
 		seed := func(t *testing.T, providerID did.DID) {
-			require.NoError(t, providers.Add(t.Context(), providerID, providerID.String()))
+			require.NoError(t, providers.Add(t.Context(), providerID, providerID.String(), nil))
 		}
 		return tenantpostgres.New(pool), seed
 	}
@@ -75,6 +75,7 @@ func TestTenantStore(t *testing.T) {
 				require.Equal(t, provider, rec.Provider)
 				require.Equal(t, tenant.Active, rec.Status)
 				require.False(t, rec.CreatedAt.IsZero())
+				require.Equal(t, rec.CreatedAt, rec.UpdatedAt)
 			})
 
 			t.Run("Get returns ErrRecordNotFound for unknown id", func(t *testing.T) {

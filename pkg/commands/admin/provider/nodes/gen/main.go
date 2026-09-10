@@ -6,7 +6,7 @@ import (
 	"os"
 
 	jsg "github.com/alanshaw/dag-json-gen"
-	provider "github.com/fil-forge/hilt/pkg/commands/admin/provider"
+	nodes "github.com/fil-forge/hilt/pkg/commands/admin/provider/nodes"
 	cbg "github.com/whyrusleeping/cbor-gen"
 )
 
@@ -24,18 +24,16 @@ func tag(path string) {
 
 func main() {
 	models := []any{
-		provider.AddArguments{},
-		provider.Provider{},
-		provider.ListOK{},
+		nodes.SetArguments{},
 	}
 	const (
 		cborFile = "../cbor_gen.go"
 		jsonFile = "../json_gen.go"
 	)
-	if err := cbg.WriteMapEncodersToFile(cborFile, "provider", models...); err != nil {
+	if err := cbg.WriteMapEncodersToFile(cborFile, "nodes", models...); err != nil {
 		panic(err)
 	}
-	if err := jsg.WriteMapEncodersToFile(jsonFile, "provider", models...); err != nil {
+	if err := jsg.WriteMapEncodersToFile(jsonFile, "nodes", models...); err != nil {
 		panic(err)
 	}
 	tag(cborFile)

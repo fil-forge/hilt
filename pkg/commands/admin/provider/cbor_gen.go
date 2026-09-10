@@ -10,6 +10,7 @@ import (
 	"math"
 	"sort"
 
+	did "github.com/fil-forge/ucantone/did"
 	cid "github.com/ipfs/go-cid"
 	cbg "github.com/whyrusleeping/cbor-gen"
 	xerrors "golang.org/x/xerrors"
@@ -28,8 +29,34 @@ func (t *AddArguments) MarshalCBOR(w io.Writer) error {
 
 	cw := cbg.NewCborWriter(w)
 
-	if _, err := cw.Write([]byte{162}); err != nil {
+	if _, err := cw.Write([]byte{163}); err != nil {
 		return err
+	}
+
+	// t.Nodes ([]did.DID) (slice)
+	if len("nodes") > 8192 {
+		return xerrors.Errorf("Value in field \"nodes\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("nodes"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("nodes")); err != nil {
+		return err
+	}
+
+	if len(t.Nodes) > 8192 {
+		return xerrors.Errorf("Slice value in field t.Nodes was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajArray, uint64(len(t.Nodes))); err != nil {
+		return err
+	}
+	for _, v := range t.Nodes {
+		if err := v.MarshalCBOR(cw); err != nil {
+			return err
+		}
+
 	}
 
 	// t.Region (string) (string)
@@ -114,7 +141,46 @@ func (t *AddArguments) UnmarshalCBOR(r io.Reader) (err error) {
 		}
 
 		switch string(nameBuf[:nameLen]) {
-		// t.Region (string) (string)
+		// t.Nodes ([]did.DID) (slice)
+		case "nodes":
+
+			maj, extra, err = cr.ReadHeader()
+			if err != nil {
+				return err
+			}
+
+			if extra > 8192 {
+				return fmt.Errorf("t.Nodes: array too large (%d)", extra)
+			}
+
+			if maj != cbg.MajArray {
+				return fmt.Errorf("expected cbor array")
+			}
+
+			if extra > 0 {
+				t.Nodes = make([]did.DID, extra)
+			}
+
+			for i := 0; i < int(extra); i++ {
+				{
+					var maj byte
+					var extra uint64
+					var err error
+					_ = maj
+					_ = extra
+					_ = err
+
+					{
+
+						if err := t.Nodes[i].UnmarshalCBOR(cr); err != nil {
+							return xerrors.Errorf("unmarshaling t.Nodes[i]: %w", err)
+						}
+
+					}
+
+				}
+			}
+			// t.Region (string) (string)
 		case "region":
 
 			{
@@ -134,6 +200,307 @@ func (t *AddArguments) UnmarshalCBOR(r io.Reader) (err error) {
 					return xerrors.Errorf("unmarshaling t.Provider: %w", err)
 				}
 
+			}
+
+		default:
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(r, func(cid.Cid) {}); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+func (t *Provider) MarshalCBOR(w io.Writer) error {
+	if t == nil {
+		_, err := w.Write(cbg.CborNull)
+		return err
+	}
+
+	cw := cbg.NewCborWriter(w)
+	fieldCount := 3
+
+	if t.Policy == nil {
+		fieldCount--
+	}
+
+	if _, err := cw.Write(cbg.CborEncodeMajorType(cbg.MajMap, uint64(fieldCount))); err != nil {
+		return err
+	}
+
+	// t.Policy (did.DID) (struct)
+	if t.Policy != nil {
+
+		if len("policy") > 8192 {
+			return xerrors.Errorf("Value in field \"policy\" was too long")
+		}
+
+		if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("policy"))); err != nil {
+			return err
+		}
+		if _, err := cw.WriteString(string("policy")); err != nil {
+			return err
+		}
+
+		if err := t.Policy.MarshalCBOR(cw); err != nil {
+			return err
+		}
+	}
+
+	// t.Region (string) (string)
+	if len("region") > 8192 {
+		return xerrors.Errorf("Value in field \"region\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("region"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("region")); err != nil {
+		return err
+	}
+
+	if len(t.Region) > 8192 {
+		return xerrors.Errorf("Value in field t.Region was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(t.Region))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string(t.Region)); err != nil {
+		return err
+	}
+
+	// t.Provider (did.DID) (struct)
+	if len("provider") > 8192 {
+		return xerrors.Errorf("Value in field \"provider\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("provider"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("provider")); err != nil {
+		return err
+	}
+
+	if err := t.Provider.MarshalCBOR(cw); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *Provider) UnmarshalCBOR(r io.Reader) (err error) {
+	*t = Provider{}
+
+	cr := cbg.NewCborReader(r)
+
+	maj, extra, err := cr.ReadHeader()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+	}()
+
+	if maj != cbg.MajMap {
+		return fmt.Errorf("cbor input should be of type map")
+	}
+
+	if extra > cbg.MaxLength {
+		return fmt.Errorf("Provider: map struct too large (%d)", extra)
+	}
+
+	n := extra
+
+	nameBuf := make([]byte, 8)
+	for i := uint64(0); i < n; i++ {
+		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(cr, func(cid.Cid) {}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch string(nameBuf[:nameLen]) {
+		// t.Policy (did.DID) (struct)
+		case "policy":
+
+			{
+
+				b, err := cr.ReadByte()
+				if err != nil {
+					return err
+				}
+				if b != cbg.CborNull[0] {
+					if err := cr.UnreadByte(); err != nil {
+						return err
+					}
+					t.Policy = new(did.DID)
+					if err := t.Policy.UnmarshalCBOR(cr); err != nil {
+						return xerrors.Errorf("unmarshaling t.Policy pointer: %w", err)
+					}
+				}
+
+			}
+			// t.Region (string) (string)
+		case "region":
+
+			{
+				sval, err := cbg.ReadStringWithMax(cr, 8192)
+				if err != nil {
+					return err
+				}
+
+				t.Region = string(sval)
+			}
+			// t.Provider (did.DID) (struct)
+		case "provider":
+
+			{
+
+				if err := t.Provider.UnmarshalCBOR(cr); err != nil {
+					return xerrors.Errorf("unmarshaling t.Provider: %w", err)
+				}
+
+			}
+
+		default:
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(r, func(cid.Cid) {}); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+func (t *ListOK) MarshalCBOR(w io.Writer) error {
+	if t == nil {
+		_, err := w.Write(cbg.CborNull)
+		return err
+	}
+
+	cw := cbg.NewCborWriter(w)
+
+	if _, err := cw.Write([]byte{161}); err != nil {
+		return err
+	}
+
+	// t.Providers ([]provider.Provider) (slice)
+	if len("providers") > 8192 {
+		return xerrors.Errorf("Value in field \"providers\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("providers"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("providers")); err != nil {
+		return err
+	}
+
+	if len(t.Providers) > 8192 {
+		return xerrors.Errorf("Slice value in field t.Providers was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajArray, uint64(len(t.Providers))); err != nil {
+		return err
+	}
+	for _, v := range t.Providers {
+		if err := v.MarshalCBOR(cw); err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+func (t *ListOK) UnmarshalCBOR(r io.Reader) (err error) {
+	*t = ListOK{}
+
+	cr := cbg.NewCborReader(r)
+
+	maj, extra, err := cr.ReadHeader()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+	}()
+
+	if maj != cbg.MajMap {
+		return fmt.Errorf("cbor input should be of type map")
+	}
+
+	if extra > cbg.MaxLength {
+		return fmt.Errorf("ListOK: map struct too large (%d)", extra)
+	}
+
+	n := extra
+
+	nameBuf := make([]byte, 9)
+	for i := uint64(0); i < n; i++ {
+		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(cr, func(cid.Cid) {}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch string(nameBuf[:nameLen]) {
+		// t.Providers ([]provider.Provider) (slice)
+		case "providers":
+
+			maj, extra, err = cr.ReadHeader()
+			if err != nil {
+				return err
+			}
+
+			if extra > 8192 {
+				return fmt.Errorf("t.Providers: array too large (%d)", extra)
+			}
+
+			if maj != cbg.MajArray {
+				return fmt.Errorf("expected cbor array")
+			}
+
+			if extra > 0 {
+				t.Providers = make([]Provider, extra)
+			}
+
+			for i := 0; i < int(extra); i++ {
+				{
+					var maj byte
+					var extra uint64
+					var err error
+					_ = maj
+					_ = extra
+					_ = err
+
+					{
+
+						if err := t.Providers[i].UnmarshalCBOR(cr); err != nil {
+							return xerrors.Errorf("unmarshaling t.Providers[i]: %w", err)
+						}
+
+					}
+
+				}
 			}
 
 		default:

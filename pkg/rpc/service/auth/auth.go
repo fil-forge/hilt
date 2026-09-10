@@ -35,7 +35,9 @@ import (
 type AuthorizedRequest struct {
 	AccessKey accesskey.Record
 	Tenant    tenant.Record
-	Region    string
+	// Provider is the tenant's regional provider, confirmed to serve Region.
+	Provider provider.Record
+	Region   string
 	// Operation is the S3 operation the (signature-verified) request performs. The
 	// access key is confirmed to hold its permission; handlers check it matches the
 	// operation they serve.
@@ -166,7 +168,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	}
 
 	// The request must be scoped to a region served by the tenant's provider.
-	region, err := validateRegion(ctx, a.providers, sr.Regions, tenantRec.Provider)
+	prov, region, err := validateRegion(ctx, a.providers, sr.Regions, tenantRec.Provider)
 	if err != nil {
 		log.Debug("rejecting request region", zap.Error(err))
 		return nil, err
@@ -216,6 +218,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	return &AuthorizedRequest{
 		AccessKey:  akRec,
 		Tenant:     tenantRec,
+		Provider:   prov,
 		Region:     region,
 		Operation:  op,
 		BucketName: bucketName,
@@ -263,19 +266,19 @@ func EncodeSecret(signer multikey.Signer) (string, error) {
 }
 
 // validateRegion confirms the tenant's provider serves one of the regions the
-// request is scoped to, returning the matched region.
-func validateRegion(ctx context.Context, providers provider.Store, regions []string, tenantProvider did.DID) (string, error) {
+// request is scoped to, returning the provider record and the matched region.
+func validateRegion(ctx context.Context, providers provider.Store, regions []string, tenantProvider did.DID) (provider.Record, string, error) {
 	for _, r := range regions {
 		prov, err := providers.GetByRegion(ctx, r)
 		if errors.Is(err, store.ErrRecordNotFound) {
 			continue // no provider serves this region
 		}
 		if err != nil {
-			return "", fmt.Errorf("looking up provider for region %q: %w", r, err)
+			return provider.Record{}, "", fmt.Errorf("looking up provider for region %q: %w", r, err)
 		}
 		if prov.ID == tenantProvider {
-			return r, nil
+			return prov, r, nil
 		}
 	}
-	return "", ErrRegionNotServed
+	return provider.Record{}, "", ErrRegionNotServed
 }

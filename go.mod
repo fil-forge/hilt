@@ -10,8 +10,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.3
 	github.com/aws/smithy-go v1.27.2
 	github.com/docker/docker v28.5.2+incompatible
-	github.com/fil-forge/libforge v0.0.0-20260904125112-81372e7200bf
 	github.com/fil-forge/smelt v0.0.0-20260828121926-640b11ba6376
+	github.com/fil-forge/libforge v0.0.0-20260908175340-249352b46c8e
 	github.com/fil-forge/swarf v0.0.1-0.20260821142121-d5d1a0a56f00
 	github.com/fil-forge/ucantone v0.0.0-20260827134420-25cf8340b9a1
 	github.com/ipfs/go-cid v0.6.2
@@ -21,6 +21,7 @@ require (
 	github.com/multiformats/go-multibase v0.3.0
 	github.com/multiformats/go-multicodec v0.10.0
 	github.com/multiformats/go-varint v0.1.0
+	github.com/olekukonko/tablewriter v1.1.4
 	github.com/openbao/openbao/api/v2 v2.6.0
 	github.com/pressly/goose/v3 v3.27.2
 	github.com/spf13/cobra v1.10.2
@@ -58,6 +59,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/clipperhouse/displaywidth v0.10.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/compose-spec/compose-go/v2 v2.12.1 // indirect
 	github.com/containerd/console v1.0.5 // indirect
@@ -80,6 +82,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203 // indirect
+	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/filecoin-project/go-data-segment v0.0.1 // indirect
 	github.com/fsnotify/fsevents v0.2.0 // indirect
@@ -148,6 +151,9 @@ require (
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
 	github.com/multiformats/go-multihash v0.2.3 // indirect
+	github.com/olekukonko/cat v0.0.0-20250911104152-50322a0618f6 // indirect
+	github.com/olekukonko/errors v1.2.0 // indirect
+	github.com/olekukonko/ll v0.1.6 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect

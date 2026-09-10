@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
@@ -52,14 +54,68 @@ func TestProviderStore(t *testing.T) {
 			s := makeStore(t, k)
 
 			t.Run("adds and retrieves a provider by region", func(t *testing.T) {
-				id := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), id, "us-east-1"))
+				id, policy := testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "us-east-1", &policy))
 
 				rec, err := s.GetByRegion(t.Context(), "us-east-1")
 				require.NoError(t, err)
 				require.Equal(t, id, rec.ID)
 				require.Equal(t, "us-east-1", rec.Region)
+				require.NotNil(t, rec.Policy)
+				require.Equal(t, policy, *rec.Policy)
 				require.False(t, rec.CreatedAt.IsZero())
+				require.Equal(t, rec.CreatedAt, rec.UpdatedAt)
+			})
+
+			t.Run("retrieves a provider by ID", func(t *testing.T) {
+				id, policy := testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "eu-central-1", &policy))
+
+				rec, err := s.Get(t.Context(), id)
+				require.NoError(t, err)
+				require.Equal(t, id, rec.ID)
+				require.Equal(t, "eu-central-1", rec.Region)
+				require.NotNil(t, rec.Policy)
+				require.Equal(t, policy, *rec.Policy)
+			})
+
+			t.Run("Get returns ErrRecordNotFound for unknown provider", func(t *testing.T) {
+				_, err := s.Get(t.Context(), testutil.RandomDID(t))
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
+
+			t.Run("stores a provider without a policy", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "us-west-2", nil))
+
+				rec, err := s.Get(t.Context(), id)
+				require.NoError(t, err)
+				require.Nil(t, rec.Policy)
+			})
+
+			t.Run("sets the policy of a provider", func(t *testing.T) {
+				id, policy := testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "sa-east-1", nil))
+
+				require.NoError(t, s.SetPolicy(t.Context(), id, policy))
+
+				rec, err := s.Get(t.Context(), id)
+				require.NoError(t, err)
+				require.NotNil(t, rec.Policy)
+				require.Equal(t, policy, *rec.Policy)
+				require.False(t, rec.UpdatedAt.IsZero())
+			})
+
+			t.Run("SetPolicy returns ErrRecordNotFound for unknown provider", func(t *testing.T) {
+				err := s.SetPolicy(t.Context(), testutil.RandomDID(t), testutil.RandomDID(t))
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
+
+			t.Run("SetPolicy returns ErrInvalidArgument for undef policy", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), id, "af-south-1", nil))
+				err := s.SetPolicy(t.Context(), id, did.Undef)
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("GetByRegion returns ErrRecordNotFound for unknown region", func(t *testing.T) {
@@ -68,19 +124,45 @@ func TestProviderStore(t *testing.T) {
 			})
 
 			t.Run("Add returns ErrInvalidArgument for undef provider ID", func(t *testing.T) {
-				err := s.Add(t.Context(), did.Undef, "us-west-1")
+				err := s.Add(t.Context(), did.Undef, "us-west-1", nil)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("Add returns ErrInvalidArgument for empty region", func(t *testing.T) {
-				err := s.Add(t.Context(), testutil.RandomDID(t), "")
+				err := s.Add(t.Context(), testutil.RandomDID(t), "", nil)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("lists every provider ordered by ID", func(t *testing.T) {
+				withPolicy, policy := testutil.RandomDID(t), testutil.RandomDID(t)
+				withoutPolicy := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), withPolicy, "ca-central-1", &policy))
+				require.NoError(t, s.Add(t.Context(), withoutPolicy, "me-south-1", nil))
+
+				recs, err := s.List(t.Context())
+				require.NoError(t, err)
+
+				// The store is shared with the other subtests, so only the two
+				// added here are asserted on.
+				byID := map[did.DID]provider.Record{}
+				for _, rec := range recs {
+					byID[rec.ID] = rec
+				}
+				require.Equal(t, "ca-central-1", byID[withPolicy].Region)
+				require.NotNil(t, byID[withPolicy].Policy)
+				require.Equal(t, policy, *byID[withPolicy].Policy)
+				require.Equal(t, "me-south-1", byID[withoutPolicy].Region)
+				require.Nil(t, byID[withoutPolicy].Policy)
+
+				require.True(t, slices.IsSortedFunc(recs, func(a, b provider.Record) int {
+					return strings.Compare(a.ID.String(), b.ID.String())
+				}), "records not ordered by ID")
 			})
 
 			t.Run("Add returns ErrRecordExists for duplicate id", func(t *testing.T) {
 				id := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), id, "ap-south-1"))
-				err := s.Add(t.Context(), id, "ap-south-2")
+				require.NoError(t, s.Add(t.Context(), id, "ap-south-1", nil))
+				err := s.Add(t.Context(), id, "ap-south-2", nil)
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 		})

@@ -57,7 +57,8 @@ func TestNewUCANServer(t *testing.T) {
 			rpc.NewDeleteBucketHandler(zap.NewNop(), buckets),
 			rpc.NewBucketInfoHandler(zap.NewNop(), buckets),
 			rpc.NewListBucketsHandler(zap.NewNop(), buckets),
-			rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New()),
+			rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), upload),
+			rpc.NewSetProviderNodesHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), upload),
 		},
 	})
 	require.NoError(t, err)

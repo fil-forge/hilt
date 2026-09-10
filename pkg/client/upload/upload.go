@@ -10,6 +10,7 @@ import (
 	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
+	routingcmds "github.com/fil-forge/libforge/commands/routing"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/client"
 	"github.com/fil-forge/ucantone/did"
@@ -66,6 +67,23 @@ type MethodOption func(*methodConfig)
 type methodConfig struct {
 	issuer ucan.Issuer
 	proofs ucanlib.ProofStore
+}
+
+// MethodConfig is the resolved per-call configuration of a client method: the
+// issuer and proof store selected by its [MethodOption]s. [MethodConfigOf] lets a
+// test double of the client observe which issuer a caller selected.
+type MethodConfig struct {
+	Issuer ucan.Issuer
+	Proofs ucanlib.ProofStore
+}
+
+// MethodConfigOf applies opts to an empty configuration and returns the result.
+func MethodConfigOf(opts ...MethodOption) MethodConfig {
+	cfg := &methodConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	return MethodConfig{Issuer: cfg.issuer, Proofs: cfg.proofs}
 }
 
 func WithIssuer(iss ucan.Issuer) MethodOption {
@@ -236,4 +254,80 @@ func (c *Client) SpaceEmpty(ctx context.Context, space did.DID, opts ...MethodOp
 		return false, fmt.Errorf("unpacking list blobs result: %w", err)
 	}
 	return len(listOK.Results) == 0, nil
+}
+
+// PutRoutingPolicy replaces the candidate set of the routing policy with the
+// given storage nodes. The subject is the policy DID; the proof chain from the
+// issuer to the policy comes from the method's proof store.
+func (c *Client) PutRoutingPolicy(ctx context.Context, policy did.DID, candidates []did.DID, opts ...MethodOption) error {
+	cfg := &methodConfig{issuer: c.Issuer, proofs: c.Proofs}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	proofs, proofLinks, err := cfg.proofs.ProofChain(ctx, cfg.issuer.DID(), routingcmds.Put.Command, policy)
+	if err != nil {
+		return fmt.Errorf("getting proof chain: %w", err)
+	}
+	entries := make(map[did.DID]routingcmds.Candidate, len(candidates))
+	for _, c := range candidates {
+		entries[c] = routingcmds.Candidate{}
+	}
+	inv, err := routingcmds.Put.Invoke(
+		cfg.issuer,
+		policy,
+		&routingcmds.PutArguments{Candidates: routingcmds.CandidateSet{Entries: entries}},
+		invocation.WithAudience(c.ServiceID),
+		invocation.WithProofs(proofLinks...),
+	)
+	if err != nil {
+		return fmt.Errorf("invoking put routing policy: %w", err)
+	}
+	log := zapucan.WithInvocation(c.Logger, inv)
+	log.Debug("executing invocation")
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv, execution.WithDelegations(proofs...)))
+	if err != nil {
+		log.Error("failed to execute put routing policy invocation", zap.Error(err))
+		return fmt.Errorf("executing put routing policy invocation: %w", err)
+	}
+	if _, err := routingcmds.Put.Unpack(res.Receipt()); err != nil {
+		log.Error("failed to unpack put routing policy result", zap.Error(err))
+		return fmt.Errorf("unpacking put routing policy result: %w", err)
+	}
+	return nil
+}
+
+// UseRoutingPolicy sets the routing policy the space references, or clears it
+// when policy is nil. The subject is the space; the proof chain from the issuer
+// to the space comes from the method's proof store.
+func (c *Client) UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...MethodOption) error {
+	cfg := &methodConfig{issuer: c.Issuer, proofs: c.Proofs}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	proofs, proofLinks, err := cfg.proofs.ProofChain(ctx, cfg.issuer.DID(), routingcmds.Use.Command, space)
+	if err != nil {
+		return fmt.Errorf("getting proof chain: %w", err)
+	}
+	inv, err := routingcmds.Use.Invoke(
+		cfg.issuer,
+		space,
+		&routingcmds.UseArguments{Policy: policy},
+		invocation.WithAudience(c.ServiceID),
+		invocation.WithProofs(proofLinks...),
+	)
+	if err != nil {
+		return fmt.Errorf("invoking use routing policy: %w", err)
+	}
+	log := zapucan.WithInvocation(c.Logger, inv)
+	log.Debug("executing invocation")
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv, execution.WithDelegations(proofs...)))
+	if err != nil {
+		log.Error("failed to execute use routing policy invocation", zap.Error(err))
+		return fmt.Errorf("executing use routing policy invocation: %w", err)
+	}
+	if _, err := routingcmds.Use.Unpack(res.Receipt()); err != nil {
+		log.Error("failed to unpack use routing policy result", zap.Error(err))
+		return fmt.Errorf("unpacking use routing policy result: %w", err)
+	}
+	return nil
 }

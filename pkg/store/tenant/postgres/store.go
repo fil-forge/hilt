@@ -91,9 +91,9 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE tenant
-		SET status = $1, updated_at = $2
-		WHERE id = $3
-	`, string(status), time.Now().UTC(), id.String())
+		SET status = $1, updated_at = NOW()
+		WHERE id = $2
+	`, string(status), id.String())
 	if err != nil {
 		return fmt.Errorf("setting tenant status: %w", err)
 	}
@@ -117,7 +117,7 @@ func scanRecord(row pgx.Row) (tenant.Record, error) {
 		providerID *string
 		status     string
 		createdAt  time.Time
-		updatedAt  *time.Time
+		updatedAt  time.Time
 	)
 	if err := row.Scan(&idStr, &externalID, &providerID, &status, &createdAt, &updatedAt); err != nil {
 		return tenant.Record{}, err
@@ -130,6 +130,7 @@ func scanRecord(row pgx.Row) (tenant.Record, error) {
 		ID:        id,
 		Status:    tenant.Status(status),
 		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 	if externalID != nil {
 		rec.ExternalID = *externalID
@@ -140,9 +141,6 @@ func scanRecord(row pgx.Row) (tenant.Record, error) {
 			return tenant.Record{}, fmt.Errorf("parsing provider DID: %w", err)
 		}
 		rec.Provider = provider
-	}
-	if updatedAt != nil {
-		rec.UpdatedAt = *updatedAt
 	}
 	return rec, nil
 }
