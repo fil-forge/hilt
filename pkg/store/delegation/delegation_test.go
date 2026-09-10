@@ -2,6 +2,7 @@ package delegation_test
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"testing"
 
@@ -111,6 +112,99 @@ func TestDelegationStore(t *testing.T) {
 				page, err := s.ListByAudience(t.Context(), audience)
 				require.NoError(t, err)
 				require.Empty(t, page.Results)
+			})
+
+			t.Run("Replace hands next the current set and stores its result", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				old := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+				fresh := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+
+				var seen []ucan.Delegation
+				require.NoError(t, s.Replace(t.Context(), audience, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+					seen = current
+					return []ucan.Delegation{fresh}, nil
+				}))
+
+				require.Len(t, seen, 1)
+				require.Equal(t, old.Link(), seen[0].Link())
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, fresh.Link(), page.Results[0].Link())
+			})
+
+			t.Run("Replace with next returning nil leaves the audience with none", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{
+					makeDelegation(t, issuer, audience, issuer.DID(), cmd),
+					makeDelegation(t, issuer, audience, issuer.DID(), cmd),
+				}))
+
+				require.NoError(t, s.Replace(t.Context(), audience, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+					require.Len(t, current, 2)
+					return nil, nil
+				}))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Empty(t, page.Results)
+			})
+
+			t.Run("Replace rolls back when next errors", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				old := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+				boom := errors.New("publish failed")
+
+				err := s.Replace(t.Context(), audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					return nil, boom
+				})
+				require.ErrorIs(t, err, boom)
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, old.Link(), page.Results[0].Link())
+			})
+
+			t.Run("Replace stores nothing for an audience holding nothing", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				fresh := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+
+				called := false
+				require.NoError(t, s.Replace(t.Context(), audience, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+					called = true
+					require.Empty(t, current)
+					return []ucan.Delegation{fresh}, nil
+				}))
+
+				require.True(t, called, "next is told the audience holds nothing")
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Empty(t, page.Results)
+			})
+
+			t.Run("Replace returns ErrInvalidArgument for a nil delegation from next", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				old := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+
+				err := s.Replace(t.Context(), audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					return []ucan.Delegation{nil}, nil
+				})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1, "the current set is kept")
 			})
 
 			t.Run("DeleteBySubject removes only that subject's delegations", func(t *testing.T) {

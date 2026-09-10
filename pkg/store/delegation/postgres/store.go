@@ -47,29 +47,118 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
 	for _, d := range delegations {
-		data, err := delegation.Encode(d)
+		if err := insert(ctx, tx, d); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+	return nil
+}
+
+// insert stores one delegation inside tx, leaving an already-stored one alone.
+func insert(ctx context.Context, tx pgx.Tx, d ucan.Delegation) error {
+	data, err := delegation.Encode(d)
+	if err != nil {
+		return fmt.Errorf("encoding delegation %s: %w", d.Link(), err)
+	}
+
+	var subject *string
+	if d.Subject().Defined() {
+		str := d.Subject().String()
+		subject = &str
+	}
+
+	var expiresAt *time.Time
+	if exp := d.Expiration(); exp != nil {
+		t := time.Unix(int64(*exp), 0).UTC()
+		expiresAt = &t
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (id) DO NOTHING
+	`, d.Link().String(), d.Issuer().String(), d.Audience().String(), subject, d.Command().String(), data, expiresAt); err != nil {
+		return fmt.Errorf("storing delegation %s: %w", d.Link(), err)
+	}
+	return nil
+}
+
+// lockNamespace is the first key of the advisory lock [Store.Replace] takes
+// per audience. Postgres identifies an advisory lock by its key pair and
+// nothing else, so the fixed first key keeps this store's locks apart from any
+// other advisory lock taken on the same database; the second key is
+// hashtext(audience DID).
+const lockNamespace int32 = 0x44454c47 // "DELG"
+
+// lockTimeout bounds how long Replace waits on another Replace of the same
+// audience. The holder runs next while it holds the lock, so a hung next must
+// fail the waiter rather than pin a pool connection.
+const lockTimeout = "10s"
+
+// Replace runs in one transaction that takes the audience's advisory lock
+// (pg_advisory_xact_lock, released when the transaction ends), reads the
+// current set, calls next, deletes the set and inserts next's result. A
+// second Replace of the same audience waits on the lock until the first
+// commits or rolls back, so it sees the settled state.
+func (s *Store) Replace(ctx context.Context, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+lockTimeout+`'`); err != nil {
+		return fmt.Errorf("setting lock timeout: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2))`, lockNamespace, audience.String()); err != nil {
+		return fmt.Errorf("locking delegation audience: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `SELECT id, data FROM delegation WHERE audience = $1 ORDER BY id ASC`, audience.String())
+	if err != nil {
+		return fmt.Errorf("querying delegations by audience: %w", err)
+	}
+	var current []ucan.Delegation
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			rows.Close()
+			return fmt.Errorf("scanning delegation: %w", err)
+		}
+		dlg, err := delegation.Decode(data)
 		if err != nil {
-			return fmt.Errorf("encoding delegation %s: %w", d.Link(), err)
+			rows.Close()
+			return fmt.Errorf("decoding delegation %s: %w", id, err)
 		}
+		current = append(current, dlg)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating delegations: %w", err)
+	}
 
-		var subject *string
-		if d.Subject().Defined() {
-			str := d.Subject().String()
-			subject = &str
-		}
+	replacement, err := next(ctx, current)
+	if err != nil {
+		return err
+	}
+	if len(current) == 0 {
+		return nil
+	}
+	if slices.Contains(replacement, nil) {
+		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
+	}
 
-		var expiresAt *time.Time
-		if exp := d.Expiration(); exp != nil {
-			t := time.Unix(int64(*exp), 0).UTC()
-			expiresAt = &t
-		}
-
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (id) DO NOTHING
-		`, d.Link().String(), d.Issuer().String(), d.Audience().String(), subject, d.Command().String(), data, expiresAt); err != nil {
-			return fmt.Errorf("storing delegation %s: %w", d.Link(), err)
+	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE audience = $1`, audience.String()); err != nil {
+		return fmt.Errorf("deleting delegations by audience: %w", err)
+	}
+	for _, d := range replacement {
+		if err := insert(ctx, tx, d); err != nil {
+			return err
 		}
 	}
 

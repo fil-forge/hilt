@@ -34,4 +34,13 @@ type Store interface {
 	// PutBatch stores a batch of delegation records. It returns
 	// [store.ErrInvalidArgument] if the batch contains a nil delegation.
 	PutBatch(ctx context.Context, delegation []ucan.Delegation) error
+	// Replace atomically swaps the audience's delegations: it locks the
+	// audience, hands next the current set, deletes it, stores what next
+	// returns, and commits. next may return nil to leave the audience with
+	// none; an error from next rolls everything back and is returned. When the
+	// audience holds nothing, next is called with nil and its result is not
+	// stored. next runs while the audience is locked and must not call back
+	// into the store. It returns [store.ErrInvalidArgument] if next returns a
+	// nil delegation.
+	Replace(ctx context.Context, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error
 }
