@@ -20,6 +20,7 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -227,7 +228,7 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.providers, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, plcClient, upload)
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.providers, bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, plcClient, upload)
 	route := api.NewProvisionTenantHandler(zap.NewNop(), svc)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
@@ -456,7 +457,7 @@ func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -477,7 +478,7 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	tenants := tenantmemory.New()
 	id := testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, id, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), svc))
 
 	statusBody := func(s api.TenantStatus) []byte {
@@ -544,6 +545,7 @@ type deleteDeps struct {
 	tenants     *tenantmemory.Store
 	buckets     *bucketmemory.Store
 	accessKeys  *accesskeymemory.Store
+	principals  *principalmemory.Store
 	delegations *delegationmemory.Store
 	wrapKeys    *wrapkeymemory.Store
 	secrets     vault.Vault
@@ -598,6 +600,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		tenants:     tenantmemory.New(),
 		buckets:     bucketmemory.New(),
 		accessKeys:  accesskeymemory.New(),
+		principals:  principalmemory.New(),
 		delegations: delegationmemory.New(),
 		wrapKeys:    wrapkeymemory.New(),
 		secrets:     vaultmemory.New(),
@@ -621,7 +624,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, providermemory.New(), deps.buckets, deps.accessKeys, deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil)
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, providermemory.New(), deps.buckets, deps.accessKeys, deps.principals, deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil)
 	route := api.NewDeleteTenantHandler(zap.NewNop(), svc)
 	return serve(route), deps
 }
@@ -648,6 +651,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		require.NoError(t, deps.accessKeys.Add(ctx, akID, deps.tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()
 		require.NoError(t, deps.secrets.Write(ctx, akVaultKey, []byte("ak-key")))
+		require.NoError(t, deps.principals.Add(ctx, deps.tenantID, "user-1"))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, deps.tenantID)}))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, akID)}))
 
@@ -678,6 +682,11 @@ func TestDeleteTenantHandler(t *testing.T) {
 		require.Empty(t, aks)
 		_, err = deps.secrets.Read(ctx, akVaultKey)
 		require.ErrorIs(t, err, vault.ErrNotFound)
+
+		// Principals gone.
+		ps, err := deps.principals.ListByTenant(ctx, deps.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, ps)
 
 		// Delegations to both the tenant and the access key gone.
 		tenantDlgs, err := deps.delegations.ListByAudience(ctx, deps.tenantID)

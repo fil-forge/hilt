@@ -55,3 +55,43 @@ func Collect[T any](ctx context.Context, getPage GetPageFunc[T]) ([]T, error) {
 	}
 	return items, nil
 }
+
+// LockMode is the row lock a read takes.
+type LockMode int
+
+const (
+	// LockNone reads without locking. The read never waits and may be answered
+	// from a snapshot that predates an in-flight write to the same row.
+	LockNone LockMode = iota
+	// LockShare reads the row with SELECT ... FOR SHARE. A write in flight on the
+	// same row (held FOR UPDATE inside its transaction) blocks the read until it
+	// commits or rolls back, so the read is answered from the committed state.
+	// The read needs no transaction of its own: a FOR SHARE in autocommit mode
+	// still waits on a conflicting FOR UPDATE.
+	//
+	// Memory backends serialize reads and writes under one mutex, so a read there
+	// already waits for an in-flight write and the option changes nothing.
+	LockShare
+)
+
+// ReadConfig configures a single-row read.
+type ReadConfig struct {
+	Lock LockMode
+}
+
+// ReadOption configures a [ReadConfig].
+type ReadOption func(*ReadConfig)
+
+// WithLock sets the row lock the read takes.
+func WithLock(mode LockMode) ReadOption {
+	return func(c *ReadConfig) { c.Lock = mode }
+}
+
+// NewReadConfig applies opts to a zero [ReadConfig].
+func NewReadConfig(opts ...ReadOption) ReadConfig {
+	cfg := ReadConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}

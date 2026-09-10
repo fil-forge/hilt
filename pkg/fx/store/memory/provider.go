@@ -9,6 +9,8 @@ import (
 	membucket "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	memdelegation "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/principal"
+	memprincipal "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	memprovider "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -24,6 +26,7 @@ var Module = fx.Module("memory-store",
 		fx.Annotate(memaccesskey.New, fx.As(new(accesskey.Store))),
 		fx.Annotate(membucket.New, fx.As(new(bucket.Store))),
 		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
+		fx.Annotate(memprincipal.New, fx.As(new(principal.Store))),
 		fx.Annotate(memprovider.New, fx.As(new(provider.Store))),
 		fx.Annotate(memtenant.New, fx.As(new(tenant.Store))),
 		fx.Annotate(memwrapkey.New, fx.As(new(wrapkey.Store))),
