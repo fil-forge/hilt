@@ -23,7 +23,6 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -36,27 +35,28 @@ import (
 	"go.uber.org/zap"
 )
 
-// revocation records one published revocation. options counts the [PublishOption]s
-// it was published with: Swarf's publishConfig is unexported, so the count is how
-// a witness path being sent is detected.
+// revocation records one published revocation.
 type revocation struct {
 	revoker did.DID
 	revoked cid.Cid
-	options int
 }
 
 // fakeSwarf is a stub of the revocation service, recording what it was asked to
 // publish.
 type fakeSwarf struct {
 	err         error
+	calls       int
 	revocations []revocation
 }
 
-func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error {
+func (f *fakeSwarf) PublishBatch(_ context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: revoked.Link(), options: len(opts)})
+	f.calls++
+	for _, d := range revoked {
+		f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: d.Link()})
+	}
 	return nil
 }
 
@@ -157,6 +157,13 @@ func TestCreate(t *testing.T) {
 		require.NotEmpty(t, secret)
 		require.Equal(t, "k1", rec.Name)
 		require.Equal(t, []did.DID{d.bucketID}, rec.Buckets)
+
+		issued, err := d.delegations.ListByAudience(ctx, rec.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, issued.Results, "the key's delegations are stored")
+		for _, dlg := range issued.Results {
+			require.Equal(t, d.bucketID, dlg.Subject())
+		}
 	})
 
 	t.Run("rejects an empty name", func(t *testing.T) {
@@ -412,7 +419,7 @@ func TestListGetDelete(t *testing.T) {
 func TestDeleteRevokes(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("revokes every bucket-scoped delegation, with no witness path", func(t *testing.T) {
+	t.Run("revokes every bucket-scoped delegation in one request, with no witness path", func(t *testing.T) {
 		d := setup(t)
 		// s3:PutObject maps to several commands, so the key gets several delegations.
 		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, []string{"bucket-a"}, "", nil)
@@ -424,12 +431,12 @@ func TestDeleteRevokes(t *testing.T) {
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
 
 		require.Len(t, d.swarf.revocations, len(issued.Results))
+		require.Equal(t, 1, d.swarf.calls, "every revocation goes in one request")
 		revoked := map[cid.Cid]bool{}
 		for _, r := range d.swarf.revocations {
 			// The tenant issued the delegations, so the tenant revokes them directly:
 			// no witness path is needed to prove its authority over them.
 			require.Equal(t, d.tenantID, r.revoker)
-			require.Zero(t, r.options)
 			revoked[r.revoked] = true
 		}
 		for _, dlg := range issued.Results {
@@ -454,7 +461,6 @@ func TestDeleteRevokes(t *testing.T) {
 		r := d.swarf.revocations[0]
 		require.Equal(t, d.tenantID, r.revoker)
 		require.Equal(t, issued.Results[0].Link(), r.revoked)
-		require.Zero(t, r.options)
 	})
 
 	t.Run("revokes a powerline delegation when the tenant owns no bucket", func(t *testing.T) {

@@ -29,7 +29,6 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	"github.com/fil-forge/libforge/testutil"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -232,27 +231,28 @@ func (f failingListDelegations) ListByAudience(context.Context, did.DID, ...stor
 	return store.Page[ucan.Delegation]{}, f.err
 }
 
-// revocation records one published revocation. options counts the [PublishOption]s
-// it was published with: Swarf's publishConfig is unexported, so the count is how
-// a witness path being sent is detected.
+// revocation records one published revocation.
 type revocation struct {
 	revoker did.DID
 	revoked cid.Cid
-	options int
 }
 
 // fakeSwarf is a stub of the revocation service, recording what it was asked to
 // publish.
 type fakeSwarf struct {
 	err         error
+	calls       int
 	revocations []revocation
 }
 
-func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error {
+func (f *fakeSwarf) PublishBatch(_ context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: revoked.Link(), options: len(opts)})
+	f.calls++
+	for _, d := range revoked {
+		f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: d.Link()})
+	}
 	return nil
 }
 
@@ -359,11 +359,11 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Len(t, d.swarf.revocations, 1)
+		require.Equal(t, 1, d.swarf.calls)
 		r := d.swarf.revocations[0]
 		// The tenant issued the grant, so the tenant revokes it directly.
 		require.Equal(t, tenantID, r.revoker)
 		require.Equal(t, d.grant.Link(), r.revoked)
-		require.Zero(t, r.options)
 	})
 
 	t.Run("does not revoke the bucket root", func(t *testing.T) {
