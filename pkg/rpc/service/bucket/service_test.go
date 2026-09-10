@@ -14,6 +14,7 @@ import (
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
@@ -118,7 +119,7 @@ func TestCreate(t *testing.T) {
 		policies := bucketpolicymemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, policy))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		powerline, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, did.DID{}, content.Retrieve.Command)
@@ -295,7 +296,7 @@ func TestDelete(t *testing.T) {
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		bucketSigner, err := ed25519.Generate()
@@ -479,7 +480,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
@@ -591,7 +592,7 @@ func TestInfo(t *testing.T) {
 		tenants := tenantmemory.New()
 		policies := bucketpolicymemory.New()
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
 		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top())
 		require.NoError(t, err)
@@ -627,7 +628,7 @@ func TestInfo(t *testing.T) {
 	t.Run("rejects an access key belonging to another tenant", func(t *testing.T) {
 		svc, accessKeys := setup(t, did.DID{})
 		foreign := testutil.RandomDID(t)
-		require.NoError(t, accessKeys.Add(ctx, foreign, testutil.RandomDID(t), "k2", nil, []string{"s3:GetObject"}, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: foreign, Tenant: testutil.RandomDID(t), Name: "k2", Permissions: []string{"s3:GetObject"}}))
 		_, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: foreign})
 		require.ErrorIs(t, err, auth.ErrForeignBucket)
 	})
