@@ -12,6 +12,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/store"
 	dlgstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
@@ -94,25 +95,26 @@ func insert(ctx context.Context, tx pgx.Tx, d ucan.Delegation) error {
 // hashtext(audience DID).
 const lockNamespace int32 = 0x44454c47 // "DELG"
 
-// lockTimeout bounds how long Replace waits on another Replace of the same
-// audience. The holder runs next while it holds the lock, so a hung next must
-// fail the waiter rather than pin a pool connection.
-const lockTimeout = "10s"
-
 // Replace runs in one transaction that takes the audience's advisory lock
 // (pg_advisory_xact_lock, released when the transaction ends), reads the
 // current set, calls next, deletes the set and inserts next's result. A
 // second Replace of the same audience waits on the lock until the first
-// commits or rolls back, so it sees the settled state.
+// commits or rolls back, so it sees the settled state; the holder runs next
+// while it holds the lock, so the wait is bounded at [store.LockTimeout] and
+// a longer one returns [store.ErrLockTimeout].
 func (s *Store) Replace(ctx context.Context, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error {
+	return pglock.MapError(s.replace(ctx, audience, next))
+}
+
+func (s *Store) replace(ctx context.Context, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+lockTimeout+`'`); err != nil {
-		return fmt.Errorf("setting lock timeout: %w", err)
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2))`, lockNamespace, audience.String()); err != nil {
 		return fmt.Errorf("locking delegation audience: %w", err)

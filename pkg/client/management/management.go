@@ -1,5 +1,6 @@
-// Package management provides a REST client for Hilt's tenant and access-key
-// management API (the handlers in pkg/api). It authenticates with the partner
+// Package management provides a REST client for Hilt's tenant, principal and
+// access-key management API (the handlers in pkg/api). It authenticates with
+// the partner
 // key as an HTTP bearer token and speaks plain JSON — it is not a UCAN client
 // (cf. the UCAN clients in the parent pkg/client package).
 package management
@@ -139,6 +140,45 @@ func (c *Client) GetAccessKey(ctx context.Context, tenantID, accessKeyID string)
 // DeleteAccessKey revokes an access key. It is idempotent server-side.
 func (c *Client) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID string) error {
 	return c.do(ctx, http.MethodDelete, []string{"tenants", tenantID, "access-keys", accessKeyID}, nil, nil, http.StatusNoContent)
+}
+
+// Principals
+
+// CreatePrincipal records a principal of the tenant. It is idempotent: a
+// principal that already exists is returned unchanged.
+func (c *Client) CreatePrincipal(ctx context.Context, tenantID, userID string) (api.Principal, error) {
+	var p api.Principal
+	err := c.do(ctx, http.MethodPut, []string{"tenants", tenantID, "principals", userID}, nil, &p,
+		http.StatusOK, http.StatusCreated)
+	return p, err
+}
+
+// ListPrincipals lists the tenant's principals.
+func (c *Client) ListPrincipals(ctx context.Context, tenantID string) ([]api.Principal, error) {
+	var list api.PrincipalList
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals"}, nil, &list, http.StatusOK)
+	return list.Items, err
+}
+
+// GetPrincipal retrieves one principal of the tenant.
+func (c *Client) GetPrincipal(ctx context.Context, tenantID, userID string) (api.Principal, error) {
+	var p api.Principal
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", userID}, nil, &p, http.StatusOK)
+	return p, err
+}
+
+// DeletePrincipal removes the principal, its access to every bucket, and its
+// access keys. It is idempotent server-side.
+func (c *Client) DeletePrincipal(ctx context.Context, tenantID, userID string) error {
+	return c.do(ctx, http.MethodDelete, []string{"tenants", tenantID, "principals", userID}, nil, nil, http.StatusNoContent)
+}
+
+// ListPrincipalAccessKeys lists the keys bound to the principal (secrets are
+// never included).
+func (c *Client) ListPrincipalAccessKeys(ctx context.Context, tenantID, userID string) ([]api.AccessKey, error) {
+	var list api.AccessKeyList
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", userID, "access-keys"}, nil, &list, http.StatusOK)
+	return list.Items, err
 }
 
 // do executes a single request: it builds the URL from path segments (JoinPath

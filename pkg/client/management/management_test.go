@@ -157,6 +157,67 @@ func TestManagementClient(t *testing.T) {
 		require.NoError(t, c.DeleteAccessKey(ctx, "acme", "AKID"))
 	})
 
+	t.Run("CreatePrincipal accepts the created and the existing principal", func(t *testing.T) {
+		for _, status := range []int{http.StatusCreated, http.StatusOK} {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				assertAuth(t, r)
+				require.Equal(t, http.MethodPut, r.Method)
+				require.Equal(t, "/tenants/acme/principals/user-1", r.URL.Path)
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(api.Principal{UserID: "user-1"})
+			})
+			got, err := c.CreatePrincipal(ctx, "acme", "user-1")
+			require.NoError(t, err)
+			require.Equal(t, "user-1", got.UserID)
+		}
+	})
+
+	t.Run("ListPrincipals returns the items", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, "/tenants/acme/principals", r.URL.Path)
+			_ = json.NewEncoder(w).Encode(api.PrincipalList{Items: []api.Principal{{UserID: "user-1"}}})
+		})
+		got, err := c.ListPrincipals(ctx, "acme")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "user-1", got[0].UserID)
+	})
+
+	t.Run("GetPrincipal returns the principal", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, "/tenants/acme/principals/user-1", r.URL.Path)
+			_ = json.NewEncoder(w).Encode(api.Principal{UserID: "user-1"})
+		})
+		got, err := c.GetPrincipal(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Equal(t, "user-1", got.UserID)
+	})
+
+	t.Run("DeletePrincipal expects 204", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodDelete, r.Method)
+			require.Equal(t, "/tenants/acme/principals/user-1", r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		})
+		require.NoError(t, c.DeletePrincipal(ctx, "acme", "user-1"))
+	})
+
+	t.Run("ListPrincipalAccessKeys returns the items", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, "/tenants/acme/principals/user-1/access-keys", r.URL.Path)
+			_ = json.NewEncoder(w).Encode(api.AccessKeyList{Items: []api.AccessKey{{AccessKeyID: "AKID", Principal: "user-1"}}})
+		})
+		got, err := c.ListPrincipalAccessKeys(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "user-1", got[0].Principal)
+	})
+
 	t.Run("non-2xx returns an APIError carrying status and message", func(t *testing.T) {
 		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)

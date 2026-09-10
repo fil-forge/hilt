@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/marker"
 	"github.com/fil-forge/hilt/pkg/store"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
@@ -27,6 +29,7 @@ import (
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/ipfs/go-cid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -37,6 +40,24 @@ import (
 type noopRevocations struct{}
 
 func (noopRevocations) Publish(context.Context, ucan.Issuer, ucan.Delegation, ...swarfclient.PublishOption) error {
+	return nil
+}
+
+// errAssertPublishFailed is the canned failure a test publisher returns.
+var errAssertPublishFailed = errors.New("swarf unreachable")
+
+// recordingRevocations stands in for the revocation service, recording the
+// delegations it was asked to revoke.
+type recordingRevocations struct {
+	err     error
+	revoked []cid.Cid
+}
+
+func (r *recordingRevocations) Publish(_ context.Context, _ ucan.Issuer, revoked ucan.Delegation, _ ...swarfclient.PublishOption) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.revoked = append(r.revoked, revoked.Link())
 	return nil
 }
 
@@ -460,6 +481,9 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.ErrorIs(t, err, vault.ErrNotFound)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
+		require.NoError(t, err)
+		require.Empty(t, dels.Results, "the marker goes with the key")
 
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)
@@ -470,4 +494,36 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/missing/access-keys/z6MkWhatever", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+
+	t.Run("a lock the store gave up on is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		created := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "d", PrincipalID: "alice"})
+		require.Equal(t, http.StatusCreated, created.Code)
+		var ck api.CreatedAccessKey
+		require.NoError(t, json.Unmarshal(created.Body.Bytes(), &ck))
+
+		locked := &lockedAccessKeys{Store: deps.accessKeys, err: store.ErrLockTimeout}
+		svc := accesskeysvc.New(zap.NewNop(), deps.tenants, locked, deps.principals, deps.buckets, deps.delegations, deps.vault, noopRevocations{})
+		lockedEcho := echo.New()
+		r := api.NewDeleteAccessKeyHandler(zap.NewNop(), svc)
+		lockedEcho.Add(r.Method, r.Path, r.Handler)
+
+		rec := doRequest(t, lockedEcho, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
+		require.Equal(t, http.StatusConflict, rec.Code)
+		akID, err := did.Parse(did.KeyPrefix + ck.AccessKeyID)
+		require.NoError(t, err)
+		_, err = deps.accessKeys.Get(ctx, akID)
+		require.NoError(t, err, "the key must survive")
+	})
+}
+
+// lockedAccessKeys fails Delete with err, standing in for the store giving up
+// on a row another write holds.
+type lockedAccessKeys struct {
+	accesskeystore.Store
+	err error
+}
+
+func (l *lockedAccessKeys) Delete(context.Context, did.DID) error {
+	return l.err
 }

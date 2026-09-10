@@ -41,6 +41,7 @@ type Store interface {
 	// audience holds nothing, next is called with nil and its result is not
 	// stored. next runs while the audience is locked and must not call back
 	// into the store. It returns [store.ErrInvalidArgument] if next returns a
-	// nil delegation.
+	// nil delegation. The lock wait is bounded at [store.LockTimeout] and
+	// returns [store.ErrLockTimeout] when it runs out.
 	Replace(ctx context.Context, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error
 }
