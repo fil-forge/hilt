@@ -28,6 +28,21 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "delete object", method: "DELETE", url: "https://s3.example.com/bkt/k", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
 		{name: "delete bucket", method: "DELETE", url: "https://s3.example.com/bkt", want: OpDeleteBucket, wantBucket: "bkt"},
 
+		// Bucket-configuration reads. Both classified as ListBucket before the
+		// subresource parameter was taken into account.
+		{name: "get bucket versioning", method: "GET", url: "https://s3.example.com/bkt?versioning", want: OpGetBucketVersioning, wantBucket: "bkt"},
+		{name: "get bucket versioning with value", method: "GET", url: "https://s3.example.com/bkt?versioning=", want: OpGetBucketVersioning, wantBucket: "bkt"},
+		{name: "head bucket versioning", method: "HEAD", url: "https://s3.example.com/bkt?versioning", want: OpGetBucketVersioning, wantBucket: "bkt"},
+		{name: "get bucket object lock configuration", method: "GET", url: "https://s3.example.com/bkt?object-lock", want: OpGetBucketObjectLockConfiguration, wantBucket: "bkt"},
+		// The subresource only applies to a bucket: on an object key it is an
+		// unknown parameter and the request stays a GetObject.
+		{name: "versioning on an object is a get object", method: "GET", url: "https://s3.example.com/bkt/k?versioning", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "object-lock on an object is a get object", method: "GET", url: "https://s3.example.com/bkt/k?object-lock", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		// The parameter names are case-sensitive, and a PUT of the subresource is
+		// not a supported configuration write: it classifies as CreateBucket.
+		{name: "versioning wrong case is a list", method: "GET", url: "https://s3.example.com/bkt?Versioning", want: OpListBucket, wantBucket: "bkt"},
+		{name: "put bucket versioning is a create bucket", method: "PUT", url: "https://s3.example.com/bkt?versioning", want: OpCreateBucket, wantBucket: "bkt"},
+
 		// Multipart operations. Each of these classified as its plain-object
 		// counterpart before the query string was taken into account.
 		{name: "list multipart uploads", method: "GET", url: "https://s3.example.com/bkt?uploads", want: OpListBucketMultipartUploads, wantBucket: "bkt"},
@@ -91,6 +106,7 @@ func TestOperationPermission(t *testing.T) {
 	ops := []Operation{
 		OpListBuckets, OpListBucket, OpGetObject, OpPutObject, OpCreateBucket,
 		OpDeleteObject, OpDeleteBucket,
+		OpGetBucketVersioning, OpGetBucketObjectLockConfiguration,
 		OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}
@@ -98,6 +114,11 @@ func TestOperationPermission(t *testing.T) {
 	for _, op := range ops {
 		require.NotEmpty(t, op.Permission(), "operation %s has no required permission", op)
 	}
+
+	// The bucket-configuration reads act on a bucket that must exist, so the
+	// authorizer resolves and scope-checks it as it does for a listing.
+	require.True(t, OpGetBucketVersioning.addressesExistingBucket())
+	require.True(t, OpGetBucketObjectLockConfiguration.addressesExistingBucket())
 
 	// The multipart write operations share s3:PutObject, so a key that can already
 	// put an object can perform them without being re-issued.
@@ -107,6 +128,11 @@ func TestOperationPermission(t *testing.T) {
 	require.Equal(t, "s3:AbortMultipartUpload", OpAbortMultipartUpload.Permission())
 	require.Equal(t, "s3:ListMultipartUploadParts", OpListMultipartUploadParts.Permission())
 	require.Equal(t, "s3:ListBucketMultipartUploads", OpListBucketMultipartUploads.Permission())
+
+	// The bucket-configuration reads have their own permissions, so a policy can
+	// grant a listing without them and the other way round.
+	require.Equal(t, "s3:GetBucketVersioning", OpGetBucketVersioning.Permission())
+	require.Equal(t, "s3:GetBucketObjectLockConfiguration", OpGetBucketObjectLockConfiguration.Permission())
 
 	require.Empty(t, Operation("Unknown").Permission())
 }
