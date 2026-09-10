@@ -197,6 +197,40 @@ func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID
 	return &adminnodes.SetOK{}, nil
 }
 
+// NewListProvidersHandler handles /admin/provider/list — report every registered
+// regional provider with its region and routing policy. It is an admin command:
+// only an invocation issued by the service's own identity is accepted.
+func NewListProvidersHandler(logger *zap.Logger, id identity.Identity, providers providerstore.Store) server.Route {
+	log := logger.With(zap.Stringer("command", adminprovider.List.Command))
+	return adminprovider.List.Route(func(req *binding.Request[*adminprovider.ListArguments], res *binding.Response[*adminprovider.ListOK]) error {
+		ok, err := ListProviders(req.Context(), log, id.DID(), providers, req.Invocation().Issuer(), req.Task().Arguments())
+		if err != nil {
+			log.Error("list providers failed", zap.Error(err))
+			return adminFailure(res, err)
+		}
+		return res.SetSuccess(ok)
+	})
+}
+
+// ListProviders reports every registered provider, ordered by DID as the store
+// returns them. Only the service identity (issuer == serviceID) may call it.
+func ListProviders(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, issuer did.DID, _ *adminprovider.ListArguments) (*adminprovider.ListOK, error) {
+	if issuer != serviceID {
+		return nil, ErrUnauthorized
+	}
+	recs, err := providers.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing providers: %w", err)
+	}
+	// Never nil, so an empty result encodes as an empty array.
+	out := make([]adminprovider.Provider, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, adminprovider.Provider{Provider: rec.ID, Region: rec.Region, Policy: rec.Policy})
+	}
+	logger.Debug("listed providers", zap.Int("providers", len(out)))
+	return &adminprovider.ListOK{Providers: out}, nil
+}
+
 // issuePolicy creates a routing policy: a fresh ed25519 key whose DID is the
 // policy DID delegates top authority over itself to the service (a non-expiring
 // root, stored in the delegation store) and is then discarded. The delegation is

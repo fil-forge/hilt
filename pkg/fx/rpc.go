@@ -38,6 +38,7 @@ var RPCModule = fx.Module("rpc",
 		asUCANRoute(rpc.NewListBucketsHandler),
 		asUCANRoute(rpc.NewAddProviderHandler),
 		asUCANRoute(rpc.NewSetProviderNodesHandler),
+		asUCANRoute(rpc.NewListProvidersHandler),
 	),
 )
 

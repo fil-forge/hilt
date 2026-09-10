@@ -25,6 +25,8 @@ func tag(path string) {
 func main() {
 	models := []any{
 		provider.AddArguments{},
+		provider.Provider{},
+		provider.ListOK{},
 	}
 	const (
 		cborFile = "../cbor_gen.go"
