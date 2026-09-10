@@ -12,7 +12,7 @@ require (
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/fil-forge/libforge v0.0.0-20260917130118-2a6403bafc69
 	github.com/fil-forge/smelt v0.0.0-20260914083257-f594cf02655c
-	github.com/fil-forge/swarf v0.0.1-0.20260821142121-d5d1a0a56f00
+	github.com/fil-forge/swarf v0.0.1-0.20260915151213-17e6d25fe8b9
 	github.com/fil-forge/ucantone v0.0.0-20260827134420-25cf8340b9a1
 	github.com/ipfs/go-cid v0.6.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6

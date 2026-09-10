@@ -10,7 +10,8 @@ import (
 )
 
 type Store interface {
-	// DeleteByAudience removes all delegation records for a given audience.
+	// DeleteByAudience removes all delegation records for a given audience,
+	// under that audience's lock.
 	DeleteByAudience(ctx context.Context, audience did.DID) error
 	// DeleteBySubject removes all delegation records for a given subject.
 	// The undefined DID (powerline) is not removed by this method: it returns
@@ -31,7 +32,18 @@ type Store interface {
 	// of the next Delegation. It returns [store.ErrInvalidArgument] for an undef
 	// subject.
 	ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error)
-	// PutBatch stores a batch of delegation records. It returns
-	// [store.ErrInvalidArgument] if the batch contains a nil delegation.
+	// PutBatch stores a batch of delegation records. It takes the lock of
+	// every audience the batch touches, so it does not interleave with a
+	// Replace of any of them. It returns [store.ErrInvalidArgument] if the
+	// batch contains a nil delegation.
 	PutBatch(ctx context.Context, delegation []ucan.Delegation) error
+	// Replace atomically swaps the audience's delegations: it locks the
+	// audience, hands next the current set, deletes it, stores what next
+	// returns, and commits. next may return nil to leave the audience with
+	// none; an error from next rolls everything back and is returned. An
+	// audience holding nothing is handed a nil current set and stores what
+	// next returns, so Replace also stores a first delegation. next runs while
+	// the audience is locked and must not call back into the store. It returns
+	// [store.ErrInvalidArgument] if next returns a nil delegation.
+	Replace(ctx context.Context, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error
 }
