@@ -11,6 +11,7 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	policymemory "github.com/fil-forge/hilt/pkg/store/policy/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -47,7 +48,7 @@ func TestNewUCANServer(t *testing.T) {
 		config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
 	)
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), upload, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), policymemory.New(), upload, revocations)
 	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{
 		Identity: id,
 		Logger:   zap.NewNop(),

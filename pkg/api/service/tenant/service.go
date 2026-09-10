@@ -15,6 +15,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
+	policystore "github.com/fil-forge/hilt/pkg/store/policy"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
@@ -40,6 +41,7 @@ type Service struct {
 	buckets     bucket.Store
 	accessKeys  accesskey.Store
 	principals  principalstore.Store
+	policies    policystore.Store
 	delegations delegation.Store
 	secrets     vault.Vault
 	wrapKeys    wrapkeystore.Store
@@ -55,6 +57,7 @@ func New(
 	buckets bucket.Store,
 	accessKeys accesskey.Store,
 	principals principalstore.Store,
+	policies policystore.Store,
 	delegations delegation.Store,
 	secrets vault.Vault,
 	wrapKeys wrapkeystore.Store,
@@ -68,6 +71,7 @@ func New(
 		buckets:     buckets,
 		accessKeys:  accessKeys,
 		principals:  principals,
+		policies:    policies,
 		delegations: delegations,
 		secrets:     secrets,
 		plcClient:   plcClient,
@@ -259,8 +263,8 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its
-// buckets, access keys, principals, and delegations, and deactivating its
-// did:plc. It is idempotent: a missing tenant is a no-op.
+// buckets and their policies, access keys, principals, and delegations, and
+// deactivating its did:plc. It is idempotent: a missing tenant is a no-op.
 //
 // Out of scope: deprovisioning the tenant's spaces from the Forge upload service
 // (Sprue), for which there is no facility per the RFC.
@@ -329,7 +333,9 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("deleting wrap keys: %w", err)
 	}
 
-	// Cascade: buckets (records; bucket keys are discarded at creation).
+	// Cascade: buckets (records and their policies; bucket keys are discarded at
+	// creation). Postgres cascades a policy with its bucket row; the explicit
+	// delete keeps the memory backend in step.
 	bucketIDs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[did.DID], error) {
 		var listOpts []bucket.ListOption
 		if opts.Cursor != nil {
@@ -349,6 +355,9 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("listing buckets: %w", err)
 	}
 	for _, id := range bucketIDs {
+		if err := s.policies.DeleteByBucket(ctx, id); err != nil {
+			return fmt.Errorf("deleting bucket policy: %w", err)
+		}
 		if err := s.buckets.Delete(ctx, id); err != nil {
 			return fmt.Errorf("deleting bucket: %w", err)
 		}

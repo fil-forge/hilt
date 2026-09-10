@@ -11,6 +11,7 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	policymemory "github.com/fil-forge/hilt/pkg/store/policy/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -30,7 +31,7 @@ func TestHandlerCommands(t *testing.T) {
 	require.NoError(t, err)
 	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), up, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), policymemory.New(), up, revocations)
 
 	t.Run("list", func(t *testing.T) {
 		route := rpc.NewListBucketsHandler(zap.NewNop(), buckets)
