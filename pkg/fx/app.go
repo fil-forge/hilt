@@ -36,15 +36,24 @@ func AppModule(cfg *config.Config) fx.Option {
 		return fx.Error(fmt.Errorf("unknown storage.type %q (valid: memory, postgres)", cfg.Storage.Type))
 	}
 
-	switch cfg.Vault.Type {
-	case config.VaultTypeMemory:
-		opts = append(opts, vaultmemory.Module)
-	case config.VaultTypeOpenBao, "":
-		// Empty type is treated as the default backend (openbao).
-		opts = append(opts, vaultopenbao.Module)
-	default:
-		return fx.Error(fmt.Errorf("unknown vault.type %q (valid: memory, openbao)", cfg.Vault.Type))
+	vault, err := vaultModule(cfg)
+	if err != nil {
+		return fx.Error(err)
 	}
+	opts = append(opts, vault)
 
 	return fx.Options(opts...)
+}
+
+// vaultModule selects the vault backend module from the configured vault type.
+func vaultModule(cfg *config.Config) (fx.Option, error) {
+	switch cfg.Vault.Type {
+	case config.VaultTypeMemory:
+		return vaultmemory.Module, nil
+	case config.VaultTypeOpenBao, "":
+		// Empty type is treated as the default backend (openbao).
+		return vaultopenbao.Module, nil
+	default:
+		return nil, fmt.Errorf("unknown vault.type %q (valid: memory, openbao)", cfg.Vault.Type)
+	}
 }

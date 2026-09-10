@@ -47,7 +47,10 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 
 ## Layout
 
-- `cmd/main.go` — cobra entrypoint (`serve`).
+- `cmd/main.go` — cobra entrypoint (`serve`, `migrate iam`, `client`).
+- `pkg/iammigrate` — the one-shot `hilt migrate iam` run: removes the access keys
+  that predate the tenant IAM model (revocations first, then delegations, vault
+  entry, row) so the IAM schema migration can drop their columns.
 - `pkg/fx` — uber-fx wiring. `AppModule` picks the storage (`memory`/`postgres`)
   and vault (`memory`/`openbao`) backend from config; `ProvideConfigs` splits
   `config.Config` into injectable sub-configs; handlers/services are registered

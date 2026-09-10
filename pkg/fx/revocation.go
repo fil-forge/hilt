@@ -6,6 +6,7 @@ import (
 
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/config"
+	"github.com/fil-forge/hilt/pkg/iammigrate"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
@@ -13,9 +14,9 @@ import (
 )
 
 // RevocationModule provides the Swarf revocation-service client, published as the
-// narrow interface each consumer declares as well as the concrete type. Both the
-// REST access-key service and the UCAN bucket service revoke delegations, so the
-// client is shared rather than owned by either module.
+// narrow interface each consumer declares as well as the concrete type. The REST
+// access-key service, the UCAN bucket service and the IAM key migration all
+// revoke delegations, so the client is shared rather than owned by any of them.
 var RevocationModule = fx.Module("revocation",
 	fx.Provide(
 		fx.Annotate(
@@ -23,6 +24,7 @@ var RevocationModule = fx.Module("revocation",
 			fx.As(fx.Self()),
 			fx.As(new(accesskeysvc.RevocationPublisher)),
 			fx.As(new(bucketsvc.RevocationPublisher)),
+			fx.As(new(iammigrate.RevocationPublisher)),
 		),
 	),
 )
