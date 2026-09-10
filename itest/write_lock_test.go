@@ -5,10 +5,12 @@ package itest
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/fil-forge/hilt/pkg/api"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,12 +18,10 @@ import (
 // active tenant creates a bucket and writes an object, then the tenant is
 // write-locked and the same operations must be refused while reads keep
 // working.
-//
-// The credentials used after the lock are a second access key created after it,
-// because ingot caches the delegations hilt issued for the first key (valid
-// until midnight UTC) and would not re-authorize with hilt at all. This
-// exercises the cold hilt authorization path; expiring warm ingot caches on a
-// status change is ingot's side of the fix.
+// The same S3 client and access key are used after the lock, so the test covers
+// Ingot's warm authorization cache. Hilt revokes the access-key delegations
+// when the lock is applied; Ingot must then re-authorize and receive the
+// write-lock rejection.
 func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
@@ -45,32 +45,31 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	require.NoError(t, err)
 
 	require.NoError(t, net.console.SetTenantStatus(ctx, tenantID, api.TenantStatusWriteLocked))
+	net.awaitRevocations(t, ctx, len(s3perm.CommandsFor(perms...)), "did:key:"+ak.AccessKeyID)
 
-	locked, err := net.console.CreateAccessKey(ctx, tenantID, "after-lock", perms, nil)
-	require.NoError(t, err)
-	lockedC := net.s3Client(t, locked.AccessKeyID, locked.SecretAccessKey)
+	require.Eventually(t, func() bool {
+		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("after-lock.txt"),
+			Body:   bytes.NewReader([]byte("should be refused")),
+		})
+		return err != nil
+	}, 30*time.Second, 500*time.Millisecond, "PutObject must be refused after revocation propagation")
 
-	_, err = lockedC.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String("after-lock.txt"),
-		Body:   bytes.NewReader([]byte("should be refused")),
-	})
-	require.Error(t, err, "PutObject must be refused while the tenant is write-locked")
-
-	_, err = lockedC.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("write-lock-bucket-2")})
+	_, err = s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("write-lock-bucket-2")})
 	require.Error(t, err, "CreateBucket must be refused while the tenant is write-locked")
 
-	_, err = lockedC.DeleteObject(ctx, &s3.DeleteObjectInput{
+	_, err = s3c.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("before-lock.txt"),
 	})
 	require.Error(t, err, "DeleteObject must be refused while the tenant is write-locked")
 
-	_, err = lockedC.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	require.Error(t, err, "DeleteBucket must be refused while the tenant is write-locked")
 
 	// Reads stay available: listing the tenant's buckets still succeeds.
-	out, err := lockedC.ListBuckets(ctx, &s3.ListBucketsInput{})
+	out, err := s3c.ListBuckets(ctx, &s3.ListBucketsInput{})
 	require.NoError(t, err, "reads must keep working while the tenant is write-locked")
 	require.NotEmpty(t, out.Buckets)
 }

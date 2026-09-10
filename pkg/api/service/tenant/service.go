@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -22,7 +24,10 @@ import (
 	"github.com/fil-forge/hilt/pkg/wrapkey"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
+	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/validator"
 	"go.uber.org/zap"
 )
 
@@ -43,6 +48,7 @@ type Service struct {
 	wrapKeys    wrapkeystore.Store
 	plcClient   *plc.DirectoryClient
 	upload      *upload.Client
+	revocations accesskeysvc.RevocationPublisher
 }
 
 // New constructs the tenant service.
@@ -57,6 +63,7 @@ func New(
 	wrapKeys wrapkeystore.Store,
 	plcClient *plc.DirectoryClient,
 	upload *upload.Client,
+	revocations accesskeysvc.RevocationPublisher,
 ) *Service {
 	return &Service{
 		logger:      logger,
@@ -69,6 +76,7 @@ func New(
 		plcClient:   plcClient,
 		wrapKeys:    wrapKeys,
 		upload:      upload,
+		revocations: revocations,
 	}
 }
 
@@ -236,7 +244,8 @@ func (s *Service) Get(ctx context.Context, externalID string) (tenantstore.Recor
 
 // SetStatus updates the tenant's access mode. status must be a recognized status.
 func (s *Service) SetStatus(ctx context.Context, externalID, status string) error {
-	if !validStatus(tenantstore.Status(status)) {
+	next := tenantstore.Status(status)
+	if !validStatus(next) {
 		return ErrInvalidStatus
 	}
 	rec, err := s.tenants.GetByExternalID(ctx, externalID)
@@ -245,11 +254,66 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	if err := s.tenants.SetStatus(ctx, rec.ID, tenantstore.Status(status)); err != nil {
+	if rec.Status != next && next == tenantstore.WriteLocked {
+		if err := s.revokeDelegations(ctx, rec.ID); err != nil {
+			return fmt.Errorf("revoking tenant delegations: %w", err)
+		}
+	}
+	if err := s.tenants.SetStatus(ctx, rec.ID, next); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("updating tenant status: %w", err)
+	}
+	return nil
+}
+
+// revokeDelegations revokes every unexpired delegation the tenant issued to its
+// access keys. Ingot's cached authorization is then invalidated by Swarf and its
+// next request must re-authorize with Hilt, where the write-lock is enforced.
+func (s *Service) revokeDelegations(ctx context.Context, tenantID did.DID) error {
+	keys, err := s.accessKeys.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("listing access keys: %w", err)
+	}
+
+	var delegations []ucan.Delegation
+	for _, key := range keys {
+		dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+			var listOpts []store.PaginationOption
+			if opts.Cursor != nil {
+				listOpts = append(listOpts, store.WithCursor(*opts.Cursor))
+			}
+			return s.delegations.ListByAudience(ctx, key.ID, listOpts...)
+		})
+		if err != nil {
+			return fmt.Errorf("listing delegations for %s: %w", key.ID, err)
+		}
+		for _, d := range dels {
+			if d.Issuer() == tenantID {
+				delegations = append(delegations, d)
+			}
+		}
+	}
+	if len(delegations) == 0 {
+		return nil
+	}
+	if s.revocations == nil {
+		return errors.New("revocation publisher is not configured")
+	}
+
+	issuer, err := s.tenantIssuer(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	now := ucan.UnixTimestamp(time.Now().Unix())
+	for _, d := range delegations {
+		if err := validator.ValidateNotExpired(d, now); err != nil {
+			continue
+		}
+		if err := s.revocations.Publish(ctx, issuer, d); err != nil {
+			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
+		}
 	}
 	return nil
 }
@@ -366,6 +430,18 @@ func (s *Service) cleanupKey(ctx context.Context, log *zap.Logger, vaultKey stri
 	if err := s.secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
 		log.Error("cleaning up orphaned tenant key", zap.Error(err))
 	}
+}
+
+func (s *Service) tenantIssuer(ctx context.Context, tenantID did.DID) (ucan.Issuer, error) {
+	keyBytes, err := s.secrets.Read(ctx, vault.TenantKeyPath(tenantID))
+	if err != nil {
+		return nil, fmt.Errorf("reading tenant key: %w", err)
+	}
+	signer, err := secp256k1.Decode(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decoding tenant key: %w", err)
+	}
+	return multikey.NewIssuer(tenantID, signer), nil
 }
 
 // deactivateTenantDID publishes a tombstone for the tenant's did:plc, signed with
