@@ -171,6 +171,38 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 	}
 }
 
+// TestPolicyAction pins the policy vocabulary: every recognized permission except
+// the three bucket-level actions, which a policy can neither grant nor withhold.
+func TestPolicyAction(t *testing.T) {
+	for _, p := range []string{
+		"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
+		"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+	} {
+		require.True(t, s3perm.PolicyAction(p), p)
+	}
+	for _, p := range []string{
+		"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
+		"", "s3:Frobnicate", "s3:getobject",
+	} {
+		require.False(t, s3perm.PolicyAction(p), p)
+	}
+}
+
+// TestPolicyActions pins the wildcard expansion: sorted, every PolicyAction and
+// nothing else.
+func TestPolicyActions(t *testing.T) {
+	actions := s3perm.PolicyActions()
+	require.True(t, slices.IsSorted(actions))
+	require.Len(t, actions, 14)
+	for _, p := range actions {
+		require.True(t, s3perm.PolicyAction(p), p)
+	}
+	for _, p := range []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets", s3perm.PolicyWildcard} {
+		require.NotContains(t, actions, p)
+	}
+	require.False(t, s3perm.PolicyAction(s3perm.PolicyWildcard))
+}
+
 // TestOperationPermissionsAreValid keeps the two hardcoded permission lists in
 // lockstep: every permission an operation requires must be one this package can map
 // to Forge commands, otherwise an authorized request would be re-delegated nothing.
