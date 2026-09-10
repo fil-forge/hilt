@@ -39,6 +39,40 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	s.put(delegations)
+	return nil
+}
+
+// Replace swaps the audiences' delegations under the store's lock, which
+// serializes it against every other write: next sees the settled current sets
+// and its result is in place before the lock is released.
+func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	current := make(map[did.DID][]ucan.Delegation, len(audiences))
+	for _, aud := range audiences {
+		current[aud] = slices.Clone(s.byAudience[aud])
+	}
+	replacement, err := next(ctx, current)
+	if err != nil {
+		return err
+	}
+	for _, aud := range audiences {
+		if slices.Contains(replacement[aud], nil) {
+			return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
+		}
+	}
+	for _, aud := range audiences {
+		delete(s.byAudience, aud)
+		s.put(replacement[aud])
+	}
+	return nil
+}
+
+// put stores the delegations, skipping any already held. The caller holds the
+// lock.
+func (s *Store) put(delegations []ucan.Delegation) {
 	for _, d := range delegations {
 		aud := d.Audience()
 		existing := s.byAudience[aud]
@@ -53,7 +87,6 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 		})
 		s.byAudience[aud] = existing
 	}
-	return nil
 }
 
 func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
