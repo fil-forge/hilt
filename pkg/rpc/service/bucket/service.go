@@ -21,6 +21,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -69,6 +70,7 @@ type Service struct {
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
 	tenants     tenantstore.Store
+	policies    bucketpolicystore.Store
 	uploads     UploadClient
 	revocations RevocationPublisher
 }
@@ -81,6 +83,7 @@ func New(
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
 	tenants tenantstore.Store,
+	policies bucketpolicystore.Store,
 	uploads UploadClient,
 	revocations RevocationPublisher,
 ) *Service {
@@ -91,6 +94,7 @@ func New(
 		delegations: delegations,
 		accessKeys:  accessKeys,
 		tenants:     tenants,
+		policies:    policies,
 		uploads:     uploads,
 		revocations: revocations,
 	}
@@ -272,7 +276,9 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 // Delete authenticates the request, checks the s3:DeleteBucket permission,
 // resolves the bucket, verifies its space is empty via Sprue (acting as the
 // tenant), publishes revocations for the delegations over the bucket, then
-// deletes those delegations and the bucket record. Revocations are published
+// deletes those delegations, the bucket's policy and the bucket record. The
+// policy goes without a publication: the gateway refuses a bucket it no longer
+// knows, so nothing cached for it can be used. Revocations are published
 // first so that a revocation service failure leaves the bucket intact and the
 // call cleanly retryable — otherwise the delegations would live on with nothing
 // for a verifier to check.
@@ -304,9 +310,14 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 		return nil, err
 	}
 
-	// Remove the bucket's delegations (subject == bucket), then the record.
+	// Remove the bucket's delegations (subject == bucket) and policy, then the
+	// record. Postgres cascades the policy with the bucket row; the explicit
+	// delete keeps the memory backend in step.
 	if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
 		return nil, fmt.Errorf("deleting bucket delegations: %w", err)
+	}
+	if err := s.policies.DeleteByBucket(ctx, authz.Bucket.ID); err != nil {
+		return nil, fmt.Errorf("deleting bucket policy: %w", err)
 	}
 	if err := s.buckets.Delete(ctx, authz.Bucket.ID); err != nil {
 		return nil, fmt.Errorf("deleting bucket: %w", err)
