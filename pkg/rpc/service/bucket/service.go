@@ -196,7 +196,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 
 	// Derive the verification key the gateway uses to validate the caller's request
 	// signatures for this bucket.
-	signer, err := s.authorizer.AccessKeySigner(ctx, authz.AccessKey.Tenant, accessKeyID)
+	signer, err := s.authorizer.AccessKeySigner(ctx, authz.AccessKey)
 	if err != nil {
 		rollback()
 		return nil, nil, err
@@ -259,7 +259,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		Bucket: &bucketID,
 		Tenant: authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			accessKeyID: authz.AccessKey.Permissions,
+			accessKeyID: authz.Permissions,
 		}},
 		Keys: s3.KeySet{Entries: map[did.DID][]s3.VerificationKey{
 			accessKeyID: {{Kind: kind, Data: key}},
