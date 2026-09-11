@@ -12,6 +12,10 @@ const (
 	// InvalidArgumentErrorName is the name given to an error where an argument
 	// passed to a store operation is invalid.
 	InvalidArgumentErrorName = "InvalidArgument"
+	// PreconditionFailedErrorName is the name given to an error where a
+	// compare-and-set write finds the record in a state other than the one the
+	// caller conditioned on.
+	PreconditionFailedErrorName = "PreconditionFailed"
 )
 
 var (
@@ -22,4 +26,8 @@ var (
 	// ErrInvalidArgument is returned when an argument passed to a store
 	// operation is invalid.
 	ErrInvalidArgument = errors.New(InvalidArgumentErrorName, "invalid argument")
+	// ErrPreconditionFailed is returned when a conditional write does not match
+	// the stored record: an If-Match tag differs from the current one, or a
+	// create finds a record already present. Nothing is written.
+	ErrPreconditionFailed = errors.New(PreconditionFailedErrorName, "precondition failed")
 )
