@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +32,7 @@ func testDeleteAccessKeyRevokes(t *testing.T, net *forgeNet) {
 	// needed to revoke them: the tenant issued them, so no witness path is
 	// involved.
 	perms := []string{"s3:CreateBucket", "s3:PutObject"}
-	ak, err := net.console.CreateAccessKey(ctx, tenantID, "key-1", perms, nil)
+	ak, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{Name: "key-1", Permissions: perms})
 	require.NoError(t, err)
 
 	require.NoError(t, net.console.DeleteAccessKey(ctx, tenantID, ak.AccessKeyID))
@@ -71,8 +72,10 @@ func testDeleteBucketRevokes(t *testing.T, net *forgeNet) {
 	// A tenant-wide admin key creates, fills, empties, and deletes the
 	// bucket; its delegations are powerline (tenant subject), so the bucket
 	// deletion revokes none of them.
-	admin, err := net.console.CreateAccessKey(ctx, tenantID, "admin-key",
-		[]string{"s3:CreateBucket", "s3:DeleteBucket", "s3:PutObject", "s3:DeleteObject"}, nil)
+	admin, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name:        "admin-key",
+		Permissions: []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:PutObject", "s3:DeleteObject"},
+	})
 	require.NoError(t, err)
 	adminS3 := net.s3Client(t, admin.AccessKeyID, admin.SecretAccessKey)
 	_, err = adminS3.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
@@ -81,7 +84,9 @@ func testDeleteBucketRevokes(t *testing.T, net *forgeNet) {
 	// A reader key scoped to that bucket: this is the delegation the delete
 	// revokes.
 	readerPerms := []string{"s3:GetObject"}
-	reader, err := net.console.CreateAccessKey(ctx, tenantID, "reader-key", readerPerms, []string{bucket})
+	reader, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name: "reader-key", Permissions: readerPerms, Buckets: []string{bucket},
+	})
 	require.NoError(t, err)
 
 	// With an object in the bucket the delete must be refused: hilt asks the
@@ -146,8 +151,9 @@ func testDeleteBucketRevokesOnlyThatBucket(t *testing.T, net *forgeNet) {
 	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
 	require.NoError(t, err)
 
-	admin, err := net.console.CreateAccessKey(ctx, tenantID,
-		"admin-key", []string{"s3:CreateBucket", "s3:DeleteBucket"}, nil)
+	admin, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name: "admin-key", Permissions: []string{"s3:CreateBucket", "s3:DeleteBucket"},
+	})
 	require.NoError(t, err)
 	adminS3 := net.s3Client(t, admin.AccessKeyID, admin.SecretAccessKey)
 	for _, bucket := range []string{keptBucket, doomedBucket} {
@@ -159,8 +165,9 @@ func testDeleteBucketRevokesOnlyThatBucket(t *testing.T, net *forgeNet) {
 	// (bucket × command); deleting one bucket must revoke only that bucket's
 	// half.
 	writerPerms := []string{"s3:PutObject"}
-	writer, err := net.console.CreateAccessKey(ctx, tenantID,
-		"writer-key", writerPerms, []string{keptBucket, doomedBucket})
+	writer, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name: "writer-key", Permissions: writerPerms, Buckets: []string{keptBucket, doomedBucket},
+	})
 	require.NoError(t, err)
 
 	_, err = adminS3.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(doomedBucket)})
