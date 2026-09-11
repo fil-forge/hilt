@@ -14,9 +14,11 @@ func TestClassifyRequest(t *testing.T) {
 		name       string
 		method     string
 		url        string
+		headers    map[string]string
 		want       Operation
 		wantBucket string
 		wantKey    string
+		wantSrc    string // "bucket/key" named by x-amz-copy-source, for the copy operations
 	}{
 		// Plain object and bucket operations.
 		{name: "list buckets", method: "GET", url: "https://s3.example.com/", want: OpListBuckets},
@@ -37,8 +39,23 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "complete multipart upload", method: "POST", url: "https://s3.example.com/bkt/k?uploadId=abc", want: OpCompleteMultipartUpload, wantBucket: "bkt", wantKey: "k"},
 		{name: "abort multipart upload", method: "DELETE", url: "https://s3.example.com/bkt/k?uploadId=abc", want: OpAbortMultipartUpload, wantBucket: "bkt", wantKey: "k"},
 
-		// A part copy is an upload part: the copy source is not classified.
-		{name: "upload part copy", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=2&uploadId=abc", want: OpUploadPart, wantBucket: "bkt", wantKey: "k"},
+		// Copies: a PUT of an object or a part naming a parseable x-amz-copy-source.
+		// The header name is case-insensitive; the value may carry a leading slash,
+		// URL-encoding and a versionId suffix, all of which the source parse strips.
+		{name: "copy object", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj"},
+		{name: "copy object, header name case", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"X-Amz-Copy-Source": "/src/a%20b/c?versionId=v1"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/a b/c"},
+		{name: "upload part copy", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=2&uploadId=abc", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpUploadPartCopy, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj"},
+		{name: "copy within a bucket", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "bkt/other"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "bkt/other"},
+
+		// A copy source the gateway would reject is not a copy: the gateway fails
+		// the request on its own validation, so only the plain write is classified.
+		{name: "copy source without a key is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "srconly"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "copy source with an empty key is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "copy source with bad encoding is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/%ZZ"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "empty copy source is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": ""}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		// Only PUT copies; the header on any other shape is ignored.
+		{name: "copy source on a complete is a complete", method: "POST", url: "https://s3.example.com/bkt/k?uploadId=abc", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpCompleteMultipartUpload, wantBucket: "bkt", wantKey: "k"},
+		{name: "copy source on a get is a get", method: "GET", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
 
 		// Each multipart write shape is reachable only via the method S3 defines for
 		// it. A mismatched shape is not a multipart request and falls back to
@@ -63,11 +80,17 @@ func TestClassifyRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			op, bucket, key, err := classifyRequest(s3.Request{Method: tt.method, URL: tt.url})
+			c, err := classifyRequest(s3.Request{Method: tt.method, URL: tt.url, Headers: tt.headers})
 			require.NoError(t, err)
-			require.Equal(t, tt.want, op)
-			require.Equal(t, tt.wantBucket, bucket)
-			require.Equal(t, tt.wantKey, key)
+			require.Equal(t, tt.want, c.op)
+			require.Equal(t, tt.wantBucket, c.bucket)
+			require.Equal(t, tt.wantKey, c.key)
+			src := ""
+			if c.srcBucket != "" {
+				src = c.srcBucket + "/" + c.srcKey
+			}
+			require.Equal(t, tt.wantSrc, src)
+			require.Equal(t, tt.wantSrc != "", c.op.CopiesSource())
 		})
 	}
 
@@ -78,10 +101,44 @@ func TestClassifyRequest(t *testing.T) {
 			{Method: "DELETE", URL: "https://s3.example.com/"},
 			{Method: "PATCH", URL: "https://s3.example.com/bkt/k"},
 		} {
-			_, _, _, err := classifyRequest(req)
+			_, err := classifyRequest(req)
 			require.Error(t, err, "%s %s", req.Method, req.URL)
 		}
 	})
+}
+
+// TestRequirementsFor covers the gateway's local view of what a request needs:
+// one bucket/permission pair for an ordinary operation, a second for the copy
+// source, none for operations that address no existing bucket.
+func TestRequirementsFor(t *testing.T) {
+	copyHdr := map[string]string{"x-amz-copy-source": "src/obj"}
+
+	op, reqs, err := RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
+	require.NoError(t, err)
+	require.Equal(t, OpCopyObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
+
+	op, reqs, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", Headers: copyHdr})
+	require.NoError(t, err)
+	require.Equal(t, OpUploadPartCopy, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
+
+	op, reqs, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
+	require.NoError(t, err)
+	require.Equal(t, OpGetObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
+
+	for _, req := range []s3.Request{
+		{Method: "GET", URL: "https://s3.example.com/"},
+		{Method: "PUT", URL: "https://s3.example.com/bkt"},
+	} {
+		_, reqs, err := RequirementsFor(req)
+		require.NoError(t, err)
+		require.Empty(t, reqs, "%s %s", req.Method, req.URL)
+	}
+
+	_, _, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
+	require.Error(t, err)
 }
 
 // TestOperationPermission asserts every operation requires a permission, so a new
@@ -89,9 +146,9 @@ func TestClassifyRequest(t *testing.T) {
 // with no permission would pass the access key's permission check unconditionally.
 func TestOperationPermission(t *testing.T) {
 	ops := []Operation{
-		OpListBuckets, OpListBucket, OpGetObject, OpPutObject, OpCreateBucket,
+		OpListBuckets, OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpCreateBucket,
 		OpDeleteObject, OpDeleteBucket,
-		OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
+		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}
 	require.Len(t, operationPermission, len(ops), "every operation constant must be listed here")
@@ -103,6 +160,14 @@ func TestOperationPermission(t *testing.T) {
 	// put an object can perform them without being re-issued.
 	require.Equal(t, "s3:PutObject", OpCreateMultipartUpload.Permission())
 	require.Equal(t, "s3:PutObject", OpUploadPart.Permission())
+	// The copies write their destination like a put; the source's read
+	// permission is a separate requirement.
+	require.Equal(t, "s3:PutObject", OpCopyObject.Permission())
+	require.Equal(t, "s3:PutObject", OpUploadPartCopy.Permission())
+	require.Equal(t, "s3:GetObject", SourcePermission)
+	require.True(t, OpCopyObject.CopiesSource())
+	require.True(t, OpUploadPartCopy.CopiesSource())
+	require.False(t, OpPutObject.CopiesSource())
 	require.Equal(t, "s3:PutObject", OpCompleteMultipartUpload.Permission())
 	require.Equal(t, "s3:AbortMultipartUpload", OpAbortMultipartUpload.Permission())
 	require.Equal(t, "s3:ListMultipartUploadParts", OpListMultipartUploadParts.Permission())

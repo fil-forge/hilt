@@ -18,7 +18,9 @@ const (
 	UnsupportedOperationErrorName  = "UnsupportedOperation"
 	OperationNotPermittedErrorName = "OperationNotPermitted"
 	UnknownBucketErrorName         = "UnknownBucket"
+	ForeignBucketErrorName         = "ForeignBucket"
 	BucketNotPermittedErrorName    = "BucketNotPermitted"
+	UnsignedCopySourceErrorName    = "UnsignedCopySource"
 )
 
 // Named rejection errors returned by [Authorizer.Authorize]. Each is a sentinel
@@ -59,10 +61,20 @@ var (
 	// ErrOperationNotPermitted is returned when the access key does not hold the
 	// permission required for the requested operation.
 	ErrOperationNotPermitted = errors.New(OperationNotPermittedErrorName, "access key is not permitted to perform this operation")
-	// ErrUnknownBucket is returned when the request's bucket does not exist or
-	// belongs to another tenant.
+	// ErrUnknownBucket is returned when a bucket the request addresses (its own,
+	// or its copy source's) does not exist.
 	ErrUnknownBucket = errors.New(UnknownBucketErrorName, "unknown bucket")
+	// ErrForeignBucket is returned when a bucket the request addresses belongs to
+	// another tenant. It is distinct from ErrUnknownBucket so the gateway can
+	// answer as S3 does for another account's bucket (AccessDenied, not
+	// NoSuchBucket); bucket names are global, so their existence is not a secret
+	// (CreateBucket already reports a taken name).
+	ErrForeignBucket = errors.New(ForeignBucketErrorName, "bucket belongs to another tenant")
 	// ErrBucketNotPermitted is returned when the access key's bucket scope does not
-	// include the request's bucket.
+	// include a bucket the request addresses.
 	ErrBucketNotPermitted = errors.New(BucketNotPermittedErrorName, "access key is not permitted to use this bucket")
+	// ErrUnsignedCopySource is returned when a copy request's x-amz-copy-source
+	// header is not covered by the request signature, so the source it names
+	// cannot be trusted and the copy cannot be authorized.
+	ErrUnsignedCopySource = errors.New(UnsignedCopySourceErrorName, "x-amz-copy-source is not covered by the request signature")
 )

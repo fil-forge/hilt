@@ -80,6 +80,14 @@ type SignedRequest struct {
 	expires       int    // X-Amz-Expires seconds (presigned only)
 }
 
+// HeaderSigned reports whether the named header is listed in the request's
+// SignedHeaders, and so is covered by the signature Verify checks. Headers
+// outside that list are not authenticated even on a verified request; a caller
+// that acts on a header's value (the copy source, say) must check this first.
+func (s *SignedRequest) HeaderSigned(name string) bool {
+	return slices.Contains(s.signedHeaders, strings.ToLower(name))
+}
+
 // Parse extracts the signature fields from an S3 request — from the
 // Authorization header or, for presigned URLs, the X-Amz-* query parameters. It
 // does not verify the signature; call [Verify] for that.
