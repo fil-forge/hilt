@@ -2,10 +2,23 @@
 
 Tenant-management service for the Forge network. Hilt owns tenants, their access
 keys, and their buckets — plus the UCAN delegations and key material that back
-them. It exposes two APIs and talks to one external service:
+them. It exposes two APIs and talks to three external services:
 
-- **Tenant REST API** (`pkg/api`, echo) — partner-facing CRUD for tenants and
-  access keys, guarded by a pre-shared partner key.
+- **Tenant REST API** (`pkg/api`, echo) — partner-facing CRUD for tenants,
+  access keys, principals and bucket policies, guarded by a pre-shared partner
+  key. `POST /tenants/{id}/access-keys` creates both key kinds. Without
+  `principalId` it is a **service key**: it carries its own `permissions` and
+  `buckets`, and the tenant→access-key delegations for them are issued at
+  creation. With `principalId` it is a **principal-bound key**: it takes no
+  permissions or buckets (both stored as `NULL`) and names a principal (the
+  console's `principalId`). What that principal may do on a bucket is the
+  bucket policy's effective set for it, and the key holds, over each bucket
+  the principal can reach, the tenant→access-key delegations for the Forge
+  commands that set maps to (`pkg/grant`), rewritten on every policy change.
+  Each authorize evaluates the policy and re-delegates from the key to the
+  gateway, as a service key does. Removing a principal tombstones its row
+  (`deleted_at`): no read returns it, and a later `PUT` for the same id
+  revives it with no keys and named in no statement.
 - **Hilt UCAN RPC API** (`pkg/rpc`, ucantone server mounted at `POST /`) — the
   `/s3/*` commands Ingot (the S3 gateway) invokes: `/s3/request/authorize`,
   `/s3/bucket/{create,delete,info,list}`; and the self-issued admin commands
@@ -14,6 +27,14 @@ them. It exposes two APIs and talks to one external service:
   bucket's storage space and to manage routing policies (`pkg/client`): each
   provider owns a policy whose candidates are its storage nodes, and every
   bucket's space is pointed at its provider's policy on creation.
+- **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke` to
+  revoke delegations, every revocation of one write in a single request
+  (`PublishBatch`): a deleted key's grants, a deleted bucket's, and the grants
+  a policy change or a principal removal takes off a principal-bound key
+  (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate
+  Swarf records once.
+- **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
+  provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
 
 Module: `github.com/fil-forge/hilt` (Go 1.27). Sibling repos it builds on:
 `ucantone` (UCAN primitives: `did`, `multikey`, `ucan/delegation`, `binding`,
@@ -41,7 +62,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   images Docker never re-pulls — `docker pull` them when the stack misbehaves,
   or override per run with `HILT_ITEST_UPLOAD_IMAGE` / `HILT_ITEST_PIRI_IMAGE`
   / `HILT_ITEST_INGOT_IMAGE` / `HILT_ITEST_SWARF_IMAGE` / `HILT_ITEST_PIRI_BINARY`
-  / `HILT_ITEST_SWARF_BINARY`. CI runs the suite on
+  / `HILT_ITEST_SWARF_BINARY` / `HILT_ITEST_INGOT_BINARY`. A binary override
+  wants a static linux build for the Docker host's architecture
+  (`GOOS=linux GOARCH=<host arch> CGO_ENABLED=0 GOWORK=off go build`), and is
+  how the IAM scenarios run against ingot changes that the `:main` image does
+  not carry yet. Until the published `:main` ingot image carries the IAM
+  changes, the IAM scenarios skip unless `HILT_ITEST_INGOT_BINARY` is set (or
+  `HILT_ITEST_IAM=1`); drop that guard once it does. CI runs the suite after
+  the unit job, on pull requests, on pushes to `main`, and on manual dispatch
+  (`.github/workflows/go-test.yml`). It sets neither override, so the IAM
+  scenarios stay skipped there until the published image carries the change.
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 
@@ -60,11 +90,20 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/sigv4` — stdlib-only SigV4 / SigV4a verification, key derivation
   (`DeriveKey`), and local verification (`VerifyWithKey`).
 - `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider}` — each an interface
-  with `memory` and `postgres` backends.
+- `pkg/bucketpolicy` — the bucket policy document and its evaluation
+  (`Decode`, `Validate`, `Canonical`/`ETag`, `Effective`, `Changed`); pure, no
+  store or transport dependencies. The package doc has the document shape.
+- `pkg/grant` — an access key's stored delegations: `Issue` builds the
+  tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
+  key's set as its policies change. See the package doc.
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy}` —
+  each an interface with `memory` and `postgres` backends.
+- `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
+  lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
-- `pkg/client` — clients for external services (the Sprue `UploadClient`).
+- `pkg/client` — clients for external services: the Sprue `UploadClient`, and
+  `pkg/client/management`, the partner-key REST client for the tenant API.
 - `pkg/migrations` — goose SQL migrations run on startup (unless skipped).
 - `internal/testutil` — test-only helpers (random DIDs/issuers, testcontainers).
 
@@ -76,6 +115,17 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   implementations kept in lockstep and exercised by one backend-parametrized test
   suite (`<entity>_test.go`). Add a method to all three (interface + both backends)
   and cover it in that suite.
+- **Locking and callbacks**: a write that another service must learn about runs
+  in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
+  caller-supplied `beforeCommit` callback, commit. A policy write's callback
+  rewrites the affected keys' delegations and publishes the revocations before
+  anything is stored, so a failed publish rolls the write back and leaves the
+  principal with its old access, never with more (`pkg/api/service/bucketpolicy`
+  and `grant.Rotator` document the sequence and its recovery). A reader that
+  must not be answered from a snapshot older than an in-flight write passes
+  `store.LockShare` (`SELECT … FOR SHARE`). Every lock wait is bounded by
+  `store.LockTimeout` and a statement that gives up returns
+  `store.ErrLockTimeout`, which the caller retries.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an
@@ -92,8 +142,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   and resolves every bucket it addresses within the tenant and the key's scope. A
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
   destination and `s3:GetObject` on the source, and the header must be a signed
-  header. Command-specific S3-permission checks stay in each handler.
-  `/s3/bucket/info` is an unauthenticated lookup (no signed request).
+  header. Command-specific S3-permission checks stay in each handler. Both key
+  kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
+  each per-request delegation keyed to itself; `/s3/bucket/info` is an
+  unauthenticated lookup (no signed request) that answers the proof chains
+  from the bucket root through the key's stored grants over the bucket, and a
+  principal-bound key's effective actions as its permissions.
 - **Identities & keys**: tenants are secp256k1 → did:plc; access keys and buckets
   are ed25519 → did:key. Build issuers with `multikey.NewIssuer(did, signer)`. Bucket
   keys are **ephemeral** — used once to sign the bucket→tenant root delegation, then
