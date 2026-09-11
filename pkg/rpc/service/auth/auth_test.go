@@ -176,6 +176,17 @@ func TestAuthorize(t *testing.T) {
 		require.Same(t, authz.Bucket, authz.SourceBucket)
 	})
 
+	t.Run("rejects a copy whose source header appears under two spellings", func(t *testing.T) {
+		// Signed as one spelling, sent with a second: which value the signature
+		// covers is ambiguous, so the request is malformed before any source is
+		// classified.
+		az, _, _ := setup(t, accessKey, copyPerms)
+		req := signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true)
+		req.Headers["X-Amz-Copy-Source"] = "/theirs/object-key"
+		_, err := az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrMalformedSignature)
+	})
+
 	t.Run("rejects a copy whose source header is not signed", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, copyPerms)
 		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, false))

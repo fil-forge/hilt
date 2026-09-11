@@ -72,6 +72,10 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 	if canonicalURI == "" {
 		canonicalURI = "/"
 	}
+	headers, err := toHeader(req.Headers)
+	if err != nil {
+		return Request{}, err
+	}
 
 	sr := &SignedRequest{
 		Scheme:        scheme,
@@ -80,7 +84,7 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 		method:        req.Method,
 		canonicalURI:  canonicalURI,
 		query:         q, // X-Amz-Signature not yet set
-		headers:       toHeader(req.Headers),
+		headers:       headers,
 		host:          u.Host,
 		signedHeaders: cfg.signedHeaders,
 		payloadHash:   unsignedPayload,
