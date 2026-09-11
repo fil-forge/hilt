@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
@@ -11,6 +12,9 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -22,6 +26,7 @@ import (
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
+	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
@@ -78,22 +83,52 @@ func TestAuthorizeRequest(t *testing.T) {
 	tenantID := testutil.RandomDID(t)
 	providerID := testutil.RandomDID(t)
 
+	// tenantSigner is the tenant's secp256k1 key: a principal-bound key holds no
+	// delegation of its own, so the tenant signs the per-request ones.
+	tenantSigner, err := secp256k1.Generate()
+	require.NoError(t, err)
+
 	// setup wires the stores + vault for a tenant whose provider serves the signing
-	// region and that owns this access key + bucket, returning the Authorizer built
-	// from them plus the bucket store.
-	setup := func(t *testing.T, perms []string, vaultSigner ed25519.Signer) *auth.Authorizer {
+	// region and that owns this credential + bucket, returning the Authorizer
+	// built from them and the policy store. The credential is a service key
+	// carrying perms unless principalBound, in which case "user-1" is a
+	// principal of the tenant and the key carries none.
+	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer) (*auth.Authorizer, *bucketpolicymemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
 
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
+		in := accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}
+		if principalBound {
+			principal := "user-1"
+			in = accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Principal: &principal}
+			require.NoError(t, principals.Add(ctx, tenantID, principal))
+		}
+		require.NoError(t, accessKeys.Add(ctx, in))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
+		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
 		require.NoError(t, buckets.Add(ctx, srcID, tenantID, srcName))
 
-		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
+		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets), policies
+	}
+
+	// grant stores a policy allowing "user-1" the given actions on the bucket.
+	grant := func(t *testing.T, policies *bucketpolicymemory.Store, actions ...string) {
+		t.Helper()
+		_, err := policies.Put(ctx, bucketpolicystore.Input{
+			Bucket: bucketID,
+			Tenant: tenantID,
+			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Effect:     bucketpolicy.Allow,
+				Principals: []string{"user-1"},
+				Actions:    actions,
+			}}},
+		}, nil)
+		require.NoError(t, err)
 	}
 
 	call := func(t *testing.T, authorizer *auth.Authorizer, issuer did.DID, args *s3req.AuthorizeArguments) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
@@ -102,7 +137,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	}
 
 	t.Run("authorizes a validly-signed request and issues a delegation to the issuer", func(t *testing.T) {
-		az := setup(t, []string{"s3:GetObject"}, akSigner)
+		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner)
 		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
 
 		ok, blocks, err := call(t, az, providerID, args)
@@ -147,7 +182,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	})
 
 	t.Run("a copy from another bucket also delegates the source's read", func(t *testing.T) {
-		az := setup(t, []string{"s3:GetObject", "s3:PutObject"}, akSigner)
+		az, _ := setup(t, []string{"s3:GetObject", "s3:PutObject"}, false, akSigner)
 		ok, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, srcName, region))
 		require.NoError(t, err)
 		require.Equal(t, &bucketID, ok.Bucket)
@@ -171,21 +206,82 @@ func TestAuthorizeRequest(t *testing.T) {
 	})
 
 	t.Run("a copy within one bucket delegates nothing extra", func(t *testing.T) {
-		az := setup(t, []string{"s3:GetObject", "s3:PutObject"}, akSigner)
+		az, _ := setup(t, []string{"s3:GetObject", "s3:PutObject"}, false, akSigner)
 		_, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, bucketName, region))
 		require.NoError(t, err)
 		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))
 	})
 
+	t.Run("a principal-bound key gets tenant-signed delegations and its effective set", func(t *testing.T) {
+		az, policies := setup(t, nil, true, akSigner)
+		grant(t, policies, "s3:GetObject", "s3:ListBucket")
+		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
+
+		ok, blocks, err := call(t, az, providerID, args)
+		require.NoError(t, err)
+
+		require.NotNil(t, ok.Principal)
+		require.Equal(t, "user-1", *ok.Principal)
+		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, ok.Permissions.Entries[akDID])
+
+		// The tenant issues the per-request delegation: the principal holds none
+		// of its own and the key is not a hop in the chain.
+		require.Len(t, blocks, 1)
+		reDel := blocks[0]
+		require.Equal(t, tenantID, reDel.Issuer())
+		require.Equal(t, providerID, reDel.Audience())
+		require.Equal(t, bucketID, reDel.Subject())
+		require.Equal(t, content.Retrieve.Command.String(), reDel.Command().String())
+	})
+
+	t.Run("a service key keeps signing its own delegations", func(t *testing.T) {
+		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner)
+		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
+
+		ok, blocks, err := call(t, az, providerID, args)
+		require.NoError(t, err)
+		require.Nil(t, ok.Principal)
+		require.Len(t, blocks, 1)
+		require.Equal(t, akDID, blocks[0].Issuer())
+	})
+
+	t.Run("a principal with no policy on the bucket cannot see it", func(t *testing.T) {
+		az, _ := setup(t, nil, true, akSigner)
+		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
+		_, _, err := call(t, az, providerID, args)
+		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
 	t.Run("rejects a key lacking the permission for the action", func(t *testing.T) {
-		az := setup(t, []string{"s3:PutObject"}, akSigner)
+		az, _ := setup(t, []string{"s3:PutObject"}, false, akSigner)
 		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
 		_, _, err := call(t, az, providerID, args)
 		require.Error(t, err)
 	})
 
+	t.Run("a bucket-configuration read issues no delegation", func(t *testing.T) {
+		// s3:GetBucketVersioning maps to no Forge command: Ingot answers it from
+		// its registry, so the gateway needs the permission and nothing else.
+		az, policies := setup(t, nil, true, akSigner)
+		grant(t, policies, "s3:GetBucketVersioning")
+		secret, err := multibase.Encode(multibase.Base64url, akSigner.Bytes())
+		require.NoError(t, err)
+		signed, err := sigv4.Presign(
+			sigv4.Request{Method: "GET", URL: "https://s3.fil.one/" + bucketName + "?versioning"},
+			akDID.Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+
+		ok, blocks, err := call(t, az, providerID, &s3req.AuthorizeArguments{
+			Request: s3.Request{Method: signed.Method, URL: signed.URL},
+		})
+		require.NoError(t, err)
+		require.Empty(t, blocks)
+		require.Empty(t, ok.Delegations.Entries)
+		require.Equal(t, []string{"s3:GetBucketVersioning"}, ok.Permissions.Entries[akDID])
+	})
+
 	t.Run("rejects an unknown bucket", func(t *testing.T) {
-		az := setup(t, []string{"s3:GetObject"}, akSigner)
+		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner)
 		args := signedGetArgs(t, akSigner, "nope", region, time.Now(), time.Hour)
 		_, _, err := call(t, az, providerID, args)
 		require.Error(t, err)
