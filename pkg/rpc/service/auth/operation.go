@@ -166,13 +166,17 @@ type classification struct {
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
 // and key. Headers are signed only when listed in the signature's SignedHeaders,
 // so unlike the path this binding is not implied by signature verification:
-// [Authorizer.Authorize] confirms the header was signed before trusting it. A
-// copy-source value the gateway's own parser would reject (no bucket/key
-// separator, bad percent-encoding) is not classified as a copy: the gateway
-// fails such a request on its own validation before it reads anything, and
-// classifying it here would only change which error the caller sees. The parse
-// mirrors the gateway's (versitygw backend.ParseCopySource) so hilt never
-// accepts a source the gateway would parse differently.
+// [Authorizer.Authorize] confirms the header was signed before trusting it.
+//
+// The value is parsed exactly as the gateway's backend parses it (versitygw
+// backend.ParseCopySource): the only values that are not a copy are ones with
+// bad percent-encoding or no bucket/key separator, which that parser rejects
+// too, so hilt never treats as a plain write a request the gateway would treat
+// as a copy. An empty bucket or key parses as a copy of that bucket and key,
+// as it does there: authorization then fails on a bucket that cannot exist, or
+// the gateway's own validation of the value rejects the request. Which error
+// the caller sees for a malformed value is the gateway's call; it validates
+// the header before consulting hilt.
 func classifyRequest(req s3.Request) (classification, error) {
 	u, err := url.Parse(req.URL)
 	if err != nil {
@@ -267,10 +271,11 @@ func headerValue(headers map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-// parseCopySource splits an x-amz-copy-source value into its bucket and key,
-// mirroring the gateway's parser: an optional leading slash, URL-decoding of the
-// whole value, an optional "?versionId=<id>" suffix, then bucket/key at the first
-// slash. ok is false for anything the gateway would reject.
+// parseCopySource splits an x-amz-copy-source value into its bucket and key
+// exactly as the gateway's backend parser does: an optional leading slash,
+// URL-decoding of the whole value, an optional "?versionId=<id>" suffix, then
+// bucket/key at the first slash. ok is false only for bad percent-encoding or
+// a missing separator; an empty bucket or key is returned as such.
 func parseCopySource(v string) (bucket, key string, ok bool) {
 	v = strings.TrimPrefix(v, "/")
 	decoded, err := url.QueryUnescape(v)
@@ -279,7 +284,7 @@ func parseCopySource(v string) (bucket, key string, ok bool) {
 	}
 	decoded, _, _ = strings.Cut(decoded, "?versionId=")
 	bucket, key, ok = strings.Cut(decoded, "/")
-	if !ok || bucket == "" || key == "" {
+	if !ok {
 		return "", "", false
 	}
 	return bucket, key, true

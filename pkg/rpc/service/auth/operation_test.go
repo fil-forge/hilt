@@ -47,12 +47,14 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "upload part copy", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=2&uploadId=abc", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpUploadPartCopy, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj"},
 		{name: "copy within a bucket", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "bkt/other"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "bkt/other"},
 
-		// A copy source the gateway would reject is not a copy: the gateway fails
-		// the request on its own validation, so only the plain write is classified.
-		{name: "copy source without a key is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "srconly"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
-		{name: "copy source with an empty key is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		// Only the values the gateway's backend parser rejects are not a copy: no
+		// separator, or bad percent-encoding. An empty bucket or key is a copy of
+		// that (impossible) bucket or key, exactly as the gateway parses it.
+		{name: "copy source without a separator is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "srconly"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
 		{name: "copy source with bad encoding is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/%ZZ"}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
 		{name: "empty copy source is a put", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": ""}, want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "copy source with an empty key is a copy", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/"},
+		{name: "copy source with an empty bucket is a copy", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "//k"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "/k"},
 		// Only PUT copies; the header on any other shape is ignored.
 		{name: "copy source on a complete is a complete", method: "POST", url: "https://s3.example.com/bkt/k?uploadId=abc", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpCompleteMultipartUpload, wantBucket: "bkt", wantKey: "k"},
 		{name: "copy source on a get is a get", method: "GET", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
@@ -86,11 +88,10 @@ func TestClassifyRequest(t *testing.T) {
 			require.Equal(t, tt.wantBucket, c.bucket)
 			require.Equal(t, tt.wantKey, c.key)
 			src := ""
-			if c.srcBucket != "" {
+			if c.op.CopiesSource() {
 				src = c.srcBucket + "/" + c.srcKey
 			}
 			require.Equal(t, tt.wantSrc, src)
-			require.Equal(t, tt.wantSrc != "", c.op.CopiesSource())
 		})
 	}
 
