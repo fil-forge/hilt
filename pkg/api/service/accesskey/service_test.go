@@ -8,9 +8,12 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	"github.com/fil-forge/hilt/pkg/store"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -52,8 +55,26 @@ func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan
 	return nil
 }
 
+// failReadBack wraps an access-key store and fails its first Get, standing in
+// for a read-back that cannot see the row the call just wrote. It records the ID
+// it was asked for, so the test can check what the rollback cleaned up.
+type failReadBack struct {
+	accesskeystore.Store
+	id     did.DID
+	failed bool
+}
+
+func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
+	if !f.failed {
+		f.failed, f.id = true, id
+		return accesskeystore.Record{}, errors.New("read-back failed")
+	}
+	return f.Store.Get(ctx, id, opts...)
+}
+
 type deps struct {
 	svc         *accesskeysvc.Service
+	accessKeys  accesskeystore.Store
 	delegations *delegationmemory.Store
 	buckets     *bucketmemory.Store
 	secrets     *vaultmemory.Store
@@ -67,18 +88,27 @@ type deps struct {
 // secp256k1 key is in the vault, owning one bucket ("bucket-a") that has issued
 // the tenant top authority over itself — the root of every proof chain through
 // the bucket, as [bucket.Service.Create] would have stored it. Its audience is the
-// tenant, not an access key, so it must never be revoked along with one.
-func setup(t *testing.T) deps {
+// tenant, not an access key, so it must never be revoked along with one. The
+// tenant has one principal, "alice".
+// wrapAccessKeys, when given, wraps the memory access-key store the service is
+// built over, so a test can make one of its methods fail.
+func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
 	t.Helper()
 	ctx := t.Context()
-	tenants, accessKeys := tenantmemory.New(), accesskeymemory.New()
+	tenants, accessKeys, principals := tenantmemory.New(), accesskeymemory.New(), principalmemory.New()
 	buckets, delegations, secrets := bucketmemory.New(), delegationmemory.New(), vaultmemory.New()
+
+	var keys accesskeystore.Store = accessKeys
+	for _, wrap := range wrapAccessKeys {
+		keys = wrap(keys)
+	}
 
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	require.NoError(t, principals.Add(ctx, tenantID, "alice"))
 
 	// The bucket key is ephemeral: it signs the bucket→tenant root and is discarded.
 	bucketSigner, err := ed25519.Generate()
@@ -92,7 +122,8 @@ func setup(t *testing.T) deps {
 
 	swarf := &fakeSwarf{}
 	return deps{
-		svc:         accesskeysvc.New(zap.NewNop(), tenants, accessKeys, buckets, delegations, secrets, swarf),
+		svc:         accesskeysvc.New(zap.NewNop(), tenants, keys, principals, buckets, delegations, secrets, swarf),
+		accessKeys:  accessKeys,
 		delegations: delegations,
 		buckets:     buckets,
 		secrets:     secrets,
@@ -108,7 +139,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("creates a bucket-scoped key", func(t *testing.T) {
 		d := setup(t)
-		rec, secret, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, nil)
+		rec, secret, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, "", nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, secret)
 		require.Equal(t, "k1", rec.Name)
@@ -117,40 +148,160 @@ func TestCreate(t *testing.T) {
 
 	t.Run("rejects an empty name", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "", []string{"s3:GetObject"}, nil, nil)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "", []string{"s3:GetObject"}, nil, "", nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrInvalidName)
 	})
 
 	t.Run("rejects no permissions", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", nil, nil, nil)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", nil, nil, "", nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrNoPermissions)
 	})
 
 	t.Run("rejects an unknown permission", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:Bogus"}, nil, nil)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:Bogus"}, nil, "", nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrInvalidPermission)
 	})
 
 	t.Run("rejects an unknown bucket", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"nope"}, nil)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"nope"}, "", nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrUnknownBucket)
 	})
 
 	t.Run("rejects an unknown tenant", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "missing", "k1", []string{"s3:GetObject"}, nil, nil)
+		_, _, err := d.svc.Create(ctx, "missing", "k1", []string{"s3:GetObject"}, nil, "", nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantNotFound)
 	})
 
 	t.Run("rejects a duplicate name", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "dup", []string{"s3:GetObject"}, nil, nil)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "dup", []string{"s3:GetObject"}, nil, "", nil)
 		require.NoError(t, err)
-		_, _, err = d.svc.Create(ctx, "tenant-1", "dup", []string{"s3:GetObject"}, nil, nil)
+		_, _, err = d.svc.Create(ctx, "tenant-1", "dup", []string{"s3:GetObject"}, nil, "", nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrNameConflict)
+	})
+}
+
+func TestCreatePrincipalBound(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("binds the key to the principal and issues nothing", func(t *testing.T) {
+		d := setup(t)
+		rec, secret, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, secret)
+		require.Equal(t, "laptop", rec.Name)
+		require.NotNil(t, rec.Principal)
+		require.Equal(t, "alice", *rec.Principal)
+		require.Empty(t, rec.Permissions)
+		require.Empty(t, rec.Buckets)
+
+		issued, err := d.delegations.ListByAudience(ctx, rec.ID)
+		require.NoError(t, err)
+		require.Empty(t, issued.Results, "a principal-bound key holds no delegation")
+		// The key pair is stored where every access key's is.
+		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
+		require.NoError(t, err)
+	})
+
+	t.Run("persists an expiry", func(t *testing.T) {
+		d := setup(t)
+		exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", &exp)
+		require.NoError(t, err)
+		require.NotNil(t, rec.ExpiresAt)
+		require.True(t, exp.Equal(*rec.ExpiresAt))
+	})
+
+	t.Run("rejects permissions on a principal-bound key", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", []string{"s3:GetObject"}, nil, "alice", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrPrincipalScoped)
+	})
+
+	t.Run("rejects buckets on a principal-bound key", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, []string{"bucket-a"}, "alice", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrPrincipalScoped)
+	})
+
+	t.Run("rejects an unknown principal", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "ghost", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
+	})
+
+	t.Run("rejects an empty name", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "", nil, nil, "alice", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrInvalidName)
+	})
+
+	t.Run("the name is unique within the principal and independent of service keys", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+		_, _, err = d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrNameConflict)
+		// A service key of the tenant may hold the same name.
+		_, _, err = d.svc.Create(ctx, "tenant-1", "laptop", []string{"s3:GetObject"}, nil, "", nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("a failed read-back leaves no row and no vault entry", func(t *testing.T) {
+		var readBack *failReadBack
+		d := setup(t, func(s accesskeystore.Store) accesskeystore.Store {
+			readBack = &failReadBack{Store: s}
+			return readBack
+		})
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.Error(t, err)
+		require.True(t, readBack.failed, "the read-back is what failed")
+
+		recs, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, recs)
+		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, readBack.id))
+		require.ErrorIs(t, err, vault.ErrNotFound)
+	})
+
+	t.Run("delete removes the key and publishes nothing", func(t *testing.T) {
+		d := setup(t)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+
+		require.NoError(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()))
+		require.Empty(t, d.swarf.revocations, "there is no delegation to revoke")
+		_, _, err = d.svc.Get(ctx, "tenant-1", rec.ID.Identifier())
+		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
+		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
+		require.ErrorIs(t, err, vault.ErrNotFound)
+	})
+
+	t.Run("list and get return both kinds", func(t *testing.T) {
+		d := setup(t)
+		svcKey, _, err := d.svc.Create(ctx, "tenant-1", "ci", []string{"s3:GetObject"}, []string{"bucket-a"}, "", nil)
+		require.NoError(t, err)
+		bound, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+
+		recs, names, err := d.svc.List(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Len(t, recs, 2)
+		require.Equal(t, "bucket-a", names[d.bucketID])
+		byID := map[string]*string{}
+		for _, r := range recs {
+			byID[r.ID.String()] = r.Principal
+		}
+		require.Nil(t, byID[svcKey.ID.String()])
+		require.NotNil(t, byID[bound.ID.String()])
+
+		got, _, err := d.svc.Get(ctx, "tenant-1", bound.ID.Identifier())
+		require.NoError(t, err)
+		require.Equal(t, "alice", *got.Principal)
 	})
 }
 
@@ -159,7 +310,7 @@ func TestListGetDelete(t *testing.T) {
 
 	t.Run("list returns the tenant's keys with bucket names", func(t *testing.T) {
 		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, nil)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, "", nil)
 		require.NoError(t, err)
 		recs, names, err := d.svc.List(ctx, "tenant-1")
 		require.NoError(t, err)
@@ -175,7 +326,7 @@ func TestListGetDelete(t *testing.T) {
 
 	t.Run("get returns a created key", func(t *testing.T) {
 		d := setup(t)
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, "", nil)
 		require.NoError(t, err)
 		got, _, err := d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
 		require.NoError(t, err)
@@ -190,7 +341,7 @@ func TestListGetDelete(t *testing.T) {
 
 	t.Run("delete removes a key", func(t *testing.T) {
 		d := setup(t)
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, "", nil)
 		require.NoError(t, err)
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
 		_, _, err = d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
@@ -210,7 +361,7 @@ func TestDeleteRevokes(t *testing.T) {
 	t.Run("revokes every bucket-scoped delegation, with no witness path", func(t *testing.T) {
 		d := setup(t)
 		// s3:PutObject maps to several commands, so the key gets several delegations.
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, []string{"bucket-a"}, nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, []string{"bucket-a"}, "", nil)
 		require.NoError(t, err)
 		issued, err := d.delegations.ListByAudience(ctx, created.ID)
 		require.NoError(t, err)
@@ -236,7 +387,7 @@ func TestDeleteRevokes(t *testing.T) {
 
 	t.Run("revokes a powerline delegation", func(t *testing.T) {
 		d := setup(t)
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, "", nil)
 		require.NoError(t, err)
 		issued, err := d.delegations.ListByAudience(ctx, created.ID)
 		require.NoError(t, err)
@@ -254,7 +405,7 @@ func TestDeleteRevokes(t *testing.T) {
 
 	t.Run("revokes a powerline delegation when the tenant owns no bucket", func(t *testing.T) {
 		d := setup(t)
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, "", nil)
 		require.NoError(t, err)
 		// A subject-less delegation used to need one of the tenant's bucket roots to
 		// witness it, so dropping the only bucket left it unrevoked. It no longer does.
@@ -269,7 +420,7 @@ func TestDeleteRevokes(t *testing.T) {
 	t.Run("skips an already-expired delegation", func(t *testing.T) {
 		d := setup(t)
 		expired := time.Now().Add(-time.Hour)
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, &expired)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, "", &expired)
 		require.NoError(t, err)
 
 		// The revocation service rejects expired delegations, and they are unusable
@@ -282,7 +433,7 @@ func TestDeleteRevokes(t *testing.T) {
 
 	t.Run("a revocation failure leaves the key intact", func(t *testing.T) {
 		d := setup(t)
-		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, "", nil)
 		require.NoError(t, err)
 		d.swarf.err = errors.New("swarf is down")
 

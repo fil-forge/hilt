@@ -21,7 +21,9 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 	case errors.Is(err, accesskeysvc.ErrInvalidName),
 		errors.Is(err, accesskeysvc.ErrNoPermissions),
 		errors.Is(err, accesskeysvc.ErrInvalidPermission),
-		errors.Is(err, accesskeysvc.ErrUnknownBucket):
+		errors.Is(err, accesskeysvc.ErrUnknownBucket),
+		errors.Is(err, accesskeysvc.ErrPrincipalScoped),
+		errors.Is(err, accesskeysvc.ErrUnknownPrincipal):
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, accesskeysvc.ErrNameConflict):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
@@ -32,8 +34,10 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 }
 
 // NewCreateAccessKeyHandler handles POST /tenants/{tenantId}/access-keys — create
-// an S3 access-key pair (returns the secret once only) and issue the
-// tenant→access-key UCAN delegations for the requested permissions.
+// an S3 access-key pair (returns the secret once only). Without principalId it
+// is a service key and the tenant→access-key UCAN delegations for the requested
+// permissions are issued; with principalId it is bound to that principal and
+// issued nothing.
 func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "CreateAccessKey"))
 	return NewRoute(http.MethodPost, "/tenants/:tenantId/access-keys", func(c echo.Context) error {
@@ -42,7 +46,7 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
 
-		rec, secret, err := accessKeys.Create(c.Request().Context(), c.Param("tenantId"), req.Name, req.Permissions, req.Buckets, req.ExpiresAt)
+		rec, secret, err := accessKeys.Create(c.Request().Context(), c.Param("tenantId"), req.Name, req.Permissions, req.Buckets, req.PrincipalID, req.ExpiresAt)
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -52,6 +56,7 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 				Name:        rec.Name,
 				Permissions: rec.Permissions,
 				Buckets:     req.Buckets,
+				Principal:   principalOf(rec),
 				ExpiresAt:   rec.ExpiresAt,
 				CreatedAt:   rec.CreatedAt,
 			},
@@ -104,7 +109,8 @@ func NewDeleteAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 
 // accessKeyResponse builds the API representation of an access key, resolving
 // stored bucket DIDs back to their names (a DID with no known name is rendered as
-// the DID string). The secret is never included.
+// the DID string). A principal-bound key carries its principal and no
+// permissions or buckets. The secret is never included.
 func accessKeyResponse(rec accesskey.Record, bucketNames map[did.DID]string) AccessKey {
 	var bucketList []string
 	for _, b := range rec.Buckets {
@@ -119,7 +125,16 @@ func accessKeyResponse(rec accesskey.Record, bucketNames map[did.DID]string) Acc
 		Name:        rec.Name,
 		Permissions: rec.Permissions,
 		Buckets:     bucketList,
+		Principal:   principalOf(rec),
 		ExpiresAt:   rec.ExpiresAt,
 		CreatedAt:   rec.CreatedAt,
 	}
+}
+
+// principalOf returns the principal a key is bound to, or "" for a service key.
+func principalOf(rec accesskey.Record) string {
+	if rec.Principal == nil {
+		return ""
+	}
+	return *rec.Principal
 }

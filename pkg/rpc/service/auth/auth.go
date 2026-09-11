@@ -29,15 +29,18 @@ import (
 )
 
 // AuthorizedRequest is the authenticated, authorized context of an S3 RPC
-// request: the verified caller's access key and tenant, and the region the
-// request is scoped to (served by the tenant's provider). Command-specific
-// permission checks use AccessKey.Permissions.
+// request: the verified caller's access key and tenant, the region the request
+// is scoped to (served by the tenant's provider), and the S3 permissions the
+// key holds. Command-specific permission checks use Permissions.
 type AuthorizedRequest struct {
 	AccessKey accesskey.Record
 	Tenant    tenant.Record
 	// Provider is the tenant's regional provider, confirmed to serve Region.
 	Provider provider.Record
 	Region   string
+	// Permissions is the set of S3 permissions the access key holds, which the
+	// operation's permission is confirmed to be in. It is the key's own set.
+	Permissions []string
 	// Operation is the S3 operation the (signature-verified) request performs. The
 	// access key is confirmed to hold its permission; handlers check it matches the
 	// operation they serve.
@@ -135,7 +138,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	}
 
 	// Authenticate: verify the request signature using the access key's secret.
-	signer, err := a.AccessKeySigner(ctx, akRec.Tenant, accessKeyID)
+	signer, err := a.AccessKeySigner(ctx, akRec)
 	if err != nil {
 		log.Error("loading access key", zap.Error(err))
 		return nil, err
@@ -232,6 +235,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		Tenant:           tenantRec,
 		Provider:         prov,
 		Region:           region,
+		Permissions:      akRec.Permissions,
 		Operation:        op,
 		BucketName:       bucketName,
 		Bucket:           resolved,
@@ -282,8 +286,8 @@ func (a *Authorizer) TenantIssuer(ctx context.Context, tenantID did.DID) (ucan.I
 }
 
 // AccessKeySigner reads the access key's ed25519 private key from the vault.
-func (a *Authorizer) AccessKeySigner(ctx context.Context, tenantID, accessKeyID did.DID) (multikey.Signer, error) {
-	keyBytes, err := a.secrets.Read(ctx, vault.AccessKeyPath(tenantID, accessKeyID))
+func (a *Authorizer) AccessKeySigner(ctx context.Context, rec accesskey.Record) (multikey.Signer, error) {
+	keyBytes, err := a.secrets.Read(ctx, vault.AccessKeyPath(rec.Tenant, rec.ID))
 	if err != nil {
 		return nil, fmt.Errorf("reading access key secret: %w", err)
 	}
