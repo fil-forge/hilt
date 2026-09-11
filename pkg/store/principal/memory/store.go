@@ -1,4 +1,15 @@
 // Package memory provides an in-memory implementation of principal.Store.
+//
+// The store holds two locks. mutex guards the map and is held for one read or
+// one write at a time, never across a caller's callback. removals serializes a
+// removal with the writes that must not interleave with it, and is the lock
+// Delete holds while beforeCommit runs.
+//
+// The split mirrors Postgres. A removal there holds the principal row FOR
+// UPDATE across its callback while ListByTenant still reads the table without
+// waiting; the callback rewrites the policies naming the principal, and a
+// policy write of its own lists this store's principals. Holding one lock
+// across both would wedge the two writes against each other.
 package memory
 
 import (
@@ -23,6 +34,7 @@ type entry struct {
 
 type Store struct {
 	mutex      sync.RWMutex
+	removals   sync.Mutex
 	principals map[did.DID]map[string]entry
 }
 
@@ -39,6 +51,11 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	if externalID == "" {
 		return fmt.Errorf("principal external ID is required: %w", store.ErrInvalidArgument)
 	}
+
+	// A revive must not interleave with a removal of the same principal: the
+	// removal would tombstone the row the revive just wrote.
+	s.removals.Lock()
+	defer s.removals.Unlock()
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -59,9 +76,17 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	return nil
 }
 
-// Get ignores the lock option: reads and writes are serialized by the store
-// mutex, so a read already waits for an in-flight Delete.
+// Get with [store.WithLock]([store.LockShare]) waits for an in-flight Delete
+// of any principal to finish, the way the Postgres read waits on the row held
+// FOR UPDATE. An unlocked read takes the map alone and may be answered while a
+// removal's callback is still running, as the unlocked Postgres read is
+// answered from its snapshot.
 func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principal.Record, error) {
+	if store.NewReadConfig(opts...).Lock == store.LockShare {
+		s.removals.Lock()
+		defer s.removals.Unlock()
+	}
+
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -88,25 +113,39 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 	return recs, nil
 }
 
-// Delete runs beforeCommit under the store mutex, so a concurrent Get waits
-// for the callback to finish and observes either the principal or its
-// tombstone, never a state in between.
+// Delete holds removals for the whole call and takes the map mutex only to
+// read the entry and, at the end, to write the tombstone. beforeCommit runs
+// with the map unlocked, so it may write the policy store whose own writes
+// read this one. A share-locked Get waits on removals and so observes either
+// the principal or its tombstone, never a state in between; ListByTenant reads
+// the map and never waits, as on Postgres.
 func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error {
+	s.removals.Lock()
+	defer s.removals.Unlock()
+
+	s.mutex.RLock()
+	e, ok := s.principals[tenant][externalID]
+	s.mutex.RUnlock()
+	if !ok || e.deleted {
+		return nil // idempotent: nothing to publish and nothing to remove
+	}
+
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
+			return fmt.Errorf("before deleting principal: %w", err)
+		}
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	byID, ok := s.principals[tenant]
 	if !ok {
-		return nil
+		return nil // DeleteByTenant took the whole tenant meanwhile
 	}
-	e, ok := byID[externalID]
+	e, ok = byID[externalID]
 	if !ok || e.deleted {
 		return nil
-	}
-	if beforeCommit != nil {
-		if err := beforeCommit(ctx); err != nil {
-			return fmt.Errorf("before deleting principal: %w", err)
-		}
 	}
 	e.deleted = true
 	byID[externalID] = e
@@ -114,6 +153,10 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 }
 
 func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) error {
+	// A tenant removal waits for an in-flight principal removal, as it would on
+	// the row Postgres holds FOR UPDATE.
+	s.removals.Lock()
+	defer s.removals.Unlock()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

@@ -70,8 +70,8 @@ const (
 	// The read needs no transaction of its own: a FOR SHARE in autocommit mode
 	// still waits on a conflicting FOR UPDATE.
 	//
-	// Memory backends serialize reads and writes under one mutex, so a read there
-	// already waits for an in-flight write and the option changes nothing.
+	// The memory backends give the same guarantee with their own locks: a
+	// share-locked read there waits for a write in flight on the same record.
 	LockShare
 )
 
