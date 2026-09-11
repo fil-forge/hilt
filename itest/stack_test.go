@@ -148,6 +148,10 @@ func startForge(t *testing.T) *forgeNet {
 		t.Logf("using swarf binary override: %s", bin)
 		opts = append(opts, stack.WithServiceBinary("swarf", bin))
 	}
+	if bin := os.Getenv("HILT_ITEST_INGOT_BINARY"); bin != "" {
+		t.Logf("using ingot binary override: %s", bin)
+		opts = append(opts, stack.WithServiceBinary("ingot", bin))
+	}
 	s := stack.MustNewStack(t, opts...)
 	waitHTTPOK(t, s.HiltEndpoint()+"/health", 2*time.Minute)
 	waitHTTPOK(t, s.IngotEndpoint()+"/health", 2*time.Minute)
@@ -180,6 +184,25 @@ func TestForge(t *testing.T) {
 	t.Run("DeleteAccessKeyRevokes", func(t *testing.T) { testDeleteAccessKeyRevokes(t, net) })
 	t.Run("DeleteBucketRevokes", func(t *testing.T) { testDeleteBucketRevokes(t, net) })
 	t.Run("DeleteBucketRevokesOnlyThatBucket", func(t *testing.T) { testDeleteBucketRevokesOnlyThatBucket(t, net) })
+	// The IAM scenarios need an ingot that enforces the effective action set.
+	// Until the published :main image carries it, they run only against the
+	// binary override (or when HILT_ITEST_IAM=1 says the image does); drop this
+	// guard then. Swarf needs nothing: markers are revoked through the
+	// /ucan/revoke it already serves.
+	iam := func(name string, fn func(*testing.T, *forgeNet)) {
+		t.Run(name, func(t *testing.T) {
+			if os.Getenv("HILT_ITEST_IAM") != "1" && os.Getenv("HILT_ITEST_INGOT_BINARY") == "" {
+				t.Skip("IAM scenarios need HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main image carries the IAM changes")
+			}
+			fn(t, net)
+		})
+	}
+	iam("PrincipalPolicyScopesToOneBucket", testPrincipalPolicyScopesToOneBucket)
+	iam("DenyBeatsAllow", testDenyBeatsAllow)
+	iam("NarrowingRotatesMarkers", testNarrowingRotatesMarkers)
+	iam("DeletePrincipalRemovesKeysAndPolicies", testDeletePrincipalRemovesKeysAndPolicies)
+	iam("PresignedGetFollowsPolicy", testPresignedGetFollowsPolicy)
+	iam("PrincipalKeyCreateRejectsBadRequests", testPrincipalKeyCreateRejectsBadRequests)
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot
@@ -240,16 +263,13 @@ func (c *console) ProvisionTenant(ctx context.Context, tenantID, region string) 
 	return c.client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
 }
 
-// CreateAccessKey creates an S3 access key with the given permissions and
-// returns it, including the one-time secret access key. Naming buckets
-// scopes the key's delegations to them; with none it gets tenant-wide
-// (powerline) access.
-func (c *console) CreateAccessKey(ctx context.Context, tenantID, name string, perms, buckets []string) (api.CreatedAccessKey, error) {
-	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
-		Name:        name,
-		Permissions: perms,
-		Buckets:     buckets,
-	})
+// CreateAccessKey creates an S3 access key and returns it, including the
+// one-time secret access key. Without a principal it is a service key carrying
+// the permissions in the request, scoped to the buckets it names (with none,
+// tenant-wide powerline access). With PrincipalID it is bound to that
+// principal, takes no permissions or buckets, and holds only its marker.
+func (c *console) CreateAccessKey(ctx context.Context, tenantID string, req api.CreateAccessKeyRequest) (api.CreatedAccessKey, error) {
+	return c.client.CreateAccessKey(ctx, tenantID, req)
 }
 
 // DeleteAccessKey revokes and removes an access key.
@@ -260,6 +280,57 @@ func (c *console) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID str
 // GetAccessKey returns a single access key.
 func (c *console) GetAccessKey(ctx context.Context, tenantID, accessKeyID string) (api.AccessKey, error) {
 	return c.client.GetAccessKey(ctx, tenantID, accessKeyID)
+}
+
+// CreatePrincipal records a console user of the tenant. A principal holds no
+// key material and no delegation: its access comes from the bucket policies
+// naming it.
+func (c *console) CreatePrincipal(ctx context.Context, tenantID, principalID string) (api.Principal, error) {
+	return c.client.CreatePrincipal(ctx, tenantID, principalID)
+}
+
+// DeletePrincipal removes the principal, its access keys and its place in
+// every policy of the tenant.
+func (c *console) DeletePrincipal(ctx context.Context, tenantID, principalID string) error {
+	return c.client.DeletePrincipal(ctx, tenantID, principalID)
+}
+
+// ListPrincipalAccessKeys returns the keys bound to the principal.
+func (c *console) ListPrincipalAccessKeys(ctx context.Context, tenantID, principalID string) ([]api.AccessKey, error) {
+	return c.client.ListPrincipalAccessKeys(ctx, tenantID, principalID)
+}
+
+// CreateBucketPolicy writes a bucket's first policy and returns its ETag.
+func (c *console) CreateBucketPolicy(ctx context.Context, tenantID, bucket string, doc api.BucketPolicy) (string, error) {
+	return c.client.CreateBucketPolicy(ctx, tenantID, bucket, doc)
+}
+
+// ReplaceBucketPolicy replaces a bucket's policy, conditioned on etag, and
+// returns the new one.
+func (c *console) ReplaceBucketPolicy(ctx context.Context, tenantID, bucket string, doc api.BucketPolicy, etag string) (string, error) {
+	return c.client.ReplaceBucketPolicy(ctx, tenantID, bucket, doc, etag)
+}
+
+// GetBucketPolicy reads a bucket's policy and the ETag its next write
+// conditions on.
+func (c *console) GetBucketPolicy(ctx context.Context, tenantID, bucket string) (api.BucketPolicy, string, error) {
+	return c.client.GetBucketPolicy(ctx, tenantID, bucket)
+}
+
+// DeleteBucketPolicy removes a bucket's policy, conditioned on etag. Every
+// principal it named loses its access to the bucket.
+func (c *console) DeleteBucketPolicy(ctx context.Context, tenantID, bucket, etag string) error {
+	return c.client.DeleteBucketPolicy(ctx, tenantID, bucket, etag)
+}
+
+// ListPrincipalPolicies lists every policy of the tenant naming the principal.
+func (c *console) ListPrincipalPolicies(ctx context.Context, tenantID, principalID string) ([]api.PrincipalPolicy, error) {
+	return c.client.ListPrincipalPolicies(ctx, tenantID, principalID)
+}
+
+// GetPrincipalAccess returns the principal's effective actions per bucket.
+func (c *console) GetPrincipalAccess(ctx context.Context, tenantID, principalID string) ([]api.BucketAccess, error) {
+	return c.client.GetPrincipalAccess(ctx, tenantID, principalID)
 }
 
 // waitHTTPOK polls url until it returns 2xx or the timeout elapses.
