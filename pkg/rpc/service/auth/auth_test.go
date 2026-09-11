@@ -39,7 +39,27 @@ func signedRequest(t *testing.T, signer multikey.Signer, region string, signedAt
 type setupConfig struct {
 	accessKeyExpires *time.Time
 	accessKeyBuckets []did.DID
-	tenantStatus     tenant.Status
+	// accessKeyPermissions defaults to s3:GetObject alone.
+	accessKeyPermissions []string
+	tenantStatus         tenant.Status
+}
+
+// signedCopyRequest presigns a CopyObject: PUT of object-key in dstBucket with an
+// x-amz-copy-source naming srcBucket/object-key. The header is covered by the
+// signature only when signSource is set.
+func signedCopyRequest(t *testing.T, signer multikey.Signer, dstBucket, srcBucket, region string, signSource bool) s3.Request {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	headers := map[string]string{"x-amz-copy-source": "/" + srcBucket + "/object-key"}
+	req := sigv4.Request{Method: "PUT", URL: "https://s3.fil.one/" + dstBucket + "/object-key", Headers: headers}
+	var opts []sigv4.PresignOption
+	if signSource {
+		opts = append(opts, sigv4.WithSignedHeaders("x-amz-copy-source"))
+	}
+	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+	require.NoError(t, err)
+	return s3.Request{Method: signed.Method, URL: signed.URL, Headers: headers}
 }
 
 // signedObjectRequest presigns a GET of an object in the named bucket.
@@ -63,6 +83,8 @@ func TestAuthorize(t *testing.T) {
 	// providerID is both the tenant's provider and the only legitimate invocation
 	// issuer.
 	providerID := testutil.RandomDID(t)
+	// The tenant's two buckets, and a bucket of some other tenant.
+	bucketID, bucket2ID, theirsID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
 
 	// setup wires the stores + vault for a tenant whose provider serves the signing
 	// region and that owns this access key, returning the Authorizer built from
@@ -78,15 +100,24 @@ func TestAuthorize(t *testing.T) {
 			tenantStatus = setupConfig.tenantStatus
 		}
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenantStatus))
-		// The bucket the happy-path request addresses (GET /bucket/object-key).
-		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bucket"))
+		// The bucket the happy-path request addresses (GET /bucket/object-key), a
+		// second bucket of the same tenant (copy destination), and another tenant's.
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
+		require.NoError(t, buckets.Add(ctx, bucket2ID, tenantID, "bucket2"))
+		otherTenant := testutil.RandomDID(t)
+		require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", providerID, tenant.Active))
+		require.NoError(t, buckets.Add(ctx, theirsID, otherTenant, "theirs"))
 		var accessKeyExpires *time.Time
 		var accessKeyBuckets []did.DID
+		permissions := []string{"s3:GetObject"}
 		if setupConfig != nil {
 			accessKeyExpires = setupConfig.accessKeyExpires
 			accessKeyBuckets = setupConfig.accessKeyBuckets
+			if setupConfig.accessKeyPermissions != nil {
+				permissions = setupConfig.accessKeyPermissions
+			}
 		}
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, []string{"s3:GetObject"}, accessKeyExpires))
+		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, permissions, accessKeyExpires))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), providers, tenantID
 	}
@@ -116,6 +147,78 @@ func TestAuthorize(t *testing.T) {
 		az, _, _ := setup(t, accessKey, nil)
 		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "nope", region))
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("rejects another tenant's bucket distinctly from an unknown one", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, nil)
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "theirs", region))
+		require.ErrorIs(t, err, auth.ErrForeignBucket)
+		require.NotErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	copyPerms := &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject"}}
+
+	t.Run("authorizes a copy whose signed source is the tenant's", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, copyPerms)
+		authz, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+		require.Equal(t, "bucket2", authz.Bucket.Name)
+		require.Equal(t, "bucket", authz.SourceBucketName)
+		require.NotNil(t, authz.SourceBucket)
+		require.Equal(t, bucketID, authz.SourceBucket.ID)
+	})
+
+	t.Run("a copy within one bucket resolves the source once", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, copyPerms)
+		authz, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket", "bucket", region, true))
+		require.NoError(t, err)
+		require.Same(t, authz.Bucket, authz.SourceBucket)
+	})
+
+	t.Run("rejects a copy whose source header appears under two spellings", func(t *testing.T) {
+		// Signed as one spelling, sent with a second: which value the signature
+		// covers is ambiguous, so the request is malformed before any source is
+		// classified.
+		az, _, _ := setup(t, accessKey, copyPerms)
+		req := signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true)
+		req.Headers["X-Amz-Copy-Source"] = "/theirs/object-key"
+		_, err := az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrMalformedSignature)
+	})
+
+	t.Run("rejects a copy whose source header is not signed", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, copyPerms)
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, false))
+		require.ErrorIs(t, err, auth.ErrUnsignedCopySource)
+	})
+
+	t.Run("rejects a copy from another tenant's bucket", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, copyPerms)
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "theirs", region, true))
+		require.ErrorIs(t, err, auth.ErrForeignBucket)
+	})
+
+	t.Run("rejects a copy from a missing bucket", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, copyPerms)
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "nope", region, true))
+		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("rejects a copy from a bucket outside the key's scope", func(t *testing.T) {
+		// The key may write bucket2 but is not scoped to bucket, the source.
+		az, _, _ := setup(t, accessKey, &setupConfig{
+			accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject"},
+			accessKeyBuckets:     []did.DID{bucket2ID},
+		})
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+		require.ErrorIs(t, err, auth.ErrBucketNotPermitted)
+	})
+
+	t.Run("rejects a copy by a key without the source read permission", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:PutObject"}})
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects an operation the access key lacks permission for", func(t *testing.T) {

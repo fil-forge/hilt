@@ -51,12 +51,20 @@ type Request struct {
 
 // toHeader builds a canonicalized http.Header from a plain header map, so
 // internal lookups get case-insensitive .Get semantics.
-func toHeader(m map[string]string) http.Header {
+// toHeader canonicalizes a request's header map. Header names are
+// case-insensitive, so two names differing only in case are one header; the
+// map cannot say which value was meant, and a caller that reads the header by
+// another route (the copy source, say) could then act on a value other than the
+// one the signature covered. Such a request is rejected as malformed.
+func toHeader(m map[string]string) (http.Header, error) {
 	h := make(http.Header, len(m))
 	for k, v := range m {
+		if _, dup := h[http.CanonicalHeaderKey(k)]; dup {
+			return nil, fmt.Errorf("duplicate header %q", http.CanonicalHeaderKey(k))
+		}
 		h.Set(k, v)
 	}
-	return h
+	return h, nil
 }
 
 // SignedRequest is the parsed authentication state of an S3 request: the public
@@ -80,6 +88,14 @@ type SignedRequest struct {
 	expires       int    // X-Amz-Expires seconds (presigned only)
 }
 
+// HeaderSigned reports whether the named header is listed in the request's
+// SignedHeaders, and so is covered by the signature Verify checks. Headers
+// outside that list are not authenticated even on a verified request; a caller
+// that acts on a header's value (the copy source, say) must check this first.
+func (s *SignedRequest) HeaderSigned(name string) bool {
+	return slices.Contains(s.signedHeaders, strings.ToLower(name))
+}
+
 // Parse extracts the signature fields from an S3 request — from the
 // Authorization header or, for presigned URLs, the X-Amz-* query parameters. It
 // does not verify the signature; call [Verify] for that.
@@ -89,7 +105,10 @@ func Parse(req Request) (*SignedRequest, error) {
 		return nil, fmt.Errorf("parsing request URL: %w", err)
 	}
 	query := u.Query()
-	headers := toHeader(req.Headers)
+	headers, err := toHeader(req.Headers)
+	if err != nil {
+		return nil, err
+	}
 
 	var (
 		algorithm     string

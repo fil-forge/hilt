@@ -94,4 +94,18 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 		require.True(t, s3perm.Valid(op.Permission()),
 			"operation %s requires %q, which s3perm does not recognize", op, op.Permission())
 	}
+
+	// The copies: their destination permission and the source's.
+	copyHdr := map[string]string{"x-amz-copy-source": "src/k"}
+	for _, r := range reqs[4:5] {
+		op, err := auth.OperationFor(s3.Request{Method: r.method, URL: r.url, Headers: copyHdr})
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, op)
+		require.True(t, s3perm.Valid(op.Permission()))
+	}
+	op, err := auth.OperationFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", Headers: copyHdr})
+	require.NoError(t, err)
+	require.Equal(t, auth.OpUploadPartCopy, op)
+	require.True(t, s3perm.Valid(op.Permission()))
+	require.True(t, s3perm.Valid(auth.SourcePermission))
 }

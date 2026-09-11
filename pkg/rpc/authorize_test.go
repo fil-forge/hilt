@@ -6,6 +6,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -40,12 +41,28 @@ func signedGetArgs(t *testing.T, signer ed25519.Signer, bucketName, region strin
 	return &s3req.AuthorizeArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL}}
 }
 
+// signedCopyArgs builds AuthorizeArguments for a CopyObject of object-key from
+// srcBucket into bucketName, with the copy-source header covered by the signature.
+func signedCopyArgs(t *testing.T, signer ed25519.Signer, bucketName, srcBucket, region string) *s3req.AuthorizeArguments {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	headers := map[string]string{"x-amz-copy-source": srcBucket + "/object-key"}
+	req := sigv4.Request{Method: "PUT", URL: "https://s3.fil.one/" + bucketName + "/object-key", Headers: headers}
+	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour,
+		sigv4.WithSignedHeaders("x-amz-copy-source"))
+	require.NoError(t, err)
+	return &s3req.AuthorizeArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL, Headers: headers}}
+}
+
 func TestAuthorizeRequest(t *testing.T) {
 	ctx := t.Context()
 	const (
 		region     = "us-west-2"
 		bucketName = "mybucket"
+		srcName    = "srcbucket"
 	)
+	srcID := testutil.RandomDID(t)
 
 	// The access key signs the request; its private key lives in the vault so the
 	// handler can issue delegations as the access key.
@@ -73,6 +90,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
+		require.NoError(t, buckets.Add(ctx, srcID, tenantID, srcName))
 
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 	}
@@ -125,6 +143,37 @@ func TestAuthorizeRequest(t *testing.T) {
 		chain, found := ok.Delegations.Entries[reDel.Link()]
 		require.True(t, found)
 		require.Equal(t, []cid.Cid{reDel.Link()}, chain)
+	})
+
+	t.Run("a copy from another bucket also delegates the source's read", func(t *testing.T) {
+		az := setup(t, []string{"s3:GetObject", "s3:PutObject"}, akSigner)
+		ok, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, srcName, region))
+		require.NoError(t, err)
+		require.Equal(t, &bucketID, ok.Bucket)
+
+		// The destination's PutObject commands plus one /content/retrieve over the
+		// source, all keyed in the proof set.
+		putCmds := s3perm.CommandsFor("s3:PutObject")
+		require.Len(t, blocks, len(putCmds)+1)
+		require.Len(t, ok.Delegations.Entries, len(putCmds)+1)
+		var srcRetrieve int
+		for _, d := range blocks {
+			require.Equal(t, providerID, d.Audience())
+			if d.Subject() == srcID {
+				require.Equal(t, content.Retrieve.Command.String(), d.Command().String())
+				srcRetrieve++
+			} else {
+				require.Equal(t, bucketID, d.Subject())
+			}
+		}
+		require.Equal(t, 1, srcRetrieve)
+	})
+
+	t.Run("a copy within one bucket delegates nothing extra", func(t *testing.T) {
+		az := setup(t, []string{"s3:GetObject", "s3:PutObject"}, akSigner)
+		_, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, bucketName, region))
+		require.NoError(t, err)
+		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))
 	})
 
 	t.Run("rejects a key lacking the permission for the action", func(t *testing.T) {

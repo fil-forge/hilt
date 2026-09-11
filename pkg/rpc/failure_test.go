@@ -98,6 +98,23 @@ func TestAuthFailure(t *testing.T) {
 		requireName(t, f.got, auth.SignatureMismatchErrorName)
 	})
 
+	t.Run("the bucket and copy rejections reach the caller by name", func(t *testing.T) {
+		for _, tc := range []struct {
+			err  error
+			name string
+		}{
+			{auth.ErrUnknownBucket, auth.UnknownBucketErrorName},
+			{auth.ErrForeignBucket, auth.ForeignBucketErrorName},
+			{auth.ErrBucketNotPermitted, auth.BucketNotPermittedErrorName},
+			{auth.ErrUnsignedCopySource, auth.UnsignedCopySourceErrorName},
+		} {
+			f := &recordingFailer{}
+			require.NoError(t, authFailure(f, fmt.Errorf("authorizing: %w", tc.err)))
+			require.True(t, f.called, tc.name)
+			requireName(t, f.got, tc.name)
+		}
+	})
+
 	t.Run("bucket sentinel is unknown to authFailure and returned", func(t *testing.T) {
 		f := &recordingFailer{}
 		require.ErrorIs(t, authFailure(f, bucketsvc.ErrBucketExists), bucketsvc.ErrBucketExists)
