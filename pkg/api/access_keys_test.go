@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,17 +47,23 @@ func (noopRevocations) Publish(context.Context, ucan.Issuer, ucan.Delegation, ..
 var errAssertPublishFailed = errors.New("swarf unreachable")
 
 // recordingInvalidations stands in for the principal invalidation publisher,
-// recording the principals it was asked to invalidate.
+// recording the principals it was asked to invalidate. A policy write
+// publishes its batch concurrently, so the record is kept in sorted order
+// rather than arrival order.
 type recordingInvalidations struct {
+	mu         sync.Mutex
 	err        error
 	principals []string
 }
 
 func (r *recordingInvalidations) Invalidate(_ context.Context, _ did.DID, principal string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.err != nil {
 		return r.err
 	}
 	r.principals = append(r.principals, principal)
+	slices.Sort(r.principals)
 	return nil
 }
 
