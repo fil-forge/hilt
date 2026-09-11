@@ -34,15 +34,35 @@ import (
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/client/management"
 	"github.com/fil-forge/smelt/pkg/stack"
+	swarfapi "github.com/fil-forge/swarf/pkg/api"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	swarfstore "github.com/fil-forge/swarf/pkg/store"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 )
 
 // forgeRegion must match the provider region hilt's post_start hook in smelt
 // registers ingot under (INGOT_REGION) — tenants are provisioned per region.
 const forgeRegion = "us-west-1"
+
+// hiltServiceDID must match the identity smelt's hilt service runs under
+// (HILT_IDENTITY_SERVICE_ID) — swarf accepts a principal invalidation only
+// from a publisher it is configured to trust, and hilt self-signs it.
+const hiltServiceDID = "did:web:hilt"
+
+// swarfPublishersConfig writes the swarf config file that trusts this stack's
+// hilt as a principal-invalidation publisher and returns its path, for
+// mounting over the container's /etc/swarf/config.yaml. Swarf reads that path
+// when it is given no --config, and every other setting stays in the
+// environment smelt provides.
+func swarfPublishersConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "swarf-config.yaml")
+	body := "principal:\n  publishers:\n    - " + hiltServiceDID + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	return path
+}
 
 // TestMain sweeps containers/volumes leaked by prior crashed itest runs (same
 // smeltery- project prefix as any smelt-SDK stack). Best-effort: a missing
@@ -148,6 +168,15 @@ func startForge(t *testing.T) *forgeNet {
 		t.Logf("using swarf binary override: %s", bin)
 		opts = append(opts, stack.WithServiceBinary("swarf", bin))
 	}
+	if bin := os.Getenv("HILT_ITEST_INGOT_BINARY"); bin != "" {
+		t.Logf("using ingot binary override: %s", bin)
+		opts = append(opts, stack.WithServiceBinary("ingot", bin))
+	}
+	// Swarf accepts /principal/invalidate only from a configured publisher,
+	// and smelt's swarf service definition sets no publisher list. Mount one
+	// naming this stack's hilt over swarf's config path so the principal
+	// scenarios can publish.
+	opts = append(opts, stack.WithServiceConfig("swarf", swarfPublishersConfig(t)))
 	s := stack.MustNewStack(t, opts...)
 	waitHTTPOK(t, s.HiltEndpoint()+"/health", 2*time.Minute)
 	waitHTTPOK(t, s.IngotEndpoint()+"/health", 2*time.Minute)
@@ -180,6 +209,25 @@ func TestForge(t *testing.T) {
 	t.Run("DeleteAccessKeyRevokes", func(t *testing.T) { testDeleteAccessKeyRevokes(t, net) })
 	t.Run("DeleteBucketRevokes", func(t *testing.T) { testDeleteBucketRevokes(t, net) })
 	t.Run("DeleteBucketRevokesOnlyThatBucket", func(t *testing.T) { testDeleteBucketRevokesOnlyThatBucket(t, net) })
+	// The IAM scenarios need a swarf that accepts principal invalidations and
+	// an ingot that enforces the effective action set. Until the published
+	// :main images carry both, they run only against the binary overrides
+	// (or when HILT_ITEST_IAM=1 says the images do); drop this guard then.
+	iam := func(name string, fn func(*testing.T, *forgeNet)) {
+		t.Run(name, func(t *testing.T) {
+			if os.Getenv("HILT_ITEST_IAM") != "1" &&
+				(os.Getenv("HILT_ITEST_SWARF_BINARY") == "" || os.Getenv("HILT_ITEST_INGOT_BINARY") == "") {
+				t.Skip("IAM scenarios need HILT_ITEST_SWARF_BINARY and HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main images carry the IAM changes")
+			}
+			fn(t, net)
+		})
+	}
+	iam("PrincipalPolicyScopesToOneBucket", testPrincipalPolicyScopesToOneBucket)
+	iam("DenyBeatsAllow", testDenyBeatsAllow)
+	iam("NarrowingInvalidatesPrincipal", testNarrowingInvalidatesPrincipal)
+	iam("DeletePrincipalRemovesKeysAndPolicies", testDeletePrincipalRemovesKeysAndPolicies)
+	iam("PresignedGetFollowsPolicy", testPresignedGetFollowsPolicy)
+	iam("PrincipalKeyCreateRejectsBadRequests", testPrincipalKeyCreateRejectsBadRequests)
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot
@@ -228,6 +276,62 @@ func (n *forgeNet) awaitRevocations(t *testing.T, ctx context.Context, count int
 	return records
 }
 
+// principalEventCauses returns the causes of every principal revocation for
+// the given principal already on the firehose. Callers take it just before the
+// write whose event they expect and pass it to awaitPrincipalEvents, so an
+// earlier event for the same principal (a policy create publishes one too) is
+// not mistaken for the new one. The firehose is the clock here rather than the
+// test host: records carry the Postgres container's time, and the Docker VM's
+// clock drifts from the host's by up to a second, which is more than the gap
+// between two consecutive writes. Swarf emits a stored record within its
+// one-second poll, so a three-second read sees everything published before
+// the call.
+func (n *forgeNet) principalEventCauses(t *testing.T, ctx context.Context, principal string) map[cid.Cid]struct{} {
+	t.Helper()
+	streamCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	seen := map[cid.Cid]struct{}{}
+	for event, err := range n.swarf.StreamEvents(streamCtx, time.Time{}) {
+		if err != nil {
+			break // the deadline ends the read; anything else surfaces on the next stream
+		}
+		if event.PrincipalRevocation != nil && event.PrincipalRevocation.Principal == principal {
+			seen[event.PrincipalRevocation.Cause] = struct{}{}
+		}
+	}
+	return seen
+}
+
+// awaitPrincipalEvents reads the firehose from the beginning and returns the
+// first count principal events naming the given principal whose cause is not
+// in exclude (see principalEventCauses), failing the test if they do not
+// arrive in time. Like the revocation firehose it is stack-global, and a
+// principal id unique to the calling scenario is what separates one subtest's
+// events from another's.
+func (n *forgeNet) awaitPrincipalEvents(t *testing.T, ctx context.Context, exclude map[cid.Cid]struct{}, count int, principal string) []swarfapi.FirehosePrincipalRevocation {
+	t.Helper()
+	streamCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	var events []swarfapi.FirehosePrincipalRevocation
+	for event, err := range n.swarf.StreamEvents(streamCtx, time.Time{}) {
+		require.NoError(t, err, "reading the firehose")
+		if event.PrincipalRevocation == nil || event.PrincipalRevocation.Principal != principal {
+			continue
+		}
+		if _, known := exclude[event.PrincipalRevocation.Cause]; known {
+			continue
+		}
+		events = append(events, *event.PrincipalRevocation)
+		if len(events) == count {
+			break
+		}
+	}
+	require.Len(t, events, count, "expected %d principal events for %s on the firehose", count, principal)
+	return events
+}
+
 // console drives hilt's partner-facing REST management API using the real
 // management client, authenticating with smelt's partner key.
 type console struct {
@@ -240,16 +344,13 @@ func (c *console) ProvisionTenant(ctx context.Context, tenantID, region string) 
 	return c.client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
 }
 
-// CreateAccessKey creates an S3 access key with the given permissions and
-// returns it, including the one-time secret access key. Naming buckets
-// scopes the key's delegations to them; with none it gets tenant-wide
-// (powerline) access.
-func (c *console) CreateAccessKey(ctx context.Context, tenantID, name string, perms, buckets []string) (api.CreatedAccessKey, error) {
-	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
-		Name:        name,
-		Permissions: perms,
-		Buckets:     buckets,
-	})
+// CreateAccessKey creates an S3 access key and returns it, including the
+// one-time secret access key. Without a principal it is a service key carrying
+// the permissions in the request, scoped to the buckets it names (with none,
+// tenant-wide powerline access). With PrincipalID it is bound to that
+// principal, takes no permissions or buckets, and is issued no delegation.
+func (c *console) CreateAccessKey(ctx context.Context, tenantID string, req api.CreateAccessKeyRequest) (api.CreatedAccessKey, error) {
+	return c.client.CreateAccessKey(ctx, tenantID, req)
 }
 
 // DeleteAccessKey revokes and removes an access key.
@@ -260,6 +361,57 @@ func (c *console) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID str
 // GetAccessKey returns a single access key.
 func (c *console) GetAccessKey(ctx context.Context, tenantID, accessKeyID string) (api.AccessKey, error) {
 	return c.client.GetAccessKey(ctx, tenantID, accessKeyID)
+}
+
+// CreatePrincipal records a console user of the tenant. A principal holds no
+// key material and no delegation: its access comes from the bucket policies
+// naming it.
+func (c *console) CreatePrincipal(ctx context.Context, tenantID, userID string) (api.Principal, error) {
+	return c.client.CreatePrincipal(ctx, tenantID, userID)
+}
+
+// DeletePrincipal removes the principal, its access keys and its place in
+// every policy of the tenant.
+func (c *console) DeletePrincipal(ctx context.Context, tenantID, userID string) error {
+	return c.client.DeletePrincipal(ctx, tenantID, userID)
+}
+
+// ListPrincipalAccessKeys returns the keys bound to the principal.
+func (c *console) ListPrincipalAccessKeys(ctx context.Context, tenantID, userID string) ([]api.AccessKey, error) {
+	return c.client.ListPrincipalAccessKeys(ctx, tenantID, userID)
+}
+
+// CreateBucketPolicy writes a bucket's first policy and returns its ETag.
+func (c *console) CreateBucketPolicy(ctx context.Context, tenantID, bucket string, doc api.BucketPolicy) (string, error) {
+	return c.client.CreateBucketPolicy(ctx, tenantID, bucket, doc)
+}
+
+// ReplaceBucketPolicy replaces a bucket's policy, conditioned on etag, and
+// returns the new one.
+func (c *console) ReplaceBucketPolicy(ctx context.Context, tenantID, bucket string, doc api.BucketPolicy, etag string) (string, error) {
+	return c.client.ReplaceBucketPolicy(ctx, tenantID, bucket, doc, etag)
+}
+
+// GetBucketPolicy reads a bucket's policy and the ETag its next write
+// conditions on.
+func (c *console) GetBucketPolicy(ctx context.Context, tenantID, bucket string) (api.BucketPolicy, string, error) {
+	return c.client.GetBucketPolicy(ctx, tenantID, bucket)
+}
+
+// DeleteBucketPolicy removes a bucket's policy, conditioned on etag. Every
+// principal it named loses its access to the bucket.
+func (c *console) DeleteBucketPolicy(ctx context.Context, tenantID, bucket, etag string) error {
+	return c.client.DeleteBucketPolicy(ctx, tenantID, bucket, etag)
+}
+
+// ListPrincipalPolicies lists every policy of the tenant naming the principal.
+func (c *console) ListPrincipalPolicies(ctx context.Context, tenantID, userID string) ([]api.PrincipalPolicy, error) {
+	return c.client.ListPrincipalPolicies(ctx, tenantID, userID)
+}
+
+// GetPrincipalAccess returns the principal's effective actions per bucket.
+func (c *console) GetPrincipalAccess(ctx context.Context, tenantID, userID string) ([]api.BucketAccess, error) {
+	return c.client.GetPrincipalAccess(ctx, tenantID, userID)
 }
 
 // waitHTTPOK polls url until it returns 2xx or the timeout elapses.
