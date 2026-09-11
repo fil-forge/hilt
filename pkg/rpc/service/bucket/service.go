@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
@@ -95,7 +96,9 @@ func New(
 	}
 }
 
-// Create authenticates the request, checks the s3:CreateBucket permission, creates
+// Create authenticates the request, checks the s3:CreateBucket permission
+// (which no policy grants, so a principal-bound key is refused by the
+// authorizer before this runs), creates
 // the bucket (an ephemeral bucket key signs a bucket→tenant "top" root delegation
 // and is then discarded), provisions the bucket's space with Sprue as the tenant,
 // points the space at the provider's routing policy so its writes land on the
@@ -268,8 +271,9 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	}, blocks, nil
 }
 
-// Delete authenticates the request, checks the s3:DeleteBucket permission,
-// resolves the bucket, verifies its space is empty via Sprue (acting as the
+// Delete authenticates the request, checks the s3:DeleteBucket permission
+// (which no policy grants, so a principal-bound key is refused by the
+// authorizer before this runs), resolves the bucket, verifies its space is empty via Sprue (acting as the
 // tenant), publishes revocations for the delegations over the bucket, then
 // deletes those delegations, the bucket's policy and the bucket record. The
 // policy goes without a publication: the gateway refuses a bucket it no longer
@@ -434,10 +438,16 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	return out, nil
 }
 
-// Info resolves the named bucket and returns its DID, the access key's permissions,
-// and the proof chains for the access key's delegations that reach the bucket. It
-// is a lookup: it carries no signed S3 request, so it neither authenticates a
+// Info resolves the named bucket and returns its DID, the credential's actions
+// on it, and the proof chains for the delegations that reach the bucket. It is
+// a lookup: it carries no signed S3 request, so it neither authenticates a
 // signature nor checks the invocation issuer.
+//
+// A service key carries its own permissions, and the chains run from the bucket
+// to its own grants. A principal-bound key holds what the bucket's policy
+// grants its principal: the chain is the bucket root alone, since neither the
+// principal nor the key is a hop in it, and a bucket the principal holds no
+// action on is reported as [ErrUnknownBucket].
 func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
 	b, err := s.buckets.GetByName(ctx, args.Name)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -451,6 +461,9 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownAccessKey, args.AccessKey)
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("looking up access key: %w", err)
+	}
+	if akRec.Principal != nil {
+		return s.principalInfo(ctx, b, akRec)
 	}
 
 	// Build the proof chains from the bucket to the access key: for each grant to
@@ -502,4 +515,60 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil
+}
+
+// principalInfo answers /s3/bucket/info for a principal-bound key: the
+// principal's effective actions on the bucket, and the bucket→tenant root as
+// the whole proof set. The per-request delegations the tenant signs on
+// /s3/request/authorize hang off that root, so it is all the gateway needs.
+func (s *Service) principalInfo(ctx context.Context, b bucketstore.Record, akRec accesskey.Record) (*s3bkt.InfoOK, []ucan.Delegation, error) {
+	if akRec.Tenant != b.Tenant {
+		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, b.Name)
+	}
+
+	// Share-locked, as the authorizer reads it: Info must observe the same
+	// settled state, so a read that meets a policy write in flight waits for it
+	// to commit or roll back, and reports the wait the way the authorizer does.
+	var doc *bucketpolicy.Policy
+	rec, err := s.policies.Get(ctx, b.ID, store.WithLock(store.LockShare))
+	switch {
+	case err == nil:
+		doc = &rec.Policy
+	case errors.Is(err, store.ErrRecordNotFound): // no policy: the principal reaches nothing
+	case errors.Is(err, store.ErrLockTimeout):
+		s.logger.Info("share-locked read waited out a write in flight",
+			zap.String("record", "bucket policy"), zap.Stringer("bucket", b.ID), zap.Error(err))
+		return nil, nil, fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, err)
+	default:
+		return nil, nil, fmt.Errorf("looking up bucket policy: %w", err)
+	}
+	eff := bucketpolicy.Effective(doc, *akRec.Principal)
+	if len(eff) == 0 {
+		return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+	}
+
+	// The root is bucket → tenant over the top command; the principal and the
+	// key are not hops in it.
+	proofs, links, err := s.delegations.ProofChain(ctx, b.Tenant, command.Top(), b.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("building the bucket root proof chain: %w", err)
+	}
+	if len(proofs) == 0 {
+		return nil, nil, fmt.Errorf("%w: %q has no root delegation", ErrUnknownBucket, b.Name)
+	}
+	root := proofs[0] // ProofChain lists the chain root first
+
+	s.logger.Debug("bucket info for a principal-bound key",
+		zap.Stringer("bucket", b.ID),
+		zap.String("name", b.Name),
+		zap.String("principal", *akRec.Principal),
+	)
+	return &s3bkt.InfoOK{
+		ID:        b.ID,
+		Principal: akRec.Principal,
+		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
+			akRec.ID: eff,
+		}},
+		Delegations: s3.ProofSet{Entries: map[cid.Cid][]cid.Cid{root.Link(): links}},
+	}, proofs, nil
 }
