@@ -9,6 +9,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -31,10 +32,19 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 const selectColumns = `SELECT id, tenant_id, name, buckets, permissions, principal, expires_at, created_at FROM access_key`
 
+// Add inserts the row in a short transaction so its wait is bounded at
+// [store.LockTimeout]: the principal foreign key takes FOR KEY SHARE on the
+// principal row, which a removal in progress holds FOR UPDATE across its
+// callback. A longer wait returns [store.ErrLockTimeout] and nothing is
+// written.
 func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 	if err := in.Validate(); err != nil {
 		return err
 	}
+	return pglock.MapError(s.add(ctx, in))
+}
+
+func (s *Store) add(ctx context.Context, in accesskey.Input) error {
 	bucketStrs := make([]string, len(in.Buckets))
 	for i, b := range in.Buckets {
 		bucketStrs[i] = b.String()
@@ -48,7 +58,16 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 		e := in.ExpiresAt.UTC()
 		expires = &e
 	}
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, principal, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`, in.ID.String(), in.Tenant.String(), in.Name, bucketStrs, permissions, in.Principal, expires)
@@ -70,17 +89,39 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 		}
 		return fmt.Errorf("adding access key: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
 	return nil
 }
 
 // Get reads the row, with FOR SHARE when [store.LockShare] is requested so the
-// read waits on a Delete that holds the row FOR UPDATE.
+// read waits on a Delete that holds the row FOR UPDATE. The share-locked read
+// runs in a short transaction of its own so its wait is bounded at
+// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
 func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
+	rec, err := s.get(ctx, id, opts...)
+	return rec, pglock.MapError(err)
+}
+
+func (s *Store) get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
 	query := selectColumns + ` WHERE id = $1`
-	if store.NewReadConfig(opts...).Lock == store.LockShare {
-		query += ` FOR SHARE`
+	if store.NewReadConfig(opts...).Lock != store.LockShare {
+		return getResult(scanRecord(s.pool.QueryRow(ctx, query, id.String())))
 	}
-	rec, err := scanRecord(s.pool.QueryRow(ctx, query, id.String()))
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return accesskey.Record{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the lock
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return accesskey.Record{}, err
+	}
+	return getResult(scanRecord(tx.QueryRow(ctx, query+` FOR SHARE`, id.String())))
+}
+
+func getResult(rec accesskey.Record, err error) (accesskey.Record, error) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accesskey.Record{}, store.ErrRecordNotFound
 	}
@@ -123,13 +164,23 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 // Delete runs in one transaction: it locks the row FOR UPDATE, runs
 // beforeCommit while holding the lock, deletes the row and commits. A locked
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
+// Every lock it takes is bounded at [store.LockTimeout], so a caller waiting
+// behind another write is given [store.ErrLockTimeout] to retry rather than
+// holding its pool connection indefinitely.
 func (s *Store) Delete(ctx context.Context, id did.DID, beforeCommit func(ctx context.Context) error) error {
+	return pglock.MapError(s.delete(ctx, id, beforeCommit))
+}
+
+func (s *Store) delete(ctx context.Context, id did.DID, beforeCommit func(ctx context.Context) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
 	var found bool
 	err = tx.QueryRow(ctx, `SELECT TRUE FROM access_key WHERE id = $1 FOR UPDATE`, id.String()).Scan(&found)
 	if errors.Is(err, pgx.ErrNoRows) {

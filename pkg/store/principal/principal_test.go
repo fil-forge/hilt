@@ -8,7 +8,13 @@ import (
 	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -376,4 +382,122 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 			t.Fatal("share-locked Get did not return after the delete committed")
 		}
 	})
+}
+
+// TestPrincipalStorePostgresLockTimeout pins the bounded wait that keeps a
+// principal removal and a policy write from hanging on each other. Removal
+// holds the principal row FOR UPDATE across a callback that rewrites policies
+// in transactions of its own, while a policy write reaches back onto the same
+// rows through the bucket_policy_principal foreign key. Neither edge is
+// visible to Postgres, so the wait is bounded and one side is told to retry.
+// Postgres only: the memory stores hold no lock across calls.
+func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
+	pool := createPostgresPool(t)
+	principals := principalpostgres.New(pool)
+	policies := bucketpolicypostgres.New(pool)
+	seed := seeder(pool)
+
+	tenantID := testutil.RandomDID(t)
+	seed(t, tenantID)
+	require.NoError(t, principals.Add(t.Context(), tenantID, "held"))
+
+	bucketID := testutil.RandomDID(t)
+	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "lock-timeout-bucket"))
+
+	// Stand in for a removal in progress: hold the principal row FOR UPDATE.
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer tx.Rollback(t.Context())
+	var found bool
+	require.NoError(t, tx.QueryRow(t.Context(),
+		`SELECT TRUE FROM principal WHERE tenant_id = $1 AND external_id = $2 FOR UPDATE`,
+		tenantID.String(), "held").Scan(&found))
+
+	// The policy write indexes the principal it names, which waits on that row.
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		_, err := policies.Put(context.Background(), bucketpolicystore.Input{
+			Bucket: bucketID,
+			Tenant: tenantID,
+			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Effect:     bucketpolicy.Allow,
+				Principals: []string{"held"},
+				Actions:    []string{"s3:GetObject"},
+			}}},
+		}, nil)
+		done <- result{err, time.Since(start)}
+	}()
+
+	select {
+	case res := <-done:
+		require.ErrorIs(t, res.err, store.ErrLockTimeout)
+		require.Greater(t, res.elapsed, store.LockTimeout/2,
+			"Put failed before it could have waited out the lock timeout")
+	case <-time.After(store.LockTimeout + 10*time.Second):
+		t.Fatal("Put did not give up waiting for the principal row lock")
+	}
+
+	// Nothing was written: the transaction rolled back with its failed lock.
+	_, err = policies.Get(t.Context(), bucketID)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+}
+
+// TestPrincipalStorePostgresLockTimeoutOnKeyAdd pins the same bound on the
+// other statement that reaches onto a held principal row: adding a key bound
+// to the principal takes FOR KEY SHARE on it through the access_key foreign
+// key, which a removal holding the row FOR UPDATE blocks. Postgres only.
+func TestPrincipalStorePostgresLockTimeoutOnKeyAdd(t *testing.T) {
+	pool := createPostgresPool(t)
+	principals := principalpostgres.New(pool)
+	accessKeys := accesskeypostgres.New(pool)
+	seed := seeder(pool)
+
+	tenantID := testutil.RandomDID(t)
+	seed(t, tenantID)
+	require.NoError(t, principals.Add(t.Context(), tenantID, "held"))
+
+	// Stand in for a removal in progress: hold the principal row FOR UPDATE.
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer tx.Rollback(t.Context())
+	var found bool
+	require.NoError(t, tx.QueryRow(t.Context(),
+		`SELECT TRUE FROM principal WHERE tenant_id = $1 AND external_id = $2 FOR UPDATE`,
+		tenantID.String(), "held").Scan(&found))
+
+	keyID := testutil.RandomDID(t)
+	principal := "held"
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		err := accessKeys.Add(context.Background(), accesskey.Input{
+			ID:        keyID,
+			Tenant:    tenantID,
+			Name:      "laptop",
+			Principal: &principal,
+		})
+		done <- result{err, time.Since(start)}
+	}()
+
+	select {
+	case res := <-done:
+		require.ErrorIs(t, res.err, store.ErrLockTimeout)
+		require.Greater(t, res.elapsed, store.LockTimeout/2,
+			"Add failed before it could have waited out the lock timeout")
+	case <-time.After(store.LockTimeout + 10*time.Second):
+		t.Fatal("Add did not give up waiting for the principal row lock")
+	}
+
+	// Nothing was written: the transaction rolled back with its failed lock.
+	_, err = accessKeys.Get(t.Context(), keyID)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
 }

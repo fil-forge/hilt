@@ -2,8 +2,10 @@
 // creation (key-pair generation and, for a service key, tenant→access-key
 // delegation issuance), listing, retrieval, and revocation. A key created with
 // a principal is bound to it: it holds no permissions, buckets or delegations
-// of its own and is authorized from the tenant's bucket policies. It returns
-// the known errors in errors.go so handlers can map them to HTTP responses;
+// of its own and is authorized from the tenant's bucket policies; deleting one
+// publishes an invalidation for its principal, since there is no delegation a
+// revocation could name. It returns the known errors in errors.go so handlers
+// can map them to HTTP responses;
 // unexpected failures are returned wrapped for the handler to log.
 package accesskey
 
@@ -15,6 +17,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/invalidation"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -49,14 +52,15 @@ type RevocationPublisher interface {
 
 // Service implements S3 access-key operations shared by the REST handlers.
 type Service struct {
-	logger      *zap.Logger
-	tenants     tenant.Store
-	accessKeys  accesskeystore.Store
-	principals  principal.Store
-	buckets     bucket.Store
-	delegations delegationstore.Store
-	secrets     vault.Vault
-	revocations RevocationPublisher
+	logger        *zap.Logger
+	tenants       tenant.Store
+	accessKeys    accesskeystore.Store
+	principals    principal.Store
+	buckets       bucket.Store
+	delegations   delegationstore.Store
+	secrets       vault.Vault
+	revocations   RevocationPublisher
+	invalidations invalidation.Publisher
 }
 
 // New constructs the access-key service.
@@ -69,16 +73,18 @@ func New(
 	delegations delegationstore.Store,
 	secrets vault.Vault,
 	revocations RevocationPublisher,
+	invalidations invalidation.Publisher,
 ) *Service {
 	return &Service{
-		logger:      logger,
-		tenants:     tenants,
-		accessKeys:  accessKeys,
-		principals:  principals,
-		buckets:     buckets,
-		delegations: delegations,
-		secrets:     secrets,
-		revocations: revocations,
+		logger:        logger,
+		tenants:       tenants,
+		accessKeys:    accessKeys,
+		principals:    principals,
+		buckets:       buckets,
+		delegations:   delegations,
+		secrets:       secrets,
+		revocations:   revocations,
+		invalidations: invalidations,
 	}
 }
 
@@ -225,6 +231,12 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if principalRef != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
+		// The principal row is referenced by the new key; a removal holding it
+		// past the store's lock timeout means nothing was written and the
+		// call can be repeated.
+		if errors.Is(err, store.ErrLockTimeout) {
+			return accesskeystore.Record{}, "", ErrConcurrentChange
+		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
 	}
 
@@ -334,12 +346,15 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 	return rec, names, nil
 }
 
-// Delete revokes an access key belonging to the tenant: publishing UCAN
-// revocations for its delegations, then removing those delegations, its vault
-// key, and its record. Revocations are published first so that a revocation
-// service failure leaves the key intact and the call cleanly retryable —
-// otherwise the delegations would live on with nothing for a verifier to check.
-// A principal-bound key holds no delegation, so nothing is published for it.
+// Delete removes an access key belonging to the tenant. A service key's
+// delegations are revoked first: publishing before anything is removed leaves
+// the key intact when the revocation service fails, so the call is cleanly
+// retryable — otherwise the delegations would live on with nothing for a
+// verifier to check. A principal-bound key holds no delegation a revocation
+// could name, so the gateway is told to drop what it cached for the key's
+// principal instead: the invalidation is published while the row is locked and
+// before the delete commits, so a publish failure leaves the key usable. A row
+// another write holds past the store's lock timeout is [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -359,19 +374,70 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
-	if err := s.revokeDelegations(ctx, tenantRec.ID, id); err != nil {
+	if rec.Principal != nil {
+		return s.deletePrincipalKey(ctx, tenantRec.ID, id, *rec.Principal)
+	}
+	return s.deleteServiceKey(ctx, tenantRec.ID, id)
+}
+
+// deleteServiceKey publishes revocations for the key's delegations, then
+// removes them, its vault key, and its record.
+func (s *Service) deleteServiceKey(ctx context.Context, tenantID, id did.DID) error {
+	if err := s.revokeDelegations(ctx, tenantID, id); err != nil {
 		return err
 	}
 
 	if err := s.delegations.DeleteByAudience(ctx, id); err != nil {
 		return fmt.Errorf("deleting access key delegations: %w", err)
 	}
-	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
+	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
 	if err := s.accessKeys.Delete(ctx, id, nil); err != nil {
+		if errors.Is(err, store.ErrLockTimeout) {
+			return ErrConcurrentChange
+		}
 		return fmt.Errorf("deleting access key: %w", err)
 	}
+	s.logger.Info("deleted access key",
+		zap.Stringer("tenant", tenantID),
+		zap.Stringer("access_key", id),
+	)
+	return nil
+}
+
+// deletePrincipalKey removes the row under its lock, publishing the principal
+// invalidation from the callback the store runs before it commits, then
+// removes the vault key.
+func (s *Service) deletePrincipalKey(ctx context.Context, tenantID, id did.DID, principal string) error {
+	if err := s.accessKeys.Delete(ctx, id, func(ctx context.Context) error {
+		return s.invalidations.Invalidate(ctx, tenantID, principal)
+	}); err != nil {
+		// A lock the delete waited on means another writer holds the row.
+		// Nothing was committed, so the caller repeats the call.
+		if errors.Is(err, store.ErrLockTimeout) {
+			s.logger.Info("access key removal lost a race with a concurrent write",
+				zap.Stringer("tenant", tenantID), zap.Stringer("access_key", id), zap.Error(err))
+			return ErrConcurrentChange
+		}
+		return fmt.Errorf("deleting access key: %w", err)
+	}
+
+	// Everything that makes the key unusable happens once the row is gone, so a
+	// failed publish leaves a working key rather than a broken one. A
+	// principal-bound key holds no delegation; the ones it may have been issued
+	// in error are removed with it, and nothing is revoked.
+	if err := s.delegations.DeleteByAudience(ctx, id); err != nil {
+		return fmt.Errorf("deleting access key delegations: %w", err)
+	}
+	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantID, id)); err != nil {
+		s.logger.Warn("removing access key from vault", zap.Error(err))
+	}
+	s.logger.Info("deleted access key",
+		zap.Stringer("tenant", tenantID),
+		zap.Stringer("access_key", id),
+		zap.String("principal", principal),
+	)
 	return nil
 }
 

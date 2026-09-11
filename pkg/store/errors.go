@@ -16,6 +16,9 @@ const (
 	// compare-and-set write finds the record in a state other than the one the
 	// caller conditioned on.
 	PreconditionFailedErrorName = "PreconditionFailed"
+	// LockTimeoutErrorName is the name given to an error where a statement gave
+	// up waiting for a conflicting row or advisory lock.
+	LockTimeoutErrorName = "LockTimeout"
 )
 
 var (
@@ -30,4 +33,9 @@ var (
 	// the stored record: an If-Match tag differs from the current one, or a
 	// create finds a record already present. Nothing is written.
 	ErrPreconditionFailed = errors.New(PreconditionFailedErrorName, "precondition failed")
+	// ErrLockTimeout is returned when a statement waited [LockTimeout] for a
+	// lock another transaction holds and gave up. Nothing is written. The call
+	// is retryable: the conflicting write either commits or rolls back, and the
+	// retry proceeds from whichever state it leaves.
+	ErrLockTimeout = errors.New(LockTimeoutErrorName, "timed out waiting for a lock")
 )
