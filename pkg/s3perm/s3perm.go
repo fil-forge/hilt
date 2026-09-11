@@ -53,6 +53,11 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:ListAllMyBuckets":    nil,
 	"s3:DeleteBucket":        nil,
 
+	// Bucket-configuration reads. Ingot answers them from its registry, so they
+	// issue no delegation; they exist so a policy can grant or withhold them.
+	"s3:GetBucketVersioning":              nil,
+	"s3:GetBucketObjectLockConfiguration": nil,
+
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.
 	"s3:AbortMultipartUpload":       cmdsAbort,
@@ -60,10 +65,26 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:ListBucketMultipartUploads": cmdsRetrieve,
 }
 
+// bucketLevel are the permissions excluded from bucket policies: a key holding
+// CreateBucket or DeleteBucket acts outside the policy that granted it, and
+// every principal holds ListAllMyBuckets.
+var bucketLevel = map[string]bool{
+	"s3:CreateBucket":     true,
+	"s3:DeleteBucket":     true,
+	"s3:ListAllMyBuckets": true,
+}
+
 // Valid reports whether p is a recognized S3 permission.
 func Valid(p string) bool {
 	_, ok := permissionCommands[p]
 	return ok
+}
+
+// PolicyAction reports whether p may appear in a bucket policy statement: a
+// recognized permission other than s3:CreateBucket, s3:DeleteBucket and
+// s3:ListAllMyBuckets.
+func PolicyAction(p string) bool {
+	return Valid(p) && !bucketLevel[p]
 }
 
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the
