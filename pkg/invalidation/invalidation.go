@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
@@ -24,6 +25,20 @@ import (
 // Timeout bounds one publish. A write that holds a row lock waits no longer
 // than this for the revocation service before failing and releasing the lock.
 const Timeout = 5 * time.Second
+
+// BatchTimeout bounds every publish of one write together. A policy write
+// invalidates each principal whose actions changed, the wildcard fanning out
+// to all of the tenant's, and holds the bucket's exclusive lock throughout,
+// while a share-locked reader of that bucket gives up after
+// [store.LockTimeout]. Giving each publish its own [Timeout] in turn would let
+// a large batch outlive the reader's wait and lock the bucket's data path out,
+// so the batch as a whole gets this deadline, below the reader's bound. A
+// single publish still waits at most [Timeout].
+const BatchTimeout = 8 * time.Second
+
+// The batch bound must stay below the reader's; a negative difference fails
+// to compile.
+const _ = uint(store.LockTimeout - BatchTimeout)
 
 // Publisher records that a principal's cached authority is void. Callers hold
 // a row lock while they call it and roll the write back when it errors, so a

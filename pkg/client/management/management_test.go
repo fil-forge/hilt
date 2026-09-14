@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/api"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/management"
 	"github.com/stretchr/testify/require"
 )
@@ -245,4 +246,107 @@ type errRoundTripper struct{}
 
 func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("transport boom")
+}
+
+func TestManagementClientPolicies(t *testing.T) {
+	ctx := context.Background()
+	document := api.BucketPolicy{Statements: []bucketpolicy.Statement{{
+		Effect:     bucketpolicy.Allow,
+		Principals: []string{"user-1"},
+		Actions:    []string{"s3:GetObject"},
+	}}}
+
+	t.Run("GetBucketPolicy returns the document and its ETag", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, "/tenants/acme/buckets/photos/policy", r.URL.Path)
+			w.Header().Set("ETag", `"abc"`)
+			_ = json.NewEncoder(w).Encode(document)
+		})
+		got, etag, err := c.GetBucketPolicy(ctx, "acme", "photos")
+		require.NoError(t, err)
+		require.Equal(t, `"abc"`, etag)
+		require.Equal(t, document, got)
+	})
+
+	t.Run("GetBucketPolicy fails when the response carries no ETag", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(document)
+		})
+		_, _, err := c.GetBucketPolicy(ctx, "acme", "photos")
+		require.ErrorIs(t, err, management.ErrMissingETag)
+	})
+
+	t.Run("CreateBucketPolicy conditions on If-None-Match", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodPut, r.Method)
+			require.Equal(t, "*", r.Header.Get("If-None-Match"))
+			require.Empty(t, r.Header.Get("If-Match"))
+			var body api.BucketPolicy
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, document, body)
+			w.Header().Set("ETag", `"abc"`)
+			w.WriteHeader(http.StatusCreated)
+		})
+		etag, err := c.CreateBucketPolicy(ctx, "acme", "photos", document)
+		require.NoError(t, err)
+		require.Equal(t, `"abc"`, etag)
+	})
+
+	t.Run("ReplaceBucketPolicy conditions on If-Match", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, `"abc"`, r.Header.Get("If-Match"))
+			w.Header().Set("ETag", `"def"`)
+			w.WriteHeader(http.StatusOK)
+		})
+		etag, err := c.ReplaceBucketPolicy(ctx, "acme", "photos", document, `"abc"`)
+		require.NoError(t, err)
+		require.Equal(t, `"def"`, etag)
+	})
+
+	t.Run("a stale tag surfaces as a 412 APIError", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = w.Write([]byte(`{"message":"the bucket's policy has changed"}`))
+		})
+		_, err := c.ReplaceBucketPolicy(ctx, "acme", "photos", document, `"stale"`)
+		var apiErr *management.APIError
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusPreconditionFailed, apiErr.StatusCode)
+	})
+
+	t.Run("DeleteBucketPolicy conditions on If-Match", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodDelete, r.Method)
+			require.Equal(t, `"abc"`, r.Header.Get("If-Match"))
+			w.WriteHeader(http.StatusNoContent)
+		})
+		require.NoError(t, c.DeleteBucketPolicy(ctx, "acme", "photos", `"abc"`))
+	})
+
+	t.Run("the principal reads unwrap their list", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/tenants/acme/principals/user-1/policies":
+				_ = json.NewEncoder(w).Encode(api.PrincipalPolicyList{Items: []api.PrincipalPolicy{
+					{BucketName: "photos", ETag: `"abc"`, Policy: document},
+				}})
+			case "/tenants/acme/principals/user-1/access":
+				_ = json.NewEncoder(w).Encode(api.PrincipalAccess{Buckets: []api.BucketAccess{
+					{Name: "photos", Actions: []string{"s3:GetObject"}},
+				}})
+			default:
+				t.Errorf("unexpected path %q", r.URL.Path)
+			}
+		})
+		policies, err := c.ListPrincipalPolicies(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Equal(t, []api.PrincipalPolicy{{BucketName: "photos", ETag: `"abc"`, Policy: document}}, policies)
+
+		access, err := c.GetPrincipalAccess(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Equal(t, []api.BucketAccess{{Name: "photos", Actions: []string{"s3:GetObject"}}}, access)
+	})
 }
