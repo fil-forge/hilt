@@ -10,10 +10,13 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -84,7 +87,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -145,7 +148,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -218,7 +221,10 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type deleteEnv struct {
 	svc        *tenantsvc.Service
 	tenants    *tenantmemory.Store
+	buckets    *bucketmemory.Store
+	policies   *bucketpolicymemory.Store
 	principals *principalmemory.Store
+	bucketID   did.DID
 	tenantID   did.DID
 	directory  *plcDirectory
 }
@@ -253,9 +259,21 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), principals, delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
-	return deleteEnv{svc: svc, tenants: tenants, principals: principals, tenantID: tenantID, directory: directory}
+	// One bucket with a policy, so the cascade over buckets and their policies
+	// is exercised.
+	buckets, policies := bucketmemory.New(), bucketpolicymemory.New()
+	bucketID := testutil.RandomDID(t)
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "tenant-1-bucket"))
+	_, err = policies.Put(ctx, bucketpolicystore.Input{
+		Bucket: bucketID, Tenant: tenantID,
+		Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principals: []string{"*"}, Actions: []string{"s3:GetObject"}}}},
+	}, nil)
+	require.NoError(t, err)
+
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
+		accesskeymemory.New(), principals, policies, delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
+	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
+		principals: principals, bucketID: bucketID, tenantID: tenantID, directory: directory}
 }
 
 func TestDelete(t *testing.T) {
@@ -270,6 +288,15 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, ps)
 		require.Equal(t, 1, env.directory.deactivations)
+	})
+
+	t.Run("deletes the tenant's buckets and their policies", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		_, err := env.buckets.GetByName(ctx, "tenant-1-bucket")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, err = env.policies.Get(ctx, env.bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("is idempotent for an unknown tenant", func(t *testing.T) {
