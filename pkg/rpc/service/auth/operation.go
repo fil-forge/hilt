@@ -26,6 +26,11 @@ const (
 	OpDeleteObject Operation = "DeleteObject" // DELETE, bucket + key
 	OpDeleteBucket Operation = "DeleteBucket" // DELETE, bucket, no key
 
+	// Bucket-configuration reads, distinguished from ListBucket by the
+	// subresource query parameter on the signed URL.
+	OpGetBucketVersioning              Operation = "GetBucketVersioning"              // GET, bucket, no key, ?versioning
+	OpGetBucketObjectLockConfiguration Operation = "GetBucketObjectLockConfiguration" // GET, bucket, no key, ?object-lock
+
 	// Multipart upload operations, distinguished from their plain-object
 	// counterparts by the query parameters on the signed URL.
 	OpCreateMultipartUpload      Operation = "CreateMultipartUpload"      // POST, bucket + key, ?uploads
@@ -50,6 +55,9 @@ var operationPermission = map[Operation]string{
 	OpCreateBucket: "s3:CreateBucket",
 	OpDeleteObject: "s3:DeleteObject",
 	OpDeleteBucket: "s3:DeleteBucket",
+
+	OpGetBucketVersioning:              "s3:GetBucketVersioning",
+	OpGetBucketObjectLockConfiguration: "s3:GetBucketObjectLockConfiguration",
 
 	OpCreateMultipartUpload:      "s3:PutObject",
 	OpUploadPart:                 "s3:PutObject",
@@ -83,10 +91,12 @@ func (o Operation) String() string { return string(o) }
 // addressesExistingBucket reports whether the operation acts on a bucket that must
 // already exist, so it can be resolved and scope-checked. ListBuckets addresses no
 // bucket; CreateBucket's bucket does not exist yet. Every multipart operation acts
-// on an existing bucket — an upload cannot be initiated into one that does not.
+// on an existing bucket — an upload cannot be initiated into one that does not —
+// and so does every bucket-configuration read.
 func (o Operation) addressesExistingBucket() bool {
 	switch o {
 	case OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpDeleteObject, OpDeleteBucket,
+		OpGetBucketVersioning, OpGetBucketObjectLockConfiguration,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads:
 		return true
@@ -154,6 +164,12 @@ type classification struct {
 // verified the classification is bound to what the caller signed. It returns an
 // error for method/path combinations that map to no supported operation.
 //
+// The bucket-configuration reads are distinguished from ListBucket by their
+// subresource parameter: `GET /{bucket}?versioning` is GetBucketVersioning and
+// `GET /{bucket}?object-lock` is GetBucketObjectLockConfiguration. The parameter
+// only counts when no object key is present; on an object it is not a subresource
+// this classifier knows, and the request stays a GetObject.
+//
 // Multipart uploads are distinguished only by their query parameters — S3 spells
 // them `uploads`, `uploadId` and `partNumber`, and the names are case-sensitive.
 // Those branches are checked before the plain-object fallbacks they shadow, and
@@ -219,6 +235,10 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(OpListBuckets)
 		case c.key == "" && uploads:
 			return classify(OpListBucketMultipartUploads)
+		case c.key == "" && query.Has("versioning"):
+			return classify(OpGetBucketVersioning)
+		case c.key == "" && query.Has("object-lock"):
+			return classify(OpGetBucketObjectLockConfiguration)
 		case c.key == "":
 			return classify(OpListBucket)
 		case uploadID != "":
