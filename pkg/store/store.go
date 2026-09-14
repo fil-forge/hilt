@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Page is a generic type representing a paginated response from the store.
@@ -95,3 +96,14 @@ func NewReadConfig(opts ...ReadOption) ReadConfig {
 	}
 	return cfg
 }
+
+// LockTimeout bounds how long a locking statement in a Postgres store waits
+// for a conflicting lock before giving up with [ErrLockTimeout].
+//
+// Writes hold their locks across a caller-supplied callback that publishes to
+// the revocation service, and a removal's callback opens further transactions
+// that lock other rows. Two such writes can therefore wait on each other
+// through an application-level edge Postgres cannot see in its own deadlock
+// graph, and an unbounded wait would hang both and pin their pool connections.
+// The bound turns that into an error the caller can retry.
+const LockTimeout = 10 * time.Second

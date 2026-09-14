@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/api"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/store"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
@@ -39,16 +41,35 @@ func (noopRevocations) Publish(context.Context, ucan.Issuer, ucan.Delegation, ..
 	return nil
 }
 
+// errAssertPublishFailed is the canned failure a test publisher returns.
+var errAssertPublishFailed = errors.New("swarf unreachable")
+
+// recordingInvalidations stands in for the principal invalidation publisher,
+// recording the principals it was asked to invalidate.
+type recordingInvalidations struct {
+	err        error
+	principals []string
+}
+
+func (r *recordingInvalidations) Invalidate(_ context.Context, _ did.DID, principal string) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.principals = append(r.principals, principal)
+	return nil
+}
+
 type accessKeyDeps struct {
-	tenants     *tenantmemory.Store
-	accessKeys  *accesskeymemory.Store
-	principals  *principalmemory.Store
-	buckets     *bucketmemory.Store
-	delegations *delegationmemory.Store
-	vault       vault.Vault
-	tenantID    did.DID // owner of "tenant-1" + "bucket-a", with principal "alice"
-	bucketID    did.DID // "bucket-a", owned by tenant-1
-	otherBucket string  // "bucket-b", owned by a different tenant
+	tenants       *tenantmemory.Store
+	accessKeys    *accesskeymemory.Store
+	principals    *principalmemory.Store
+	buckets       *bucketmemory.Store
+	delegations   *delegationmemory.Store
+	vault         vault.Vault
+	invalidations *recordingInvalidations
+	tenantID      did.DID // owner of "tenant-1" + "bucket-a", with principal "alice"
+	bucketID      did.DID // "bucket-a", owned by tenant-1
+	otherBucket   string  // "bucket-b", owned by a different tenant
 }
 
 // addTenant creates a tenant with a real did:plc key written to the vault and a
@@ -74,19 +95,20 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	t.Helper()
 	deps := &accessKeyDeps{
-		tenants:     tenantmemory.New(),
-		accessKeys:  accesskeymemory.New(),
-		principals:  principalmemory.New(),
-		buckets:     bucketmemory.New(),
-		delegations: delegationmemory.New(),
-		vault:       vaultmemory.New(),
-		otherBucket: "bucket-b",
+		tenants:       tenantmemory.New(),
+		accessKeys:    accesskeymemory.New(),
+		principals:    principalmemory.New(),
+		buckets:       bucketmemory.New(),
+		delegations:   delegationmemory.New(),
+		vault:         vaultmemory.New(),
+		invalidations: &recordingInvalidations{},
+		otherBucket:   "bucket-b",
 	}
 	deps.tenantID, deps.bucketID = addTenant(t, deps, "tenant-1", "bucket-a")
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "alice"))
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, deps.delegations, deps.vault, noopRevocations{})
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, deps.delegations, deps.vault, noopRevocations{}, deps.invalidations)
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
@@ -437,6 +459,9 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, dels.Results)
 
+		require.Empty(t, deps.invalidations.principals,
+			"a service key's delegations are revoked; no principal is invalidated")
+
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)
 	})
@@ -458,6 +483,9 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.ErrorIs(t, err, vault.ErrNotFound)
 
+		require.Equal(t, []string{"alice"}, deps.invalidations.principals,
+			"the key holds no delegation, so its principal is invalidated instead")
+
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)
 	})
@@ -467,4 +495,36 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/missing/access-keys/z6MkWhatever", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+
+	t.Run("a lock the store gave up on is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		created := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "d", PrincipalID: "alice"})
+		require.Equal(t, http.StatusCreated, created.Code)
+		var ck api.CreatedAccessKey
+		require.NoError(t, json.Unmarshal(created.Body.Bytes(), &ck))
+
+		locked := &lockedAccessKeys{Store: deps.accessKeys, err: store.ErrLockTimeout}
+		svc := accesskeysvc.New(zap.NewNop(), deps.tenants, locked, deps.principals, deps.buckets, deps.delegations, deps.vault, noopRevocations{}, deps.invalidations)
+		lockedEcho := echo.New()
+		r := api.NewDeleteAccessKeyHandler(zap.NewNop(), svc)
+		lockedEcho.Add(r.Method, r.Path, r.Handler)
+
+		rec := doRequest(t, lockedEcho, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
+		require.Equal(t, http.StatusConflict, rec.Code)
+		akID, err := did.Parse(did.KeyPrefix + ck.AccessKeyID)
+		require.NoError(t, err)
+		_, err = deps.accessKeys.Get(ctx, akID)
+		require.NoError(t, err, "the key must survive")
+	})
+}
+
+// lockedAccessKeys fails Delete with err, standing in for the store giving up
+// on a row another write holds.
+type lockedAccessKeys struct {
+	accesskeystore.Store
+	err error
+}
+
+func (l *lockedAccessKeys) Delete(context.Context, did.DID, func(context.Context) error) error {
+	return l.err
 }

@@ -72,16 +72,45 @@ func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOp
 	return f.Store.Get(ctx, id, opts...)
 }
 
+// fakeInvalidations is a stub of the principal invalidation publisher,
+// recording the principals it was asked to invalidate.
+type fakeInvalidations struct {
+	err        error
+	principals []string
+}
+
+func (f *fakeInvalidations) Invalidate(_ context.Context, _ did.DID, principal string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.principals = append(f.principals, principal)
+	return nil
+}
+
+// lockedAccessKeys fails Delete with err, standing in for the store giving up
+// on a row another write holds.
+type lockedAccessKeys struct {
+	accesskeystore.Store
+	err error
+}
+
+func (l *lockedAccessKeys) Delete(context.Context, did.DID, func(context.Context) error) error {
+	return l.err
+}
+
 type deps struct {
-	svc         *accesskeysvc.Service
-	accessKeys  accesskeystore.Store
-	delegations *delegationmemory.Store
-	buckets     *bucketmemory.Store
-	secrets     *vaultmemory.Store
-	swarf       *fakeSwarf
-	tenantID    did.DID
-	bucketID    did.DID
-	bucketRoot  ucan.Delegation
+	svc           *accesskeysvc.Service
+	tenants       *tenantmemory.Store
+	accessKeys    *accesskeymemory.Store
+	principals    *principalmemory.Store
+	delegations   *delegationmemory.Store
+	buckets       *bucketmemory.Store
+	secrets       *vaultmemory.Store
+	swarf         *fakeSwarf
+	invalidations *fakeInvalidations
+	tenantID      did.DID
+	bucketID      did.DID
+	bucketRoot    ucan.Delegation
 }
 
 // setup wires the service over memory stores with one tenant ("tenant-1") whose
@@ -90,6 +119,7 @@ type deps struct {
 // the bucket, as [bucket.Service.Create] would have stored it. Its audience is the
 // tenant, not an access key, so it must never be revoked along with one. The
 // tenant has one principal, "alice".
+//
 // wrapAccessKeys, when given, wraps the memory access-key store the service is
 // built over, so a test can make one of its methods fail.
 func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
@@ -121,16 +151,20 @@ func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeys
 	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 
 	swarf := &fakeSwarf{}
+	invalidations := &fakeInvalidations{}
 	return deps{
-		svc:         accesskeysvc.New(zap.NewNop(), tenants, keys, principals, buckets, delegations, secrets, swarf),
-		accessKeys:  accessKeys,
-		delegations: delegations,
-		buckets:     buckets,
-		secrets:     secrets,
-		swarf:       swarf,
-		tenantID:    tenantID,
-		bucketID:    bucketID,
-		bucketRoot:  root,
+		svc:           accesskeysvc.New(zap.NewNop(), tenants, keys, principals, buckets, delegations, secrets, swarf, invalidations),
+		tenants:       tenants,
+		accessKeys:    accessKeys,
+		principals:    principals,
+		delegations:   delegations,
+		buckets:       buckets,
+		secrets:       secrets,
+		swarf:         swarf,
+		invalidations: invalidations,
+		tenantID:      tenantID,
+		bucketID:      bucketID,
+		bucketRoot:    root,
 	}
 }
 
@@ -268,17 +302,52 @@ func TestCreatePrincipalBound(t *testing.T) {
 		require.ErrorIs(t, err, vault.ErrNotFound)
 	})
 
-	t.Run("delete removes the key and publishes nothing", func(t *testing.T) {
+	t.Run("delete removes the key and invalidates its principal", func(t *testing.T) {
 		d := setup(t)
 		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
 		require.NoError(t, err)
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()))
 		require.Empty(t, d.swarf.revocations, "there is no delegation to revoke")
+		// Nothing a revocation could name, so the gateway is told to drop what it
+		// cached for the principal instead.
+		require.Equal(t, []string{"alice"}, d.invalidations.principals)
 		_, _, err = d.svc.Get(ctx, "tenant-1", rec.ID.Identifier())
 		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
 		require.ErrorIs(t, err, vault.ErrNotFound)
+	})
+
+	t.Run("delete leaves the key usable when the invalidation cannot be published", func(t *testing.T) {
+		d := setup(t)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+		d.invalidations.err = errors.New("swarf unreachable")
+
+		require.ErrorContains(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()), "swarf unreachable")
+
+		got, _, err := d.svc.Get(ctx, "tenant-1", rec.ID.Identifier())
+		require.NoError(t, err, "the key row must survive")
+		require.Equal(t, rec.ID, got.ID)
+		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
+		require.NoError(t, err, "the vault entry must survive so the key still signs")
+	})
+
+	t.Run("delete reports a lock the store gave up on as a retryable conflict", func(t *testing.T) {
+		d := setup(t)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+		locked := &lockedAccessKeys{Store: d.accessKeys, err: store.ErrLockTimeout}
+		svc := accesskeysvc.New(zap.NewNop(), d.tenants, locked, d.principals, d.buckets, d.delegations, d.secrets, d.swarf, d.invalidations)
+
+		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", rec.ID.Identifier()), accesskeysvc.ErrConcurrentChange)
+
+		got, _, err := d.svc.Get(ctx, "tenant-1", rec.ID.Identifier())
+		require.NoError(t, err, "the key row must survive")
+		require.Equal(t, rec.ID, got.ID)
+		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
+		require.NoError(t, err, "the vault entry must survive so the key still signs")
+		require.Empty(t, d.invalidations.principals)
 	})
 
 	t.Run("list and get return both kinds", func(t *testing.T) {
@@ -448,5 +517,7 @@ func TestDeleteRevokes(t *testing.T) {
 		require.NotEmpty(t, remaining.Results)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, created.ID))
 		require.NoError(t, err)
+		require.Empty(t, d.swarf.revocations)
+		require.Empty(t, d.invalidations.principals)
 	})
 }
