@@ -108,6 +108,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, &bucketID, ok.Bucket)
+		require.Nil(t, ok.SourceBucket, "only a copy names a source bucket")
 		require.Equal(t, tenantID, ok.Tenant)
 		require.Equal(t, []string{"s3:GetObject"}, ok.Permissions.Entries[akDID])
 
@@ -150,6 +151,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		ok, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, srcName, region))
 		require.NoError(t, err)
 		require.Equal(t, &bucketID, ok.Bucket)
+		require.Equal(t, &srcID, ok.SourceBucket, "the source the copy was authorized to read")
 
 		// The destination's PutObject commands plus one /content/retrieve over the
 		// source, all keyed in the proof set.
@@ -171,8 +173,9 @@ func TestAuthorizeRequest(t *testing.T) {
 
 	t.Run("a copy within one bucket delegates nothing extra", func(t *testing.T) {
 		az := setup(t, []string{"s3:GetObject", "s3:PutObject"}, akSigner)
-		_, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, bucketName, region))
+		ok, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, bucketName, region))
 		require.NoError(t, err)
+		require.Equal(t, &bucketID, ok.SourceBucket, "a copy within one bucket names it as the source too")
 		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))
 	})
 

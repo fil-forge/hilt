@@ -110,6 +110,12 @@ func AuthorizeRequest(
 	if authz.Bucket != nil {
 		bucketID = &authz.Bucket.ID
 	}
+	// A copy also names the source bucket it was authorized to read, so the
+	// gateway can key what it caches for the copy by both bucket DIDs.
+	var sourceBucketID *did.DID
+	if authz.SourceBucket != nil {
+		sourceBucketID = &authz.SourceBucket.ID
+	}
 
 	delegations, err := issuePermissionDelegations(akIssuer, issuer, bucketID, perm, exp)
 	if err != nil {
@@ -137,8 +143,9 @@ func AuthorizeRequest(
 		zap.Int("delegations", len(proofSet)),
 	)
 	return &s3req.AuthorizeOK{
-		Bucket: bucketID,
-		Tenant: authz.Tenant.ID,
+		Bucket:       bucketID,
+		SourceBucket: sourceBucketID,
+		Tenant:       authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
 			accessKeyID: authz.AccessKey.Permissions,
 		}},
