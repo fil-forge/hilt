@@ -17,6 +17,7 @@ import (
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
@@ -649,7 +650,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		bucketID := testutil.RandomDID(t)
 		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, "bucket-1"))
 		akID := testutil.RandomDID(t)
-		require.NoError(t, deps.accessKeys.Add(ctx, akID, deps.tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
+		require.NoError(t, deps.accessKeys.Add(ctx, accesskey.Input{ID: akID, Tenant: deps.tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()
 		require.NoError(t, deps.secrets.Write(ctx, akVaultKey, []byte("ak-key")))
 		require.NoError(t, deps.principals.Add(ctx, deps.tenantID, "user-1"))
