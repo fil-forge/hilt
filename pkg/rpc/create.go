@@ -12,8 +12,9 @@ import (
 
 // NewCreateBucketHandler handles /s3/bucket/create — authenticate an AWS S3
 // CreateBucket request, create the bucket (and its bucket→tenant root delegation),
-// provision its space with Sprue, and return the bucket DID with the delegation
-// chains that now grant the access key access to it.
+// store the policy the request carries in the signed x-bucket-policy header when
+// there is one, provision its space with Sprue, and return the bucket DID with the
+// delegation chains that now grant the access key access to it.
 func NewCreateBucketHandler(logger *zap.Logger, buckets *bucketsvc.Service) server.Route {
 	log := logger.With(zap.Stringer("command", s3bkt.Create.Command))
 	return s3bkt.Create.Route(func(req *binding.Request[*s3bkt.CreateArguments], res *binding.Response[*s3req.AuthorizeOK]) error {
