@@ -1,16 +1,20 @@
 // Package bucket provides the S3 bucket business logic for the UCAN RPC API:
-// create (authenticate + create the bucket, its bucket→tenant root delegation, and
-// Sprue space, returning the access key's proof chains), delete (verify empty via
-// Sprue, then tear down), list, and info (a lookup returning proof chains). It
-// returns the known errors in errors.go so handlers surface stable failure names;
-// unexpected failures are returned wrapped.
+// create (authenticate + create the bucket, its bucket→tenant root delegation,
+// the policy the request carries in [PolicyHeader], and Sprue space, returning
+// the access key's proof chains), delete (verify empty via Sprue, then tear
+// down), list, and info (a lookup returning proof chains). It returns the known
+// errors in errors.go, plus [bucketpolicy.ErrInvalidPolicy] for a refused
+// create-request policy, so handlers surface stable failure names; unexpected
+// failures are returned wrapped.
 package bucket
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -51,6 +55,11 @@ type UploadClient interface {
 	UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error
 }
 
+// PolicyHeader is the S3 CreateBucket request header that carries the new
+// bucket's policy: the policy document as JSON, base64-encoded. It MUST be
+// among the request's signed headers, or the create is refused.
+const PolicyHeader = "x-bucket-policy"
+
 // Service implements the S3 bucket operations shared by the UCAN command handlers.
 type Service struct {
 	logger      *zap.Logger
@@ -62,6 +71,7 @@ type Service struct {
 	policies    bucketpolicystore.Store
 	uploads     UploadClient
 	revocations grant.RevocationPublisher
+	grants      *grant.Rotator
 }
 
 // New constructs the bucket service.
@@ -75,6 +85,7 @@ func New(
 	policies bucketpolicystore.Store,
 	uploads UploadClient,
 	revocations grant.RevocationPublisher,
+	grants *grant.Rotator,
 ) *Service {
 	return &Service{
 		logger:      logger,
@@ -86,14 +97,18 @@ func New(
 		policies:    policies,
 		uploads:     uploads,
 		revocations: revocations,
+		grants:      grants,
 	}
 }
 
 // Create authenticates the request, checks the s3:CreateBucket permission
 // (which no policy grants, so a principal-bound key is refused by the
-// authorizer before this runs), creates
-// the bucket (an ephemeral bucket key signs a bucket→tenant "top" root delegation
-// and is then discarded), provisions the bucket's space with Sprue as the tenant,
+// authorizer before this runs), validates the policy carried in the
+// [PolicyHeader] when there is one, creates the bucket (an ephemeral bucket
+// key signs a bucket→tenant "top" root delegation and is then discarded),
+// stores the policy and issues every key of each principal it names that
+// key's delegations over the new bucket, provisions the bucket's space with
+// Sprue as the tenant,
 // points the space at the provider's routing policy so its writes land on the
 // provider's storage nodes, and returns the AuthorizeOK: the new bucket DID, the
 // access key's permissions and derived verification key, and the proof chains for
@@ -121,6 +136,13 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		return nil, nil, fmt.Errorf("looking up bucket: %w", err)
 	}
 
+	// The policy is validated before anything is written, so a bad document
+	// refuses the create and leaves no bucket behind.
+	policy, err := s.policyFromHeader(ctx, authz, args.Request.Headers)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Generate an ephemeral bucket key; its DID is the bucket DID. The key signs
 	// the root delegation below and is then discarded (the space is managed by
 	// Sprue).
@@ -143,8 +165,39 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	// cannot abort the rollback partway and leave an orphaned bucket record.
 	rollback := func() {
 		cleanupCtx := context.WithoutCancel(ctx)
+		// The delegations over the bucket and the policy first: Postgres
+		// cascades the policy from the bucket row, the memory store does not,
+		// and nothing cascades the delegations.
+		if err := s.delegations.DeleteBySubject(cleanupCtx, bucketID); err != nil {
+			log.Error("rollback: deleting bucket delegations", zap.Error(err))
+		}
+		if err := s.policies.DeleteByBucket(cleanupCtx, bucketID); err != nil {
+			log.Error("rollback: deleting bucket policy", zap.Error(err))
+		}
 		if err := s.buckets.Delete(cleanupCtx, bucketID); err != nil {
 			log.Error("rollback: deleting bucket", zap.Error(err))
+		}
+	}
+
+	// The policy is written right after the bucket row; the bucket row goes
+	// with it if the write fails, so no bucket outlives a failed write of the
+	// policy its create request carried. The keys of the principals it names
+	// then receive their delegations over the new bucket. The policy is
+	// committed before they are issued, so a key created for one of those
+	// principals meanwhile reads it and issues its own; the rotation and the
+	// creation serialize on the key's delegation lock.
+	if policy != nil {
+		if _, err := s.policies.Put(ctx, bucketpolicystore.Input{
+			Bucket: bucketID,
+			Tenant: authz.Tenant.ID,
+			Policy: *policy,
+		}, nil); err != nil {
+			rollback()
+			return nil, nil, fmt.Errorf("storing bucket policy: %w", err)
+		}
+		if err := s.grantNewBucket(ctx, authz.Tenant.ID, bucketID, policy); err != nil {
+			rollback()
+			return nil, nil, err
 		}
 	}
 
@@ -551,4 +604,54 @@ func (s *Service) lookupError(what string, bucketID did.DID, err error) error {
 		return fmt.Errorf("%w: looking up %s: %w", auth.ErrTemporarilyUnavailable, what, err)
 	}
 	return fmt.Errorf("looking up %s: %w", what, err)
+}
+
+// grantNewBucket issues every key of each principal the new bucket's policy
+// grants something to that key's delegations over the bucket. No key held
+// anything over the bucket before, so nothing is revoked.
+func (s *Service) grantNewBucket(ctx context.Context, tenantID, bucketID did.DID, policy *bucketpolicy.Policy) error {
+	ids, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
+	if err != nil {
+		return fmt.Errorf("listing principals: %w", err)
+	}
+	actions := map[string][]string{}
+	for _, p := range bucketpolicy.Changed(nil, policy, ids) {
+		actions[p] = bucketpolicy.Effective(policy, p)
+	}
+	if err := s.grants.Rotate(ctx, tenantID, bucketID, actions); err != nil {
+		return fmt.Errorf("issuing the new bucket's delegations: %w", err)
+	}
+	return nil
+}
+
+// policyFromHeader reads the policy a CreateBucket request carries in
+// [PolicyHeader]. It returns nil when the header is absent. The header must be
+// covered by the request signature, decode as base64 JSON, and pass the same
+// validation as a management-API policy PUT; otherwise the error wraps
+// [bucketpolicy.ErrInvalidPolicy], which the caller records as the
+// InvalidBucketPolicy failure.
+func (s *Service) policyFromHeader(ctx context.Context, authz *auth.AuthorizedRequest, headers map[string]string) (*bucketpolicy.Policy, error) {
+	encoded, ok := auth.HeaderValue(headers, PolicyHeader)
+	if !ok {
+		return nil, nil
+	}
+	if !authz.Signed.HeaderSigned(PolicyHeader) {
+		return nil, fmt.Errorf("%s is not covered by the request signature: %w", PolicyHeader, bucketpolicy.ErrInvalidPolicy)
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not base64: %v: %w", PolicyHeader, err, bucketpolicy.ErrInvalidPolicy)
+	}
+	doc, err := bucketpolicy.Decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := principalstore.ExternalIDs(ctx, s.principals, authz.Tenant.ID)
+	if err != nil {
+		return nil, fmt.Errorf("listing principals: %w", err)
+	}
+	if err := bucketpolicy.Validate(doc, func(p string) bool { return slices.Contains(ids, p) }); err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
