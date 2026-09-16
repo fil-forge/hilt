@@ -2,6 +2,8 @@ package bucket_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -195,7 +197,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, sprue, &fakeSwarf{}), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, principals, policies, sprue, &fakeSwarf{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -390,7 +392,7 @@ func TestDelete(t *testing.T) {
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
 		swarf := &fakeSwarf{}
 		return deleteDeps{
-			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, sprue, swarf),
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, principals, policies, sprue, swarf),
 			buckets:     buckets,
 			delegations: delegations,
 			policies:    policies,
@@ -538,7 +540,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		seedKey(t, accessKeys, secrets, delegations, principals, signer, tenantID, perms, principalBound)
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, principals, policies, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -688,7 +690,7 @@ func TestInfo(t *testing.T) {
 		if wrapDelegations != nil {
 			dels = wrapDelegations(dels)
 		}
-		return bucketsvc.New(zap.NewNop(), az, buckets, dels, accessKeys, read, &fakeSprue{}, &fakeSwarf{}), policies, root
+		return bucketsvc.New(zap.NewNop(), az, buckets, dels, accessKeys, principals, read, &fakeSprue{}, &fakeSwarf{}), policies, root
 	}
 
 	// grant stores a policy allowing "user-1" the given actions on the bucket.
@@ -811,4 +813,125 @@ func TestInfo(t *testing.T) {
 		require.Empty(t, ok.Delegations.Entries)
 		require.Empty(t, blocks)
 	})
+}
+
+// TestCreateWithPolicy covers the policy a CreateBucket request carries in the
+// x-bucket-policy header: signed and valid, it is stored with the bucket;
+// unsigned, undecodable or invalid, the create is refused and no bucket exists.
+func TestCreateWithPolicy(t *testing.T) {
+	ctx := t.Context()
+	const region, bucketName = "us-west-2", "policied"
+
+	akSigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	tenantSigner, err := secp256k1.Generate()
+	require.NoError(t, err)
+	tenantID := tenantSigner.KeyDID()
+	providerID := testutil.RandomDID(t)
+
+	type fixture struct {
+		svc      *bucketsvc.Service
+		buckets  *bucketmemory.Store
+		policies *bucketpolicymemory.Store
+	}
+	setup := func(t *testing.T, sprue bucketsvc.UploadClient) fixture {
+		t.Helper()
+		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
+		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
+		seedKey(t, accessKeys, secrets, delegations, principals, akSigner, tenantID, allPerms, false)
+		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, principals, policies, sprue, &fakeSwarf{}), buckets, policies}
+	}
+
+	// create presigns a CreateBucket carrying header as x-bucket-policy, covered
+	// by the signature unless unsigned is set.
+	create := func(t *testing.T, header string, unsigned bool) *s3bkt.CreateArguments {
+		t.Helper()
+		secret, err := multibase.Encode(multibase.Base64url, akSigner.Bytes())
+		require.NoError(t, err)
+		headers := map[string]string{bucketsvc.PolicyHeader: header}
+		req := sigv4.Request{Method: "PUT", URL: "https://s3.fil.one/" + bucketName, Headers: headers}
+		var opts []sigv4.PresignOption
+		if !unsigned {
+			opts = append(opts, sigv4.WithSignedHeaders(bucketsvc.PolicyHeader))
+		}
+		signed, err := sigv4.Presign(req, akSigner.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+		require.NoError(t, err)
+		return &s3bkt.CreateArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL, Headers: headers}}
+	}
+	encode := func(t *testing.T, doc bucketpolicy.Policy) string {
+		t.Helper()
+		raw, err := json.Marshal(doc)
+		require.NoError(t, err)
+		return base64.StdEncoding.EncodeToString(raw)
+	}
+	valid := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
+		{Sid: "creator", Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:*"}},
+	}}
+
+	t.Run("stores a signed, valid policy with the bucket", func(t *testing.T) {
+		f := setup(t, &fakeSprue{})
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.NoError(t, err)
+		rec, err := f.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err)
+		stored, err := f.policies.Get(ctx, rec.ID)
+		require.NoError(t, err)
+		require.Equal(t, valid, stored.Policy)
+		require.Equal(t, bucketpolicy.ETag(valid), stored.ETag)
+	})
+
+	t.Run("rolls back the policy with the bucket when provisioning fails", func(t *testing.T) {
+		f := setup(t, &fakeSprue{provErr: errors.New("sprue unavailable")})
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "sprue unavailable")
+		_, err = f.buckets.GetByName(ctx, bucketName)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		// The memory store has no cascade, so the rollback must delete the
+		// policy itself; it is keyed by the bucket DID the failed create used.
+		recs, err := f.policies.ListByPrincipal(ctx, tenantID, "user-1")
+		require.NoError(t, err)
+		require.Empty(t, recs, "no policy survives the rolled-back bucket")
+	})
+
+	t.Run("a create without the header stores no policy", func(t *testing.T) {
+		f := setup(t, &fakeSprue{})
+		_, _, err := f.svc.Create(ctx, providerID, &s3bkt.CreateArguments{Request: presign(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName, region)})
+		require.NoError(t, err)
+		rec, err := f.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err)
+		_, err = f.policies.Get(ctx, rec.ID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	refused := map[string]struct {
+		header   string
+		unsigned bool
+		want     string
+	}{
+		"an unsigned header":               {encode(t, valid), true, "not covered by the request signature"},
+		"a header that is not base64":      {"%%not-base64%%", false, "is not base64"},
+		"a document with an unknown field": {base64.StdEncoding.EncodeToString([]byte(`{"statement":[],"resource":"x"}`)), false, `unknown field "resource"`},
+		"a document naming an unknown principal": {encode(t, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("ghost"), Actions: []string{"s3:GetObject"}},
+		}}), false, `unknown principal "ghost"`},
+		"a document granting a bucket-level action": {encode(t, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:CreateBucket"}},
+		}}), false, `action "s3:CreateBucket"`},
+	}
+	for name, tt := range refused {
+		t.Run("refuses "+name+" and creates nothing", func(t *testing.T) {
+			f := setup(t, &fakeSprue{})
+			_, _, err := f.svc.Create(ctx, providerID, create(t, tt.header, tt.unsigned))
+			require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+			require.ErrorContains(t, err, tt.want)
+			_, err = f.buckets.GetByName(ctx, bucketName)
+			require.ErrorIs(t, err, store.ErrRecordNotFound)
+		})
+	}
 }

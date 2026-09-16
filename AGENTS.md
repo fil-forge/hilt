@@ -19,7 +19,12 @@ them. It exposes two APIs and talks to three external services:
   revives it with no keys and named in no statement.
 - **Hilt UCAN RPC API** (`pkg/rpc`, ucantone server mounted at `POST /`) — the
   `/s3/*` commands Ingot (the S3 gateway) invokes: `/s3/request/authorize`,
-  `/s3/bucket/{create,delete,info,list}`; and the self-issued admin commands
+  `/s3/bucket/{create,delete,info,list}`; and the self-issued admin commands.
+  A CreateBucket request may carry the new bucket's policy as base64 JSON in
+  the `x-bucket-policy` header (`bucket.PolicyHeader`): it must be a signed
+  header, is validated like a management-API policy `PUT`, and is written
+  right after the bucket row (the bucket is deleted if that write fails); a
+  refusal is the `InvalidBucketPolicy` failure. The admin commands are
   `/admin/provider/{add,list}` and `/admin/provider/nodes/set` (`hilt client admin`).
 - **Sprue** (the Forge upload service) — Hilt calls it to provision/inspect a
   bucket's storage space and to manage routing policies (`pkg/client`): each
