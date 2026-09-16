@@ -110,17 +110,32 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 	if err != nil {
 		return "", false, err
 	}
-	tenantPrincipals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
+	etag, err := s.Write(ctx, tenantID, b.ID, bucketName, doc, ifMatch)
 	if err != nil {
 		return "", false, err
 	}
-	if err := bucketpolicy.Validate(doc, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
-		return "", false, err
-	}
-
 	created := ifMatch == nil
+	s.logger.Info("wrote bucket policy",
+		zap.Stringer("tenant", tenantID), zap.String("bucket", bucketName), zap.Bool("created", created))
+	return etag, created, nil
+}
+
+// Write is the write [Service.Put] makes once it has resolved the tenant and
+// the bucket, for a caller that already holds both: it validates doc against
+// the tenant's principals, creates or replaces the bucket's policy under the
+// same compare-and-set rule, and rotates the affected principals' keys inside
+// the store's transaction. Bucket creation stores the policy a CreateBucket
+// request carries this way. bucketName names the bucket in errors.
+func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc bucketpolicy.Policy, ifMatch *string) (string, error) {
+	tenantPrincipals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
+	if err != nil {
+		return "", err
+	}
+	if err := bucketpolicy.Validate(doc, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
+		return "", err
+	}
 	etag, err := s.policies.Put(ctx, bucketpolicystore.Input{
-		Bucket:  b.ID,
+		Bucket:  bucketID,
 		Tenant:  tenantID,
 		Policy:  doc,
 		IfMatch: ifMatch,
@@ -136,14 +151,12 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 		if err != nil {
 			return err
 		}
-		return s.rotate(ctx, tenantID, b.ID, oldDoc, &doc, principals)
+		return s.rotate(ctx, tenantID, bucketID, oldDoc, &doc, principals)
 	})
 	if err != nil {
-		return "", false, s.writeError(ctx, bucketName, err)
+		return "", s.writeError(ctx, bucketName, err)
 	}
-	s.logger.Info("wrote bucket policy",
-		zap.Stringer("tenant", tenantID), zap.String("bucket", bucketName), zap.Bool("created", created))
-	return etag, created, nil
+	return etag, nil
 }
 
 // Delete removes the bucket's policy. ifMatch must equal the current ETag.

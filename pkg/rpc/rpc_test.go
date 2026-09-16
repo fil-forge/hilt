@@ -32,7 +32,7 @@ func TestHandlerCommands(t *testing.T) {
 	require.NoError(t, err)
 	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), bucketpolicymemory.New(), up, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), bucketpolicymemory.New(), up, revocations, nil)
 
 	t.Run("list", func(t *testing.T) {
 		route := rpc.NewListBucketsHandler(zap.NewNop(), buckets)
