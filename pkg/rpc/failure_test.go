@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -48,6 +49,14 @@ func TestBucketFailure(t *testing.T) {
 		require.NoError(t, bucketFailure(f, err))
 		require.True(t, f.called)
 		requireName(t, f.got, bucketsvc.BucketAlreadyOwnedErrorName)
+	})
+
+	t.Run("a rejected create-request policy is set as failure under the policy name", func(t *testing.T) {
+		f := &recordingFailer{}
+		err := fmt.Errorf("x-bucket-policy is not covered by the request signature: %w", bucketpolicy.ErrInvalidPolicy)
+		require.NoError(t, bucketFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, bucketpolicy.InvalidPolicyErrorName)
 	})
 
 	t.Run("propagated auth sentinel is set as failure with its name", func(t *testing.T) {
