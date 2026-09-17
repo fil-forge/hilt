@@ -9,6 +9,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
+	"github.com/fil-forge/hilt/pkg/marker"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/sigv4"
@@ -20,6 +21,7 @@ import (
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -28,6 +30,7 @@ import (
 	"github.com/fil-forge/libforge/commands/content"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+	s3key "github.com/fil-forge/libforge/commands/s3/key"
 	"github.com/fil-forge/libforge/testutil"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
@@ -45,6 +48,17 @@ import (
 
 // fakeSprue is a combined stub of the Sprue dependency (ProvisionSpace +
 // SpaceEmpty), recording its inputs.
+// lockedPolicies fails every policy read with err, standing in for the store
+// giving up on a row a write in flight holds.
+type lockedPolicies struct {
+	bucketpolicystore.Store
+	err error
+}
+
+func (l *lockedPolicies) Get(context.Context, did.DID, ...store.ReadOption) (bucketpolicystore.Record, error) {
+	return bucketpolicystore.Record{}, l.err
+}
+
 type fakeSprue struct {
 	sub         string
 	provErr     error
@@ -87,6 +101,63 @@ func (f *fakeSprue) UseRoutingPolicy(_ context.Context, space did.DID, policy *d
 	return f.useErr
 }
 
+// seedKey stores the credential's record and vault entry: a service credential
+// carrying perms unless principalBound, in which case a key bound to "user-1",
+// who is recorded as a principal of the tenant and holds whatever the bucket
+// policies grant.
+func seedKey(t *testing.T, accessKeys *accesskeymemory.Store, secrets *vaultmemory.Store, delegations delegationstore.Store, principals *principalmemory.Store, signer ed25519.Signer, tenantID did.DID, perms []string, principalBound bool) {
+	t.Helper()
+	akDID := signer.KeyDID()
+	in := accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}
+	if principalBound {
+		principal := "user-1"
+		in = accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Principal: &principal}
+		require.NoError(t, principals.Add(t.Context(), tenantID, principal))
+	}
+	require.NoError(t, accessKeys.Add(t.Context(), in))
+	require.NoError(t, secrets.Write(t.Context(), vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
+	if principalBound {
+		// The key holds its marker, issued as the tenant.
+		tenantSigner, err := ed25519.Generate()
+		require.NoError(t, err)
+		m, err := marker.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, tenantID, nil)
+		require.NoError(t, err)
+		require.NoError(t, delegations.PutBatch(t.Context(), []ucan.Delegation{m}))
+	}
+}
+
+// readOrderPolicies and readOrderDelegations append to reads when the policy
+// and the key's delegations are read, so a test can pin their order.
+type readOrderPolicies struct {
+	bucketpolicystore.Store
+	reads *[]string
+}
+
+func (r *readOrderPolicies) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (bucketpolicystore.Record, error) {
+	*r.reads = append(*r.reads, "policy")
+	return r.Store.Get(ctx, bucket, opts...)
+}
+
+type readOrderDelegations struct {
+	delegationstore.Store
+	reads *[]string
+}
+
+func (r *readOrderDelegations) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	*r.reads = append(*r.reads, "marker")
+	return r.Store.ListByAudience(ctx, audience, opts...)
+}
+
+// allPerms is the permission set a service key in these tests holds: every
+// action the subtests exercise.
+var allPerms = []string{
+	"s3:CreateBucket",
+	"s3:DeleteBucket",
+	"s3:ListAllMyBuckets",
+	"s3:ListBucket",
+	"s3:GetObject",
+}
+
 func presign(t *testing.T, signer ed25519.Signer, method, url, region string) s3.Request {
 	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
@@ -109,22 +180,22 @@ func TestCreate(t *testing.T) {
 	providerID := testutil.RandomDID(t)
 	providerPolicy := testutil.RandomDID(t)
 
-	// setup seeds a powerline tenant→access-key delegation for /content/retrieve.
+	// setup seeds a powerline tenant→credential delegation for /content/retrieve.
 	// policy is the provider's routing policy; nil registers a provider without one.
-	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, delegations delegationstore.Store, policy *did.DID) (*bucketsvc.Service, *bucketmemory.Store) {
+	setup := func(t *testing.T, perms []string, principalBound bool, sprue bucketsvc.UploadClient, delegations delegationstore.Store, policy *did.DID) (*bucketsvc.Service, *bucketmemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, policy))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
-		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
+		seedKey(t, accessKeys, secrets, delegations, principals, akSigner, tenantID, perms, principalBound)
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		powerline, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, did.DID{}, content.Retrieve.Command)
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, bucketpolicymemory.New(), sprue, &fakeSwarf{}), buckets
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, sprue, &fakeSwarf{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -133,7 +204,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("creates and provisions the bucket, returning the powerline chain", func(t *testing.T) {
 		sprue := &fakeSprue{sub: "sub-1"}
-		svc, buckets := setup(t, []string{"s3:CreateBucket", "s3:GetObject"}, sprue, delegationmemory.New(), &providerPolicy)
+		svc, buckets := setup(t, allPerms, false, sprue, delegationmemory.New(), &providerPolicy)
 		ok, blocks, err := svc.Create(ctx, providerID, args())
 		require.NoError(t, err)
 
@@ -150,7 +221,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("points the bucket at the provider's routing policy as the tenant", func(t *testing.T) {
 		sprue := &fakeSprue{sub: "sub-1"}
-		svc, _ := setup(t, []string{"s3:CreateBucket"}, sprue, delegationmemory.New(), &providerPolicy)
+		svc, _ := setup(t, allPerms, false, sprue, delegationmemory.New(), &providerPolicy)
 		ok, _, err := svc.Create(ctx, providerID, args())
 		require.NoError(t, err)
 
@@ -163,7 +234,7 @@ func TestCreate(t *testing.T) {
 
 	t.Run("leaves the bucket on default routing when the provider has no policy", func(t *testing.T) {
 		sprue := &fakeSprue{sub: "sub-1"}
-		svc, _ := setup(t, []string{"s3:CreateBucket"}, sprue, delegationmemory.New(), nil)
+		svc, _ := setup(t, allPerms, false, sprue, delegationmemory.New(), nil)
 		ok, _, err := svc.Create(ctx, providerID, args())
 		require.NoError(t, err)
 		require.NotNil(t, ok.Bucket)
@@ -172,7 +243,7 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rolls back the bucket when applying the routing policy fails", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{useErr: errors.New("sprue unavailable")}, delegationmemory.New(), &providerPolicy)
+		svc, buckets := setup(t, allPerms, false, &fakeSprue{useErr: errors.New("sprue unavailable")}, delegationmemory.New(), &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
@@ -180,13 +251,21 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rejects a key without s3:CreateBucket", func(t *testing.T) {
-		svc, _ := setup(t, []string{"s3:GetObject"}, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
+		svc, _ := setup(t, []string{"s3:GetObject"}, false, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
+		_, _, err := svc.Create(ctx, providerID, args())
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+	})
+
+	t.Run("rejects a principal-bound key", func(t *testing.T) {
+		// No policy grants s3:CreateBucket, so the authorizer refuses the key
+		// before the service is reached.
+		svc, _ := setup(t, nil, true, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects a duplicate name owned by another tenant", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
+		svc, buckets := setup(t, allPerms, false, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
 		// Owner is a different tenant → BucketAlreadyExists.
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), testutil.RandomDID(t), bucketName))
 		_, _, err := svc.Create(ctx, providerID, args())
@@ -194,7 +273,7 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rejects re-creating a bucket you already own", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
+		svc, buckets := setup(t, allPerms, false, &fakeSprue{}, delegationmemory.New(), &providerPolicy)
 		// Owner is the requesting tenant → BucketAlreadyOwnedByYou.
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, bucketName))
 		_, _, err := svc.Create(ctx, providerID, args())
@@ -202,7 +281,7 @@ func TestCreate(t *testing.T) {
 	})
 
 	t.Run("rolls back the bucket when provisioning fails", func(t *testing.T) {
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{provErr: errors.New("sprue unavailable")}, delegationmemory.New(), &providerPolicy)
+		svc, buckets := setup(t, allPerms, false, &fakeSprue{provErr: errors.New("sprue unavailable")}, delegationmemory.New(), &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
@@ -213,7 +292,7 @@ func TestCreate(t *testing.T) {
 		// A failure after provisioning (listing the access key's delegations) must
 		// still roll the bucket record back.
 		delegations := failingListDelegations{Store: delegationmemory.New(), err: errors.New("boom")}
-		svc, buckets := setup(t, []string{"s3:CreateBucket"}, &fakeSprue{}, delegations, &providerPolicy)
+		svc, buckets := setup(t, allPerms, false, &fakeSprue{}, delegations, &providerPolicy)
 		_, _, err := svc.Create(ctx, providerID, args())
 		require.Error(t, err)
 		_, err = buckets.GetByName(ctx, bucketName)
@@ -281,15 +360,15 @@ func TestDelete(t *testing.T) {
 	tenantID := tenantSigner.KeyDID()
 	providerID := testutil.RandomDID(t)
 
-	// grantOpts lets a subtest vary the tenant→access-key grant's expiry.
-	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, grantOpts ...delegation.Option) deleteDeps {
+	// grantOpts lets a subtest vary the tenant→credential grant's expiry.
+	setup := func(t *testing.T, perms []string, principalBound bool, sprue bucketsvc.UploadClient, grantOpts ...delegation.Option) deleteDeps {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
-		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), akSigner.Bytes()))
+		seedKey(t, accessKeys, secrets, delegations, principals, akSigner, tenantID, perms, principalBound)
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		bucketSigner, err := ed25519.Generate()
 		require.NoError(t, err)
@@ -308,9 +387,8 @@ func TestDelete(t *testing.T) {
 			multikey.NewIssuer(tenantID, tenantSigner), akDID, bucketID, content.Retrieve.Command, grantOpts...)
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
 		swarf := &fakeSwarf{}
-		policies := bucketpolicymemory.New()
 		return deleteDeps{
 			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, sprue, swarf),
 			buckets:     buckets,
@@ -329,7 +407,7 @@ func TestDelete(t *testing.T) {
 	}
 
 	t.Run("deletes the bucket's policy with the bucket", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: d.bucketID, Tenant: d.tenantID,
 			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
@@ -344,7 +422,7 @@ func TestDelete(t *testing.T) {
 
 	t.Run("deletes an empty bucket", func(t *testing.T) {
 		sprue := &fakeSprue{empty: true}
-		d := setup(t, []string{"s3:DeleteBucket"}, sprue)
+		d := setup(t, allPerms, false, sprue)
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
 		require.True(t, sprue.emptyCalled)
@@ -354,7 +432,7 @@ func TestDelete(t *testing.T) {
 	})
 
 	t.Run("revokes the tenant's grant over the bucket, with no witness path", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
 
@@ -367,7 +445,7 @@ func TestDelete(t *testing.T) {
 	})
 
 	t.Run("does not revoke the bucket root", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
 
@@ -380,7 +458,7 @@ func TestDelete(t *testing.T) {
 
 	t.Run("skips an expired grant", func(t *testing.T) {
 		expired := delegation.WithExpiration(ucan.UnixTimestamp(time.Now().Add(-time.Hour).Unix()))
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true}, expired)
+		d := setup(t, allPerms, false, &fakeSprue{empty: true}, expired)
 
 		// The revocation service rejects expired delegations, and they are unusable
 		// anyway — so the bucket is still deleted, just with nothing published.
@@ -392,7 +470,7 @@ func TestDelete(t *testing.T) {
 	})
 
 	t.Run("a revocation failure leaves the bucket intact", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		d.swarf.err = errors.New("swarf is down")
 
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
@@ -407,19 +485,27 @@ func TestDelete(t *testing.T) {
 	})
 
 	t.Run("rejects a key without s3:DeleteBucket", func(t *testing.T) {
-		d := setup(t, []string{"s3:GetObject"}, &fakeSprue{empty: true})
+		d := setup(t, []string{"s3:GetObject"}, false, &fakeSprue{empty: true})
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+	})
+
+	t.Run("rejects a principal-bound key", func(t *testing.T) {
+		// No policy grants s3:DeleteBucket, so the authorizer refuses the key
+		// before the service is reached.
+		d := setup(t, nil, true, &fakeSprue{empty: true})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
 	t.Run("rejects an unknown bucket", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.svc.Delete(ctx, providerID, del("nope"))
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
 	})
 
 	t.Run("rejects a non-empty bucket and keeps it", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: false})
+		d := setup(t, allPerms, false, &fakeSprue{empty: false})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.ErrorIs(t, err, bucketsvc.ErrBucketNotEmpty)
 		_, err = d.buckets.GetByName(ctx, bucketName)
@@ -428,7 +514,7 @@ func TestDelete(t *testing.T) {
 	})
 
 	t.Run("propagates a SpaceEmpty error", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{emptyErr: errors.New("sprue unavailable")})
+		d := setup(t, allPerms, false, &fakeSprue{emptyErr: errors.New("sprue unavailable")})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.Error(t, err)
 	})
@@ -440,20 +526,19 @@ func TestList(t *testing.T) {
 
 	signer, err := ed25519.Generate()
 	require.NoError(t, err)
-	akDID := signer.KeyDID()
 	providerID := testutil.RandomDID(t)
 
-	setup := func(t *testing.T, perms []string) (*bucketsvc.Service, *bucketmemory.Store, did.DID) {
+	setup := func(t *testing.T, perms []string, principalBound bool) (*bucketsvc.Service, *bucketmemory.Store, did.DID) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
-		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, bucketpolicymemory.New(), &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
+		seedKey(t, accessKeys, secrets, delegations, principals, signer, tenantID, perms, principalBound)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, delegations, secrets)
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -473,7 +558,7 @@ func TestList(t *testing.T) {
 	}
 
 	t.Run("lists the tenant's buckets", func(t *testing.T) {
-		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"})
+		svc, buckets, tenantID := setup(t, allPerms, false)
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "alpha"))
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bravo"))
 		ok, err := svc.List(ctx, providerID, listArgs())
@@ -484,7 +569,7 @@ func TestList(t *testing.T) {
 	})
 
 	t.Run("filters by prefix and echoes it", func(t *testing.T) {
-		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"})
+		svc, buckets, tenantID := setup(t, allPerms, false)
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "alpha"))
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "apple"))
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bravo"))
@@ -496,7 +581,7 @@ func TestList(t *testing.T) {
 	})
 
 	t.Run("paginates with max-buckets and continuation-token", func(t *testing.T) {
-		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"})
+		svc, buckets, tenantID := setup(t, allPerms, false)
 		for _, name := range []string{"charlie", "alpha", "bravo"} {
 			require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, name))
 		}
@@ -513,7 +598,7 @@ func TestList(t *testing.T) {
 	})
 
 	t.Run("rejects an invalid max-buckets", func(t *testing.T) {
-		svc, _, _ := setup(t, []string{"s3:ListAllMyBuckets"})
+		svc, _, _ := setup(t, allPerms, false)
 		for _, param := range []string{"max-buckets=abc", "max-buckets=0", "max-buckets=-1", "max-buckets=10001"} {
 			_, err := svc.List(ctx, providerID, listArgs(param))
 			require.ErrorIs(t, err, bucketsvc.ErrInvalidArgument, "param %q", param)
@@ -521,15 +606,26 @@ func TestList(t *testing.T) {
 	})
 
 	t.Run("rejects a key without the list permission", func(t *testing.T) {
-		svc, _, _ := setup(t, []string{"s3:GetObject"})
+		svc, _, _ := setup(t, []string{"s3:GetObject"}, false)
 		_, err := svc.List(ctx, providerID, listArgs())
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
+	t.Run("a principal-bound key lists the tenant's buckets", func(t *testing.T) {
+		// Every principal holds s3:ListAllMyBuckets, and the listing consults no
+		// policy: it is the tenant's whole bucket set, as AWS lists names the
+		// caller cannot open.
+		svc, buckets, tenantID := setup(t, nil, true)
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "alpha"))
+		ok, err := svc.List(ctx, providerID, listArgs())
+		require.NoError(t, err)
+		require.Equal(t, []string{"alpha"}, bucketNames(ok))
+	})
+
 	t.Run("rejects a validly-signed request for a different operation", func(t *testing.T) {
-		// A GetObject request the key IS permitted for passes Authorize, but List
-		// rejects it as not a ListBuckets operation.
-		svc, buckets, tenantID := setup(t, []string{"s3:GetObject"})
+		// A GetObject request the credential IS permitted for passes Authorize, but
+		// List rejects it as not a ListBuckets operation.
+		svc, buckets, tenantID := setup(t, allPerms, false)
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, "bucket-a"))
 		args := &s3bkt.ListArguments{Request: presign(t, signer, "GET", "https://"+region+".s3.fil.one/bucket-a/object-key", region)}
 		_, err := svc.List(ctx, providerID, args)
@@ -551,46 +647,165 @@ func TestInfo(t *testing.T) {
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
 
-	// setup seeds a bucket, an access key, a bucket→tenant root, and a
-	// tenant→access-key grant with the given subject (did.DID{} = powerline).
-	setup := func(t *testing.T, grantSubject did.DID) *bucketsvc.Service {
+	// setup seeds a bucket, a credential (a service credential unless
+	// principalBound), a bucket→tenant root, and either a tenant→credential
+	// grant with the given subject (did.DID{} = powerline) or, for a
+	// principal-bound key, its marker.
+	// wrapPolicies, when given, wraps the memory policy store the service reads
+	// through, so a test can make the read fail; wrapDelegations, when set,
+	// wraps the delegation store the same way. infoDelegations is the
+	// delegation store of the most recent setup.
+	var wrapDelegations func(delegationstore.Store) delegationstore.Store
+	var infoDelegations *delegationmemory.Store
+	setup := func(t *testing.T, perms []string, principalBound bool, grantSubject did.DID,
+		wrapPolicies ...func(bucketpolicystore.Store) bucketpolicystore.Store,
+	) (*bucketsvc.Service, *bucketpolicymemory.Store, ucan.Delegation) {
 		t.Helper()
 		accessKeys, buckets, delegations := accesskeymemory.New(), bucketmemory.New(), delegationmemory.New()
-		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
+		seedKey(t, accessKeys, vaultmemory.New(), delegations, principals, akSigner, tenantID, perms, principalBound)
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
-		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top())
+		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 		require.NoError(t, err)
-		grant, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, grantSubject, content.Retrieve.Command)
-		require.NoError(t, err)
-		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
+		// seedKey stored a principal-bound key's marker; a service credential
+		// holds the tenant's grant instead.
+		held := []ucan.Delegation{root}
+		if !principalBound {
+			grant, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, grantSubject, content.Retrieve.Command)
+			require.NoError(t, err)
+			held = append(held, grant)
+		}
+		require.NoError(t, delegations.PutBatch(ctx, held))
+		infoDelegations = delegations
 		// Info does not use the authorizer; a minimal one over empty stores suffices.
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, bucketpolicymemory.New(), &fakeSprue{}, &fakeSwarf{})
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets,
+			principalmemory.New(), bucketpolicymemory.New(), delegations, vaultmemory.New())
+		var read bucketpolicystore.Store = policies
+		for _, wrap := range wrapPolicies {
+			read = wrap(read)
+		}
+		var dels delegationstore.Store = delegations
+		if wrapDelegations != nil {
+			dels = wrapDelegations(dels)
+		}
+		return bucketsvc.New(zap.NewNop(), az, buckets, dels, accessKeys, read, &fakeSprue{}, &fakeSwarf{}), policies, root
+	}
+
+	// grant stores a policy allowing "user-1" the given actions on the bucket.
+	grantPolicy := func(t *testing.T, policies *bucketpolicymemory.Store, actions ...string) {
+		t.Helper()
+		_, err := policies.Put(ctx, bucketpolicystore.Input{
+			Bucket: bucketID,
+			Tenant: tenantID,
+			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Effect:    bucketpolicy.Allow,
+				Principal: bucketpolicy.Only("user-1"),
+				Actions:   actions,
+			}}},
+		}, nil)
+		require.NoError(t, err)
 	}
 
 	t.Run("returns the bucket, permissions, and delegation chain", func(t *testing.T) {
-		svc := setup(t, did.DID{}) // powerline grant reaches the bucket
+		svc, _, _ := setup(t, allPerms, false, did.DID{}) // powerline grant reaches the bucket
 		ok, blocks, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		require.NoError(t, err)
 		require.Equal(t, bucketID, ok.ID)
-		require.Equal(t, []string{"s3:GetObject"}, ok.Permissions.Entries[akDID])
+		// A service key carries its own permission set.
+		require.Equal(t, allPerms, ok.Permissions.Entries[akDID])
 		require.Len(t, blocks, 2)
 	})
 
 	t.Run("rejects an unknown bucket", func(t *testing.T) {
-		svc := setup(t, did.DID{})
+		svc, _, _ := setup(t, allPerms, false, did.DID{})
 		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: "nope", AccessKey: akDID})
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
 	})
 
 	t.Run("rejects an unknown access key", func(t *testing.T) {
-		svc := setup(t, did.DID{})
+		svc, _, _ := setup(t, allPerms, false, did.DID{})
 		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: testutil.RandomDID(t)})
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownAccessKey)
 	})
 
+	t.Run("a principal-bound key gets the bucket root, its marker and its effective set", func(t *testing.T) {
+		svc, policies, root := setup(t, nil, true, did.DID{})
+		grantPolicy(t, policies, "s3:GetObject", "s3:ListBucket")
+
+		ok, blocks, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.NoError(t, err)
+		require.Equal(t, bucketID, ok.ID)
+		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, ok.Permissions.Entries[akDID])
+
+		// The chain is the bucket root alone: neither the principal nor the key
+		// is a hop in it. The key's marker rides along, keyed to itself.
+		require.Len(t, blocks, 2)
+		var m ucan.Delegation
+		for _, d := range blocks {
+			if d.Command() == s3key.Marker.Command {
+				m = d
+			} else {
+				require.Equal(t, root.Link(), d.Link())
+			}
+		}
+		require.NotNil(t, m, "the container carries the key's marker")
+		require.Equal(t, akDID, m.Audience())
+		require.Equal(t, map[cid.Cid][]cid.Cid{root.Link(): {root.Link()}, m.Link(): {m.Link()}}, ok.Delegations.Entries)
+	})
+
+	t.Run("a bucket outside the principal's reach is unknown", func(t *testing.T) {
+		svc, _, _ := setup(t, nil, true, did.DID{}) // no policy at all
+		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
+	})
+
+	t.Run("a principal-bound key holding no marker is an unknown key", func(t *testing.T) {
+		svc, policies, _ := setup(t, nil, true, did.DID{})
+		grantPolicy(t, policies, "s3:GetObject")
+		// Between a creation's row insert and its marker's store, or between a
+		// deletion's marker revocation and its row delete, the key holds no
+		// marker: the gateway would hold nothing to drop, so it is refused.
+		require.NoError(t, infoDelegations.DeleteByAudience(ctx, akDID))
+
+		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.ErrorIs(t, err, bucketsvc.ErrUnknownAccessKey)
+	})
+
+	t.Run("the marker is read before the policy", func(t *testing.T) {
+		// A policy write commits the new marker before the policy, so reading the
+		// marker first is what keeps Info from pairing an old document with a new
+		// marker.
+		var reads []string
+		wrapDelegations = func(s delegationstore.Store) delegationstore.Store {
+			return &readOrderDelegations{Store: s, reads: &reads}
+		}
+		defer func() { wrapDelegations = nil }()
+		svc, policies, _ := setup(t, nil, true, did.DID{}, func(s bucketpolicystore.Store) bucketpolicystore.Store {
+			return &readOrderPolicies{Store: s, reads: &reads}
+		})
+		grantPolicy(t, policies, "s3:GetObject")
+
+		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.NoError(t, err)
+		require.Equal(t, []string{"marker", "policy"}, reads[:2])
+	})
+
+	t.Run("a policy read that waited out the lock is temporarily unavailable", func(t *testing.T) {
+		// Info reads the policy share-locked, as Authorize does, so a read the
+		// store gave up on is the named, retryable failure rather than an
+		// internal error.
+		svc, policies, _ := setup(t, nil, true, did.DID{}, func(s bucketpolicystore.Store) bucketpolicystore.Store {
+			return &lockedPolicies{s, store.ErrLockTimeout}
+		})
+		grantPolicy(t, policies, "s3:GetObject")
+
+		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
+		require.ErrorIs(t, err, store.ErrLockTimeout, "the failure must carry the store's timeout")
+	})
+
 	t.Run("returns empty delegations when no grant reaches the bucket", func(t *testing.T) {
-		svc := setup(t, testutil.RandomDID(t)) // grant scoped to a different bucket
+		svc, _, _ := setup(t, allPerms, false, testutil.RandomDID(t)) // grant scoped to a different bucket
 		ok, blocks, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		require.NoError(t, err)
 		require.Empty(t, ok.Delegations.Entries)
