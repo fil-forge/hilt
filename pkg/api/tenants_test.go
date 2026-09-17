@@ -494,7 +494,10 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 		// The winner landed in eu-west-1, so this request is not a repeat of it.
 		require.Equal(t, http.StatusConflict, rec.Code)
-		require.Contains(t, rec.Body.String(), "tenant is already provisioned in a different region: eu-west-1")
+		require.Equal(t, api.Error{
+			Code:    "RegionMismatch",
+			Message: "tenant is already provisioned in a different region: eu-west-1",
+		}, decodeError(t, rec))
 
 		// The loser's state was still unwound.
 		loser, ok := wrapKeys.lastAdded()

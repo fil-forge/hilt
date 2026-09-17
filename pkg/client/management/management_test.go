@@ -55,6 +55,12 @@ func TestManagementClient(t *testing.T) {
 
 	t.Run("ProvisionTenant surfaces the error code on a region conflict", func(t *testing.T) {
 		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodPut, r.Method)
+			require.Equal(t, "/tenants/acme", r.URL.Path)
+			var body api.ProvisionTenantRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, "eu-west-1", body.Region)
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(api.Error{
 				Code:    "RegionMismatch",
