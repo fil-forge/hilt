@@ -2,10 +2,21 @@
 
 Tenant-management service for the Forge network. Hilt owns tenants, their access
 keys, and their buckets — plus the UCAN delegations and key material that back
-them. It exposes two APIs and talks to one external service:
+them. It exposes two APIs and talks to three external services:
 
-- **Tenant REST API** (`pkg/api`, echo) — partner-facing CRUD for tenants and
-  access keys, guarded by a pre-shared partner key.
+- **Tenant REST API** (`pkg/api`, echo) — partner-facing CRUD for tenants,
+  access keys, principals and bucket policies, guarded by a pre-shared partner
+  key. `POST /tenants/{id}/access-keys` creates both key kinds. Without
+  `principalId` it is a **service key**: it carries its own `permissions` and
+  `buckets`, and the tenant→access-key delegations for them are issued at
+  creation. With `principalId` it is a **principal-bound key**: it takes no
+  permissions or buckets (both stored as `NULL`) and holds one delegation, its
+  marker (`pkg/marker`) — it names a principal (the console's `principalId`),
+  and what that principal may do on a bucket is computed on each authorize
+  from the bucket's policy; the per-request delegations are issued by the
+  tenant at that moment. Removing a principal tombstones its row
+  (`deleted_at`): no read returns it, and a later `PUT` for the same id
+  revives it with no keys and named in no statement.
 - **Hilt UCAN RPC API** (`pkg/rpc`, ucantone server mounted at `POST /`) — the
   `/s3/*` commands Ingot (the S3 gateway) invokes: `/s3/request/authorize`,
   `/s3/bucket/{create,delete,info,list}`; and the self-issued admin commands
@@ -14,6 +25,11 @@ them. It exposes two APIs and talks to one external service:
   bucket's storage space and to manage routing policies (`pkg/client`): each
   provider owns a policy whose candidates are its storage nodes, and every
   bucket's space is pointed at its provider's policy on creation.
+- **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke` to
+  revoke delegations: a deleted service key's grants, a deleted bucket's, and
+  a principal-bound key's marker (`pkg/marker`).
+- **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
+  provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
 
 Module: `github.com/fil-forge/hilt` (Go 1.27). Sibling repos it builds on:
 `ucantone` (UCAN primitives: `did`, `multikey`, `ucan/delegation`, `binding`,
@@ -41,7 +57,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   images Docker never re-pulls — `docker pull` them when the stack misbehaves,
   or override per run with `HILT_ITEST_UPLOAD_IMAGE` / `HILT_ITEST_PIRI_IMAGE`
   / `HILT_ITEST_INGOT_IMAGE` / `HILT_ITEST_SWARF_IMAGE` / `HILT_ITEST_PIRI_BINARY`
-  / `HILT_ITEST_SWARF_BINARY`. CI runs the suite on
+  / `HILT_ITEST_SWARF_BINARY` / `HILT_ITEST_INGOT_BINARY`. A binary override
+  wants a static linux build for the Docker host's architecture
+  (`GOOS=linux GOARCH=<host arch> CGO_ENABLED=0 GOWORK=off go build`), and is
+  how the IAM scenarios run against ingot changes that the `:main` image does
+  not carry yet. Until the published `:main` ingot image carries the IAM
+  changes, the IAM scenarios skip unless `HILT_ITEST_INGOT_BINARY` is set (or
+  `HILT_ITEST_IAM=1`); drop that guard once it does. CI runs the suite after
+  the unit job, on pull requests, on pushes to `main`, and on manual dispatch
+  (`.github/workflows/go-test.yml`). It sets neither override, so the IAM
+  scenarios stay skipped there until the published image carries the change.
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 
@@ -60,11 +85,33 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/sigv4` — stdlib-only SigV4 / SigV4a verification, key derivation
   (`DeriveKey`), and local verification (`VerifyWithKey`).
 - `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider}` — each an interface
-  with `memory` and `postgres` backends.
+- `pkg/bucketpolicy` — the bucket policy and its evaluation. The document is
+  AWS-shaped and flat: `statement[]` of `{sid?, effect: allow|deny, principal:
+  [ids] | "*", action: [...] | ["s3:*"]}`; the wildcard is the bare string,
+  never a list entry, and there is no `resource`. `Decode` is strict (unknown
+  fields are refused), `Validate` checks content, `Canonical`/`ETag` serve
+  compare-and-set, `Effective(doc, principal)` expands `s3:*` and lets deny
+  beat allow, and `Changed(old, new, …)` names the principals whose keys a
+  write rotates. Pure: no store or transport dependencies.
+- `pkg/marker` — a principal-bound key's marker: the one delegation the key
+  holds (tenant → key over the tenant, under libforge's bound
+  `commands/s3/key.Marker` command). It grants nothing and is in no proof
+  chain; it exists so the key has a CID the gateway holds and Hilt can revoke.
+  `Issue` builds it; `Rotator` revokes it through Swarf's `/ucan/revoke` (with
+  a fresh nonce per revocation) and reissues it (`Rotate`) or leaves the key
+  with none (`Revoke`), each key under the delegation store's `Replace`.
+  `BatchTimeout` bounds a policy write's whole fan-out, below
+  `store.LockTimeout`.
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy}` —
+  each an interface with `memory` and `postgres` backends.
+- `pkg/store/pglock` — the Postgres locking helpers the stores share:
+  `SetTimeout` (SET LOCAL lock_timeout), `Advisory` (the transaction-scoped
+  advisory lock the policy and delegation stores key by bucket and audience)
+  and `MapError` (lock_not_available → `store.ErrLockTimeout`).
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
-- `pkg/client` — clients for external services (the Sprue `UploadClient`).
+- `pkg/client` — clients for external services: the Sprue `UploadClient`, and
+  `pkg/client/management`, the partner-key REST client for the tenant API.
 - `pkg/migrations` — goose SQL migrations run on startup (unless skipped).
 - `internal/testutil` — test-only helpers (random DIDs/issuers, testcontainers).
 
@@ -76,6 +123,24 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   implementations kept in lockstep and exercised by one backend-parametrized test
   suite (`<entity>_test.go`). Add a method to all three (interface + both backends)
   and cover it in that suite.
+- **Locking and callbacks**: a write that another service must learn about runs
+  in one transaction — lock the row (`SELECT … FOR UPDATE`), run the
+  caller-supplied `beforeCommit` callback, commit. The callback rotates the
+  markers of the affected keys through `/ucan/revoke`, each key's in a
+  transaction of its own under the delegation store's per-audience lock
+  (`Replace`), so a failed publish rolls the write back and leaves the
+  principal with its old access, never with more; a rollback after a
+  successful publish leaves a fresh marker in service, which revokes a marker
+  it did not need to. Memory backends run the callback under a per-store
+  write lock; the principal store's removal lock is separate from its map
+  mutex, so a removal's callback does not block reads.
+  A reader that must not be answered from a snapshot older than an in-flight
+  write passes `store.WithLock(store.LockShare)` (`SELECT … FOR SHARE`; a
+  no-op for memory, which already serializes). Every lock is bounded by
+  `store.LockTimeout` —
+  callbacks open further transactions, so two writes can wait on each other
+  through an edge Postgres cannot see — and a statement that gives up returns
+  `store.ErrLockTimeout`.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an
