@@ -13,6 +13,7 @@ const (
 	UnknownBucketErrorName      = "UnknownBucket"
 	UnknownAccessKeyErrorName   = "UnknownAccessKey"
 	InvalidArgumentErrorName    = "InvalidArgument"
+	ExportInProgressErrorName   = "ExportInProgress"
 )
 
 // Known errors returned by the bucket [Service]. Handlers pass these to
@@ -41,4 +42,8 @@ var (
 	// of range (e.g. ListBuckets max-buckets). The name matches the canonical S3
 	// error code.
 	ErrInvalidArgument = errors.New(InvalidArgumentErrorName, "invalid request parameter")
+	// ErrExportInProgress is returned when deleting a bucket that has an open
+	// export session. Ingot maps it to S3 OperationAborted, as it does for its
+	// own pin.
+	ErrExportInProgress = errors.New(ExportInProgressErrorName, "bucket has an export in progress")
 )

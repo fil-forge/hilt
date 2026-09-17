@@ -21,6 +21,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
@@ -66,6 +67,7 @@ type Service struct {
 	buckets     bucketstore.Store
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
+	exports     exportsession.Store
 	uploads     UploadClient
 	revocations RevocationPublisher
 }
@@ -77,6 +79,7 @@ func New(
 	buckets bucketstore.Store,
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
+	exports exportsession.Store,
 	uploads UploadClient,
 	revocations RevocationPublisher,
 ) *Service {
@@ -86,6 +89,7 @@ func New(
 		buckets:     buckets,
 		delegations: delegations,
 		accessKeys:  accessKeys,
+		exports:     exports,
 		uploads:     uploads,
 		revocations: revocations,
 	}
@@ -265,12 +269,12 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 }
 
 // Delete authenticates the request, checks the s3:DeleteBucket permission,
-// resolves the bucket, verifies its space is empty via Sprue (acting as the
-// tenant), publishes revocations for the delegations over the bucket, then
-// deletes those delegations and the bucket record. Revocations are published
-// first so that a revocation service failure leaves the bucket intact and the
-// call cleanly retryable — otherwise the delegations would live on with nothing
-// for a verifier to check.
+// resolves the bucket, refuses while an export of it is open, verifies its space
+// is empty via Sprue (acting as the tenant), publishes revocations for the
+// delegations over the bucket, then deletes those delegations and the bucket
+// record. Revocations are published first so that a revocation service failure
+// leaves the bucket intact and the call cleanly retryable — otherwise the
+// delegations would live on with nothing for a verifier to check.
 func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.DeleteArguments) (*s3bkt.DeleteOK, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -279,6 +283,16 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 
 	if authz.Operation != auth.OpDeleteBucket {
 		return nil, fmt.Errorf("%w: %s", ErrOperationMismatch, authz.Operation)
+	}
+
+	// An export session opens here before the gateway pins anything, so the
+	// gateway's own pin cannot be relied on to refuse this delete.
+	exporting, err := s.exports.HasOpenForBucket(ctx, authz.Bucket.ID)
+	if err != nil {
+		return nil, fmt.Errorf("checking export sessions: %w", err)
+	}
+	if exporting {
+		return nil, fmt.Errorf("%w: %q", ErrExportInProgress, authz.BucketName)
 	}
 
 	// Verify the bucket is empty, listing its blobs via Sprue as the tenant (the

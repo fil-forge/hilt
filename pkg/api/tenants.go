@@ -21,7 +21,7 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 		return httpError(http.StatusBadRequest, err)
 	case errors.Is(err, tenantsvc.ErrInvalidStatus):
 		return httpError(http.StatusUnprocessableEntity, err)
-	case errors.Is(err, tenantsvc.ErrTenantNotDisabled):
+	case errors.Is(err, tenantsvc.ErrTenantNotDisabled), errors.Is(err, tenantsvc.ErrExportInProgress):
 		return httpError(http.StatusConflict, err)
 	case errors.Is(err, tenantsvc.ErrDIDRegistration),
 		errors.Is(err, tenantsvc.ErrUploadRegistration),
@@ -88,7 +88,7 @@ func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants *tenantsvc.Service
 }
 
 // NewDeleteTenantHandler handles DELETE /tenants/{tenantId} — permanently delete a
-// tenant (must be disabled first). Idempotent.
+// tenant (must be disabled first, with no export in progress). Idempotent.
 func NewDeleteTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "DeleteTenant"))
 	return NewRoute(http.MethodDelete, "/tenants/:tenantId", func(c echo.Context) error {

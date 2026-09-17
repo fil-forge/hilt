@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
@@ -15,6 +16,8 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	exportsessionmemory "github.com/fil-forge/hilt/pkg/store/exportsession/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -83,7 +86,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), exportsessionmemory.New(), plcClient, upload)
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -144,7 +147,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), exportsessionmemory.New(), nil, nil)
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -217,7 +220,9 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type deleteEnv struct {
 	svc       *tenantsvc.Service
 	tenants   *tenantmemory.Store
+	exports   *exportsessionmemory.Store
 	directory *plcDirectory
+	tenantID  did.DID
 }
 
 func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
@@ -248,9 +253,10 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), status))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
+	exports := exportsessionmemory.New()
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
-	return deleteEnv{svc: svc, tenants: tenants, directory: directory}
+		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), exports, plcClient, nil)
+	return deleteEnv{svc: svc, tenants: tenants, exports: exports, directory: directory, tenantID: tenantID}
 }
 
 func TestDelete(t *testing.T) {
@@ -273,6 +279,24 @@ func TestDelete(t *testing.T) {
 	t.Run("rejects a non-disabled tenant", func(t *testing.T) {
 		env := deleteSetup(t, tenant.Active)
 		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), tenantsvc.ErrTenantNotDisabled)
+	})
+
+	t.Run("refuses while an export is open, then deletes once it closes", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.exports.Add(ctx, exportsession.Input{
+			ID: "session-1", Tenant: env.tenantID, Bucket: testutil.RandomDID(t),
+			CustomerKey: "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc", ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), tenantsvc.ErrExportInProgress)
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Equal(t, 0, env.directory.deactivations, "nothing is torn down while the export is open")
+
+		require.NoError(t, env.exports.Transition(ctx, "session-1", exportsession.Opened, exportsession.Aborted))
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		_, err = env.exports.Get(ctx, "session-1")
+		require.ErrorIs(t, err, store.ErrRecordNotFound, "closed sessions are deleted with the tenant")
 	})
 
 	t.Run("maps a directory failure to ErrDIDDeactivation", func(t *testing.T) {
