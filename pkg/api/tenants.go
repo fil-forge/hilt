@@ -11,33 +11,32 @@ import (
 
 // tenantHTTPError maps a tenant-service error to an echo HTTP error. Known errors
 // (see the tenant service's errors.go) become their mapped status with the error's
-// own message; anything else is logged and returned as a 500.
+// own message and code; anything else is logged and returned as a 500.
 func tenantHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, tenantsvc.ErrTenantNotFound):
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return httpError(http.StatusNotFound, err)
 	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case errors.Is(err, tenantsvc.ErrInvalidStatus), errors.Is(err, tenantsvc.ErrRegionMismatch):
-		// 422 rather than 409: fil-one's tenant setup recovers from 409 as
-		// "already exists", which is the wrong recovery for a tenant that lives
-		// in another region.
-		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, tenantsvc.ErrTenantNotDisabled):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
+		return httpError(http.StatusBadRequest, err)
+	case errors.Is(err, tenantsvc.ErrInvalidStatus):
+		return httpError(http.StatusUnprocessableEntity, err)
+	case errors.Is(err, tenantsvc.ErrTenantNotDisabled), errors.Is(err, tenantsvc.ErrRegionMismatch):
+		// Both requests are well-formed and refused because of the tenant's
+		// stored state, which is what 409 is for.
+		return httpError(http.StatusConflict, err)
 	case errors.Is(err, tenantsvc.ErrDIDRegistration),
 		errors.Is(err, tenantsvc.ErrUploadRegistration),
 		errors.Is(err, tenantsvc.ErrDIDDeactivation):
-		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		return httpError(http.StatusBadGateway, err)
 	default:
 		log.Error("request failed", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
+		return internalError()
 	}
 }
 
 // NewProvisionTenantHandler handles PUT /tenants/{tenantId} — provision a tenant
 // in the requested region. Idempotent on the external {tenantId} when the region
-// matches the existing tenant's; a different region is rejected with 422.
+// matches the existing tenant's; a different region is rejected with 409.
 func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {

@@ -74,7 +74,10 @@ func NewClient(baseURL url.URL, partnerKey string, opts ...Option) *Client {
 // branch on the status (e.g. 404 Not Found, 409 Conflict).
 type APIError struct {
 	StatusCode int
-	Message    string
+	// Code is the API's stable machine-readable error code (e.g. RegionMismatch),
+	// empty when the response carried none. Branch on it rather than on Message.
+	Code    string
+	Message string
 }
 
 func (e *APIError) Error() string {
@@ -88,7 +91,7 @@ func (e *APIError) Error() string {
 
 // ProvisionTenant provisions the tenant with the given external id in the
 // requested region. Repeating the call with the same region returns the existing
-// tenant; a different region fails with a 422 APIError.
+// tenant; a different region fails with a 409 APIError coded RegionMismatch.
 func (c *Client) ProvisionTenant(ctx context.Context, tenantID string, req api.ProvisionTenantRequest) (api.Tenant, error) {
 	var t api.Tenant
 	err := c.do(ctx, http.MethodPut, []string{"tenants", tenantID}, req, &t, http.StatusOK, http.StatusCreated)
@@ -186,14 +189,14 @@ func (c *Client) do(ctx context.Context, method string, segments []string, body,
 }
 
 // apiErrorFromResponse builds an [APIError] from a non-2xx response, reading the
-// echo default error shape ({"message": "..."}) and falling back to the raw body.
+// API error shape ({"code": "...", "message": "..."}) and falling back to the raw
+// body.
 func apiErrorFromResponse(resp *http.Response) error {
 	apiErr := &APIError{StatusCode: resp.StatusCode}
 	data, _ := io.ReadAll(resp.Body)
-	var envelope struct {
-		Message string `json:"message"`
-	}
+	var envelope api.Error
 	if err := json.Unmarshal(data, &envelope); err == nil && envelope.Message != "" {
+		apiErr.Code = envelope.Code
 		apiErr.Message = envelope.Message
 	} else {
 		apiErr.Message = strings.TrimSpace(string(data))

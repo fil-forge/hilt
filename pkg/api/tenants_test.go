@@ -354,12 +354,24 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.Equal(t, http.StatusCreated, first.Code)
 
 		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "eu-west-1"})
-		require.Equal(t, http.StatusUnprocessableEntity, second.Code)
-		require.Contains(t, second.Body.String(), "tenant is already provisioned in a different region: us-east-1")
+		require.Equal(t, http.StatusConflict, second.Code)
 
 		// The tenant stays in its original region; nothing was re-created.
 		require.Equal(t, 1, deps.plcPosts)
 		require.Equal(t, 1, deps.customerAdds)
+	})
+
+	t.Run("a rejected region carries the RegionMismatch code and the tenant's region", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
+		provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
+
+		rec := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "eu-west-1"})
+		require.Equal(t, api.Error{
+			Code:    "RegionMismatch",
+			Message: "tenant is already provisioned in a different region: us-east-1",
+		}, decodeError(t, rec))
 	})
 
 	t.Run("upload service failure aborts provisioning", func(t *testing.T) {
@@ -469,7 +481,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		rec := provisionRequest(t, e, "tenant-10", api.ProvisionTenantRequest{Region: "us-east-1"})
 
 		// The winner landed in eu-west-1, so this request is not a repeat of it.
-		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		require.Equal(t, http.StatusConflict, rec.Code)
 		require.Contains(t, rec.Body.String(), "tenant is already provisioned in a different region: eu-west-1")
 
 		// The loser's state was still unwound.
@@ -500,6 +512,14 @@ func doRequest(t *testing.T, e *echo.Echo, method, target string, body []byte) *
 	return rec
 }
 
+// decodeError decodes an error response body into the API's error shape.
+func decodeError(t *testing.T, rec *httptest.ResponseRecorder) api.Error {
+	t.Helper()
+	var body api.Error
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body
+}
+
 func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
@@ -521,6 +541,11 @@ func TestGetTenantHandler(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/missing", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("not found carries a stable error code", func(t *testing.T) {
+		rec := doRequest(t, e, http.MethodGet, "/tenants/missing", nil)
+		require.Equal(t, api.Error{Code: "TenantNotFound", Message: "tenant not found"}, decodeError(t, rec))
 	})
 }
 

@@ -53,6 +53,24 @@ func TestManagementClient(t *testing.T) {
 		require.Equal(t, api.Tenant{TenantID: "acme", Status: api.TenantStatusActive, Region: "us-east-1"}, got)
 	})
 
+	t.Run("ProvisionTenant surfaces the error code on a region conflict", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(api.Error{
+				Code:    "RegionMismatch",
+				Message: "tenant is already provisioned in a different region: us-east-1",
+			})
+		})
+		_, err := c.ProvisionTenant(ctx, "acme", api.ProvisionTenantRequest{Region: "eu-west-1"})
+		var apiErr *management.APIError
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, &management.APIError{
+			StatusCode: http.StatusConflict,
+			Code:       "RegionMismatch",
+			Message:    "tenant is already provisioned in a different region: us-east-1",
+		}, apiErr)
+	})
+
 	t.Run("ProvisionTenant accepts idempotent 200", func(t *testing.T) {
 		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)

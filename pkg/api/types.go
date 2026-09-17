@@ -26,7 +26,7 @@ type Tenant struct {
 // ProvisionTenantRequest is the body of PUT /tenants/{tenantId}. Region selects
 // the regional provider the tenant is bound to for its lifetime: repeating the
 // request with the same region returns the existing tenant, a different region
-// is rejected with 422.
+// is rejected with 409 and the code RegionMismatch.
 type ProvisionTenantRequest struct {
 	Region string `json:"region"`
 }
