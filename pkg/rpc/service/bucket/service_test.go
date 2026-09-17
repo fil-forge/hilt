@@ -27,6 +27,8 @@ import (
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	exportsessionmemory "github.com/fil-forge/hilt/pkg/store/exportsession/memory"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -163,7 +165,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &htestutil.FakeSwarf{}, nil), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, exportsessionmemory.New(), sprue, &htestutil.FakeSwarf{}, nil), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -351,6 +353,7 @@ type deleteDeps struct {
 	buckets     *bucketmemory.Store
 	delegations *delegationmemory.Store
 	policies    bucketpolicystore.Store
+	exports     *exportsessionmemory.Store
 	swarf       *htestutil.FakeSwarf
 	tenantID    did.DID
 	bucketID    did.DID
@@ -399,11 +402,13 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
 		swarf := &htestutil.FakeSwarf{}
+		exports := exportsessionmemory.New()
 		return deleteDeps{
-			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, nil),
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, exports, sprue, swarf, nil),
 			buckets:     buckets,
 			delegations: delegations,
 			policies:    policies,
+			exports:     exports,
 			tenantID:    tenantID,
 			swarf:       swarf,
 			bucketID:    bucketID,
@@ -548,6 +553,26 @@ func TestDelete(t *testing.T) {
 		require.Empty(t, d.swarf.Revocations(), "nothing is revoked when the delete is refused")
 	})
 
+	t.Run("refuses while an export is open and keeps the bucket", func(t *testing.T) {
+		sprue := &fakeSprue{empty: true}
+		d := setup(t, allPerms, false, sprue)
+		require.NoError(t, d.exports.Add(ctx, exportsession.Input{
+			ID: "session-1", Tenant: d.tenantID, Bucket: d.bucketID,
+			CustomerKey: "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc", ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.ErrorIs(t, err, bucketsvc.ErrExportInProgress)
+		require.False(t, sprue.emptyCalled, "refused before touching the space")
+		require.Empty(t, d.swarf.Revocations())
+		_, err = d.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err)
+
+		require.NoError(t, d.exports.Transition(ctx, "session-1", exportsession.Opened, exportsession.Aborted))
+		_, err = d.svc.Delete(ctx, providerID, del(bucketName))
+		require.NoError(t, err)
+	})
+
 	t.Run("propagates a SpaceEmpty error", func(t *testing.T) {
 		d := setup(t, allPerms, false, &fakeSprue{emptyErr: errors.New("sprue unavailable")})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
@@ -573,7 +598,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		seedKey(t, accessKeys, secrets, delegations, principals, signer, tenantID, perms, principalBound)
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, exportsessionmemory.New(), &fakeSprue{}, &htestutil.FakeSwarf{}, nil), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -722,7 +747,7 @@ func TestInfo(t *testing.T) {
 		for _, w := range wrap {
 			reads = w(reads)
 		}
-		return bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil), policies, root, accessKeys
+		return bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, exportsessionmemory.New(), &fakeSprue{}, &htestutil.FakeSwarf{}, nil), policies, root, accessKeys
 	}
 
 	// grantPolicy stores a policy allowing "user-1" the given actions on the bucket.
@@ -1045,7 +1070,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	})
 
 	az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, policies, vaultmemory.New())
-	svc := bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil)
+	svc := bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, exportsessionmemory.New(), &fakeSprue{}, &htestutil.FakeSwarf{}, nil)
 
 	type result struct {
 		ok  *s3bkt.InfoOK
