@@ -145,6 +145,13 @@ func TestCreate(t *testing.T) {
 		require.NotEmpty(t, secret)
 		require.Equal(t, "k1", rec.Name)
 		require.Equal(t, []did.DID{d.bucketID}, rec.Buckets)
+
+		issued, err := d.delegations.ListByAudience(ctx, rec.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, issued.Results, "the key's delegations are stored")
+		for _, dlg := range issued.Results {
+			require.Equal(t, d.bucketID, dlg.Subject())
+		}
 	})
 
 	t.Run("rejects an empty name", func(t *testing.T) {

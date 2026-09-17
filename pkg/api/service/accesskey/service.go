@@ -27,9 +27,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/vault"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
-	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
-	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/fil-forge/ucantone/validator"
@@ -266,7 +264,18 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		}
 	}
 	if len(dels) > 0 {
-		if err := s.delegations.PutBatch(ctx, dels); err != nil {
+		// Store the delegations under the access key's delegation lock rather
+		// than with PutBatch: a marker rotation for the principal running
+		// between the key record's commit and this write would otherwise find
+		// the key holding no marker, return, and leave the marker stored below
+		// unrevoked. The access-key DID is freshly generated, so the key holds
+		// nothing yet.
+		if err := s.delegations.Replace(ctx, accessKeyID, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+			if len(current) > 0 {
+				return nil, fmt.Errorf("access key already holds delegations: %w", store.ErrInvalidArgument)
+			}
+			return dels, nil
+		}); err != nil {
 			rollback()
 			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)
 		}
@@ -425,15 +434,7 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, accessKeyID d
 // tenantIssuer loads the tenant's secp256k1 signing key from the vault and
 // returns an issuer that signs as the tenant.
 func (s *Service) tenantIssuer(ctx context.Context, tenantID did.DID) (ucan.Issuer, error) {
-	keyBytes, err := s.secrets.Read(ctx, vault.TenantKeyPath(tenantID))
-	if err != nil {
-		return nil, fmt.Errorf("reading tenant key: %w", err)
-	}
-	signer, err := secp256k1.Decode(keyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("decoding tenant key: %w", err)
-	}
-	return multikey.NewIssuer(tenantID, signer), nil
+	return vault.TenantIssuer(ctx, s.secrets, tenantID)
 }
 
 // bucketNamesByID returns a DID→name map for the given bucket IDs owned by the
