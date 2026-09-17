@@ -210,6 +210,63 @@ func TestPrincipalStore(t *testing.T) {
 				require.Equal(t, 1, calls)
 			})
 
+			t.Run("Delete holds only the removal: ListByTenant answers, a share-locked Get waits", func(t *testing.T) {
+				// The locking both backends owe the two writers that cross here:
+				// a policy write lists the tenant's principals from inside its own
+				// lock while a removal's callback rewrites that tenant's policies.
+				// The list must not wait on the removal, and a share-locked read
+				// must.
+				const grace = 300 * time.Millisecond
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+				inCallback := make(chan struct{})
+				release := make(chan struct{})
+				deleted := make(chan error, 1)
+				go func() {
+					deleted <- s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+						close(inCallback)
+						<-release
+						return nil
+					})
+				}()
+				<-inCallback
+
+				listed := make(chan []principal.Record, 1)
+				go func() {
+					recs, err := s.ListByTenant(context.Background(), tenantID)
+					require.NoError(t, err)
+					listed <- recs
+				}()
+				select {
+				case recs := <-listed:
+					require.Len(t, recs, 1, "the principal is live until the removal commits")
+				case <-time.After(10 * time.Second):
+					t.Fatal("ListByTenant waited for the removal's callback")
+				}
+
+				got := make(chan error, 1)
+				go func() {
+					_, err := s.Get(context.Background(), tenantID, "held", store.WithLock(store.LockShare))
+					got <- err
+				}()
+				select {
+				case <-got:
+					t.Fatal("share-locked Get returned while the removal was in flight")
+				case <-time.After(grace):
+				}
+
+				close(release)
+				require.NoError(t, <-deleted)
+				select {
+				case err := <-got:
+					require.ErrorIs(t, err, store.ErrRecordNotFound, "the tombstone is visible once the removal commits")
+				case <-time.After(10 * time.Second):
+					t.Fatal("share-locked Get did not return after the removal committed")
+				}
+			})
+
 			t.Run("Delete accepts a nil callback", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
