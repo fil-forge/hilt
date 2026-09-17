@@ -15,6 +15,7 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/provider"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -98,9 +99,10 @@ func TestProvision(t *testing.T) {
 		require.True(t, created)
 		require.Equal(t, "tenant-1", rec.ExternalID)
 		require.Equal(t, tenant.Active, rec.Status)
+		require.Equal(t, "us-east-1", rec.Region)
 	})
 
-	t.Run("is idempotent on the external id", func(t *testing.T) {
+	t.Run("is idempotent on the external id and region", func(t *testing.T) {
 		env := provisionSetup(t, 0)
 		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 		first, created, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
@@ -109,7 +111,36 @@ func TestProvision(t *testing.T) {
 		again, created, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
 		require.NoError(t, err)
 		require.False(t, created)
-		require.Equal(t, first.ID, again.ID)
+		require.Equal(t, first, again)
+	})
+
+	t.Run("rejects re-provisioning in a different region", func(t *testing.T) {
+		env := provisionSetup(t, 0)
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
+		_, _, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
+		require.NoError(t, err)
+		_, _, err = env.svc.Provision(ctx, "tenant-2", "eu-west-1")
+		require.ErrorIs(t, err, tenantsvc.ErrRegionMismatch)
+	})
+
+	t.Run("names the tenant's region on a mismatch", func(t *testing.T) {
+		env := provisionSetup(t, 0)
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
+		_, _, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
+		require.NoError(t, err)
+		_, _, err = env.svc.Provision(ctx, "tenant-2", "eu-west-1")
+		require.EqualError(t, err, "tenant is already provisioned in a different region: us-east-1")
+	})
+
+	t.Run("rejects an unknown region for an existing tenant", func(t *testing.T) {
+		env := provisionSetup(t, 0)
+		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		_, _, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
+		require.NoError(t, err)
+		_, _, err = env.svc.Provision(ctx, "tenant-2", "nowhere")
+		require.ErrorIs(t, err, tenantsvc.ErrUnknownRegion)
 	})
 
 	t.Run("rejects a missing region", func(t *testing.T) {
@@ -142,8 +173,8 @@ func TestProvision(t *testing.T) {
 
 // simpleService builds a service with the given tenant store and no PLC/upload
 // clients — enough for Get and SetStatus, which never touch them.
-func simpleService(tenants tenant.Store) *tenantsvc.Service {
-	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
+func simpleService(tenants tenant.Store, providers provider.Store) *tenantsvc.Service {
+	return tenantsvc.New(zap.NewNop(), tenants, providers, bucketmemory.New(),
 		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
 }
 
@@ -152,15 +183,20 @@ func TestGetAndSetStatus(t *testing.T) {
 
 	newWithTenant := func(t *testing.T) (*tenantsvc.Service, tenant.Store) {
 		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
-		return simpleService(tenants), tenants
+		providers := providermemory.New()
+		providerID := testutil.RandomDID(t)
+		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
+		require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", providerID, tenant.Active))
+		return simpleService(tenants, providers), tenants
 	}
 
-	t.Run("get returns the tenant", func(t *testing.T) {
-		svc, _ := newWithTenant(t)
-		rec, err := svc.Get(ctx, "tenant-1")
+	t.Run("get returns the tenant with its region", func(t *testing.T) {
+		svc, tenants := newWithTenant(t)
+		stored, err := tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)
-		require.Equal(t, "tenant-1", rec.ExternalID)
+		got, err := svc.Get(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Equal(t, tenantsvc.Tenant{Record: stored, Region: "us-east-1"}, got)
 	})
 
 	t.Run("get rejects an unknown tenant", func(t *testing.T) {

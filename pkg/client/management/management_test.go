@@ -46,12 +46,11 @@ func TestManagementClient(t *testing.T) {
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			require.Equal(t, "us-east-1", body.Region)
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(api.Tenant{TenantID: "acme", Status: api.TenantStatusActive})
+			_ = json.NewEncoder(w).Encode(api.Tenant{TenantID: "acme", Status: api.TenantStatusActive, Region: "us-east-1"})
 		})
 		got, err := c.ProvisionTenant(ctx, "acme", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.NoError(t, err)
-		require.Equal(t, "acme", got.TenantID)
-		require.Equal(t, api.TenantStatusActive, got.Status)
+		require.Equal(t, api.Tenant{TenantID: "acme", Status: api.TenantStatusActive, Region: "us-east-1"}, got)
 	})
 
 	t.Run("ProvisionTenant accepts idempotent 200", func(t *testing.T) {

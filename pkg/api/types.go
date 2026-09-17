@@ -15,6 +15,7 @@ const (
 type Tenant struct {
 	TenantID       string       `json:"tenantId"`
 	Status         TenantStatus `json:"status"`
+	Region         string       `json:"region"`
 	BucketCount    int          `json:"bucketCount"`
 	BucketLimit    int          `json:"bucketLimit"`
 	AccessKeyCount int          `json:"accessKeyCount"`
@@ -22,7 +23,10 @@ type Tenant struct {
 	CreatedAt      time.Time    `json:"createdAt"`
 }
 
-// ProvisionTenantRequest is the body of PUT /tenants/{tenantId}.
+// ProvisionTenantRequest is the body of PUT /tenants/{tenantId}. Region selects
+// the regional provider the tenant is bound to for its lifetime: repeating the
+// request with the same region returns the existing tenant, a different region
+// is rejected with 422.
 type ProvisionTenantRequest struct {
 	Region string `json:"region"`
 }

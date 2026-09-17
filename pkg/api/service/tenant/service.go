@@ -72,34 +72,46 @@ func New(
 	}
 }
 
-// Provision provisions (or, idempotently, returns) the tenant for externalID: it
-// generates a rotatable did:plc key, publishes it, registers the tenant with the
-// upload service, and records it. created is false when an existing tenant is
-// returned (including the concurrent-create winner).
-func (s *Service) Provision(ctx context.Context, externalID, region string) (tenantstore.Record, bool, error) {
-	if region == "" {
-		return tenantstore.Record{}, false, ErrRegionRequired
-	}
+// Tenant is a tenant record together with the region its provider serves.
+type Tenant struct {
+	tenantstore.Record
+	Region string
+}
 
-	// Idempotent: return the existing tenant if already provisioned.
-	if existing, err := s.tenants.GetByExternalID(ctx, externalID); err == nil {
-		return existing, false, nil
-	} else if !errors.Is(err, store.ErrRecordNotFound) {
-		return tenantstore.Record{}, false, fmt.Errorf("looking up tenant: %w", err)
+// Provision provisions the tenant for externalID in region: it generates a
+// rotatable did:plc key, publishes it, registers the tenant with the upload
+// service, and records it bound to the provider serving the region.
+//
+// Provision is idempotent on externalID as long as the region resolves to the
+// tenant's provider: the existing tenant is returned with created=false (also
+// for the concurrent-create winner). A request naming a different region
+// returns ErrRegionMismatch; the tenant is never moved.
+func (s *Service) Provision(ctx context.Context, externalID, region string) (Tenant, bool, error) {
+	if region == "" {
+		return Tenant{}, false, ErrRegionRequired
 	}
 
 	// Resolve the provider for the requested region.
 	prov, err := s.providers.GetByRegion(ctx, region)
 	if errors.Is(err, store.ErrRecordNotFound) {
-		return tenantstore.Record{}, false, ErrUnknownRegion
+		return Tenant{}, false, ErrUnknownRegion
 	} else if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("resolving provider: %w", err)
+		return Tenant{}, false, fmt.Errorf("resolving provider: %w", err)
+	}
+
+	// Idempotent: return the existing tenant if it is already provisioned with
+	// this provider.
+	if existing, err := s.tenants.GetByExternalID(ctx, externalID); err == nil {
+		t, err := s.matchExisting(ctx, existing, prov)
+		return t, false, err
+	} else if !errors.Is(err, store.ErrRecordNotFound) {
+		return Tenant{}, false, fmt.Errorf("looking up tenant: %w", err)
 	}
 
 	// Generate the tenant's rotatable did:plc key (secp256k1 rotation key).
 	signer, err := secp256k1.Generate()
 	if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("generating tenant key: %w", err)
+		return Tenant{}, false, fmt.Errorf("generating tenant key: %w", err)
 	}
 	key := signer.KeyDID()
 
@@ -111,7 +123,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	// fragment.
 	wrapKeyPair, err := wrapkey.Generate()
 	if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("generating wrap key: %w", err)
+		return Tenant{}, false, fmt.Errorf("generating wrap key: %w", err)
 	}
 
 	tenantID, genesis, err := plc.New(
@@ -123,7 +135,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 		}),
 	)
 	if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("building genesis operation: %w", err)
+		return Tenant{}, false, fmt.Errorf("building genesis operation: %w", err)
 	}
 
 	log := s.logger.With(zap.String("external_id", externalID), zap.Stringer("tenant", tenantID))
@@ -148,7 +160,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	// type is recoverable on decode rather than assumed.
 	if err := s.secrets.Write(ctx, signingVaultKey, signer.Bytes()); err != nil {
 		log.Error("storing signing key", zap.Error(err))
-		return tenantstore.Record{}, false, fmt.Errorf("storing signing key: %w", err)
+		return Tenant{}, false, fmt.Errorf("storing signing key: %w", err)
 	}
 	cleanups = append(cleanups, func(ctx context.Context) {
 		s.cleanupKey(ctx, log, signingVaultKey)
@@ -157,7 +169,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	if err := s.secrets.Write(ctx, wrapVaultKey, wrapKeyPair.Bytes()); err != nil {
 		log.Error("storing wrap key", zap.Error(err))
 		runCleanups()
-		return tenantstore.Record{}, false, fmt.Errorf("storing wrap key: %w", err)
+		return Tenant{}, false, fmt.Errorf("storing wrap key: %w", err)
 	}
 	cleanups = append(cleanups, func(ctx context.Context) {
 		s.cleanupKey(ctx, log, wrapVaultKey)
@@ -167,7 +179,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	if err := s.plcClient.Update(ctx, tenantID, genesis); err != nil {
 		log.Error("publishing genesis operation", zap.Error(err))
 		runCleanups()
-		return tenantstore.Record{}, false, ErrDIDRegistration
+		return Tenant{}, false, ErrDIDRegistration
 	}
 
 	// Register the tenant as a customer with the upload service (Sprue). Done
@@ -178,7 +190,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	if err := s.upload.RegisterCustomer(ctx, tenantID, s.upload.Product, details); err != nil {
 		log.Error("registering tenant with upload service", zap.Error(err))
 		runCleanups()
-		return tenantstore.Record{}, false, ErrUploadRegistration
+		return Tenant{}, false, ErrUploadRegistration
 	}
 
 	// Record the active wrap key (version 1) before the tenant row. The tenant
@@ -195,7 +207,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	}); err != nil {
 		log.Error("storing wrap key record", zap.Error(err))
 		runCleanups()
-		return tenantstore.Record{}, false, fmt.Errorf("storing wrap key record: %w", err)
+		return Tenant{}, false, fmt.Errorf("storing wrap key record: %w", err)
 	}
 	cleanups = append(cleanups, func(ctx context.Context) {
 		if err := s.wrapKeys.Delete(ctx, tenantID); err != nil {
@@ -206,32 +218,55 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	// Record the tenant.
 	if err := s.tenants.Add(ctx, tenantID, externalID, prov.ID, tenantstore.Active); err != nil {
 		runCleanups()
-		// Concurrent create with the same external id: return the winner.
+		// Concurrent create with the same external id: return the winner, which
+		// must have landed with the same provider.
 		if errors.Is(err, store.ErrRecordExists) {
 			if winner, gerr := s.tenants.GetByExternalID(ctx, externalID); gerr == nil {
-				return winner, false, nil
+				t, err := s.matchExisting(ctx, winner, prov)
+				return t, false, err
 			}
 		}
-		return tenantstore.Record{}, false, fmt.Errorf("storing tenant: %w", err)
+		return Tenant{}, false, fmt.Errorf("storing tenant: %w", err)
 	}
 
 	rec, err := s.tenants.Get(ctx, tenantID)
 	if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("loading created tenant: %w", err)
+		return Tenant{}, false, fmt.Errorf("loading created tenant: %w", err)
 	}
 	log.Info("provisioned tenant")
-	return rec, true, nil
+	return Tenant{Record: rec, Region: prov.Region}, true, nil
 }
 
-// Get returns the tenant for externalID.
-func (s *Service) Get(ctx context.Context, externalID string) (tenantstore.Record, error) {
+// matchExisting decides whether a provision request resolving to prov is a
+// repeat of the request that created existing. It returns the tenant in prov's
+// region when the providers match and ErrRegionMismatch, wrapped with the
+// tenant's actual region, when they differ.
+func (s *Service) matchExisting(ctx context.Context, existing tenantstore.Record, prov provider.Record) (Tenant, error) {
+	if existing.Provider == prov.ID {
+		return Tenant{Record: existing, Region: prov.Region}, nil
+	}
+	actual, err := s.providers.Get(ctx, existing.Provider)
+	if err != nil {
+		return Tenant{}, fmt.Errorf("resolving tenant provider: %w", err)
+	}
+	return Tenant{}, fmt.Errorf("%w: %s", ErrRegionMismatch, actual.Region)
+}
+
+// Get returns the tenant for externalID together with its region.
+func (s *Service) Get(ctx context.Context, externalID string) (Tenant, error) {
 	rec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
-		return tenantstore.Record{}, ErrTenantNotFound
+		return Tenant{}, ErrTenantNotFound
 	} else if err != nil {
-		return tenantstore.Record{}, fmt.Errorf("looking up tenant: %w", err)
+		return Tenant{}, fmt.Errorf("looking up tenant: %w", err)
 	}
-	return rec, nil
+	// The provider row is guaranteed by the tenant's foreign key; a miss here is
+	// a data-integrity failure, not a client error.
+	prov, err := s.providers.Get(ctx, rec.Provider)
+	if err != nil {
+		return Tenant{}, fmt.Errorf("resolving tenant provider: %w", err)
+	}
+	return Tenant{Record: rec, Region: prov.Region}, nil
 }
 
 // SetStatus updates the tenant's access mode. status must be a recognized status.

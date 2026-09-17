@@ -8,6 +8,7 @@ const (
 	TenantNotFoundErrorName     = "TenantNotFound"
 	RegionRequiredErrorName     = "RegionRequired"
 	UnknownRegionErrorName      = "UnknownRegion"
+	RegionMismatchErrorName     = "RegionMismatch"
 	InvalidStatusErrorName      = "InvalidStatus"
 	TenantNotDisabledErrorName  = "TenantNotDisabled"
 	DIDRegistrationErrorName    = "DIDRegistration"
@@ -26,6 +27,10 @@ var (
 	ErrRegionRequired = errors.New(RegionRequiredErrorName, "region is required")
 	// ErrUnknownRegion is returned when no provider serves the requested region.
 	ErrUnknownRegion = errors.New(UnknownRegionErrorName, "unknown region")
+	// ErrRegionMismatch is returned when a provision request names a region
+	// other than the one the existing tenant was provisioned in. Provision wraps
+	// it with the tenant's region so the message names it; match with errors.Is.
+	ErrRegionMismatch = errors.New(RegionMismatchErrorName, "tenant is already provisioned in a different region")
 	// ErrInvalidStatus is returned when a status update names an unknown status.
 	ErrInvalidStatus = errors.New(InvalidStatusErrorName, "invalid status")
 	// ErrTenantNotDisabled is returned when deleting a tenant that is not disabled.

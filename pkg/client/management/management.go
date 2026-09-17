@@ -86,8 +86,9 @@ func (e *APIError) Error() string {
 
 // Tenants
 
-// ProvisionTenant provisions (or, idempotently, returns) the tenant with the
-// given external id.
+// ProvisionTenant provisions the tenant with the given external id in the
+// requested region. Repeating the call with the same region returns the existing
+// tenant; a different region fails with a 422 APIError.
 func (c *Client) ProvisionTenant(ctx context.Context, tenantID string, req api.ProvisionTenantRequest) (api.Tenant, error) {
 	var t api.Tenant
 	err := c.do(ctx, http.MethodPut, []string{"tenants", tenantID}, req, &t, http.StatusOK, http.StatusCreated)

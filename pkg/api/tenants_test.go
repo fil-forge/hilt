@@ -122,13 +122,18 @@ func (s *spyWrapKeyStore) lastAdded() (wrapkeystore.Input, bool) {
 
 // loseRaceTenantStore simulates losing a concurrent create: Add lands the
 // winner's row (another request's tenant) and reports ErrRecordExists to the
-// caller.
+// caller. When winnerProvider is set the winner is recorded under that provider
+// instead of the loser's, simulating a race between two regions.
 type loseRaceTenantStore struct {
 	tenant.Store
-	winnerID did.DID
+	winnerID       did.DID
+	winnerProvider did.DID
 }
 
 func (s *loseRaceTenantStore) Add(ctx context.Context, _ did.DID, externalID string, provider did.DID, status tenant.Status) error {
+	if s.winnerProvider.Defined() {
+		provider = s.winnerProvider
+	}
 	if err := s.Store.Add(ctx, s.winnerID, externalID, provider, status); err != nil {
 		return err
 	}
@@ -265,6 +270,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		rec := provisionRequest(t, e, "tenant-1", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusCreated, rec.Code)
 		require.Contains(t, rec.Body.String(), `"tenantId":"tenant-1"`)
+		require.Contains(t, rec.Body.String(), `"region":"us-east-1"`)
 
 		// A tenant record exists, keyed by a did:plc, mapped to the external id.
 		stored, err := deps.tenants.GetByExternalID(ctx, "tenant-1")
@@ -318,7 +324,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.Equal(t, "did:key:"+wrapRec.KID, wrapVM.String())
 	})
 
-	t.Run("is idempotent on the external id", func(t *testing.T) {
+	t.Run("is idempotent on the external id and region", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 
@@ -329,6 +335,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
 		require.Equal(t, http.StatusOK, second.Code)
+		require.Equal(t, first.Body.String(), second.Body.String())
 
 		// No new key minted/published, and no re-registration, on the idempotent call.
 		require.Equal(t, 1, deps.plcPosts)
@@ -336,6 +343,23 @@ func TestProvisionTenantHandler(t *testing.T) {
 		again, err := deps.tenants.GetByExternalID(ctx, "tenant-2")
 		require.NoError(t, err)
 		require.Equal(t, stored.ID, again.ID)
+	})
+
+	t.Run("re-provisioning in a different region is rejected", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
+
+		first := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusCreated, first.Code)
+
+		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "eu-west-1"})
+		require.Equal(t, http.StatusUnprocessableEntity, second.Code)
+		require.Contains(t, second.Body.String(), "tenant is already provisioned in a different region: us-east-1")
+
+		// The tenant stays in its original region; nothing was re-created.
+		require.Equal(t, 1, deps.plcPosts)
+		require.Equal(t, 1, deps.customerAdds)
 	})
 
 	t.Run("upload service failure aborts provisioning", func(t *testing.T) {
@@ -431,6 +455,30 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		require.Zero(t, deps.secrets.liveKeys())
 	})
+
+	t.Run("losing a concurrent create to another region is rejected", func(t *testing.T) {
+		winnerProvider := testutil.RandomDID(t)
+		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New()}
+		e, deps := setupProvision(t, &setupConfig{
+			tenants:  &loseRaceTenantStore{Store: tenantmemory.New(), winnerID: testutil.RandomDID(t), winnerProvider: winnerProvider},
+			wrapKeys: wrapKeys,
+		})
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		require.NoError(t, deps.providers.Add(ctx, winnerProvider, "eu-west-1", nil))
+
+		rec := provisionRequest(t, e, "tenant-10", api.ProvisionTenantRequest{Region: "us-east-1"})
+
+		// The winner landed in eu-west-1, so this request is not a repeat of it.
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		require.Contains(t, rec.Body.String(), "tenant is already provisioned in a different region: eu-west-1")
+
+		// The loser's state was still unwound.
+		loser, ok := wrapKeys.lastAdded()
+		require.True(t, ok)
+		_, err := deps.wrapKeys.GetByKID(ctx, loser.KID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.Zero(t, deps.secrets.liveKeys())
+	})
 }
 
 // serve wraps a single Route in an echo server.
@@ -455,8 +503,11 @@ func doRequest(t *testing.T, e *echo.Echo, method, target string, body []byte) *
 func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
+	providers := providermemory.New()
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
+	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", providerID, tenant.Active))
+	svc := tenantsvc.New(zap.NewNop(), tenants, providers, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -464,6 +515,7 @@ func TestGetTenantHandler(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.Contains(t, rec.Body.String(), `"tenantId":"tenant-1"`)
 		require.Contains(t, rec.Body.String(), `"status":"active"`)
+		require.Contains(t, rec.Body.String(), `"region":"us-east-1"`)
 	})
 
 	t.Run("not found", func(t *testing.T) {

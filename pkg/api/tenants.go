@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
-	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
@@ -19,7 +18,10 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case errors.Is(err, tenantsvc.ErrInvalidStatus):
+	case errors.Is(err, tenantsvc.ErrInvalidStatus), errors.Is(err, tenantsvc.ErrRegionMismatch):
+		// 422 rather than 409: fil-one's tenant setup recovers from 409 as
+		// "already exists", which is the wrong recovery for a tenant that lives
+		// in another region.
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, tenantsvc.ErrTenantNotDisabled):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
@@ -34,7 +36,8 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 }
 
 // NewProvisionTenantHandler handles PUT /tenants/{tenantId} — provision a tenant
-// (idempotent on the external {tenantId}).
+// in the requested region. Idempotent on the external {tenantId} when the region
+// matches the existing tenant's; a different region is rejected with 422.
 func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {
@@ -99,13 +102,14 @@ func NewDeleteTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Rout
 	})
 }
 
-// tenantResponse builds the Tenant API representation from a stored record. The
-// caller-facing tenantId is the external id; the did:plc stays internal. Quota
-// counts/limits are not tracked yet and are returned as zero.
-func tenantResponse(rec tenant.Record) Tenant {
+// tenantResponse builds the Tenant API representation from the service's view.
+// The caller-facing tenantId is the external id; the did:plc stays internal.
+// Quota counts/limits are not tracked yet and are returned as zero.
+func tenantResponse(t tenantsvc.Tenant) Tenant {
 	return Tenant{
-		TenantID:  rec.ExternalID,
-		Status:    TenantStatus(rec.Status),
-		CreatedAt: rec.CreatedAt,
+		TenantID:  t.ExternalID,
+		Status:    TenantStatus(t.Status),
+		Region:    t.Region,
+		CreatedAt: t.CreatedAt,
 	}
 }
