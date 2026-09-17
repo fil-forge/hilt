@@ -78,14 +78,15 @@ type Tenant struct {
 	Region string
 }
 
-// Provision provisions the tenant for externalID in region: it generates a
-// rotatable did:plc key, publishes it, registers the tenant with the upload
-// service, and records it bound to the provider serving the region.
+// Provision provisions (or, idempotently, returns) the tenant for externalID: it
+// generates a rotatable did:plc key, publishes it, registers the tenant with the
+// upload service, and records it. The tenant record stores the provider that
+// serves region, and every later S3 request must come from that provider.
 //
-// Provision is idempotent on externalID as long as the region resolves to the
-// tenant's provider: the existing tenant is returned with created=false (also
-// for the concurrent-create winner). A request naming a different region
-// returns ErrRegionMismatch; the tenant is never moved.
+// A repeat call is idempotent only when its region resolves to the same
+// provider; a different region returns ErrRegionMismatch because a tenant
+// cannot move between providers. created is false when an existing tenant is
+// returned (including the concurrent-create winner).
 func (s *Service) Provision(ctx context.Context, externalID, region string) (Tenant, bool, error) {
 	if region == "" {
 		return Tenant{}, false, ErrRegionRequired
