@@ -392,13 +392,25 @@ func TestProvisionTenantHandler(t *testing.T) {
 	t.Run("unknown region is rejected", func(t *testing.T) {
 		e, _ := setupProvision(t, nil)
 		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	})
+
+	t.Run("an unknown region carries the UnknownRegion code", func(t *testing.T) {
+		e, _ := setupProvision(t, nil)
+		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
+		require.Equal(t, api.Error{Code: "UnknownRegion", Message: "unknown region"}, decodeError(t, rec))
 	})
 
 	t.Run("missing region is rejected", func(t *testing.T) {
 		e, _ := setupProvision(t, nil)
 		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	})
+
+	t.Run("a missing region carries the RegionRequired code", func(t *testing.T) {
+		e, _ := setupProvision(t, nil)
+		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
+		require.Equal(t, api.Error{Code: "RegionRequired", Message: "region is required"}, decodeError(t, rec))
 	})
 
 	t.Run("cleans up the orphaned key when PLC publication fails", func(t *testing.T) {

@@ -16,9 +16,11 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, tenantsvc.ErrTenantNotFound):
 		return httpError(http.StatusNotFound, err)
-	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
-		return httpError(http.StatusBadRequest, err)
-	case errors.Is(err, tenantsvc.ErrInvalidStatus):
+	case errors.Is(err, tenantsvc.ErrRegionRequired),
+		errors.Is(err, tenantsvc.ErrUnknownRegion),
+		errors.Is(err, tenantsvc.ErrInvalidStatus):
+		// A well-formed body that fails semantic validation is 422. 400 is
+		// reserved for a malformed path parameter or an unparseable body.
 		return httpError(http.StatusUnprocessableEntity, err)
 	case errors.Is(err, tenantsvc.ErrTenantNotDisabled), errors.Is(err, tenantsvc.ErrRegionMismatch):
 		// Both requests are well-formed and refused because of the tenant's
