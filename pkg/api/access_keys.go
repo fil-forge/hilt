@@ -25,7 +25,8 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 		errors.Is(err, accesskeysvc.ErrPrincipalScoped),
 		errors.Is(err, accesskeysvc.ErrUnknownPrincipal):
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
-	case errors.Is(err, accesskeysvc.ErrNameConflict):
+	case errors.Is(err, accesskeysvc.ErrNameConflict),
+		errors.Is(err, accesskeysvc.ErrConcurrentChange):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	default:
 		log.Error("request failed", zap.Error(err))

@@ -3,9 +3,9 @@
 // delegation issuance), listing, retrieval, and revocation. A key created with
 // a principal is bound to it: it holds no permissions or buckets of its own,
 // only the marker delegation of [marker.Issue], and is authorized from the
-// tenant's bucket policies. It returns the known errors in errors.go so
-// handlers can map them to HTTP responses; unexpected failures are returned
-// wrapped for the handler to log.
+// tenant's bucket policies; deleting one revokes its marker. It returns the
+// known errors in errors.go so handlers can map them to HTTP responses;
+// unexpected failures are returned wrapped for the handler to log.
 package accesskey
 
 import (
@@ -225,6 +225,12 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if principalRef != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
+		// The principal row is referenced by the new key; a removal holding it
+		// past the store's lock timeout means nothing was written and the
+		// call can be repeated.
+		if errors.Is(err, store.ErrLockTimeout) {
+			return accesskeystore.Record{}, "", ErrConcurrentChange
+		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
 	}
 
@@ -347,12 +353,14 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 	return rec, names, nil
 }
 
-// Delete revokes an access key belonging to the tenant: publishing UCAN
-// revocations for its delegations, then removing those delegations, its vault
-// key, and its record. Revocations are published first so that a revocation
-// service failure leaves the key intact and the call cleanly retryable —
-// otherwise the delegations would live on with nothing for a verifier to check.
-// A principal-bound key's marker is revoked the same way.
+// Delete removes an access key belonging to the tenant. Its delegations are
+// revoked first: publishing before anything is removed leaves the key intact
+// when the revocation service fails, so the call is cleanly retryable —
+// otherwise the delegations would live on with nothing for a verifier to
+// check. A service key's are the tenant's grants to it; a principal-bound
+// key's is its marker, revoked under the key's delegation lock so a rotation
+// of the same key in flight waits for the outcome. A row another write holds
+// past the store's lock timeout is [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -372,18 +380,63 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
-	if err := s.revokeDelegations(ctx, tenantRec.ID, id); err != nil {
-		return err
+	if rec.Principal != nil {
+		if err := s.revokeMarker(ctx, tenantRec.ID, id); err != nil {
+			return err
+		}
+	} else {
+		if err := s.revokeDelegations(ctx, tenantRec.ID, id); err != nil {
+			return err
+		}
+		if err := s.delegations.DeleteByAudience(ctx, id); err != nil {
+			return fmt.Errorf("deleting access key delegations: %w", err)
+		}
 	}
-
-	if err := s.delegations.DeleteByAudience(ctx, id); err != nil {
-		return fmt.Errorf("deleting access key delegations: %w", err)
+	// The row goes first, so a key whose vault entry outlives it is unreachable
+	// rather than present but unusable.
+	if err := s.accessKeys.Delete(ctx, id); err != nil {
+		// A lock the delete waited on means another writer holds the row.
+		// Nothing was committed, so the caller repeats the call.
+		if errors.Is(err, store.ErrLockTimeout) {
+			s.logger.Info("access key removal lost a race with a concurrent write",
+				zap.Stringer("tenant", tenantRec.ID), zap.Stringer("access_key", id), zap.Error(err))
+			return ErrConcurrentChange
+		}
+		return fmt.Errorf("deleting access key: %w", err)
 	}
 	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
-	if err := s.accessKeys.Delete(ctx, id); err != nil {
-		return fmt.Errorf("deleting access key: %w", err)
+	s.logger.Info("deleted access key",
+		zap.Stringer("tenant", tenantRec.ID),
+		zap.Stringer("access_key", id),
+	)
+	return nil
+}
+
+// revokeMarker revokes the principal-bound key's marker and leaves the key
+// with no delegation, under the key's delegation lock so a rotation of the
+// same key in flight waits for the outcome. A key already holding none (a
+// retry) publishes nothing. A lock held past the store's timeout is
+// [ErrConcurrentChange].
+func (s *Service) revokeMarker(ctx context.Context, tenantID, accessKeyID did.DID) error {
+	// The vault round trip stays outside the key's lock.
+	issuer, err := s.tenantIssuer(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("access_key", accessKeyID))
+	err = s.delegations.Replace(ctx, accessKeyID, func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+		if len(current) == 0 {
+			return nil, nil
+		}
+		return nil, marker.PublishRevocations(ctx, log, s.revocations, issuer, current)
+	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		return ErrConcurrentChange
+	}
+	if err != nil {
+		return fmt.Errorf("revoking access key marker: %w", err)
 	}
 	return nil
 }
