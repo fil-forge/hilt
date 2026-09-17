@@ -194,7 +194,7 @@ func classifyRequest(req s3.Request) (classification, error) {
 		if method := strings.ToUpper(req.Method); method != http.MethodPut {
 			return plain
 		}
-		src, ok := headerValue(req.Headers, copySourceHeader)
+		src, ok := HeaderValue(req.Headers, copySourceHeader)
 		if !ok {
 			return plain
 		}
@@ -259,13 +259,13 @@ func classifyRequest(req s3.Request) (classification, error) {
 	}
 }
 
-// headerValue returns the value of the named header from a request's header
+// HeaderValue returns the value of the named header from a request's header
 // map, matched case-insensitively (HTTP header names are; the gateway forwards
 // them as sent). An empty value counts as absent. Names differing only in case
 // would make the lookup ambiguous, and could diverge from the value the
 // signature covered; sigv4.Parse rejects such a request before classification
 // (in Authorize, and in the gateway's fast path).
-func headerValue(headers map[string]string, name string) (string, bool) {
+func HeaderValue(headers map[string]string, name string) (string, bool) {
 	for k, v := range headers {
 		if strings.EqualFold(k, name) && v != "" {
 			return v, true
