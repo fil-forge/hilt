@@ -231,28 +231,56 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		e, _ := setupAccessKeys(t)
 		body := api.CreateAccessKeyRequest{Name: "dup", Permissions: []string{"s3:GetObject"}}
 		require.Equal(t, http.StatusCreated, createAccessKey(t, e, "tenant-1", body).Code)
-		require.Equal(t, http.StatusConflict, createAccessKey(t, e, "tenant-1", body).Code)
+
+		rec := createAccessKey(t, e, "tenant-1", body)
+		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{
+			Code:    "AccessKeyNameConflict",
+			Message: "an access key with this name already exists",
+		}, decodeError(t, rec))
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {
 		e, _ := setupAccessKeys(t)
 		rec := createAccessKey(t, e, "missing", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
 		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantNotFound", Message: "tenant not found"}, decodeError(t, rec))
 	})
 
 	t.Run("invalid requests are 422", func(t *testing.T) {
 		e, _ := setupAccessKeys(t)
-		cases := map[string]api.CreateAccessKeyRequest{
-			"empty name":         {Name: "", Permissions: []string{"s3:GetObject"}},
-			"empty permissions":  {Name: "k", Permissions: nil},
-			"unknown permission": {Name: "k", Permissions: []string{"s3:Frobnicate"}},
-			"unknown bucket":     {Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"ghost"}},
-			"foreign bucket":     {Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"bucket-b"}},
+		// ErrInvalidPermission and ErrUnknownBucket are wrapped with the offending
+		// value, so their code comes from the sentinel the message wraps.
+		cases := map[string]struct {
+			request  api.CreateAccessKeyRequest
+			expected api.Error
+		}{
+			"empty name": {
+				request:  api.CreateAccessKeyRequest{Name: "", Permissions: []string{"s3:GetObject"}},
+				expected: api.Error{Code: "InvalidAccessKeyName", Message: "name must be between 1 and 100 characters"},
+			},
+			"empty permissions": {
+				request:  api.CreateAccessKeyRequest{Name: "k", Permissions: nil},
+				expected: api.Error{Code: "NoPermissions", Message: "at least one permission is required"},
+			},
+			"unknown permission": {
+				request:  api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:Frobnicate"}},
+				expected: api.Error{Code: "InvalidPermission", Message: "unknown permission: s3:Frobnicate"},
+			},
+			"unknown bucket": {
+				request:  api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"ghost"}},
+				expected: api.Error{Code: "UnknownBucket", Message: "unknown bucket: ghost"},
+			},
+			"foreign bucket": {
+				request:  api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}, Buckets: []string{"bucket-b"}},
+				expected: api.Error{Code: "UnknownBucket", Message: "unknown bucket: bucket-b"},
+			},
 		}
-		for name, body := range cases {
+		for name, tc := range cases {
 			t.Run(name, func(t *testing.T) {
-				rec := createAccessKey(t, e, "tenant-1", body)
+				rec := createAccessKey(t, e, "tenant-1", tc.request)
 				require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+				require.Equal(t, tc.expected, decodeError(t, rec))
 			})
 		}
 	})
