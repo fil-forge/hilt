@@ -17,8 +17,6 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, tenantsvc.ErrTenantNotFound):
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
-	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	case errors.Is(err, tenantsvc.ErrInvalidStatus):
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, tenantsvc.ErrTenantNotDisabled):
@@ -42,12 +40,9 @@ func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) R
 		if externalID == "" {
 			return echo.NewHTTPError(http.StatusBadRequest, "missing tenant id")
 		}
-		var req ProvisionTenantRequest
-		if err := c.Bind(&req); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-		}
-
-		rec, created, err := tenants.Provision(c.Request().Context(), externalID, req.Region)
+		// The request takes no body: a tenant is region-free, and each bucket
+		// binds to the region it is created in.
+		rec, created, err := tenants.Provision(c.Request().Context(), externalID)
 		if err != nil {
 			return tenantHTTPError(log, err)
 		}

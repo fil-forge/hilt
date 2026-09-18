@@ -20,12 +20,15 @@ const (
 	UnknownBucketErrorName         = "UnknownBucket"
 	ForeignBucketErrorName         = "ForeignBucket"
 	BucketNotPermittedErrorName    = "BucketNotPermitted"
+	BucketRegionMismatchErrorName  = "BucketRegionMismatch"
 	UnsignedCopySourceErrorName    = "UnsignedCopySource"
 )
 
 // Named rejection errors returned by [Authorizer.Authorize]. Each is a sentinel
 // carrying a stable Name(), wrapped with per-request context at the return site,
-// so callers can branch on the reason with errors.Is. Unexpected/internal
+// so callers can branch on the reason with errors.Is. The one rejection that
+// carries data of its own, [BucketRegionMismatchError], is a type rather than a
+// sentinel; match it with errors.As. Unexpected/internal
 // failures (store or vault errors) are intentionally not named — they are
 // 500-class, not authorization rejections.
 var (
@@ -49,12 +52,13 @@ var (
 	ErrAccessKeyExpired = errors.New(AccessKeyExpiredErrorName, "access key has expired")
 	// ErrTenantDisabled is returned when the tenant is disabled.
 	ErrTenantDisabled = errors.New(TenantDisabledErrorName, "tenant is disabled")
-	// ErrIssuerForbidden is returned when the invocation issuer is not allowed to
-	// act on the tenant's behalf (it is not the tenant's provider).
-	ErrIssuerForbidden = errors.New(IssuerForbiddenErrorName, "issuer is not allowed to act for this tenant")
-	// ErrRegionNotServed is returned when none of the request's regions are served
-	// by the tenant's provider.
-	ErrRegionNotServed = errors.New(RegionNotServedErrorName, "request region is not served by the tenant's provider")
+	// ErrIssuerForbidden is returned when the invocation issuer is not the
+	// provider registered for the request's region: a provider may only act on
+	// requests signed for the region it serves.
+	ErrIssuerForbidden = errors.New(IssuerForbiddenErrorName, "issuer is not the provider serving the request region")
+	// ErrRegionNotServed is returned when no registered provider serves any of
+	// the request's regions.
+	ErrRegionNotServed = errors.New(RegionNotServedErrorName, "no provider serves the request region")
 	// ErrUnsupportedOperation is returned when the request's method and path map to
 	// no supported S3 operation.
 	ErrUnsupportedOperation = errors.New(UnsupportedOperationErrorName, "unsupported S3 operation")

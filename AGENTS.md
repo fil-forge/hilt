@@ -87,9 +87,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - **Use libforge bound commands** (`.Command`, `.Route`, `.Invoke`, `.Unpack`) — do
   not hand-write command strings with `command.MustParse`.
 - **Authorization**: signature-bearing S3 commands authenticate via the
-  `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
-  provider + region served by that provider), which also classifies the operation
-  and resolves every bucket it addresses within the tenant and the key's scope. A
+  `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == the
+  provider registered for the request's signing region), which also classifies
+  the operation and resolves every bucket it addresses within the tenant, the
+  key's scope, and that provider. Tenants are region-free; a bucket is bound to
+  the provider (region) it was created through and only that provider may act
+  on it (`ErrBucketRegionMismatch` otherwise). A
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
   destination and `s3:GetObject` on the source, and the header must be a signed
   header. Command-specific S3-permission checks stay in each handler.

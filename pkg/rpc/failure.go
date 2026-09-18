@@ -17,6 +17,12 @@ type failer interface{ SetFailure(error) error }
 // passed as-is (its full message is preserved). Unknown/internal errors are returned
 // unchanged; the dispatcher then reports them as a "HandlerExecutionError".
 func authFailure(res failer, err error) error {
+	// A structured failure is set as itself, unwrapped: SetFailure marshals an
+	// error that encodes its own CBOR, which is how its fields reach the wire.
+	var regionMismatch *auth.BucketRegionMismatchError
+	if errors.As(err, &regionMismatch) {
+		return res.SetFailure(regionMismatch)
+	}
 	switch {
 	case errors.Is(err, auth.ErrMalformedSignature),
 		errors.Is(err, auth.ErrInvalidAccessKeyID),

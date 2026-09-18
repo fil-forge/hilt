@@ -88,9 +88,9 @@ func (e *APIError) Error() string {
 
 // ProvisionTenant provisions (or, idempotently, returns) the tenant with the
 // given external id.
-func (c *Client) ProvisionTenant(ctx context.Context, tenantID string, req api.ProvisionTenantRequest) (api.Tenant, error) {
+func (c *Client) ProvisionTenant(ctx context.Context, tenantID string) (api.Tenant, error) {
 	var t api.Tenant
-	err := c.do(ctx, http.MethodPut, []string{"tenants", tenantID}, req, &t, http.StatusOK, http.StatusCreated)
+	err := c.do(ctx, http.MethodPut, []string{"tenants", tenantID}, nil, &t, http.StatusOK, http.StatusCreated)
 	return t, err
 }
 
