@@ -46,9 +46,9 @@ func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 		tenantID:   testutil.RandomDID(t),
 		photos:     testutil.RandomDID(t),
 	}
-	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", testutil.RandomDID(t), tenant.Active))
-	require.NoError(t, deps.buckets.Add(t.Context(), deps.photos, deps.tenantID, "photos"))
+	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", tenant.Active))
+	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", tenant.Active))
+	require.NoError(t, deps.buckets.Add(t.Context(), deps.photos, deps.tenantID, testutil.RandomDID(t), "photos"))
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "user-1"))
 
 	// No principal holds a key here, so the grant rotator has nothing to

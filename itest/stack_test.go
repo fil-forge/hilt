@@ -41,7 +41,8 @@ import (
 )
 
 // forgeRegion must match the provider region hilt's post_start hook in smelt
-// registers ingot under (INGOT_REGION) — tenants are provisioned per region.
+// registers ingot under (INGOT_REGION): S3 requests are signed for it and hilt
+// resolves the serving provider from it.
 const forgeRegion = "us-west-1"
 
 // TestMain sweeps containers/volumes leaked by prior crashed itest runs (same
@@ -261,9 +262,9 @@ type console struct {
 }
 
 // ProvisionTenant creates (or returns the existing) tenant for the given
-// external id and region.
-func (c *console) ProvisionTenant(ctx context.Context, tenantID, region string) (api.Tenant, error) {
-	return c.Client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
+// external id.
+func (c *console) ProvisionTenant(ctx context.Context, tenantID string) (api.Tenant, error) {
+	return c.Client.ProvisionTenant(ctx, tenantID)
 }
 
 // waitHTTPOK polls url until it returns 2xx or the timeout elapses.

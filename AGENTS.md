@@ -175,9 +175,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   the service invokes it on itself, and put the check in middleware rather than
   in the handler.
 - **Authorization**: signature-bearing S3 commands authenticate via the
-  `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
-  provider + region served by that provider), which also classifies the operation
-  and resolves every bucket it addresses within the tenant and the key's scope.
+  `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == the
+  provider registered for the request's signing region), which also classifies
+  the operation and resolves every bucket it addresses within the tenant, the
+  key's scope, and that provider. Tenants are region-free; a bucket is bound to
+  the provider (region) it was created through and only that provider may act on
+  it (`BucketRegionMismatchError` otherwise).
   Classification mirrors the gateway's router (`pkg/rpc/service/auth/operation.go`):
   `subresources` is S3's subresource vocabulary, each marked supported or
   not, and `bucketRoutes` / `objectRoutes` give the operation a supported

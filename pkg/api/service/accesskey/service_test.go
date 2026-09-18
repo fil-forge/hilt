@@ -140,7 +140,7 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", b.providerID, tenant.Active))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	require.NoError(t, principals.Add(ctx, tenantID, "alice"))
 
@@ -148,7 +148,7 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket-a"))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, b.providerID, "bucket-a"))
 	root, err := delegation.Delegate(
 		multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)

@@ -66,13 +66,12 @@ func TestTenantStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), id, "ext-acme", provider, tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-acme", tenant.Active))
 
 				rec, err := s.Get(t.Context(), id)
 				require.NoError(t, err)
 				require.Equal(t, id, rec.ID)
 				require.Equal(t, "ext-acme", rec.ExternalID)
-				require.Equal(t, provider, rec.Provider)
 				require.Equal(t, tenant.Active, rec.Status)
 				require.False(t, rec.CreatedAt.IsZero())
 				require.Equal(t, rec.CreatedAt, rec.UpdatedAt)
@@ -87,7 +86,7 @@ func TestTenantStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), id, "ext-lookup", provider, tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-lookup", tenant.Active))
 
 				rec, err := s.GetByExternalID(t.Context(), "ext-lookup")
 				require.NoError(t, err)
@@ -104,35 +103,28 @@ func TestTenantStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), id, "ext-dup-1", provider, tenant.Active))
-				err := s.Add(t.Context(), id, "ext-dup-2", provider, tenant.Active)
+				require.NoError(t, s.Add(t.Context(), id, "ext-dup-1", tenant.Active))
+				err := s.Add(t.Context(), id, "ext-dup-2", tenant.Active)
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("Add returns ErrRecordExists for duplicate external id", func(t *testing.T) {
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), "ext-shared", provider, tenant.Active))
-				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-shared", provider, tenant.Active)
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), "ext-shared", tenant.Active))
+				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-shared", tenant.Active)
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("Add returns ErrInvalidArgument for undef tenant ID", func(t *testing.T) {
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				err := s.Add(t.Context(), did.Undef, "ext-undef-id", provider, tenant.Active)
-				require.ErrorIs(t, err, store.ErrInvalidArgument)
-			})
-
-			t.Run("Add returns ErrInvalidArgument for undef provider", func(t *testing.T) {
-				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-undef-prov", did.Undef, tenant.Active)
+				err := s.Add(t.Context(), did.Undef, "ext-undef-id", tenant.Active)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("Add returns ErrInvalidArgument for invalid status", func(t *testing.T) {
-				provider := testutil.RandomDID(t)
-				seed(t, provider)
-				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-bad-status", provider, tenant.Status("bogus"))
+				err := s.Add(t.Context(), testutil.RandomDID(t), "ext-bad-status", tenant.Status("bogus"))
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
@@ -140,7 +132,7 @@ func TestTenantStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), id, "ext-switcher", provider, tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-switcher", tenant.Active))
 
 				require.NoError(t, s.SetStatus(t.Context(), id, tenant.WriteLocked))
 
@@ -159,7 +151,7 @@ func TestTenantStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), id, "ext-bad-set-status", provider, tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-bad-set-status", tenant.Active))
 
 				err := s.SetStatus(t.Context(), id, tenant.Status(""))
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
@@ -169,7 +161,7 @@ func TestTenantStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				provider := testutil.RandomDID(t)
 				seed(t, provider)
-				require.NoError(t, s.Add(t.Context(), id, "ext-del", provider, tenant.Active))
+				require.NoError(t, s.Add(t.Context(), id, "ext-del", tenant.Active))
 
 				require.NoError(t, s.Delete(t.Context(), id))
 				_, err := s.Get(t.Context(), id)

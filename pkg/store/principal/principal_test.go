@@ -60,7 +60,7 @@ func seeder(pool *pgxpool.Pool) seedFunc {
 	return func(t *testing.T, tenantID did.DID) {
 		providerID := testutil.RandomDID(t)
 		require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
-		require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+		require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 	}
 }
 
@@ -544,7 +544,11 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 			name: "a policy write naming the principal",
 			op: func(ctx context.Context, tenantID did.DID) error {
 				bucketID := testutil.RandomDID(t)
-				if err := bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, "lock-timeout-bucket"); err != nil {
+				bucketProvider := testutil.RandomDID(t)
+				if err := providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil); err != nil {
+					return err
+				}
+				if err := bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, bucketProvider, "lock-timeout-bucket"); err != nil {
 					return err
 				}
 				_, err := bucketpolicypostgres.New(pool).Put(ctx, bucketpolicystore.Input{

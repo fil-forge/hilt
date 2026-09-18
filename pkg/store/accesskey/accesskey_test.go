@@ -13,7 +13,6 @@ import (
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
-	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
@@ -55,14 +54,11 @@ func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seeder) {
 }
 
 func postgresSeeder(pool *pgxpool.Pool) seeder {
-	providers := providerpostgres.New(pool)
 	tenants := tenantpostgres.New(pool)
 	principals := principalpostgres.New(pool)
 	return seeder{
 		tenant: func(t *testing.T, tenantID did.DID) {
-			providerID := testutil.RandomDID(t)
-			require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
-			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 		},
 		principal: func(t *testing.T, tenantID did.DID, externalID string) {
 			require.NoError(t, principals.Add(t.Context(), tenantID, externalID))

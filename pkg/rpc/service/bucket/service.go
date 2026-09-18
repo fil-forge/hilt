@@ -26,6 +26,7 @@ import (
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
@@ -62,6 +63,7 @@ type Service struct {
 	accessKeys  accesskey.Store
 	tenants     tenantstore.Store
 	policies    bucketpolicystore.Store
+	providers   providerstore.Store
 	uploads     UploadClient
 	revocations grant.RevocationPublisher
 	// policyWrites stores a policy as the management API stores a policy PUT.
@@ -77,6 +79,7 @@ func New(
 	accessKeys accesskey.Store,
 	tenants tenantstore.Store,
 	policies bucketpolicystore.Store,
+	providers providerstore.Store,
 	uploads UploadClient,
 	revocations grant.RevocationPublisher,
 	policyWrites *bucketpolicysvc.Service,
@@ -89,6 +92,7 @@ func New(
 		accessKeys:   accessKeys,
 		tenants:      tenants,
 		policies:     policies,
+		providers:    providers,
 		uploads:      uploads,
 		revocations:  revocations,
 		policyWrites: policyWrites,
@@ -135,7 +139,10 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	bucketID := bucketSigner.KeyDID()
 	log := s.logger.With(zap.Stringer("bucket", bucketID), zap.String("name", authz.BucketName))
 
-	if err := s.buckets.Add(ctx, bucketID, authz.Tenant.ID, authz.BucketName); err != nil {
+	// The bucket is served by the provider handling this request: its space is
+	// routed to that provider's storage nodes below, and only that provider may
+	// act on it afterwards.
+	if err := s.buckets.Add(ctx, bucketID, authz.Tenant.ID, authz.Provider.ID, authz.BucketName); err != nil {
 		return nil, nil, fmt.Errorf("storing bucket: %w", err)
 	}
 	// Best-effort rollback of the bucket record on a later failure. The root
@@ -438,10 +445,22 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	if page.Cursor != nil {
 		out.ContinuationToken = *page.Cursor
 	}
+	// A tenant's buckets may span providers; each is reported in the region of
+	// the provider serving it, resolved once per provider.
+	regions := map[did.DID]string{authz.Provider.ID: authz.Region}
 	for _, b := range page.Results {
+		region, ok := regions[b.Provider]
+		if !ok {
+			prov, err := s.providers.Get(ctx, b.Provider)
+			if err != nil {
+				return nil, fmt.Errorf("looking up provider %s of bucket %q: %w", b.Provider, b.Name, err)
+			}
+			region = prov.Region
+			regions[b.Provider] = region
+		}
 		out.Buckets = append(out.Buckets, s3bkt.Bucket{
 			ARN:          "arn:aws:s3:::" + b.Name,
-			Region:       authz.Region,
+			Region:       region,
 			CreationDate: b.CreatedAt.UTC().Format(time.RFC3339),
 			Name:         b.Name,
 		})
@@ -480,18 +499,13 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, fmt.Errorf("looking up bucket: %w", err)
 	}
 
-	// The proof chains this returns are the bucket tenant's, so the caller must be
-	// the provider that acts for that tenant — the same rule Authorize applies to
-	// the signature-bearing commands.
-	tenantRec, err := s.tenants.Get(ctx, b.Tenant)
-	if errors.Is(err, store.ErrRecordNotFound) {
-		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, args.Name)
-	} else if err != nil {
-		return nil, nil, fmt.Errorf("looking up tenant: %w", err)
-	}
-	if issuer != tenantRec.Provider {
-		s.logger.Debug("rejecting bucket info not from the tenant's provider",
-			zap.Stringer("bucket", b.ID), zap.Stringer("issuer", issuer), zap.Stringer("provider", tenantRec.Provider))
+	// The proof chains this returns are the bucket tenant's, and a bucket is
+	// served by one provider, so the caller must be that provider — the same
+	// rule Authorize applies to the signature-bearing commands. A tenant is
+	// region-free, so the binding is the bucket's rather than the tenant's.
+	if issuer != b.Provider {
+		s.logger.Debug("rejecting bucket info not from the bucket's provider",
+			zap.Stringer("bucket", b.ID), zap.Stringer("issuer", issuer), zap.Stringer("provider", b.Provider))
 		return nil, nil, auth.ErrIssuerForbidden
 	}
 

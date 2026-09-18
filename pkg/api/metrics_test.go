@@ -80,13 +80,13 @@ func addMetricsTenant(t *testing.T, d *metricsDeps, externalID string, bucketNam
 		plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
 	)
 	require.NoError(t, err)
-	require.NoError(t, d.tenants.Add(ctx, tenantID, externalID, testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, d.tenants.Add(ctx, tenantID, externalID, tenant.Active))
 	require.NoError(t, d.vault.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 
 	ids := make([]did.DID, 0, len(bucketNames))
 	for _, name := range bucketNames {
 		id := testutil.RandomDID(t)
-		require.NoError(t, d.buckets.Add(ctx, id, tenantID, name))
+		require.NoError(t, d.buckets.Add(ctx, id, tenantID, testutil.RandomDID(t), name))
 		ids = append(ids, id)
 	}
 	return ids

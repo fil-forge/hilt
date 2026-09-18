@@ -29,20 +29,17 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status tenant.Status) error {
+func (s *Store) Add(ctx context.Context, id did.DID, externalID string, status tenant.Status) error {
 	if id == did.Undef {
 		return fmt.Errorf("tenant ID is required: %w", store.ErrInvalidArgument)
-	}
-	if provider == did.Undef {
-		return fmt.Errorf("tenant provider is required: %w", store.ErrInvalidArgument)
 	}
 	if !status.Valid() {
 		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tenant (id, external_id, provider_id, status)
-		VALUES ($1, $2, $3, $4)
-	`, id.String(), externalID, provider.String(), string(status))
+		INSERT INTO tenant (id, external_id, status)
+		VALUES ($1, $2, $3)
+	`, id.String(), externalID, string(status))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -55,7 +52,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 
 func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, external_id, provider_id, status, created_at, updated_at
+		SELECT id, external_id, status, created_at, updated_at
 		FROM tenant
 		WHERE id = $1
 	`, id.String())
@@ -71,7 +68,7 @@ func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 
 func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, external_id, provider_id, status, created_at, updated_at
+		SELECT id, external_id, status, created_at, updated_at
 		FROM tenant
 		WHERE external_id = $1
 	`, externalID)
@@ -114,12 +111,11 @@ func scanRecord(row pgx.Row) (tenant.Record, error) {
 	var (
 		idStr      string
 		externalID *string
-		providerID *string
 		status     string
 		createdAt  time.Time
 		updatedAt  time.Time
 	)
-	if err := row.Scan(&idStr, &externalID, &providerID, &status, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&idStr, &externalID, &status, &createdAt, &updatedAt); err != nil {
 		return tenant.Record{}, err
 	}
 	id, err := did.Parse(idStr)
@@ -134,13 +130,6 @@ func scanRecord(row pgx.Row) (tenant.Record, error) {
 	}
 	if externalID != nil {
 		rec.ExternalID = *externalID
-	}
-	if providerID != nil && *providerID != "" {
-		provider, err := did.Parse(*providerID)
-		if err != nil {
-			return tenant.Record{}, fmt.Errorf("parsing provider DID: %w", err)
-		}
-		rec.Provider = provider
 	}
 	return rec, nil
 }

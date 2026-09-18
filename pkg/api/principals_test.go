@@ -58,8 +58,8 @@ func setupPrincipals(t *testing.T) (*echo.Echo, *principalDeps) {
 		revocations: &testutil.FakeSwarf{},
 		tenantID:    testutil.RandomDID(t),
 	}
-	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", tenant.Active))
+	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", tenant.Active))
 	// The tenant's key is in the vault: the grant rotator signs revocations as
 	// the tenant.
 	signer, err := secp256k1.Generate()
