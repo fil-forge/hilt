@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"net/http"
 
 	ucanerrors "github.com/fil-forge/ucantone/errors"
 	"github.com/labstack/echo/v4"
@@ -27,10 +26,4 @@ func httpError(status int, err error) *echo.HTTPError {
 		body.Code = named.Name()
 	}
 	return echo.NewHTTPError(status, body)
-}
-
-// internalError is the opaque body for an unexpected failure. The cause is
-// logged by the handler and never surfaced to the caller.
-func internalError() *echo.HTTPError {
-	return echo.NewHTTPError(http.StatusInternalServerError, Error{Message: "internal error"})
 }

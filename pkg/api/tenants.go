@@ -32,7 +32,7 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 		return httpError(http.StatusBadGateway, err)
 	default:
 		log.Error("request failed", zap.Error(err))
-		return internalError()
+		return echo.NewHTTPError(http.StatusInternalServerError, Error{Message: "internal error"})
 	}
 }
 

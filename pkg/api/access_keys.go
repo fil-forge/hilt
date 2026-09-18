@@ -27,7 +27,7 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 		return httpError(http.StatusConflict, err)
 	default:
 		log.Error("request failed", zap.Error(err))
-		return internalError()
+		return echo.NewHTTPError(http.StatusInternalServerError, Error{Message: "internal error"})
 	}
 }
 
