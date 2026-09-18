@@ -481,6 +481,7 @@ func TestGetTenantHandler(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/missing", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantNotFound", Message: "tenant not found"}, decodeError(t, rec))
 	})
 }
 

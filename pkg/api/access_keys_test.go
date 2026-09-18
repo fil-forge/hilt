@@ -333,6 +333,7 @@ func TestGetAccessKeyHandler(t *testing.T) {
 	t.Run("unknown key is 404", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys/z6MkUnknownKeyIdentifier", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, api.Error{Code: "AccessKeyNotFound", Message: "access key not found"}, decodeError(t, rec))
 	})
 
 	t.Run("key owned by another tenant is 404", func(t *testing.T) {
