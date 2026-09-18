@@ -47,7 +47,7 @@ func TestNewUCANServer(t *testing.T) {
 		config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
 	)
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), upload, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), providermemory.New(), upload, revocations)
 	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{
 		Identity: id,
 		Logger:   zap.NewNop(),

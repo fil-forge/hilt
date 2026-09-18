@@ -22,11 +22,6 @@ type Tenant struct {
 	CreatedAt      time.Time    `json:"createdAt"`
 }
 
-// ProvisionTenantRequest is the body of PUT /tenants/{tenantId}.
-type ProvisionTenantRequest struct {
-	Region string `json:"region"`
-}
-
 // UpdateTenantStatusRequest is the body of POST /tenants/{tenantId}/status.
 type UpdateTenantStatusRequest struct {
 	Status TenantStatus `json:"status"`

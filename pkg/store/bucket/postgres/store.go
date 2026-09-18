@@ -29,20 +29,23 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string) error {
+func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, provider did.DID, name string) error {
 	if id == did.Undef {
 		return fmt.Errorf("bucket ID is required: %w", store.ErrInvalidArgument)
 	}
 	if tenant == did.Undef {
 		return fmt.Errorf("bucket tenant is required: %w", store.ErrInvalidArgument)
 	}
+	if provider == did.Undef {
+		return fmt.Errorf("bucket provider is required: %w", store.ErrInvalidArgument)
+	}
 	if err := bucket.ValidateName(name); err != nil {
 		return err
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO bucket (id, tenant_id, name)
-		VALUES ($1, $2, $3)
-	`, id.String(), tenant.String(), name)
+		INSERT INTO bucket (id, tenant_id, provider_id, name)
+		VALUES ($1, $2, $3, $4)
+	`, id.String(), tenant.String(), provider.String(), name)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
@@ -55,7 +58,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 
 func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, name, created_at
+		SELECT id, tenant_id, provider_id, name, created_at
 		FROM bucket
 		WHERE name = $1
 	`, name)
@@ -87,7 +90,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	// $1 = tenant, $2 = limit+1; further filters use dynamic placeholders.
 	args := []any{tenant.String(), limit + 1}
 	query := `
-		SELECT id, tenant_id, name, created_at
+		SELECT id, tenant_id, provider_id, name, created_at
 		FROM bucket
 		WHERE tenant_id = $1
 	`
@@ -151,12 +154,13 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 
 func scanRecord(row pgx.Row) (bucket.Record, error) {
 	var (
-		idStr     string
-		tenantID  *string
-		name      *string
-		createdAt time.Time
+		idStr      string
+		tenantID   *string
+		providerID *string
+		name       *string
+		createdAt  time.Time
 	)
-	if err := row.Scan(&idStr, &tenantID, &name, &createdAt); err != nil {
+	if err := row.Scan(&idStr, &tenantID, &providerID, &name, &createdAt); err != nil {
 		return bucket.Record{}, err
 	}
 	id, err := did.Parse(idStr)
@@ -173,6 +177,13 @@ func scanRecord(row pgx.Row) (bucket.Record, error) {
 			return bucket.Record{}, fmt.Errorf("parsing tenant DID: %w", err)
 		}
 		rec.Tenant = tenant
+	}
+	if providerID != nil && *providerID != "" {
+		provider, err := did.Parse(*providerID)
+		if err != nil {
+			return bucket.Record{}, fmt.Errorf("parsing provider DID: %w", err)
+		}
+		rec.Provider = provider
 	}
 	if name != nil {
 		rec.Name = *name

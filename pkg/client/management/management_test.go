@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -42,13 +43,13 @@ func TestManagementClient(t *testing.T) {
 			assertAuth(t, r)
 			require.Equal(t, http.MethodPut, r.Method)
 			require.Equal(t, "/tenants/acme", r.URL.Path)
-			var body api.ProvisionTenantRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			require.Equal(t, "us-east-1", body.Region)
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.Empty(t, body, "PUT /tenants/{id} takes no body")
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(api.Tenant{TenantID: "acme", Status: api.TenantStatusActive})
 		})
-		got, err := c.ProvisionTenant(ctx, "acme", api.ProvisionTenantRequest{Region: "us-east-1"})
+		got, err := c.ProvisionTenant(ctx, "acme")
 		require.NoError(t, err)
 		require.Equal(t, "acme", got.TenantID)
 		require.Equal(t, api.TenantStatusActive, got.Status)
@@ -59,7 +60,7 @@ func TestManagementClient(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(api.Tenant{TenantID: "acme"})
 		})
-		got, err := c.ProvisionTenant(ctx, "acme", api.ProvisionTenantRequest{Region: "us-east-1"})
+		got, err := c.ProvisionTenant(ctx, "acme")
 		require.NoError(t, err)
 		require.Equal(t, "acme", got.TenantID)
 	})

@@ -70,15 +70,15 @@ func TestAuthorizeRequest(t *testing.T) {
 	require.NoError(t, err)
 	akDID := akSigner.KeyDID()
 
-	// providerID is both the tenant's provider and the only legitimate invocation
-	// issuer. bucketID/tenantID are opaque DIDs — the handler no longer reads any
+	// providerID serves the signing region and both buckets, so it is the only
+	// legitimate invocation issuer. bucketID/tenantID are opaque DIDs — the handler no longer reads any
 	// stored delegation chain.
 	bucketID := testutil.RandomDID(t)
 	tenantID := testutil.RandomDID(t)
 	providerID := testutil.RandomDID(t)
 
-	// setup wires the stores + vault for a tenant whose provider serves the signing
-	// region and that owns this access key + bucket, returning the Authorizer built
+	// setup wires the stores + vault for a provider serving the signing region and
+	// a tenant that owns this access key + bucket, returning the Authorizer built
 	// from them plus the bucket store.
 	setup := func(t *testing.T, perms []string, vaultSigner ed25519.Signer) *auth.Authorizer {
 		t.Helper()
@@ -86,11 +86,11 @@ func TestAuthorizeRequest(t *testing.T) {
 		providers, secrets := providermemory.New(), vaultmemory.New()
 
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
-		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
-		require.NoError(t, buckets.Add(ctx, srcID, tenantID, srcName))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, bucketName))
+		require.NoError(t, buckets.Add(ctx, srcID, tenantID, providerID, srcName))
 
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 	}

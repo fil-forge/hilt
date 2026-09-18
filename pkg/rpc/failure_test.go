@@ -49,6 +49,16 @@ func TestBucketFailure(t *testing.T) {
 		requireName(t, f.got, bucketsvc.BucketAlreadyOwnedErrorName)
 	})
 
+	t.Run("wrapped region mismatch is set as the typed failure itself", func(t *testing.T) {
+		// The typed error must reach SetFailure unwrapped so its own CBOR
+		// encoding (with the regions) is what goes on the wire.
+		f := &recordingFailer{}
+		mismatch := &auth.BucketRegionMismatchError{Expected: "eu-west-1", Actual: "us-west-2"}
+		require.NoError(t, bucketFailure(f, fmt.Errorf("create: %w", mismatch)))
+		require.True(t, f.called)
+		require.Same(t, mismatch, f.got)
+	})
+
 	t.Run("propagated auth sentinel is set as failure with its name", func(t *testing.T) {
 		f := &recordingFailer{}
 		require.NoError(t, bucketFailure(f, auth.ErrOperationNotPermitted))

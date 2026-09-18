@@ -6,8 +6,6 @@ import "github.com/fil-forge/ucantone/errors"
 // match on the stable Name() of a serialized failure.
 const (
 	TenantNotFoundErrorName     = "TenantNotFound"
-	RegionRequiredErrorName     = "RegionRequired"
-	UnknownRegionErrorName      = "UnknownRegion"
 	InvalidStatusErrorName      = "InvalidStatus"
 	TenantNotDisabledErrorName  = "TenantNotDisabled"
 	DIDRegistrationErrorName    = "DIDRegistration"
@@ -22,10 +20,6 @@ const (
 var (
 	// ErrTenantNotFound is returned when no tenant exists for the external id.
 	ErrTenantNotFound = errors.New(TenantNotFoundErrorName, "tenant not found")
-	// ErrRegionRequired is returned when a provision request omits the region.
-	ErrRegionRequired = errors.New(RegionRequiredErrorName, "region is required")
-	// ErrUnknownRegion is returned when no provider serves the requested region.
-	ErrUnknownRegion = errors.New(UnknownRegionErrorName, "unknown region")
 	// ErrInvalidStatus is returned when a status update names an unknown status.
 	ErrInvalidStatus = errors.New(InvalidStatusErrorName, "invalid status")
 	// ErrTenantNotDisabled is returned when deleting a tenant that is not disabled.

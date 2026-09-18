@@ -77,14 +77,14 @@ func setup(t *testing.T) deps {
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
 	// The bucket key is ephemeral: it signs the bucket→tenant root and is discarded.
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket-a"))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), "bucket-a"))
 	root, err := delegation.Delegate(
 		multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)

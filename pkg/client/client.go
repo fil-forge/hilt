@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/fil-forge/hilt/pkg/lib/zapucan"
+	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
@@ -186,7 +187,18 @@ func invoke[A, O binding.CBORValue](ctx context.Context, c *Client, cmd binding.
 		log.Error("failed to execute invocation", zap.Error(err))
 		return zero, nil, fmt.Errorf("executing %s invocation: %w", cmd.Command, err)
 	}
-	ok, err := cmd.Unpack(res.Receipt())
+	// Decode a failure with Hilt's own decoder rather than the binding's, so a
+	// structured failure (a bucket served by another region) keeps its fields.
+	rcpt := res.Receipt()
+	if out := rcpt.Out(); out.IsErr() {
+		_, errBytes := out.Unpack()
+		failure, err := auth.DecodeFailure(errBytes)
+		if err != nil {
+			return zero, nil, fmt.Errorf("unpacking %s result: %w", cmd.Command, err)
+		}
+		return zero, nil, fmt.Errorf("executing %s: %w", cmd.Command, failure)
+	}
+	ok, err := cmd.Unpack(rcpt)
 	if err != nil {
 		return zero, nil, fmt.Errorf("unpacking %s result: %w", cmd.Command, err)
 	}

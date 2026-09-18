@@ -31,8 +31,6 @@ type Record struct {
 	// ExternalID is the tenant identifier used by the Tenant API (the {tenantId}
 	// path parameter supplied by the caller).
 	ExternalID string
-	// Provider this tenant belongs to.
-	Provider did.DID
 	// Current status of the tenant.
 	Status Status
 	// When the tenant record was created.
@@ -43,10 +41,9 @@ type Record struct {
 
 type Store interface {
 	// Add creates a new tenant record. It returns [store.ErrInvalidArgument] if
-	// the ID or provider is undef or the status is not valid, and
-	// [store.ErrRecordExists] if a record with the same ID or external ID
-	// already exists.
-	Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status Status) error
+	// the ID is undef or the status is not valid, and [store.ErrRecordExists]
+	// if a record with the same ID or external ID already exists.
+	Add(ctx context.Context, id did.DID, externalID string, status Status) error
 	// Get retrieves the tenant record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	Get(ctx context.Context, id did.DID) (Record, error)
