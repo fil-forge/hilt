@@ -13,14 +13,14 @@ FROM build AS build-prod
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /hilt ./cmd/main.go
+    go build -ldflags="-s -w" -o /hilt ./cmd
 
 # Development build - debug-friendly binary
 FROM build AS build-dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -gcflags="all=-N -l" -o /hilt ./cmd/main.go
+    go build -gcflags="all=-N -l" -o /hilt ./cmd
 RUN GOARCH=${TARGETARCH} go install github.com/go-delve/delve/cmd/dlv@latest && \
     cp /go/bin/linux_${TARGETARCH}/dlv /go/bin/dlv 2>/dev/null || cp /go/bin/dlv /go/bin/dlv 2>/dev/null || true
 
