@@ -6,10 +6,21 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	ucanerrors "github.com/fil-forge/ucantone/errors"
+	cbg "github.com/whyrusleeping/cbor-gen"
 )
 
 // failer is the subset of *binding.Response[OK] used to record a receipt failure.
 type failer interface{ SetFailure(error) error }
+
+// structuredFailure is a rejection that encodes its own CBOR: the standard error
+// model plus fields of its own (e.g. [auth.BucketRegionMismatchError] and its two
+// regions). SetFailure type-asserts for the marshaler instead of unwrapping, so
+// such an error is handed to it unwrapped; wrapped, it would reach the wire as a
+// name and a message alone.
+type structuredFailure interface {
+	ucanerrors.Named
+	cbg.CBORMarshaler
+}
 
 // authFailure records a known auth-service rejection as the invocation's receipt
 // failure, so its stable Name() reaches the caller (Ingot maps it to a canonical S3
@@ -17,11 +28,11 @@ type failer interface{ SetFailure(error) error }
 // passed as-is (its full message is preserved). Unknown/internal errors are returned
 // unchanged; the dispatcher then reports them as a "HandlerExecutionError".
 func authFailure(res failer, err error) error {
-	// A structured failure is set as itself, unwrapped: SetFailure marshals an
-	// error that encodes its own CBOR, which is how its fields reach the wire.
-	var regionMismatch *auth.BucketRegionMismatchError
-	if errors.As(err, &regionMismatch) {
-		return res.SetFailure(regionMismatch)
+	// A structured failure is set as itself, unwrapped, which is how its fields
+	// reach the wire; the sentinels below are set wrapped, keeping their context.
+	var structured structuredFailure
+	if errors.As(err, &structured) {
+		return res.SetFailure(structured)
 	}
 	switch {
 	case errors.Is(err, auth.ErrMalformedSignature),

@@ -3,6 +3,7 @@ package rpc
 import (
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -22,6 +23,14 @@ func (f *recordingFailer) SetFailure(err error) error {
 	f.got = err
 	return nil
 }
+
+// selfEncodingError is a named failure that encodes its own CBOR, standing in for
+// any rejection that carries fields of its own.
+type selfEncodingError struct{}
+
+func (e *selfEncodingError) Name() string                  { return "SelfEncoding" }
+func (e *selfEncodingError) Error() string                 { return "self-encoding failure" }
+func (e *selfEncodingError) MarshalCBOR(w io.Writer) error { return nil }
 
 // requireName asserts the recorded failure resolves (via errors.As, as SetFailure
 // does) to a Named error with the given name.
@@ -123,6 +132,25 @@ func TestAuthFailure(t *testing.T) {
 			require.True(t, f.called, tc.name)
 			requireName(t, f.got, tc.name)
 		}
+	})
+
+	t.Run("a wrapped error that encodes its own CBOR is set as itself", func(t *testing.T) {
+		// authFailure names no structured failure: it detects the encoding, so a
+		// rejection that carries fields of its own reaches SetFailure unwrapped.
+		f := &recordingFailer{}
+		own := &selfEncodingError{}
+		require.NoError(t, authFailure(f, fmt.Errorf("authorizing: %w", own)))
+		require.True(t, f.called)
+		require.Same(t, own, f.got)
+	})
+
+	t.Run("a wrapped sentinel keeps its context, so it is not set unwrapped", func(t *testing.T) {
+		// The sentinels encode no CBOR of their own, so SetFailure receives the
+		// wrapped error and reports its full message under the sentinel's name.
+		f := &recordingFailer{}
+		err := fmt.Errorf("authorizing: %w", auth.ErrUnknownBucket)
+		require.NoError(t, authFailure(f, err))
+		require.Same(t, err, f.got)
 	})
 
 	t.Run("bucket sentinel is unknown to authFailure and returned", func(t *testing.T) {
