@@ -12,19 +12,19 @@ import (
 
 // tenantHTTPError maps a tenant-service error to an echo HTTP error. Known errors
 // (see the tenant service's errors.go) become their mapped status with the error's
-// own message; anything else is logged and returned as a 500.
+// own message and code; anything else is logged and returned as a 500.
 func tenantHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, tenantsvc.ErrTenantNotFound):
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return httpError(http.StatusNotFound, err)
 	case errors.Is(err, tenantsvc.ErrInvalidStatus):
-		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		return httpError(http.StatusUnprocessableEntity, err)
 	case errors.Is(err, tenantsvc.ErrTenantNotDisabled):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
+		return httpError(http.StatusConflict, err)
 	case errors.Is(err, tenantsvc.ErrDIDRegistration),
 		errors.Is(err, tenantsvc.ErrUploadRegistration),
 		errors.Is(err, tenantsvc.ErrDIDDeactivation):
-		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		return httpError(http.StatusBadGateway, err)
 	default:
 		log.Error("request failed", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal error")

@@ -357,6 +357,20 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("unknown region is rejected", func(t *testing.T) {
+		e, _ := setupProvision(t, nil)
+		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, api.Error{Code: "UnknownRegion", Message: "unknown region"}, decodeError(t, rec))
+	})
+
+	t.Run("missing region is rejected", func(t *testing.T) {
+		e, _ := setupProvision(t, nil)
+		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, api.Error{Code: "RegionRequired", Message: "region is required"}, decodeError(t, rec))
+	})
+
 	t.Run("cleans up the orphaned key when PLC publication fails", func(t *testing.T) {
 		e, deps := setupProvision(t, &setupConfig{plcStatus: http.StatusInternalServerError})
 
@@ -376,6 +390,8 @@ func TestProvisionTenantHandler(t *testing.T) {
 		e, deps := setupProvision(t, &setupConfig{tenants: tenants})
 		rec := provisionRequest(t, e, "tenant-7")
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		// An unexpected failure stays opaque: a message, no code, no cause.
+		require.JSONEq(t, `{"message":"internal error"}`, rec.Body.String())
 
 		// The key written before the failed Add was cleaned up.
 		require.Positive(t, deps.secrets.writes)
@@ -428,6 +444,14 @@ func serve(route api.Route) *echo.Echo {
 	return e
 }
 
+// decodeError decodes an error response body into the Tenant API error envelope.
+func decodeError(t *testing.T, rec *httptest.ResponseRecorder) api.Error {
+	t.Helper()
+	var body api.Error
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body
+}
+
 // doRequest issues an HTTP request against e. A non-empty body is sent as JSON.
 func doRequest(t *testing.T, e *echo.Echo, method, target string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
@@ -457,6 +481,7 @@ func TestGetTenantHandler(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/missing", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantNotFound", Message: "tenant not found"}, decodeError(t, rec))
 	})
 }
 
@@ -486,11 +511,13 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	t.Run("unknown tenant", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodPost, "/tenants/missing/status", statusBody(api.TenantStatusDisabled))
 		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantNotFound", Message: "tenant not found"}, decodeError(t, rec))
 	})
 
 	t.Run("invalid status value", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodPost, "/tenants/tenant-1/status", []byte(`{"status":"bogus"}`))
 		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		require.Equal(t, api.Error{Code: "InvalidStatus", Message: "invalid status"}, decodeError(t, rec))
 	})
 
 	t.Run("missing status", func(t *testing.T) {
@@ -695,6 +722,10 @@ func TestDeleteTenantHandler(t *testing.T) {
 		e, deps := setupDelete(t, tenant.Active)
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1", nil)
 		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{
+			Code:    "TenantNotDisabled",
+			Message: "tenant must be disabled before deletion",
+		}, decodeError(t, rec))
 
 		_, err := deps.tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)

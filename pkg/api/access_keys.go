@@ -13,18 +13,18 @@ import (
 
 // accessKeyHTTPError maps an access-key-service error to an echo HTTP error. Known
 // errors (see the access-key service's errors.go) become their mapped status with
-// the error's own message; anything else is logged and returned as a 500.
+// the error's own message and code; anything else is logged and returned as a 500.
 func accessKeyHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, accesskeysvc.ErrTenantNotFound), errors.Is(err, accesskeysvc.ErrAccessKeyNotFound):
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		return httpError(http.StatusNotFound, err)
 	case errors.Is(err, accesskeysvc.ErrInvalidName),
 		errors.Is(err, accesskeysvc.ErrNoPermissions),
 		errors.Is(err, accesskeysvc.ErrInvalidPermission),
 		errors.Is(err, accesskeysvc.ErrUnknownBucket):
-		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		return httpError(http.StatusUnprocessableEntity, err)
 	case errors.Is(err, accesskeysvc.ErrNameConflict):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
+		return httpError(http.StatusConflict, err)
 	default:
 		log.Error("request failed", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
