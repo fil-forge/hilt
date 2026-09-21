@@ -51,7 +51,13 @@ func TestCommandsFor(t *testing.T) {
 	})
 
 	t.Run("bucket-level permissions map to no commands", func(t *testing.T) {
-		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets", "s3:DeleteBucket"))
+		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets"))
+	})
+
+	t.Run("deleting a bucket unwinds the blobs its space holds", func(t *testing.T) {
+		// Parked parts are abandoned, everything else the space still
+		// registers is released.
+		require.ElementsMatch(t, []string{"/blob/abort", "/blob/remove"}, strs("s3:DeleteBucket"))
 	})
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {
