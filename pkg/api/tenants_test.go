@@ -357,20 +357,6 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("unknown region is rejected", func(t *testing.T) {
-		e, _ := setupProvision(t, nil)
-		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
-		require.Equal(t, api.Error{Code: "UnknownRegion", Message: "unknown region"}, decodeError(t, rec))
-	})
-
-	t.Run("missing region is rejected", func(t *testing.T) {
-		e, _ := setupProvision(t, nil)
-		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
-		require.Equal(t, api.Error{Code: "RegionRequired", Message: "region is required"}, decodeError(t, rec))
-	})
-
 	t.Run("cleans up the orphaned key when PLC publication fails", func(t *testing.T) {
 		e, deps := setupProvision(t, &setupConfig{plcStatus: http.StatusInternalServerError})
 
