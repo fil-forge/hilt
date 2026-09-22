@@ -71,6 +71,27 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
 		return err
 	}
+	if in.Principal != nil {
+		// Lock the principal FOR SHARE so the insert waits for an in-flight
+		// removal and then sees its tombstone. The foreign key alone would let a
+		// key bind to a removed principal, which a later revive would make live.
+		var removed bool
+		err := tx.QueryRow(ctx, `
+			SELECT deleted_at IS NOT NULL
+			FROM principal
+			WHERE tenant_id = $1 AND external_id = $2
+			FOR SHARE
+		`, in.Tenant.String(), *in.Principal).Scan(&removed)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("principal %q is not a principal of tenant %s: %w", *in.Principal, in.Tenant, store.ErrInvalidArgument)
+		}
+		if err != nil {
+			return fmt.Errorf("checking principal: %w", err)
+		}
+		if removed {
+			return fmt.Errorf("principal %q of tenant %s was removed: %w", *in.Principal, in.Tenant, store.ErrInvalidArgument)
+		}
+	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, principal_id, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
