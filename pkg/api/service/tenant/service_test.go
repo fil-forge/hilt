@@ -2,6 +2,7 @@ package tenant_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
@@ -30,9 +33,12 @@ import (
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
+	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -87,7 +93,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload, &fakeSwarf{})
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -148,7 +154,26 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil, &fakeSwarf{})
+}
+
+// fakeSwarf records the delegations it was asked to revoke, and fails every
+// publish once err is set.
+type fakeSwarf struct {
+	err     error
+	calls   int
+	revoked []cid.Cid
+}
+
+func (f *fakeSwarf) PublishBatch(_ context.Context, _ ucan.Issuer, revoked []ucan.Delegation) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls++
+	for _, d := range revoked {
+		f.revoked = append(f.revoked, d.Link())
+	}
+	return nil
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -224,9 +249,12 @@ type deleteEnv struct {
 	buckets    *bucketmemory.Store
 	policies   *bucketpolicymemory.Store
 	principals *principalmemory.Store
+	swarf      *fakeSwarf
 	bucketID   did.DID
 	tenantID   did.DID
-	directory  *plcDirectory
+	// grants are the delegations the tenant's one access key holds.
+	grants    []cid.Cid
+	directory *plcDirectory
 }
 
 func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
@@ -270,10 +298,24 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	}, nil)
 	require.NoError(t, err)
 
+	// One access key holding a grant over the bucket, so the revocations the
+	// removal publishes are observable.
+	accessKeys, delegations := accesskeymemory.New(), delegationmemory.New()
+	keyID := testutil.RandomDID(t)
+	require.NoError(t, accessKeys.Add(ctx, accesskeystore.Input{ID: keyID, Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
+	held, err := grant.Issue(multikey.NewIssuer(tenantID, signer), keyID, []did.DID{bucketID}, []string{"s3:GetObject"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, delegations.PutBatch(ctx, held))
+	var grants []cid.Cid
+	for _, d := range held {
+		grants = append(grants, d.Link())
+	}
+
+	swarf := &fakeSwarf{}
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
-		accesskeymemory.New(), principals, policies, delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
+		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, swarf)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
-		principals: principals, bucketID: bucketID, tenantID: tenantID, directory: directory}
+		principals: principals, swarf: swarf, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory}
 }
 
 func TestDelete(t *testing.T) {
@@ -288,6 +330,23 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, ps)
 		require.Equal(t, 1, env.directory.deactivations)
+	})
+
+	t.Run("revokes every key's delegations in one request before deactivating the DID", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		require.Equal(t, 1, env.swarf.calls)
+		require.ElementsMatch(t, env.grants, env.swarf.revoked)
+		require.Equal(t, 1, env.directory.deactivations)
+	})
+
+	t.Run("a publish failure leaves the tenant and its DID in place", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		env.swarf.err = errors.New("swarf unreachable")
+		require.ErrorContains(t, env.svc.Delete(ctx, "tenant-1"), "swarf unreachable")
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Zero(t, env.directory.deactivations)
 	})
 
 	t.Run("deletes the tenant's buckets and their policies", func(t *testing.T) {
