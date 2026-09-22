@@ -3,20 +3,20 @@ package fx_test
 import (
 	"testing"
 
+	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
-	"github.com/fil-forge/hilt/pkg/rpc"
-	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
-	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
-	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
-	"github.com/fil-forge/libforge/testutil"
+	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
+	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
+	rpcmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
+	"github.com/fil-forge/libforge/identity"
+	"github.com/fil-forge/ucantone/did"
+	"github.com/fil-forge/ucantone/execution/batch"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/invocation"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
 
@@ -32,35 +32,122 @@ func TestNewIdentityMissingKeyFile(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNewUCANServer(t *testing.T) {
-	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
+// newRPCApp builds the RPC module over in-memory backends and returns the two
+// route groups and the server built from them, so a test sees the wiring the
+// app actually gets (RPCModule decides which group a handler joins).
+func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *server.HTTPServer, id identity.Identity) {
+	t.Helper()
+	cfg := &config.Config{
+		Storage:    config.StorageConfig{Type: config.StorageTypeMemory},
+		Vault:      config.VaultConfig{Type: config.VaultTypeMemory},
+		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test"},
+		Revocation: config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
+	}
+	app := fx.New(
+		fx.Supply(cfg),
+		appfx.ConfigModule,
+		appfx.LoggerModule,
+		appfx.IdentityModule,
+		appfx.RevocationModule,
+		appfx.RPCModule,
+		storememory.Module,
+		vaultmemory.Module,
+		fx.NopLogger,
+		// The handlers log their rejections; keep the test output quiet.
+		fx.Decorate(func(*zap.Logger) *zap.Logger { return zap.NewNop() }),
+		fx.Invoke(fx.Annotate(
+			func(r []server.Route, a []server.Route, s *server.HTTPServer, i identity.Identity) {
+				routes, admin, srv, id = r, a, s, i
+			},
+			fx.ParamTags(`group:"ucanRoutes"`, `group:"ucanAdminRoutes"`),
+		)),
+	)
+	require.NoError(t, app.Err())
+	require.NotNil(t, srv)
+	return routes, admin, srv, id
+}
+
+// TestRPCModuleRouteGroups checks which group each handler joins: the admin
+// commands, which the service invokes on itself, are the ones served unguarded,
+// and every other command is guarded.
+func TestRPCModuleRouteGroups(t *testing.T) {
+	routes, admin, _, _ := newRPCApp(t)
+
+	require.ElementsMatch(t, []string{
+		"/s3/request/authorize",
+		"/s3/bucket/create",
+		"/s3/bucket/delete",
+		"/s3/bucket/info",
+		"/s3/bucket/list",
+	}, commandsOf(routes))
+
+	require.ElementsMatch(t, []string{
+		"/admin/provider/add",
+		"/admin/provider/nodes/set",
+		"/admin/provider/list",
+	}, commandsOf(admin))
+}
+
+// TestUCANServerRejectsSelfSigned drives a self-signed invocation — the shape
+// that needs no proofs and claims unattenuated authority — through the server
+// the app serves. Every command Hilt serves for others rejects it, and so does
+// an admin command, which admits only the service's own key.
+func TestUCANServerRejectsSelfSigned(t *testing.T) {
+	routes, admin, srv, id := newRPCApp(t)
+	stranger := testutil.RandomIssuer(t)
+
+	for _, route := range routes {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			err := executeOn(t, srv, id.DID(), route.Command, stranger, stranger.DID())
+			require.ErrorIs(t, err, rpcmiddleware.ErrSelfSignedInvocation)
+		})
+	}
+
+	for _, route := range admin {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			err := executeOn(t, srv, id.DID(), route.Command, stranger, stranger.DID())
+			require.ErrorIs(t, err, rpcmiddleware.ErrUnauthorized)
+		})
+	}
+}
+
+// TestUCANServerAdmitsTheServiceOnAdminRoutes is the other half: an admin
+// command is self-signed by definition, so it must reach its handler when the
+// service itself issues it.
+func TestUCANServerAdmitsTheServiceOnAdminRoutes(t *testing.T) {
+	_, admin, srv, id := newRPCApp(t)
+
+	for _, route := range admin {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			err := executeOn(t, srv, id.DID(), route.Command, id, id.DID())
+			require.NotErrorIs(t, err, rpcmiddleware.ErrSelfSignedInvocation)
+			require.NotErrorIs(t, err, rpcmiddleware.ErrInvalidSubject)
+			require.NotErrorIs(t, err, rpcmiddleware.ErrUnauthorized)
+		})
+	}
+}
+
+func commandsOf(routes []server.Route) []string {
+	cmds := make([]string, 0, len(routes))
+	for _, r := range routes {
+		cmds = append(cmds, r.Command.String())
+	}
+	return cmds
+}
+
+// executeOn runs one invocation of cmd through the server as a request would
+// arrive, returning the failure its receipt carries (nil on success). The
+// invocation carries no arguments, so a command that runs rejects it on its own
+// terms — which is how these tests tell a rejection by the route's middleware
+// from a command that ran.
+func executeOn(t *testing.T, srv *server.HTTPServer, service did.DID, cmd ucan.Command, issuer ucan.Issuer, subject did.DID) error {
+	t.Helper()
+	inv, err := invocation.Invoke(issuer, subject, cmd, nil, invocation.WithAudience(service))
 	require.NoError(t, err)
 
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
-	upload, err := appfx.NewUploadClient(
-		id,
-		config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test"},
-		zap.NewNop(),
-	)
+	resp, err := srv.ExecuteBatch(batch.NewRequest(t.Context(), []ucan.Invocation{inv}))
 	require.NoError(t, err)
-	revocations, err := appfx.NewRevocationClient(
-		config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
-	)
-	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), upload, revocations)
-	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{
-		Identity: id,
-		Logger:   zap.NewNop(),
-		Routes: []server.Route{
-			rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),
-			rpc.NewCreateBucketHandler(zap.NewNop(), buckets),
-			rpc.NewDeleteBucketHandler(zap.NewNop(), buckets),
-			rpc.NewBucketInfoHandler(zap.NewNop(), buckets),
-			rpc.NewListBucketsHandler(zap.NewNop(), buckets),
-			rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), upload),
-			rpc.NewSetProviderNodesHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), upload),
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, srv)
+	rcpt, ok := resp.Receipt(inv.Task().Link())
+	require.True(t, ok, "the server issued no receipt for the invocation")
+	return testutil.ReceiptFailure(t, rcpt)
 }

@@ -73,12 +73,12 @@ func TestAdminFailure(t *testing.T) {
 		requireName(t, f.got, ProviderExistsErrorName)
 	})
 
-	t.Run("unauthorized sentinel is set as failure with its name", func(t *testing.T) {
+	t.Run("provider-not-found sentinel is set as failure with its name", func(t *testing.T) {
 		f := &recordingFailer{}
-		err := fmt.Errorf("adding provider: %w", ErrUnauthorized)
+		err := fmt.Errorf("setting nodes: %w", ErrProviderNotFound)
 		require.NoError(t, adminFailure(f, err))
 		require.True(t, f.called)
-		requireName(t, f.got, UnauthorizedErrorName)
+		requireName(t, f.got, ProviderNotFoundErrorName)
 	})
 
 	t.Run("unknown error is returned, not set as failure", func(t *testing.T) {

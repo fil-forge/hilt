@@ -6,6 +6,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/rpc"
+	rpcmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/libforge/identity"
@@ -19,7 +20,8 @@ import (
 )
 
 // RPCModule provides the Hilt UCAN RPC server and the command handlers it
-// serves, collected into the "ucanRoutes" group.
+// serves, collected into the "ucanRoutes" group — or, for the commands the
+// service invokes on itself, the "ucanAdminRoutes" group.
 var RPCModule = fx.Module("rpc",
 	fx.Provide(
 		auth.NewAuthorizer,
@@ -36,31 +38,48 @@ var RPCModule = fx.Module("rpc",
 		asUCANRoute(rpc.NewDeleteBucketHandler),
 		asUCANRoute(rpc.NewBucketInfoHandler),
 		asUCANRoute(rpc.NewListBucketsHandler),
-		asUCANRoute(rpc.NewAddProviderHandler),
-		asUCANRoute(rpc.NewSetProviderNodesHandler),
-		asUCANRoute(rpc.NewListProvidersHandler),
+		asAdminUCANRoute(rpc.NewAddProviderHandler),
+		asAdminUCANRoute(rpc.NewSetProviderNodesHandler),
+		asAdminUCANRoute(rpc.NewListProvidersHandler),
 	),
 )
 
 // asUCANRoute annotates a handler constructor so its result joins the
-// "ucanRoutes" group consumed by the UCAN server.
+// "ucanRoutes" group consumed by the UCAN server, whose routes are served
+// behind [rpcmiddleware.NotSelfSigned] and [rpcmiddleware.OnlySubject].
 func asUCANRoute(constructor any) any {
 	return fx.Annotate(constructor, fx.ResultTags(`group:"ucanRoutes"`))
 }
 
+// asAdminUCANRoute annotates a handler constructor so its result joins the
+// "ucanAdminRoutes" group: the commands the service invokes on itself, whose
+// invocations are issued by the service's own identity over itself as subject
+// and so carry no delegation proofs. They are served behind
+// [rpcmiddleware.OnlyIssuer], since the subject checks reject exactly that
+// shape.
+func asAdminUCANRoute(constructor any) any {
+	return fx.Annotate(constructor, fx.ResultTags(`group:"ucanAdminRoutes"`))
+}
+
 // UCANServerParams are the dependencies for the UCAN RPC server. Handlers are
-// collected from the "ucanRoutes" fx group (see RPCModule).
+// collected from the "ucanRoutes" and "ucanAdminRoutes" fx groups (see
+// RPCModule).
 type UCANServerParams struct {
 	fx.In
-	Identity identity.Identity   // embeds multikey.Issuer, satisfying ucan.Issuer
-	Server   config.ServerConfig // supplies InsecureDIDResolution
-	Logger   *zap.Logger
-	Routes   []server.Route `group:"ucanRoutes"`
+	Identity    identity.Identity   // embeds multikey.Issuer, satisfying ucan.Issuer
+	Server      config.ServerConfig // supplies InsecureDIDResolution
+	Logger      *zap.Logger
+	Routes      []server.Route `group:"ucanRoutes"`
+	AdminRoutes []server.Route `group:"ucanAdminRoutes"`
 }
 
 // NewUCANServer builds the ucantone UCAN RPC server with the service identity
-// and registers each command handler. The returned *server.HTTPServer is an
-// http.Handler mounted on the echo server (see NewEchoServer).
+// and registers each command handler behind its group's authorization checks:
+// a command in the "ucanRoutes" group requires an invocation subjected to the
+// service and issued by someone else, while an admin command
+// ("ucanAdminRoutes") requires one issued by the service itself. The returned
+// *server.HTTPServer is an http.Handler mounted on the echo server (see
+// NewEchoServer).
 //
 // The server is configured with a DID resolver that supports did:key and
 // did:web. did:web is required so the validator can verify UCANs issued by, or
@@ -79,7 +98,16 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 			validator.WithDIDResolver(didResolver),
 		),
 	)
-	for _, r := range p.Routes {
+	routes := rpcmiddleware.Apply(p.Logger, p.Routes,
+		rpcmiddleware.NotSelfSigned(),
+		rpcmiddleware.OnlySubject(p.Identity.DID()),
+	)
+	// The admin commands are the ones the service invokes on itself: self-signed
+	// by definition, and safe because only the service's key can issue them.
+	routes = append(routes, rpcmiddleware.Apply(p.Logger, p.AdminRoutes,
+		rpcmiddleware.OnlyIssuer(p.Identity.DID()),
+	)...)
+	for _, r := range routes {
 		srv.Handle(r.Command, r.Handler)
 	}
 	return srv, nil

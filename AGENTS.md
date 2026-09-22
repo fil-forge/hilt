@@ -86,6 +86,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   delegation map carries only CIDs — the blocks ride back in the container).
 - **Use libforge bound commands** (`.Command`, `.Route`, `.Invoke`, `.Unpack`) — do
   not hand-write command strings with `command.MustParse`.
+- **Invocation authorization** (`pkg/rpc/middleware`, applied in
+  `pkg/fx/rpc.go`): routes in the `ucanRoutes` group are served behind
+  `NotSelfSigned` + `OnlySubject(serviceDID)`, so a caller must present
+  authority the service delegated; the admin commands, which Hilt invokes on
+  itself, join `ucanAdminRoutes` (`asAdminUCANRoute`) and are served behind
+  `OnlyIssuer(serviceDID)`. A self-signed invocation (issuer == subject) needs
+  no proofs and carries unattenuated authority under the UCAN rules, which is
+  why nothing but the service's own key may issue one. Register a new handler
+  with `asUCANRoute` unless the service invokes it on itself, and put the
+  check in middleware rather than in the handler.
 - **Authorization**: signature-bearing S3 commands authenticate via the
   `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
   provider + region served by that provider), which also classifies the operation

@@ -47,8 +47,7 @@ func authFailure(res failer, err error) error {
 func adminFailure(res failer, err error) error {
 	var named ucanerrors.Named
 	switch {
-	case errors.Is(err, ErrUnauthorized),
-		errors.Is(err, ErrProviderExists),
+	case errors.Is(err, ErrProviderExists),
 		errors.Is(err, ErrProviderNotFound),
 		errors.Is(err, ErrInvalidNodes),
 		errors.As(err, &named):
