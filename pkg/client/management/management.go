@@ -1,5 +1,6 @@
-// Package management provides a REST client for Hilt's tenant and access-key
-// management API (the handlers in pkg/api). It authenticates with the partner
+// Package management provides a REST client for Hilt's tenant, principal and
+// access-key management API (the handlers in pkg/api). It authenticates with
+// the partner
 // key as an HTTP bearer token and speaks plain JSON — it is not a UCAN client
 // (cf. the UCAN clients in the parent pkg/client package).
 package management
@@ -141,11 +142,50 @@ func (c *Client) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID stri
 	return c.do(ctx, http.MethodDelete, []string{"tenants", tenantID, "access-keys", accessKeyID}, nil, nil, http.StatusNoContent)
 }
 
-// do executes a single request: it builds the URL from path segments (JoinPath
-// escapes them), sets auth/JSON headers, sends the (optional) JSON body, checks
-// the status against wantStatus, and decodes the response into out when non-nil.
+// Principals
+
+// CreatePrincipal records a principal of the tenant. It is idempotent: a
+// principal that already exists is returned unchanged.
+func (c *Client) CreatePrincipal(ctx context.Context, tenantID, principalID string) (api.Principal, error) {
+	var p api.Principal
+	err := c.do(ctx, http.MethodPut, []string{"tenants", tenantID, "principals", principalID}, nil, &p,
+		http.StatusOK, http.StatusCreated)
+	return p, err
+}
+
+// ListPrincipals lists the tenant's principals.
+func (c *Client) ListPrincipals(ctx context.Context, tenantID string) ([]api.Principal, error) {
+	var list api.PrincipalList
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals"}, nil, &list, http.StatusOK)
+	return list.Items, err
+}
+
+// GetPrincipal retrieves one principal of the tenant.
+func (c *Client) GetPrincipal(ctx context.Context, tenantID, principalID string) (api.Principal, error) {
+	var p api.Principal
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", principalID}, nil, &p, http.StatusOK)
+	return p, err
+}
+
+// DeletePrincipal removes the principal, its access to every bucket, and its
+// access keys. It is idempotent server-side.
+func (c *Client) DeletePrincipal(ctx context.Context, tenantID, principalID string) error {
+	return c.do(ctx, http.MethodDelete, []string{"tenants", tenantID, "principals", principalID}, nil, nil, http.StatusNoContent)
+}
+
+// ListPrincipalAccessKeys lists the keys bound to the principal (secrets are
+// never included).
+func (c *Client) ListPrincipalAccessKeys(ctx context.Context, tenantID, principalID string) ([]api.AccessKey, error) {
+	var list api.AccessKeyList
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", principalID, "access-keys"}, nil, &list, http.StatusOK)
+	return list.Items, err
+}
+
+// do executes a single request: it builds the URL with [Client.resolve], sets
+// auth/JSON headers, sends the (optional) JSON body, checks the status against
+// wantStatus, and decodes the response into out when non-nil.
 func (c *Client) do(ctx context.Context, method string, segments []string, body, out any, wantStatus ...int) error {
-	u := c.baseURL.JoinPath(segments...)
+	u := c.resolve(segments)
 
 	var reqBody io.Reader
 	if body != nil {
@@ -182,6 +222,32 @@ func (c *Client) do(ctx context.Context, method string, segments []string, body,
 		}
 	}
 	return nil
+}
+
+// resolve appends the segments to the base URL, one escaped path element each.
+// Tenant and principal ids are opaque — the API refuses only the empty id, one
+// over 255 bytes, and "*" — so a segment can hold "/", "%", a space or "..",
+// and each must stay a single element. Neither url.URL.JoinPath nor path.Join
+// can be used for that: both split a segment on "/" and clean away "." and
+// ".." elements, so DeletePrincipal(t, "..") would issue DELETE /tenants/t (a
+// real route), and a segment holding "%" makes JoinPath fail silently and keep
+// the base path. Escaping first and joining the escaped forms avoids both.
+func (c *Client) resolve(segments []string) url.URL {
+	u := c.baseURL
+	raw := strings.TrimSuffix(u.EscapedPath(), "/")
+	for _, segment := range segments {
+		raw += "/" + url.PathEscape(segment)
+	}
+	// RawPath is honoured only while it is a valid encoding of Path, so set
+	// both: Path holds the decoded form, RawPath the form that goes on the wire.
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		// Unreachable: raw is built from EscapedPath and url.PathEscape output.
+		decoded = raw
+	}
+	u.Path = decoded
+	u.RawPath = raw
+	return u
 }
 
 // apiErrorFromResponse builds an [APIError] from a non-2xx response, reading the

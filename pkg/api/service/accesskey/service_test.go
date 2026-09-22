@@ -17,7 +17,6 @@ import (
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -77,10 +76,23 @@ func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOp
 	return f.Store.Get(ctx, id, opts...)
 }
 
+// lockedAccessKeys fails Delete with err, standing in for the store giving up
+// on a row another write holds.
+type lockedAccessKeys struct {
+	accesskeystore.Store
+	err error
+}
+
+func (l *lockedAccessKeys) Delete(context.Context, did.DID) error {
+	return l.err
+}
+
 type deps struct {
 	svc         *accesskeysvc.Service
-	accessKeys  accesskeystore.Store
-	principals  principal.Store
+	tenants     *tenantmemory.Store
+	accessKeys  *accesskeymemory.Store
+	principals  *principalmemory.Store
+	policies    *bucketpolicymemory.Store
 	delegations *delegationmemory.Store
 	buckets     *bucketmemory.Store
 	secrets     *vaultmemory.Store
@@ -96,6 +108,7 @@ type deps struct {
 // the bucket, as [bucket.Service.Create] would have stored it. Its audience is the
 // tenant, not an access key, so it must never be revoked along with one. The
 // tenant has one principal, "alice".
+//
 // wrapAccessKeys, when given, wraps the memory access-key store the service is
 // built over, so a test can make one of its methods fail.
 func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
@@ -135,8 +148,10 @@ func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeys
 	swarf := &fakeSwarf{}
 	return deps{
 		svc:         accesskeysvc.New(zap.NewNop(), tenants, keys, principals, buckets, policies, delegations, secrets, swarf),
+		tenants:     tenants,
 		accessKeys:  accessKeys,
 		principals:  principals,
+		policies:    policies,
 		delegations: delegations,
 		buckets:     buckets,
 		secrets:     secrets,
@@ -286,6 +301,13 @@ func TestCreatePrincipalBound(t *testing.T) {
 		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
 	})
 
+	t.Run("rejects a removed principal", func(t *testing.T) {
+		d := setup(t)
+		require.NoError(t, d.principals.Delete(ctx, d.tenantID, "alice", nil))
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
+	})
+
 	t.Run("rejects an empty name", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "", nil, nil, "alice", nil)
@@ -320,7 +342,7 @@ func TestCreatePrincipalBound(t *testing.T) {
 		require.ErrorIs(t, err, vault.ErrNotFound)
 	})
 
-	t.Run("delete removes the key and revokes its marker", func(t *testing.T) {
+	t.Run("delete removes the key and revokes its delegations", func(t *testing.T) {
 		d := setup(t)
 		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
 		require.NoError(t, err)
@@ -329,7 +351,6 @@ func TestCreatePrincipalBound(t *testing.T) {
 		require.Len(t, issued.Results, 1)
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()))
-		// The marker is the one delegation a revocation can name for the key.
 		require.Len(t, d.swarf.revocations, 1)
 		require.Equal(t, d.tenantID, d.swarf.revocations[0].revoker)
 		require.Equal(t, issued.Results[0].Link(), d.swarf.revocations[0].revoked)
@@ -340,6 +361,38 @@ func TestCreatePrincipalBound(t *testing.T) {
 		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
 		require.ErrorIs(t, err, vault.ErrNotFound)
+	})
+
+	t.Run("delete leaves the key usable when the revocation cannot be published", func(t *testing.T) {
+		d := setup(t)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+		d.swarf.err = errors.New("swarf unreachable")
+
+		require.ErrorContains(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()), "swarf unreachable")
+
+		got, _, err := d.svc.Get(ctx, "tenant-1", rec.ID.Identifier())
+		require.NoError(t, err, "the key row must survive")
+		require.Equal(t, rec.ID, got.ID)
+		held, err := d.delegations.ListByAudience(ctx, rec.ID)
+		require.NoError(t, err)
+		require.Len(t, held.Results, 1, "its delegation must survive")
+		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
+		require.NoError(t, err, "the vault entry must survive so the key still signs")
+	})
+
+	t.Run("delete reports a lock the store gave up on as a retryable conflict", func(t *testing.T) {
+		d := setup(t)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "alice", nil)
+		require.NoError(t, err)
+		locked := &lockedAccessKeys{Store: d.accessKeys, err: store.ErrLockTimeout}
+		svc := accesskeysvc.New(zap.NewNop(), d.tenants, locked, d.principals, d.buckets, d.policies, d.delegations, d.secrets, d.swarf)
+
+		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", rec.ID.Identifier()), accesskeysvc.ErrConcurrentChange)
+
+		got, _, err := d.svc.Get(ctx, "tenant-1", rec.ID.Identifier())
+		require.NoError(t, err, "the key row must survive")
+		require.Equal(t, rec.ID, got.ID)
 	})
 
 	t.Run("list and get return both kinds", func(t *testing.T) {
@@ -508,5 +561,6 @@ func TestDeleteRevokes(t *testing.T) {
 		require.NotEmpty(t, remaining.Results)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, created.ID))
 		require.NoError(t, err)
+		require.Empty(t, d.swarf.revocations)
 	})
 }
