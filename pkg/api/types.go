@@ -117,3 +117,16 @@ type Metrics struct {
 	Egress  EgressMetrics  `json:"egress"`
 	Ingress IngressMetrics `json:"ingress"`
 }
+
+// Principal is a console user of a tenant, identified by the console's principalId.
+// It holds no key material and no delegation: its access to the tenant's
+// buckets is computed from the bucket policies naming it.
+type Principal struct {
+	PrincipalID string    `json:"principalId"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// PrincipalList is the body of GET /tenants/{tenantId}/principals.
+type PrincipalList struct {
+	Items []Principal `json:"items"`
+}
