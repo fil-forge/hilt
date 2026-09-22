@@ -224,6 +224,12 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if principalID != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
+		// The principal row is referenced by the new key; a removal holding it
+		// past the store's lock timeout means nothing was written and the
+		// call can be repeated.
+		if errors.Is(err, store.ErrLockTimeout) {
+			return accesskeystore.Record{}, "", ErrConcurrentChange
+		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
 	}
 
@@ -346,15 +352,16 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 	return rec, names, nil
 }
 
-// Delete revokes an access key belonging to the tenant: publishing UCAN
-// revocations for its delegations, then removing its record and those
-// delegations under the key's delegation lock, and its vault key. Revocations
-// are published first so that a revocation service failure leaves the key
-// intact and the call cleanly retryable — otherwise the delegations would live
-// on with nothing for a verifier to check. The record goes under the lock so a
-// policy rotation that listed the key and is waiting on the lock finds it gone
+// Delete removes an access key belonging to the tenant. Its delegations are
+// revoked first, in one request and under the key's delegation lock, so a
+// rotation of the same key in flight waits for the outcome: publishing before
+// anything is removed leaves the key intact when the revocation service fails,
+// so the call is cleanly retryable — otherwise the delegations would live on
+// with nothing for a verifier to check. The record goes under the same lock,
+// so a rotation that listed the key and is waiting on the lock finds it gone
 // rather than issuing it fresh delegations. Both kinds of key are deleted the
-// same way.
+// same way. A row another write holds past the store's lock timeout is
+// [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -391,17 +398,29 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 				return nil, err
 			}
 		}
+		// A lock the delete waited on means another writer holds the row;
+		// nothing is committed and the caller repeats the call.
 		if err := s.accessKeys.Delete(ctx, id); err != nil {
 			return nil, fmt.Errorf("deleting access key: %w", err)
 		}
 		return nil, nil
 	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		log.Info("access key removal lost a race with a concurrent write", zap.Error(err))
+		return ErrConcurrentChange
+	}
 	if err != nil {
 		return fmt.Errorf("revoking access key: %w", err)
 	}
+	// The row went first, so a key whose vault entry outlives it is unreachable
+	// rather than present but unusable.
 	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
+	s.logger.Info("deleted access key",
+		zap.Stringer("tenant", tenantRec.ID),
+		zap.Stringer("access_key", id),
+	)
 	return nil
 }
 
