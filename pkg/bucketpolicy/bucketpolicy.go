@@ -298,6 +298,28 @@ func Named(d Policy) (principals []string, wildcard bool) {
 	return principals, wildcard
 }
 
+// WithoutPrincipal returns d with principalID removed from every statement
+// naming it, dropping statements left with no principal, and reports whether
+// anything changed. A wildcard statement names no principal and is kept as is.
+func WithoutPrincipal(d Policy, principalID string) (Policy, bool) {
+	var statements []Statement
+	changed := false
+	for _, st := range d.Statements {
+		if !st.Principal.All {
+			ids := slices.DeleteFunc(slices.Clone(st.Principal.IDs), func(p string) bool { return p == principalID })
+			if len(ids) != len(st.Principal.IDs) {
+				changed = true
+			}
+			if len(ids) == 0 {
+				continue
+			}
+			st.Principal = Only(ids...)
+		}
+		statements = append(statements, st)
+	}
+	return Policy{Statements: statements}, changed
+}
+
 // Changed returns the principals whose effective set differs between old and
 // new, either of which may be nil for "no policy". It considers every
 // principal either policy names, with [Wildcard] expanding to

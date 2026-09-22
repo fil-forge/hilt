@@ -308,6 +308,16 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
+	t.Run("a key bound to a removed principal is rejected inside the transaction", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed.tenant(t, tenantID)
+		seed.principal(t, tenantID, "user-1")
+		require.NoError(t, principalpostgres.New(pool).Delete(t.Context(), tenantID, "user-1", nil))
+		err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "laptop"))
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+		require.ErrorContains(t, err, "was removed")
+	})
+
 	t.Run("a key bound to another tenant's principal is rejected", func(t *testing.T) {
 		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
 		seed.tenant(t, tenantID)
