@@ -34,7 +34,9 @@ func TestNewIdentityMissingKeyFile(t *testing.T) {
 
 // newRPCApp builds the RPC module over in-memory backends and returns the two
 // route groups and the server built from them, so a test sees the wiring the
-// app actually gets (RPCModule decides which group a handler joins).
+// app actually gets (RPCModule decides which group a handler joins). fx.New
+// executes Invoke functions immediately, so the values are populated without
+// starting the app; nothing here registers a lifecycle hook.
 func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *server.HTTPServer, id identity.Identity) {
 	t.Helper()
 	cfg := &config.Config{
@@ -64,6 +66,10 @@ func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *
 	)
 	require.NoError(t, app.Err())
 	require.NotNil(t, srv)
+	// Both groups are asserted non-empty here because the tests below range over
+	// them: an empty group would make those tests pass without asserting a thing.
+	require.NotEmpty(t, routes)
+	require.NotEmpty(t, admin)
 	return routes, admin, srv, id
 }
 
