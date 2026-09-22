@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -30,14 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
-
-// noopRevocations stands in for the revocation service: these tests exercise the
-// HTTP layer, not revocation (see the accesskey service tests for that).
-type noopRevocations struct{}
-
-func (noopRevocations) PublishBatch(context.Context, ucan.Issuer, []ucan.Delegation) error {
-	return nil
-}
 
 type accessKeyDeps struct {
 	tenants     *tenantmemory.Store
@@ -86,7 +77,7 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "alice"))
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), deps.delegations, deps.vault, noopRevocations{})
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), deps.delegations, deps.vault, &testutil.FakeSwarf{})
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
@@ -502,6 +493,9 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.ErrorIs(t, err, vault.ErrNotFound)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
+		require.NoError(t, err)
+		require.Empty(t, dels.Results, "the delegations go with the key")
 
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)
