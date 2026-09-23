@@ -257,17 +257,12 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
+	// Returning to active reissues the write grants a write lock may have
+	// revoked, since revocation is permanent. It runs before the status changes,
+	// so if it fails the tenant keeps its current status and a retry reissues
+	// them.
 	var reissued []ucan.Delegation
-	switch {
-	case next == tenantstore.WriteLocked && rec.Status != tenantstore.WriteLocked:
-		if err := s.revokeWriteGrants(ctx, rec.ID); err != nil {
-			return fmt.Errorf("revoking tenant write grants: %w", err)
-		}
-	case next == tenantstore.Active && rec.Status != tenantstore.Active:
-		// Returning to active reissues the write grants a write lock may have
-		// revoked, since revocation is permanent. It runs before the status
-		// changes, so if it fails the tenant keeps its current status and a retry
-		// reissues them.
+	if next == tenantstore.Active && rec.Status != tenantstore.Active {
 		if reissued, err = s.reissueWriteGrants(ctx, rec.ID); err != nil {
 			return fmt.Errorf("reissuing tenant write grants: %w", err)
 		}
@@ -283,6 +278,20 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("updating tenant status: %w", err)
+	}
+	// A lock revokes the write grants only once the status is stored, and on
+	// every lock, not just the first:
+	//   - An access key being created re-reads the status after storing its
+	//     grants (see the access-key service's Create). Either it reads the lock
+	//     and revokes its own grants, or it read before this status write, so its
+	//     grants were already stored and this sweep finds them.
+	//   - A failed or partial sweep leaves the tenant write-locked, so Hilt still
+	//     refuses its writes, and retrying the lock finishes the sweep. Revoking a
+	//     grant twice is harmless.
+	if next == tenantstore.WriteLocked {
+		if err := s.revokeWriteGrants(ctx, rec.ID); err != nil {
+			return fmt.Errorf("revoking tenant write grants: %w", err)
+		}
 	}
 	return nil
 }

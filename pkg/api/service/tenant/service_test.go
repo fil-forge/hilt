@@ -43,10 +43,14 @@ import (
 )
 
 type recordingRevocations struct {
+	err       error
 	published []ucan.Delegation
 }
 
 func (r *recordingRevocations) Publish(_ context.Context, _ ucan.Issuer, revoked ucan.Delegation, _ ...swarfclient.PublishOption) error {
+	if r.err != nil {
+		return r.err
+	}
 	r.published = append(r.published, revoked)
 	return nil
 }
@@ -301,16 +305,17 @@ func TestGetAndSetStatus(t *testing.T) {
 		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
 		require.Equal(t, []cid.Cid{env.write.Link()}, env.revocations.links())
 
-		// Repeating the same status must not publish duplicate revocations.
+		// Reapplying the lock sweeps again, so a retried lock finishes a partial
+		// sweep; the repeat revocation is harmless.
 		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
-		require.Len(t, env.revocations.published, 1)
+		require.Equal(t, []cid.Cid{env.write.Link(), env.write.Link()}, env.revocations.links())
 
 		// Unlocking replaces the revoked write grant with one of the same shape,
 		// and keeps the read grant as it was. The replaced grant is revoked again
 		// on the way out, which is harmless.
 		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "active"))
 		reissued := env.requireReissued(t)
-		require.Equal(t, []cid.Cid{env.write.Link(), env.write.Link()}, env.revocations.links())
+		require.Len(t, env.revocations.published, 3)
 		require.NotEqual(t, env.write.Link(), reissued.Link())
 		env.requireStatus(t, tenant.Active)
 	})
@@ -330,6 +335,29 @@ func TestGetAndSetStatus(t *testing.T) {
 
 		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
 		require.Equal(t, []cid.Cid{env.write.Link(), reissued.Link()}, env.revocations.links())
+	})
+
+	t.Run("a lock whose status update fails revokes nothing", func(t *testing.T) {
+		// The sweep runs only once the lock is stored, so a failed lock leaves the
+		// tenant active with its write grants intact.
+		env := newGrantEnv(t, tenant.Active)
+		env.tenants.failSetStatus = true
+		require.Error(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Empty(t, env.revocations.published)
+		env.requireStatus(t, tenant.Active)
+	})
+
+	t.Run("a retried lock finishes a sweep that failed", func(t *testing.T) {
+		env := newGrantEnv(t, tenant.Active)
+		env.revocations.err = errors.New("swarf unavailable")
+		require.Error(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		// The lock holds even though the sweep failed, so Hilt refuses writes.
+		env.requireStatus(t, tenant.WriteLocked)
+		require.Empty(t, env.revocations.published)
+
+		env.revocations.err = nil
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Equal(t, []cid.Cid{env.write.Link()}, env.revocations.links())
 	})
 
 	t.Run("a failed status update revokes the grants it reissued", func(t *testing.T) {

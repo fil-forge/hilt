@@ -53,6 +53,19 @@ func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan
 	return nil
 }
 
+// lockedOnReread is a tenant store in which the tenant looks active when looked
+// up by external ID and write-locked when re-read by DID: a write lock landing
+// in the middle of creating an access key.
+type lockedOnReread struct {
+	tenant.Store
+}
+
+func (l lockedOnReread) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
+	rec, err := l.Store.Get(ctx, id)
+	rec.Status = tenant.WriteLocked
+	return rec, err
+}
+
 type deps struct {
 	svc         *accesskeysvc.Service
 	tenants     *tenantmemory.Store
@@ -171,6 +184,17 @@ func TestCreate(t *testing.T) {
 		}
 		require.ElementsMatch(t, writes, revoked, "exactly the write grants are revoked; the read grant stays")
 		require.Len(t, page.Results, len(s3perm.CommandsFor(perms...)), "every grant is still stored, for unlock to reissue")
+	})
+
+	t.Run("revokes a new key's write grants when a lock lands while it is created", func(t *testing.T) {
+		// The tenant reads as active when Create starts and write-locked by the
+		// time its grants are stored: the lock's sweep may have run before they
+		// were, so Create must revoke them itself.
+		d := setup(t)
+		svc := accesskeysvc.New(zap.NewNop(), lockedOnReread{d.tenants}, accesskeymemory.New(), d.buckets, d.delegations, d.secrets, d.swarf)
+		_, _, err := svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, nil, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, d.swarf.revocations)
 	})
 
 	t.Run("rolls the key back when a write-locked tenant's revocation fails", func(t *testing.T) {

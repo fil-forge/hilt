@@ -215,11 +215,19 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	}
 	// A write lock revokes the tenant's write grants (see the tenant service's
 	// SetStatus), and a key created while it holds gets the same treatment, so
-	// its write grants are dead on arrival; unlocking reissues them. A key created
-	// while a lock is being applied can miss both this check and the lock's
-	// sweep: closing that needs one transaction across the tenant and delegation
-	// stores.
-	if tenantRec.Status == tenant.WriteLocked {
+	// its write grants are dead on arrival; unlocking reissues them. The status
+	// is re-read now that the grants are stored, not taken from the start of
+	// Create: a lock stores its status before it sweeps, so either this read sees
+	// the lock or the lock's sweep sees these grants. The mirror case, a key
+	// created while an unlock is reissuing, can end up with revoked grants on an
+	// active tenant; that fails closed (the key cannot write), and locking and
+	// unlocking again repairs it.
+	current, err := s.tenants.Get(ctx, tenantRec.ID)
+	if err != nil {
+		rollback()
+		return accesskeystore.Record{}, "", fmt.Errorf("re-reading tenant status: %w", err)
+	}
+	if current.Status == tenant.WriteLocked {
 		if err := s.revokeWriteGrants(ctx, issuer, dels); err != nil {
 			rollback()
 			return accesskeystore.Record{}, "", fmt.Errorf("revoking write grants for a write-locked tenant: %w", err)
