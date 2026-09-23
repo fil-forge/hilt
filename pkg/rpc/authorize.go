@@ -47,12 +47,14 @@ func NewAuthorizeRequestHandler(
 	})
 }
 
-// AuthorizeRequest authenticates the S3 request (which resolves and scope-checks
-// the addressed bucket and the access key's permission for the action), derives the
+// AuthorizeRequest authenticates the S3 request (which resolves the addressed
+// bucket and computes the actions the credential holds on it), derives the
 // verification key, and issues delegations for the action's Forge commands to the
-// invocation issuer (TTL ≤ 24h + clock skew). It returns the result and the delegation blocks to
-// attach to the response. It is factored out of the handler so it can be unit
-// tested without constructing a UCAN invocation.
+// invocation issuer (TTL ≤ 24h + clock skew), signed by the credential for
+// either kind of key. It returns the result and the delegation blocks to attach
+// to the response. It is factored
+// out of the handler so it can be unit tested without constructing a UCAN
+// invocation.
 func AuthorizeRequest(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -89,12 +91,15 @@ func AuthorizeRequest(
 	}
 
 	// Issue a delegation to the invocation issuer (the gateway) for each Forge
-	// command the action maps to, signing as the access key with the bucket as
-	// subject. We assume the access key already holds these commands (delegated at
-	// access-key creation); if not, the delegation simply has no proof chain to a
-	// root and is unusable — harmless. The gateway obtains the chain to the
-	// access key via `/s3/bucket/info`.
-	akIssuer := multikey.NewIssuer(accessKeyID, signer)
+	// command the action maps to, with the bucket as subject.
+	//
+	// The key signs as itself: it holds these commands over the bucket, a
+	// service key from its creation and a principal-bound key from the bucket's
+	// policy, which the action check above is the mirror of. If it does not,
+	// the delegation simply has no proof chain to a root and is unusable —
+	// harmless. The gateway obtains the chain to the credential via
+	// `/s3/bucket/info`.
+	reIssuer := ucan.Issuer(multikey.NewIssuer(accessKeyID, signer))
 	// Expire when the derived key does — 00:00:00 UTC of the following day — plus
 	// the max clock skew, so the gateway can still enact a request signed just
 	// before midnight but received within the skew window after it. Capped to the
@@ -117,7 +122,7 @@ func AuthorizeRequest(
 		sourceBucketID = &authz.SourceBucket.ID
 	}
 
-	delegations, err := issuePermissionDelegations(akIssuer, issuer, bucketID, perm, exp)
+	delegations, err := issuePermissionDelegations(reIssuer, issuer, bucketID, perm, exp)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -125,7 +130,7 @@ func AuthorizeRequest(
 	// the destination grant's retrieve is scoped to the destination. A copy
 	// within one bucket is already covered.
 	if src := authz.SourceBucket; src != nil && (bucketID == nil || src.ID != *bucketID) {
-		srcDlgs, err := issuePermissionDelegations(akIssuer, issuer, &src.ID, auth.SourcePermission, exp)
+		srcDlgs, err := issuePermissionDelegations(reIssuer, issuer, &src.ID, auth.SourcePermission, exp)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -140,6 +145,7 @@ func AuthorizeRequest(
 	logger.Debug("authorized request",
 		zap.Stringer("bucket", bucketID),
 		zap.String("permission", perm),
+		zap.Stringp("principal", authz.Principal),
 		zap.Int("delegations", len(proofSet)),
 	)
 	return &s3req.AuthorizeOK{
@@ -156,18 +162,19 @@ func AuthorizeRequest(
 	}, delegations, nil
 }
 
-// issuePermissionDelegations issues one delegation from the access key to
-// audience for each Forge command the S3 permission maps to, over the bucket
-// named by subject, expiring at exp. A permission that maps to commands needs
-// a bucket; one that maps to none (the bucket-level permissions) issues nothing
-// and tolerates a nil subject.
-func issuePermissionDelegations(accessKey ucan.Issuer, audience did.DID, subject *did.DID, perm string, exp ucan.UnixTimestamp) ([]ucan.Delegation, error) {
+// issuePermissionDelegations issues one delegation from issuer to audience for
+// each Forge command the S3 permission maps to, over the bucket named by
+// subject, expiring at exp. The issuer is the access key for a service
+// credential and the tenant for a principal-bound one. A permission that maps
+// to commands needs a bucket; one that maps to none (the bucket-level
+// permissions) issues nothing and tolerates a nil subject.
+func issuePermissionDelegations(from ucan.Issuer, audience did.DID, subject *did.DID, perm string, exp ucan.UnixTimestamp) ([]ucan.Delegation, error) {
 	var out []ucan.Delegation
 	for _, cmd := range s3perm.CommandsFor(perm) {
 		if subject == nil {
 			return nil, fmt.Errorf("delegating %s: missing bucket", cmd)
 		}
-		d, err := delegation.Delegate(accessKey, audience, *subject, cmd, delegation.WithExpiration(exp))
+		d, err := delegation.Delegate(from, audience, *subject, cmd, delegation.WithExpiration(exp))
 		if err != nil {
 			return nil, fmt.Errorf("delegating %s: %w", cmd, err)
 		}

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -23,6 +24,7 @@ import (
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
@@ -56,6 +58,7 @@ type Service struct {
 	buckets     bucketstore.Store
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
+	principals  principalstore.Store
 	policies    bucketpolicystore.Store
 	uploads     UploadClient
 	revocations grant.RevocationPublisher
@@ -68,6 +71,7 @@ func New(
 	buckets bucketstore.Store,
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
+	principals principalstore.Store,
 	policies bucketpolicystore.Store,
 	uploads UploadClient,
 	revocations grant.RevocationPublisher,
@@ -78,13 +82,16 @@ func New(
 		buckets:     buckets,
 		delegations: delegations,
 		accessKeys:  accessKeys,
+		principals:  principals,
 		policies:    policies,
 		uploads:     uploads,
 		revocations: revocations,
 	}
 }
 
-// Create authenticates the request, checks the s3:CreateBucket permission, creates
+// Create authenticates the request, checks the s3:CreateBucket permission
+// (which no policy grants, so a principal-bound key is refused by the
+// authorizer before this runs), creates
 // the bucket (an ephemeral bucket key signs a bucket→tenant "top" root delegation
 // and is then discarded), provisions the bucket's space with Sprue as the tenant,
 // points the space at the provider's routing policy so its writes land on the
@@ -257,8 +264,9 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	}, blocks, nil
 }
 
-// Delete authenticates the request, checks the s3:DeleteBucket permission,
-// resolves the bucket, verifies its space is empty via Sprue (acting as the
+// Delete authenticates the request, checks the s3:DeleteBucket permission
+// (which no policy grants, so a principal-bound key is refused by the
+// authorizer before this runs), resolves the bucket, verifies its space is empty via Sprue (acting as the
 // tenant), publishes revocations for the delegations over the bucket, then
 // deletes those delegations, the bucket's policy and the bucket record. The
 // policy goes without a publication: the gateway refuses a bucket it no longer
@@ -416,10 +424,16 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	return out, nil
 }
 
-// Info resolves the named bucket and returns its DID, the access key's permissions,
-// and the proof chains for the access key's delegations that reach the bucket. It
-// is a lookup: it carries no signed S3 request, so it neither authenticates a
+// Info resolves the named bucket and returns its DID, the credential's actions
+// on it, and the proof chains for the delegations that reach the bucket. It is
+// a lookup: it carries no signed S3 request, so it neither authenticates a
 // signature nor checks the invocation issuer.
+//
+// The chains run from the bucket root to the key's own grants over the bucket
+// for either kind of key. A service key carries its own permissions; a
+// principal-bound key its principal's effective actions on the bucket, whose
+// stored grants are the commands those actions map to. A bucket the principal
+// holds no action on is reported as [ErrUnknownBucket].
 func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
 	b, err := s.buckets.GetByName(ctx, args.Name)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -433,6 +447,17 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownAccessKey, args.AccessKey)
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("looking up access key: %w", err)
+	}
+	// A service key carries its own permission set; a principal-bound key its
+	// principal's effective actions on the bucket, whose stored grants over the
+	// bucket are the commands those actions map to.
+	permissions := akRec.Permissions
+	if akRec.Principal != nil {
+		eff, err := s.effectiveActions(ctx, b, akRec)
+		if err != nil {
+			return nil, nil, err
+		}
+		permissions = eff
 	}
 
 	// Build the proof chains from the bucket to the access key: for each grant to
@@ -480,8 +505,50 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 	return &s3bkt.InfoOK{
 		ID: b.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			args.AccessKey: akRec.Permissions,
+			args.AccessKey: permissions,
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil
+}
+
+// effectiveActions computes a principal-bound key's effective actions on the
+// bucket, reading the principal and the policy share-locked as the authorizer
+// does, so Info observes the same settled state: a read that meets a write in
+// flight waits for it to commit or roll back. A removed principal is an
+// unknown key, and a bucket the principal cannot reach is unknown.
+func (s *Service) effectiveActions(ctx context.Context, b bucketstore.Record, akRec accesskey.Record) ([]string, error) {
+	if akRec.Tenant != b.Tenant {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownBucket, b.Name)
+	}
+	if _, err := s.principals.Get(ctx, akRec.Tenant, *akRec.Principal, store.WithLock(store.LockShare)); err != nil {
+		if errors.Is(err, store.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
+		}
+		return nil, s.lookupError("principal", b.ID, err)
+	}
+	var doc *bucketpolicy.Policy
+	rec, err := s.policies.Get(ctx, b.ID, store.WithLock(store.LockShare))
+	switch {
+	case err == nil:
+		doc = &rec.Policy
+	case errors.Is(err, store.ErrRecordNotFound): // no policy: the principal reaches nothing
+	default:
+		return nil, s.lookupError("bucket policy", b.ID, err)
+	}
+	eff := bucketpolicy.Effective(doc, *akRec.Principal)
+	if len(eff) == 0 {
+		return nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+	}
+	return eff, nil
+}
+
+// lookupError reports a share-locked read the store gave up on as the
+// retryable failure, the way the authorizer does.
+func (s *Service) lookupError(what string, bucketID did.DID, err error) error {
+	if errors.Is(err, store.ErrLockTimeout) {
+		s.logger.Info("share-locked read waited out a write in flight",
+			zap.String("record", what), zap.Stringer("bucket", bucketID), zap.Error(err))
+		return fmt.Errorf("%w: looking up %s: %w", auth.ErrTemporarilyUnavailable, what, err)
+	}
+	return fmt.Errorf("looking up %s: %w", what, err)
 }
