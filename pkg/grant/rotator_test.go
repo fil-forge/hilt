@@ -10,6 +10,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -58,6 +59,8 @@ func (f *fakeSwarf) revoked() []cid.Cid {
 type deps struct {
 	rotator     *grant.Rotator
 	delegations *delegationmemory.Store
+	accessKeys  *accesskeymemory.Store
+	secrets     *vaultmemory.Store
 	swarf       *fakeSwarf
 	tenant      ucan.Issuer
 	// photos and backups are the tenant's buckets.
@@ -80,6 +83,8 @@ func setup(t *testing.T, expiresAt *time.Time) deps {
 
 	d := deps{
 		delegations: delegations,
+		accessKeys:  accessKeys,
+		secrets:     secrets,
 		swarf:       &fakeSwarf{},
 		tenant:      tenant,
 		photos:      randomKey(t),
@@ -99,6 +104,21 @@ func setup(t *testing.T, expiresAt *time.Time) deps {
 	d.bob = []did.DID{addKey("bob", "laptop")}
 	d.rotator = grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, d.swarf)
 	return d
+}
+
+// deleteOnReplace runs del once the audiences are locked, before the callback.
+type deleteOnReplace struct {
+	delegationstore.Store
+	del func(context.Context) error
+}
+
+func (s *deleteOnReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return s.Store.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		if err := s.del(ctx); err != nil {
+			return nil, err
+		}
+		return next(ctx, current)
+	})
 }
 
 func randomKey(t *testing.T) did.DID {
@@ -228,6 +248,19 @@ func TestRotate(t *testing.T) {
 
 		require.Empty(t, d.swarf.batches)
 		require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(d.held(t, d.bob[0], d.photos)))
+	})
+
+	t.Run("a key deleted while the rotation waited on the lock gets nothing", func(t *testing.T) {
+		d := setup(t, nil)
+		gone, kept := d.alice[0], d.alice[1]
+		// The key goes between the rotation's listing and its lock, as a
+		// concurrent removal holding the lock first would have it.
+		dels := &deleteOnReplace{Store: d.delegations, del: func(ctx context.Context) error { return d.accessKeys.Delete(ctx, gone) }}
+		rotator := grant.NewRotator(zap.NewNop(), dels, d.accessKeys, d.secrets, d.swarf)
+		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+
+		require.Empty(t, d.held(t, gone, d.photos))
+		require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(d.held(t, kept, d.photos)))
 	})
 
 	t.Run("a principal without keys is a no-op", func(t *testing.T) {

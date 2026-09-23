@@ -2,11 +2,13 @@ package grant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -90,6 +92,13 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 		var revoked []ucan.Delegation
 		next := make(map[did.DID][]ucan.Delegation, len(keys))
 		for _, key := range keys {
+			// The listing above is a snapshot: a key deleted while this waited
+			// on the lock is left with nothing rather than issued fresh grants.
+			if _, err := r.accessKeys.Get(ctx, key.ID); errors.Is(err, store.ErrRecordNotFound) {
+				continue
+			} else if err != nil {
+				return nil, fmt.Errorf("looking up key %s: %w", key.ID, err)
+			}
 			for _, d := range current[key.ID] {
 				if d.Subject() == bucket {
 					revoked = append(revoked, d)
