@@ -167,9 +167,6 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 }
 
 func (s *Store) Delete(ctx context.Context, links ...cid.Cid) error {
-	if len(links) == 0 {
-		return nil
-	}
 	ids := make([]string, 0, len(links))
 	for _, l := range links {
 		ids = append(ids, l.String())

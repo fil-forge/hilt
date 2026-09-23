@@ -196,8 +196,8 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrOperationNotPermitted
 	}
 
-	// A write-locked tenant may read but not mutate: no bucket create/delete, no
-	// object write or delete, no multipart upload.
+	// A write-locked tenant may read but not mutate: no bucket create or delete,
+	// no object write, copy or delete, no multipart upload or part.
 	if tenantRec.Status == tenant.WriteLocked && op.Mutates() {
 		log.Debug("rejecting mutating operation for write-locked tenant", zap.Stringer("operation", op))
 		return nil, ErrTenantWriteLocked

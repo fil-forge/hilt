@@ -263,9 +263,10 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 			return fmt.Errorf("revoking tenant write grants: %w", err)
 		}
 	case next == tenantstore.Active && rec.Status != tenantstore.Active:
-		// A write lock revoked the keys' write grants, and revocation is permanent,
-		// so leaving it issues replacements. It runs before the status changes: if
-		// it fails, the tenant stays locked and a retried unlock picks it up again.
+		// Returning to active reissues the write grants a write lock may have
+		// revoked, since revocation is permanent. It runs before the status
+		// changes, so if it fails the tenant keeps its current status and a retry
+		// reissues them.
 		if err := s.reissueWriteGrants(ctx, rec.ID); err != nil {
 			return fmt.Errorf("reissuing tenant write grants: %w", err)
 		}
@@ -279,20 +280,20 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	return nil
 }
 
-// isWriteGrant reports whether d is a grant the tenant issued to one of its
-// access keys for a command that changes tenant data (see [s3perm.Mutates]).
-// These are the grants a write lock revokes; the read grants stay valid.
+// isWriteGrant reports whether d, a grant the tenant issued, is for a command
+// that changes tenant data (see [s3perm.Mutates]). These are the grants a write
+// lock revokes; the read grants stay valid.
 func isWriteGrant(tenantID did.DID, d ucan.Delegation) bool {
 	return d.Issuer() == tenantID && s3perm.Mutates(d.Command())
 }
 
-// keyGrants returns the delegations issued to each of the tenant's access keys.
-func (s *Service) keyGrants(ctx context.Context, tenantID did.DID) (map[did.DID][]ucan.Delegation, error) {
+// writeGrants returns the write grants the tenant issued to its access keys.
+func (s *Service) writeGrants(ctx context.Context, tenantID did.DID) ([]ucan.Delegation, error) {
 	keys, err := s.accessKeys.ListByTenant(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing access keys: %w", err)
 	}
-	grants := make(map[did.DID][]ucan.Delegation, len(keys))
+	var grants []ucan.Delegation
 	for _, key := range keys {
 		dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
 			var listOpts []store.PaginationOption
@@ -304,7 +305,11 @@ func (s *Service) keyGrants(ctx context.Context, tenantID did.DID) (map[did.DID]
 		if err != nil {
 			return nil, fmt.Errorf("listing delegations for %s: %w", key.ID, err)
 		}
-		grants[key.ID] = dels
+		for _, d := range dels {
+			if isWriteGrant(tenantID, d) {
+				grants = append(grants, d)
+			}
+		}
 	}
 	return grants, nil
 }
@@ -314,17 +319,15 @@ func (s *Service) keyGrants(ctx context.Context, tenantID did.DID) (map[did.DID]
 // the next write must re-authorize with Hilt, where the write lock is enforced.
 // Read grants are left alone so reads keep working through the lock.
 func (s *Service) revokeWriteGrants(ctx context.Context, tenantID did.DID) error {
-	grants, err := s.keyGrants(ctx, tenantID)
+	grants, err := s.writeGrants(ctx, tenantID)
 	if err != nil {
 		return err
 	}
 	now := ucan.UnixTimestamp(time.Now().Unix())
 	var revoke []ucan.Delegation
-	for _, dels := range grants {
-		for _, d := range dels {
-			if isWriteGrant(tenantID, d) && validator.ValidateNotExpired(d, now) == nil {
-				revoke = append(revoke, d)
-			}
+	for _, d := range grants {
+		if validator.ValidateNotExpired(d, now) == nil {
+			revoke = append(revoke, d)
 		}
 	}
 	if len(revoke) == 0 {
@@ -352,37 +355,27 @@ func (s *Service) revokeWriteGrants(ctx context.Context, tenantID did.DID) error
 // replacements are stored before the old grants are deleted, so a failure part
 // way leaves both, and a retry replaces both.
 func (s *Service) reissueWriteGrants(ctx context.Context, tenantID did.DID) error {
-	grants, err := s.keyGrants(ctx, tenantID)
+	grants, err := s.writeGrants(ctx, tenantID)
+	if err != nil || len(grants) == 0 {
+		return err
+	}
+	issuer, err := s.tenantIssuer(ctx, tenantID)
 	if err != nil {
 		return err
 	}
-	var issuer ucan.Issuer
-	var replacements []ucan.Delegation
-	var replaced []cid.Cid
-	for _, dels := range grants {
-		for _, d := range dels {
-			if !isWriteGrant(tenantID, d) {
-				continue
-			}
-			if issuer == nil {
-				if issuer, err = s.tenantIssuer(ctx, tenantID); err != nil {
-					return err
-				}
-			}
-			opts := []ucandelegation.Option{ucandelegation.WithNoExpiration()}
-			if exp := d.Expiration(); exp != nil {
-				opts = []ucandelegation.Option{ucandelegation.WithExpiration(*exp)}
-			}
-			nd, err := ucandelegation.Delegate(issuer, d.Audience(), d.Subject(), d.Command(), opts...)
-			if err != nil {
-				return fmt.Errorf("reissuing %s: %w", d.Link(), err)
-			}
-			replacements = append(replacements, nd)
-			replaced = append(replaced, d.Link())
+	replacements := make([]ucan.Delegation, 0, len(grants))
+	replaced := make([]cid.Cid, 0, len(grants))
+	for _, d := range grants {
+		opts := []ucandelegation.Option{ucandelegation.WithNoExpiration()}
+		if exp := d.Expiration(); exp != nil {
+			opts = []ucandelegation.Option{ucandelegation.WithExpiration(*exp)}
 		}
-	}
-	if len(replacements) == 0 {
-		return nil
+		nd, err := ucandelegation.Delegate(issuer, d.Audience(), d.Subject(), d.Command(), opts...)
+		if err != nil {
+			return fmt.Errorf("reissuing %s: %w", d.Link(), err)
+		}
+		replacements = append(replacements, nd)
+		replaced = append(replaced, d.Link())
 	}
 	if err := s.delegations.PutBatch(ctx, replacements); err != nil {
 		return fmt.Errorf("storing reissued grants: %w", err)

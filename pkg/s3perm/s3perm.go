@@ -5,6 +5,8 @@
 package s3perm
 
 import (
+	"slices"
+
 	"github.com/fil-forge/libforge/commands/blob"
 	"github.com/fil-forge/libforge/commands/content"
 	"github.com/fil-forge/libforge/commands/index"
@@ -83,12 +85,7 @@ func Valid(p string) bool {
 // also delegated for s3:PutObject, but it only reads, so a write-locked tenant
 // keeps it.
 func Mutates(cmd ucan.Command) bool {
-	for _, c := range cmdsRetrieve {
-		if c.String() == cmd.String() {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(cmdsRetrieve, func(c ucan.Command) bool { return c.String() == cmd.String() })
 }
 
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the
