@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,13 +47,17 @@ func (noopRevocations) PublishBatch(context.Context, ucan.Issuer, []ucan.Delegat
 var errAssertPublishFailed = errors.New("swarf unreachable")
 
 // recordingRevocations stands in for the revocation service, recording the
-// delegations it was asked to revoke.
+// delegations it was asked to revoke. A policy write publishes its batch
+// concurrently, so the record is guarded.
 type recordingRevocations struct {
+	mu      sync.Mutex
 	err     error
 	revoked []cid.Cid
 }
 
 func (r *recordingRevocations) PublishBatch(_ context.Context, _ ucan.Issuer, revoked []ucan.Delegation) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.err != nil {
 		return r.err
 	}

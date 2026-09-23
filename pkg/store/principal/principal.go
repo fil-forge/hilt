@@ -44,17 +44,18 @@ type Store interface {
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
 	ListByTenant(ctx context.Context, tenant did.DID) ([]Record, error)
-	// Delete removes a principal by marking its row deleted. It locks the row
-	// for the whole call, runs beforeCommit (nil allowed) while holding the
-	// lock, then marks the row and commits. An error from beforeCommit is
-	// returned and leaves the principal live. It is idempotent: when no live
-	// row exists it returns nil without running beforeCommit. On Postgres the
-	// wait for the row lock is bounded at [store.LockTimeout] and returns
-	// [store.ErrLockTimeout], which the caller retries.
+	// Delete removes a principal by marking its row deleted. It excludes
+	// concurrent removals and revives of the same row for the whole call, runs
+	// beforeCommit (nil allowed), then marks the row and commits. An error from
+	// beforeCommit is returned and leaves the principal live. It is idempotent:
+	// when no live row exists it returns nil without running beforeCommit. On
+	// Postgres the wait for the row lock is bounded at [store.LockTimeout] and
+	// returns [store.ErrLockTimeout], which the caller retries.
 	//
-	// beforeCommit must not read or write this store: on the memory backend it
-	// runs under the store mutex, and on Postgres a locked read of the same row
-	// would wait on the lock the call itself holds.
+	// beforeCommit must not read or write this store: a share-locked read or a
+	// write of the same row waits on the lock the call itself holds. It may
+	// write other stores, including ones whose own writes read this one: no
+	// lock on this store's records is held while it runs.
 	Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error
 	// Lock holds the tenant's live principals with the given external IDs
 	// against concurrent removals, revives and share-locked reads while fn runs,
