@@ -44,6 +44,8 @@ type Store interface {
 	// next rolls everything back and is returned. An audience holding nothing
 	// is handed a nil set, so Replace also stores a first delegation. next runs
 	// while the audiences are locked and must not call back into the store. It
-	// returns [store.ErrInvalidArgument] if next returns a nil delegation.
+	// returns [store.ErrInvalidArgument] if next returns a nil delegation. The
+	// lock wait is bounded at [store.LockTimeout] and returns
+	// [store.ErrLockTimeout] when it runs out.
 	Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
 }
