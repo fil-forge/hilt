@@ -60,8 +60,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/sigv4` — stdlib-only SigV4 / SigV4a verification, key derivation
   (`DeriveKey`), and local verification (`VerifyWithKey`).
 - `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider}` — each an interface
-  with `memory` and `postgres` backends.
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,wrapkey,exportsession}` —
+  each an interface with `memory` and `postgres` backends.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
 - `pkg/client` — clients for external services (the Sprue `UploadClient`).

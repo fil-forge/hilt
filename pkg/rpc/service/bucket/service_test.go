@@ -16,6 +16,8 @@ import (
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	exportsessionmemory "github.com/fil-forge/hilt/pkg/store/exportsession/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -120,7 +122,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue, &fakeSwarf{}), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, exportsessionmemory.New(), sprue, &fakeSwarf{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -257,6 +259,7 @@ type deleteDeps struct {
 	svc         *bucketsvc.Service
 	buckets     *bucketmemory.Store
 	delegations *delegationmemory.Store
+	exports     *exportsessionmemory.Store
 	swarf       *fakeSwarf
 	bucketID    did.DID
 	root        ucan.Delegation // bucket→tenant, signed by the bucket's discarded key
@@ -304,10 +307,12 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 		swarf := &fakeSwarf{}
+		exports := exportsessionmemory.New()
 		return deleteDeps{
-			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue, swarf),
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, exports, sprue, swarf),
 			buckets:     buckets,
 			delegations: delegations,
+			exports:     exports,
 			swarf:       swarf,
 			bucketID:    bucketID,
 			root:        root,
@@ -404,6 +409,26 @@ func TestDelete(t *testing.T) {
 		require.Empty(t, d.swarf.revocations, "nothing is revoked when the delete is refused")
 	})
 
+	t.Run("refuses while an export is open and keeps the bucket", func(t *testing.T) {
+		sprue := &fakeSprue{empty: true}
+		d := setup(t, []string{"s3:DeleteBucket"}, sprue)
+		require.NoError(t, d.exports.Add(ctx, exportsession.Input{
+			ID: "session-1", Tenant: tenantID, Bucket: d.bucketID,
+			CustomerKey: "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc", ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+		require.ErrorIs(t, err, bucketsvc.ErrExportInProgress)
+		require.False(t, sprue.emptyCalled, "refused before touching the space")
+		require.Empty(t, d.swarf.revocations)
+		_, err = d.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err)
+
+		require.NoError(t, d.exports.Transition(ctx, "session-1", exportsession.Opened, exportsession.Aborted))
+		_, err = d.svc.Delete(ctx, providerID, del(bucketName))
+		require.NoError(t, err)
+	})
+
 	t.Run("propagates a SpaceEmpty error", func(t *testing.T) {
 		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{emptyErr: errors.New("sprue unavailable")})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
@@ -430,7 +455,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, exportsessionmemory.New(), &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -542,7 +567,7 @@ func TestInfo(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		// Info does not use the authorizer; a minimal one over empty stores suffices.
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{})
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, exportsessionmemory.New(), &fakeSprue{}, &fakeSwarf{})
 	}
 
 	t.Run("returns the bucket, permissions, and delegation chain", func(t *testing.T) {

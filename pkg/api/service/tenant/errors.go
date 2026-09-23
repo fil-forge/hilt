@@ -13,6 +13,7 @@ const (
 	DIDRegistrationErrorName    = "DIDRegistration"
 	UploadRegistrationErrorName = "UploadRegistration"
 	DIDDeactivationErrorName    = "DIDDeactivation"
+	ExportInProgressErrorName   = "ExportInProgress"
 )
 
 // Known errors returned by the tenant [Service]. Handlers map these to HTTP
@@ -37,4 +38,7 @@ var (
 	ErrUploadRegistration = errors.New(UploadRegistrationErrorName, "failed to register tenant with upload service")
 	// ErrDIDDeactivation is returned when deactivating the tenant's did:plc fails.
 	ErrDIDDeactivation = errors.New(DIDDeactivationErrorName, "failed to deactivate tenant DID")
+	// ErrExportInProgress is returned when deleting a tenant that has an open
+	// export session.
+	ErrExportInProgress = errors.New(ExportInProgressErrorName, "tenant has an export in progress")
 )
