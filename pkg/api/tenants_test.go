@@ -20,8 +20,6 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	"github.com/fil-forge/hilt/pkg/store/provider"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
@@ -87,7 +85,7 @@ type addFailTenantStore struct {
 	err error
 }
 
-func (s addFailTenantStore) Add(context.Context, did.DID, string, did.DID, tenant.Status) error {
+func (s addFailTenantStore) Add(context.Context, did.DID, string, tenant.Status) error {
 	return s.err
 }
 
@@ -128,8 +126,8 @@ type loseRaceTenantStore struct {
 	winnerID did.DID
 }
 
-func (s *loseRaceTenantStore) Add(ctx context.Context, _ did.DID, externalID string, provider did.DID, status tenant.Status) error {
-	if err := s.Store.Add(ctx, s.winnerID, externalID, provider, status); err != nil {
+func (s *loseRaceTenantStore) Add(ctx context.Context, _ did.DID, externalID string, status tenant.Status) error {
+	if err := s.Store.Add(ctx, s.winnerID, externalID, status); err != nil {
 		return err
 	}
 	return store.ErrRecordExists
@@ -142,12 +140,11 @@ type setupConfig struct {
 }
 
 type provisionDeps struct {
-	tenants   tenant.Store
-	providers provider.Store
-	wrapKeys  wrapkeystore.Store
-	secrets   *spyVault
-	plcPosts  int
-	lastOp    []byte // body of the most recent op POSTed to the fake PLC directory
+	tenants  tenant.Store
+	wrapKeys wrapkeystore.Store
+	secrets  *spyVault
+	plcPosts int
+	lastOp   []byte // body of the most recent op POSTed to the fake PLC directory
 
 	// Sprue (upload service) stub state.
 	product      did.DID
@@ -175,11 +172,10 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 		wrapKeys = wrapkeymemory.New()
 	}
 	deps := &provisionDeps{
-		tenants:   tenants,
-		providers: providermemory.New(),
-		wrapKeys:  wrapKeys,
-		secrets:   newSpyVault(),
-		product:   testutil.RandomDID(t),
+		tenants:  tenants,
+		wrapKeys: wrapKeys,
+		secrets:  newSpyVault(),
+		product:  testutil.RandomDID(t),
 	}
 
 	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,19 +223,17 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.providers, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, plcClient, upload)
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, plcClient, upload)
 	route := api.NewProvisionTenantHandler(zap.NewNop(), svc)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
 	return e, deps
 }
 
-func provisionRequest(t *testing.T, e *echo.Echo, tenantID string, body api.ProvisionTenantRequest) *httptest.ResponseRecorder {
+// provisionRequest issues PUT /tenants/{tenantID}, which takes no body.
+func provisionRequest(t *testing.T, e *echo.Echo, tenantID string) *httptest.ResponseRecorder {
 	t.Helper()
-	encoded, err := json.Marshal(body)
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPut, "/tenants/"+tenantID, bytes.NewReader(encoded))
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req := httptest.NewRequest(http.MethodPut, "/tenants/"+tenantID, nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	return rec
@@ -260,9 +254,8 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("provisions a new tenant", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 
-		rec := provisionRequest(t, e, "tenant-1", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-1")
 		require.Equal(t, http.StatusCreated, rec.Code)
 		require.Contains(t, rec.Body.String(), `"tenantId":"tenant-1"`)
 
@@ -285,7 +278,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.NotNil(t, deps.lastAddArgs)
 		require.Equal(t, stored.ID, deps.lastAddArgs.Customer)
 		require.Equal(t, deps.product, deps.lastAddArgs.Product)
-		require.Equal(t, map[string]string{"external_id": "tenant-1", "region": "us-east-1"}, deps.lastAddArgs.Details)
+		require.Equal(t, map[string]string{"external_id": "tenant-1"}, deps.lastAddArgs.Details)
 
 		// An active wrap key (version 1) was registered, keyed by its fingerprint
 		// (the multicodec-tagged public key), not a DID URL.
@@ -320,14 +313,13 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("is idempotent on the external id", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 
-		first := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
+		first := provisionRequest(t, e, "tenant-2")
 		require.Equal(t, http.StatusCreated, first.Code)
 		stored, err := deps.tenants.GetByExternalID(ctx, "tenant-2")
 		require.NoError(t, err)
 
-		second := provisionRequest(t, e, "tenant-2", api.ProvisionTenantRequest{Region: "us-east-1"})
+		second := provisionRequest(t, e, "tenant-2")
 		require.Equal(t, http.StatusOK, second.Code)
 
 		// No new key minted/published, and no re-registration, on the idempotent call.
@@ -340,10 +332,9 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("upload service failure aborts provisioning", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 		deps.sprueFailure = true
 
-		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-6")
 		require.Equal(t, http.StatusBadGateway, rec.Code)
 
 		// Registration was attempted but no tenant record was written, so the
@@ -353,25 +344,23 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
-	t.Run("unknown region is rejected", func(t *testing.T) {
-		e, _ := setupProvision(t, nil)
-		rec := provisionRequest(t, e, "tenant-3", api.ProvisionTenantRequest{Region: "nowhere"})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
-		require.Equal(t, api.Error{Code: "UnknownRegion", Message: "unknown region"}, decodeError(t, rec))
-	})
-
-	t.Run("missing region is rejected", func(t *testing.T) {
-		e, _ := setupProvision(t, nil)
-		rec := provisionRequest(t, e, "tenant-5", api.ProvisionTenantRequest{})
-		require.Equal(t, http.StatusBadRequest, rec.Code)
-		require.Equal(t, api.Error{Code: "RegionRequired", Message: "region is required"}, decodeError(t, rec))
+	t.Run("ignores a request body", func(t *testing.T) {
+		// The tenant API once took {"region": ...}; a tenant is region-free now,
+		// and a client still sending a body is served rather than rejected.
+		e, deps := setupProvision(t, nil)
+		req := httptest.NewRequest(http.MethodPut, "/tenants/tenant-3", bytes.NewReader([]byte(`{"region":"us-east-1"}`)))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+		_, err := deps.tenants.GetByExternalID(ctx, "tenant-3")
+		require.NoError(t, err)
 	})
 
 	t.Run("cleans up the orphaned key when PLC publication fails", func(t *testing.T) {
 		e, deps := setupProvision(t, &setupConfig{plcStatus: http.StatusInternalServerError})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 
-		rec := provisionRequest(t, e, "tenant-6", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-6")
 		require.Equal(t, http.StatusBadGateway, rec.Code)
 
 		// A key was written then cleaned up, and no tenant was recorded.
@@ -385,8 +374,7 @@ func TestProvisionTenantHandler(t *testing.T) {
 		tenants := addFailTenantStore{Store: tenantmemory.New(), err: errors.New("boom")}
 
 		e, deps := setupProvision(t, &setupConfig{tenants: tenants})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
-		rec := provisionRequest(t, e, "tenant-7", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-7")
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 		// An unexpected failure stays opaque: a message, no code, no cause.
 		require.JSONEq(t, `{"message":"internal error"}`, rec.Body.String())
@@ -399,9 +387,8 @@ func TestProvisionTenantHandler(t *testing.T) {
 	t.Run("cleans up both vault keys when storing the wrap key record fails", func(t *testing.T) {
 		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New(), addErr: errors.New("boom")}
 		e, deps := setupProvision(t, &setupConfig{wrapKeys: wrapKeys})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 
-		rec := provisionRequest(t, e, "tenant-8", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-8")
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 		// Both the signing and wrap vault keys were written, then unwound.
@@ -418,9 +405,8 @@ func TestProvisionTenantHandler(t *testing.T) {
 			tenants:  &loseRaceTenantStore{Store: tenantmemory.New(), winnerID: winnerID},
 			wrapKeys: wrapKeys,
 		})
-		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
 
-		rec := provisionRequest(t, e, "tenant-9", api.ProvisionTenantRequest{Region: "us-east-1"})
+		rec := provisionRequest(t, e, "tenant-9")
 
 		// The loser reports the winner's (already-committed) tenant, not an error.
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -467,8 +453,8 @@ func doRequest(t *testing.T, e *echo.Echo, method, target string, body []byte) *
 func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
+	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", tenant.Active))
+	svc := tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -489,8 +475,8 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	id := testutil.RandomDID(t)
-	require.NoError(t, tenants.Add(ctx, id, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
+	require.NoError(t, tenants.Add(ctx, id, "tenant-1", tenant.Active))
+	svc := tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(), accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil)
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), svc))
 
 	statusBody := func(s api.TenantStatus) []byte {
@@ -621,7 +607,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		genesis:     genesis,
 		tenantID:    tenantID,
 	}
-	require.NoError(t, deps.tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), status))
+	require.NoError(t, deps.tenants.Add(ctx, tenantID, "tenant-1", status))
 	require.NoError(t, deps.secrets.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 	// Every provisioned tenant has an active wrap key; seed a real keypair —
 	// sealed exactly as provisioning would — so deletion has wrap-key state to
@@ -636,7 +622,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, providermemory.New(), deps.buckets, deps.accessKeys, deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil)
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.buckets, deps.accessKeys, deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil)
 	route := api.NewDeleteTenantHandler(zap.NewNop(), svc)
 	return serve(route), deps
 }
@@ -658,7 +644,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		// Seed owned resources: a bucket, an access key (+ vault key), and
 		// delegations addressed to the tenant and to the access key.
 		bucketID := testutil.RandomDID(t)
-		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, "bucket-1"))
+		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, testutil.RandomDID(t), "bucket-1"))
 		akID := testutil.RandomDID(t)
 		require.NoError(t, deps.accessKeys.Add(ctx, akID, deps.tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()

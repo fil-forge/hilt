@@ -75,38 +75,49 @@ func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, regio
 
 func TestAuthorize(t *testing.T) {
 	ctx := t.Context()
-	const region = "us-west-2"
+	// providerID serves region; provider2ID serves region2. A tenant is
+	// region-free, so this one owns buckets in both.
+	const region, region2 = "us-west-2", "eu-west-1"
 
 	accessKey, err := ed25519.GenerateIssuer()
 	require.NoError(t, err)
 
-	// providerID is both the tenant's provider and the only legitimate invocation
-	// issuer.
-	providerID := testutil.RandomDID(t)
-	// The tenant's two buckets, and a bucket of some other tenant.
-	bucketID, bucket2ID, theirsID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	providerID, provider2ID := testutil.RandomDID(t), testutil.RandomDID(t)
+	// The tenant's two buckets in region, one in region2, and a bucket of some
+	// other tenant.
+	bucketID, bucket2ID, region2BucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	theirsID := testutil.RandomDID(t)
 
-	// setup wires the stores + vault for a tenant whose provider serves the signing
-	// region and that owns this access key, returning the Authorizer built from
-	// them (plus the provider handle and tenant DID subtests still use).
+	// setup wires the stores + vault for the fixture every subtest shares:
+	//
+	//	providerID  serves region  and holds "bucket" (bucketID) and "bucket2"
+	//	                           (bucket2ID), plus another tenant's "theirs"
+	//	provider2ID serves region2 and holds "bucket-in-region2" (region2BucketID)
+	//
+	// One tenant owns this access key and all three of its buckets. A tenant is
+	// region-free, so its buckets may live with either provider. The key may use
+	// any of them unless setupConfig scopes it. setup returns the Authorizer built
+	// from the stores, plus the provider handle and tenant DID subtests still use.
 	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID) {
 		t.Helper()
 		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
+		require.NoError(t, providers.Add(ctx, provider2ID, region2, nil))
 		tenantID := testutil.RandomDID(t)
 		tenantStatus := tenant.Active
 		if setupConfig != nil && setupConfig.tenantStatus != "" {
 			tenantStatus = setupConfig.tenantStatus
 		}
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenantStatus))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenantStatus))
 		// The bucket the happy-path request addresses (GET /bucket/object-key), a
 		// second bucket of the same tenant (copy destination), and another tenant's.
-		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
-		require.NoError(t, buckets.Add(ctx, bucket2ID, tenantID, "bucket2"))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "bucket"))
+		require.NoError(t, buckets.Add(ctx, bucket2ID, tenantID, providerID, "bucket2"))
+		require.NoError(t, buckets.Add(ctx, region2BucketID, tenantID, provider2ID, "bucket-in-region2"))
 		otherTenant := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", providerID, tenant.Active))
-		require.NoError(t, buckets.Add(ctx, theirsID, otherTenant, "theirs"))
+		require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
+		require.NoError(t, buckets.Add(ctx, theirsID, otherTenant, providerID, "theirs"))
 		var accessKeyExpires *time.Time
 		var accessKeyBuckets []did.DID
 		permissions := []string{"s3:GetObject"}
@@ -128,6 +139,7 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, accessKey.DID(), authz.AccessKey.ID)
 		require.Equal(t, tenantID, authz.Tenant.ID)
+		require.Equal(t, providerID, authz.Provider.ID)
 		require.Equal(t, region, authz.Region)
 		require.Equal(t, auth.OpGetObject, authz.Operation) // GET /bucket/object-key
 		require.NotNil(t, authz.Bucket)
@@ -154,6 +166,40 @@ func TestAuthorize(t *testing.T) {
 		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "theirs", region))
 		require.ErrorIs(t, err, auth.ErrForeignBucket)
 		require.NotErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("authorizes a bucket in a second region through that region's provider", func(t *testing.T) {
+		// Same tenant, same access key: setup gave "bucket-in-region2" to
+		// provider2ID, and the request is signed for region2 and invoked by
+		// provider2ID.
+		az, _, tenantID := setup(t, accessKey, nil)
+		authz, err := az.Authorize(ctx, provider2ID, signedObjectRequest(t, accessKey, "bucket-in-region2", region2))
+		require.NoError(t, err)
+		require.Equal(t, tenantID, authz.Tenant.ID)
+		require.Equal(t, provider2ID, authz.Provider.ID)
+		require.Equal(t, region2, authz.Region)
+		require.Equal(t, region2BucketID, authz.Bucket.ID)
+	})
+
+	t.Run("rejects a bucket served by another region", func(t *testing.T) {
+		// "bucket-in-region2" is the tenant's, but setup gave it to provider2ID in
+		// region2; this request is signed for region and reaches providerID, which
+		// does not hold the bucket.
+		az, _, _ := setup(t, accessKey, nil)
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket-in-region2", region))
+		var mismatch *auth.BucketRegionMismatchError
+		require.ErrorAs(t, err, &mismatch)
+		require.Equal(t, region2, mismatch.Expected)
+		require.Equal(t, region, mismatch.Actual)
+	})
+
+	t.Run("checks the key's bucket scope before the bucket's region", func(t *testing.T) {
+		// The key is scoped to bucketID ("bucket", in region) alone, so addressing
+		// the tenant's other bucket is refused for scope: the caller learns nothing
+		// about the region that bucket lives in.
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyBuckets: []did.DID{bucketID}})
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket-in-region2", region))
+		require.ErrorIs(t, err, auth.ErrBucketNotPermitted)
 	})
 
 	copyPerms := &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject"}}
@@ -197,6 +243,16 @@ func TestAuthorize(t *testing.T) {
 		az, _, _ := setup(t, accessKey, copyPerms)
 		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "theirs", region, true))
 		require.ErrorIs(t, err, auth.ErrForeignBucket)
+	})
+
+	t.Run("rejects a copy whose source is served by another region", func(t *testing.T) {
+		// The destination "bucket2" is providerID's, the source is provider2ID's.
+		az, _, _ := setup(t, accessKey, copyPerms)
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket-in-region2", region, true))
+		var mismatch *auth.BucketRegionMismatchError
+		require.ErrorAs(t, err, &mismatch)
+		require.Equal(t, region2, mismatch.Expected)
+		require.Equal(t, region, mismatch.Actual)
 	})
 
 	t.Run("rejects a copy from a missing bucket", func(t *testing.T) {
@@ -243,7 +299,7 @@ func TestAuthorize(t *testing.T) {
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), other.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
@@ -271,7 +327,7 @@ func TestAuthorize(t *testing.T) {
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
 
@@ -279,18 +335,17 @@ func TestAuthorize(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("rejects a region the tenant's provider does not serve", func(t *testing.T) {
-		az, providers, _ := setup(t, accessKey, nil)
-		// A provider exists in eu-west-1, but it isn't the tenant's provider.
-		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
-		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "eu-west-1", time.Now(), time.Hour))
-		require.ErrorIs(t, err, auth.ErrRegionNotServed)
+	t.Run("rejects a request signed for a region another provider serves", func(t *testing.T) {
+		// setup gave region2 to provider2ID, so providerID may not act on a request
+		// signed for it, even though the tenant has a bucket there.
+		az, _, _ := setup(t, accessKey, nil)
+		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region2, time.Now(), time.Hour))
+		require.ErrorIs(t, err, auth.ErrIssuerForbidden)
 	})
 
 	t.Run("rejects a region no provider serves", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, nil)
-		// No provider is registered for eu-west-1, so validateRegion skips it.
-		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "eu-west-1", time.Now(), time.Hour))
+		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "ap-south-1", time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrRegionNotServed)
 	})
 
@@ -301,14 +356,14 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrSignatureExpired)
 	})
 
-	t.Run("rejects an invocation not from the tenant's provider", func(t *testing.T) {
+	t.Run("rejects an invocation not from the provider serving the request region", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, nil)
 		_, err := az.Authorize(ctx, testutil.RandomDID(t), signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrIssuerForbidden)
 	})
 
 	t.Run("rejects an expired access key", func(t *testing.T) {
-		// A freshly-signed request from the tenant's provider must still be rejected
+		// A freshly-signed request from the region's provider must still be rejected
 		// when the access key itself has expired (so expiry is the only variable).
 		past := time.Now().Add(-time.Hour)
 		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyExpires: &past})
@@ -317,7 +372,7 @@ func TestAuthorize(t *testing.T) {
 	})
 
 	t.Run("rejects a disabled tenant", func(t *testing.T) {
-		// A freshly-signed request from the tenant's provider must be rejected when
+		// A freshly-signed request from the region's provider must be rejected when
 		// the tenant is disabled (so disabled status is the only variable).
 		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.Disabled})
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))

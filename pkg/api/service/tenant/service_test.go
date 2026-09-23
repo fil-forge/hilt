@@ -15,7 +15,6 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	wrapkeysmemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
@@ -35,7 +34,6 @@ import (
 
 type provisionEnv struct {
 	svc         *tenantsvc.Service
-	providers   *providermemory.Store
 	sprueFailed *bool
 }
 
@@ -44,7 +42,6 @@ type provisionEnv struct {
 // *sprueFailed is set.
 func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	t.Helper()
-	providers := providermemory.New()
 
 	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
@@ -82,9 +79,9 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
+	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), bucketmemory.New(),
 		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
-	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
+	return provisionEnv{svc: svc, sprueFailed: sprueFailed}
 }
 
 func TestProvision(t *testing.T) {
@@ -92,8 +89,7 @@ func TestProvision(t *testing.T) {
 
 	t.Run("provisions a new tenant", func(t *testing.T) {
 		env := provisionSetup(t, 0)
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
-		rec, created, err := env.svc.Provision(ctx, "tenant-1", "us-east-1")
+		rec, created, err := env.svc.Provision(ctx, "tenant-1")
 		require.NoError(t, err)
 		require.True(t, created)
 		require.Equal(t, "tenant-1", rec.ExternalID)
@@ -102,40 +98,25 @@ func TestProvision(t *testing.T) {
 
 	t.Run("is idempotent on the external id", func(t *testing.T) {
 		env := provisionSetup(t, 0)
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
-		first, created, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
+		first, created, err := env.svc.Provision(ctx, "tenant-2")
 		require.NoError(t, err)
 		require.True(t, created)
-		again, created, err := env.svc.Provision(ctx, "tenant-2", "us-east-1")
+		again, created, err := env.svc.Provision(ctx, "tenant-2")
 		require.NoError(t, err)
 		require.False(t, created)
 		require.Equal(t, first.ID, again.ID)
 	})
 
-	t.Run("rejects a missing region", func(t *testing.T) {
-		env := provisionSetup(t, 0)
-		_, _, err := env.svc.Provision(ctx, "tenant-3", "")
-		require.ErrorIs(t, err, tenantsvc.ErrRegionRequired)
-	})
-
-	t.Run("rejects an unknown region", func(t *testing.T) {
-		env := provisionSetup(t, 0)
-		_, _, err := env.svc.Provision(ctx, "tenant-3", "nowhere")
-		require.ErrorIs(t, err, tenantsvc.ErrUnknownRegion)
-	})
-
 	t.Run("maps a PLC failure to ErrDIDRegistration", func(t *testing.T) {
 		env := provisionSetup(t, http.StatusInternalServerError)
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
-		_, _, err := env.svc.Provision(ctx, "tenant-4", "us-east-1")
+		_, _, err := env.svc.Provision(ctx, "tenant-4")
 		require.ErrorIs(t, err, tenantsvc.ErrDIDRegistration)
 	})
 
 	t.Run("maps an upload failure to ErrUploadRegistration", func(t *testing.T) {
 		env := provisionSetup(t, 0)
 		*env.sprueFailed = true
-		require.NoError(t, env.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
-		_, _, err := env.svc.Provision(ctx, "tenant-5", "us-east-1")
+		_, _, err := env.svc.Provision(ctx, "tenant-5")
 		require.ErrorIs(t, err, tenantsvc.ErrUploadRegistration)
 	})
 }
@@ -143,7 +124,7 @@ func TestProvision(t *testing.T) {
 // simpleService builds a service with the given tenant store and no PLC/upload
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
-	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
+	return tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(),
 		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
 }
 
@@ -152,7 +133,7 @@ func TestGetAndSetStatus(t *testing.T) {
 
 	newWithTenant := func(t *testing.T) (*tenantsvc.Service, tenant.Store) {
 		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
+		require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", tenant.Active))
 		return simpleService(tenants), tenants
 	}
 
@@ -245,10 +226,10 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	tenants := tenantmemory.New()
 	secrets := vaultmemory.New()
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), status))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", status))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
+	svc := tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(),
 		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
 	return deleteEnv{svc: svc, tenants: tenants, directory: directory}
 }

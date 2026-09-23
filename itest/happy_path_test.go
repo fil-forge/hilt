@@ -25,7 +25,7 @@ func testHappyPath(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
 	const tenantID = "tenant-happy"
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 
 	ak, err := net.console.CreateAccessKey(ctx, tenantID, "key-1",

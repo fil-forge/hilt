@@ -34,6 +34,9 @@ type Record struct {
 	ID did.DID
 	// Tenant the bucket belongs to.
 	Tenant did.DID
+	// Provider that serves the bucket: the regional Ingot whose storage nodes
+	// hold its data and the only issuer allowed to act on it.
+	Provider did.DID
 	// Human readable name of the bucket.
 	Name string
 	// When the bucket record was created.
@@ -89,9 +92,10 @@ func WithCursor(cursor string) ListOption {
 
 type Store interface {
 	// Add creates a new bucket record. It returns [store.ErrInvalidArgument] if
-	// the ID or tenant is undef or the name is not valid (see [ValidateName]),
-	// and [store.ErrRecordExists] if a record with the same ID already exists.
-	Add(ctx context.Context, id did.DID, tenant did.DID, name string) error
+	// the ID, tenant or provider is undef or the name is not valid (see
+	// [ValidateName]), and [store.ErrRecordExists] if a record with the same ID
+	// or name already exists.
+	Add(ctx context.Context, id did.DID, tenant did.DID, provider did.DID, name string) error
 	// GetByName retrieves the bucket record for a given name. It returns
 	// [store.ErrRecordNotFound] if no bucket exists with the specified name.
 	GetByName(ctx context.Context, name string) (Record, error)

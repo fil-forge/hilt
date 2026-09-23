@@ -62,10 +62,10 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 		plc.WithVerificationMethods(map[string]did.DID{"hilt": key}),
 	)
 	require.NoError(t, err)
-	require.NoError(t, deps.tenants.Add(ctx, tenantID, externalID, testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, deps.tenants.Add(ctx, tenantID, externalID, tenant.Active))
 	require.NoError(t, deps.vault.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 	bucketID := testutil.RandomDID(t)
-	require.NoError(t, deps.buckets.Add(ctx, bucketID, tenantID, bucketName))
+	require.NoError(t, deps.buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), bucketName))
 	return tenantID, bucketID
 }
 

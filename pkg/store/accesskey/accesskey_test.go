@@ -11,7 +11,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
-	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
@@ -29,8 +28,8 @@ const (
 
 var storeKinds = []StoreKind{Memory, Postgres}
 
-// seedFunc ensures the parent tenant (and its provider) exist so the
-// access_key.tenant_id foreign key is satisfied. It is a no-op for the memory
+// seedFunc ensures the parent tenant exists so the access_key.tenant_id
+// foreign key is satisfied. It is a no-op for the memory
 // store, which does not enforce referential integrity.
 type seedFunc func(t *testing.T, tenantID did.DID)
 
@@ -40,12 +39,9 @@ func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seedFunc) {
 		return accesskeymemory.New(), func(*testing.T, did.DID) {}
 	case Postgres:
 		pool := createPostgresPool(t)
-		providers := providerpostgres.New(pool)
 		tenants := tenantpostgres.New(pool)
 		seed := func(t *testing.T, tenantID did.DID) {
-			providerID := testutil.RandomDID(t)
-			require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
-			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 		}
 		return accesskeypostgres.New(pool), seed
 	}
