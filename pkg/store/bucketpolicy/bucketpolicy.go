@@ -7,7 +7,7 @@
 // The Postgres backend runs it inside the write's transaction, after taking a
 // bucket-keyed advisory lock (and the row lock, when a row exists) and before
 // committing, so a caller can publish an invalidation with the guarantee that
-// a share-locked read of the bucket (see [store.WithLock]) waits for the
+// a share-locked read of the bucket (see [store.LockShare]) waits for the
 // outcome, whether the write creates, replaces or deletes the policy. A
 // callback error rolls the write back. The memory backend runs the callback
 // under the store mutex.
@@ -15,6 +15,7 @@ package bucketpolicy
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -52,11 +53,11 @@ type Input struct {
 // Store persists bucket policies.
 type Store interface {
 	// Get returns the bucket's policy. It returns [store.ErrRecordNotFound] if
-	// the bucket has none. With [store.WithLock]([store.LockShare]) the read
-	// waits for an in-flight write of the same bucket's policy, a create
-	// included, to commit or roll back; on Postgres the wait is bounded and
-	// an error is returned when it runs out.
-	Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (Record, error)
+	// the bucket has none. With [store.LockShare] the read waits for an
+	// in-flight write of the same bucket's policy, a create included, to
+	// commit or roll back; on Postgres the wait is bounded and an error is
+	// returned when it runs out.
+	Get(ctx context.Context, bucket did.DID, locks ...store.LockMode) (Record, error)
 	// Put creates or replaces the bucket's policy in one transaction: it locks
 	// the current row, checks in.IfMatch against it, runs beforeCommit (nil
 	// allowed) with the current record (nil when creating), writes the row and
@@ -85,13 +86,27 @@ type Store interface {
 	DeleteByBucket(ctx context.Context, bucket did.DID) error
 	// ListByPrincipal returns the tenant's policies whose statements name
 	// principal, including those naming every principal with the wildcard,
-	// ordered by bucket. It is answered from the index. With
-	// [store.WithLock]([store.LockShare]) the read waits for in-flight writes of
-	// the listed rows.
+	// ordered by bucket. It is answered from the index. With [store.LockShare]
+	// the read waits for in-flight writes of the listed rows.
 	//
 	// Deleting a principal removes its index rows on Postgres by cascade but
 	// not on the memory backend, and neither backend rewrites the policies.
 	// Principal removal must strip the principal from each listed policy
 	// itself and must not rely on the cascade.
-	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]Record, error)
+	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]Record, error)
+}
+
+// CheckPrecondition applies the If-Match / If-None-Match rule of [Store.Put]:
+// a nil ifMatch requires no current policy; a non-nil one must equal the
+// current ETag.
+func CheckPrecondition(old *Record, ifMatch *string) error {
+	switch {
+	case ifMatch == nil && old != nil:
+		return fmt.Errorf("policy already exists with ETag %s: %w", old.ETag, store.ErrPreconditionFailed)
+	case ifMatch != nil && old == nil:
+		return fmt.Errorf("bucket has no policy: %w", store.ErrPreconditionFailed)
+	case ifMatch != nil && old.ETag != *ifMatch:
+		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
+	}
+	return nil
 }

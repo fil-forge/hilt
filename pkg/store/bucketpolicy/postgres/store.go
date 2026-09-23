@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -36,10 +37,9 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 const selectColumns = `SELECT bucket_id, document, etag, updated_at FROM bucket_policy`
 
 // lockNamespace is the first of the two 32-bit keys of the advisory lock this
-// store takes per bucket (see [advisoryLock]). Postgres identifies an advisory
-// lock by its key pair and nothing else, so the fixed first key keeps this
-// store's locks apart from any other advisory lock taken on the same database
-// by this process or anything else; the second key is hashtext(bucket DID).
+// store takes per bucket with [pglock.Advisory]; the second is the bucket DID.
+// A writer holds it, exclusive, across its row lock, precondition check,
+// beforeCommit callback and writes; a share-locked reader takes it shared.
 //
 // The lock exists because a row lock cannot cover a create: there is no row
 // to lock until the INSERT commits, and an uncommitted INSERT is invisible to
@@ -57,9 +57,9 @@ const shareLockTimeout = "10s"
 // Put or Delete until it commits or rolls back) and then reads the row FOR
 // SHARE, so it is answered from the settled state; if the wait exceeds
 // [shareLockTimeout] an error is returned.
-func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (bucketpolicystore.Record, error) {
+func (s *Store) Get(ctx context.Context, bucket did.DID, locks ...store.LockMode) (bucketpolicystore.Record, error) {
 	query := selectColumns + ` WHERE bucket_id = $1`
-	if store.NewReadConfig(opts...).Lock != store.LockShare {
+	if !slices.Contains(locks, store.LockShare) {
 		rec, err := scanRecord(s.pool.QueryRow(ctx, query, bucket.String()))
 		return getResult(rec, err)
 	}
@@ -72,7 +72,7 @@ func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOptio
 	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+shareLockTimeout+`'`); err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("setting lock timeout: %w", err)
 	}
-	if err := advisoryLock(ctx, tx, bucket, true); err != nil {
+	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), true); err != nil {
 		return bucketpolicystore.Record{}, err
 	}
 	rec, err := scanRecord(tx.QueryRow(ctx, fmt.Sprintf(`%s FOR SHARE`, query), bucket.String()))
@@ -87,18 +87,6 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 		return bucketpolicystore.Record{}, fmt.Errorf("getting policy: %w", err)
 	}
 	return rec, nil
-}
-
-// advisoryLock takes the bucket's advisory lock inside tx, keyed by
-// (lockNamespace, hashtext(bucket DID)): pg_advisory_xact_lock, exclusive,
-// for a writer; pg_advisory_xact_lock_shared for a share-locked reader. The
-// lock is transaction-scoped: Postgres releases it when tx commits or rolls
-// back, and there is nothing to unlock. A writer holds it across its row lock,
-// precondition check, beforeCommit callback and writes, so a reader arriving
-// mid-write waits for the outcome even when the write is a create and no row
-// exists yet.
-func advisoryLock(ctx context.Context, tx pgx.Tx, bucket did.DID, shared bool) error {
-	return pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), shared)
 }
 
 // Put runs in one transaction: it takes the bucket's advisory lock, locks the
@@ -130,14 +118,14 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if err := advisoryLock(ctx, tx, in.Bucket, false); err != nil {
+	if err := pglock.Advisory(ctx, tx, lockNamespace, in.Bucket.String(), false); err != nil {
 		return "", err
 	}
 	old, err := lockRow(ctx, tx, in.Bucket)
 	if err != nil {
 		return "", err
 	}
-	if err := checkPrecondition(old, in.IfMatch); err != nil {
+	if err := bucketpolicystore.CheckPrecondition(old, in.IfMatch); err != nil {
 		return "", err
 	}
 	if beforeCommit != nil {
@@ -190,7 +178,7 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if err := advisoryLock(ctx, tx, bucket, false); err != nil {
+	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), false); err != nil {
 		return err
 	}
 	old, err := lockRow(ctx, tx, bucket)
@@ -217,6 +205,9 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	return nil
 }
 
+// DeleteByBucket removes the bucket's policy unconditionally, under the
+// bucket's advisory lock so it serializes with a Put or Delete in flight the
+// way the memory backend's mutex does.
 func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -224,6 +215,9 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 	}
 	defer tx.Rollback(ctx)
 
+	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), false); err != nil {
+		return err
+	}
 	if err := deleteRows(ctx, tx, bucket); err != nil {
 		return err
 	}
@@ -236,7 +230,7 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 // ListByPrincipal answers from the index: a policy is listed when
 // bucket_policy_principal holds a row for the principal or a wildcard row
 // (NULL principal) under the tenant.
-func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
+func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]bucketpolicystore.Record, error) {
 	query := selectColumns + ` p
 		WHERE EXISTS (
 			SELECT 1 FROM bucket_policy_principal i
@@ -245,7 +239,7 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 			  AND (i.principal_id = $2 OR i.principal_id IS NULL)
 		)
 		ORDER BY bucket_id ASC`
-	if store.NewReadConfig(opts...).Lock == store.LockShare {
+	if slices.Contains(locks, store.LockShare) {
 		query += ` FOR SHARE`
 	}
 	rows, err := s.pool.Query(ctx, query, tenant.String(), principal)
@@ -281,35 +275,11 @@ func lockRow(ctx context.Context, tx pgx.Tx, bucket did.DID) (*bucketpolicystore
 	return &rec, nil
 }
 
-// checkPrecondition applies the If-Match / If-None-Match rule: a nil ifMatch
-// requires no current policy; a non-nil one must equal the current ETag.
-func checkPrecondition(old *bucketpolicystore.Record, ifMatch *string) error {
-	switch {
-	case ifMatch == nil && old != nil:
-		return fmt.Errorf("policy already exists with ETag %s: %w", old.ETag, store.ErrPreconditionFailed)
-	case ifMatch != nil && old == nil:
-		return fmt.Errorf("bucket has no policy: %w", store.ErrPreconditionFailed)
-	case ifMatch != nil && old.ETag != *ifMatch:
-		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
-	}
-	return nil
-}
-
 // bucketFKConstraint names bucket_policy_principal's foreign key onto
 // (bucket.id, bucket.tenant_id), as migration 00007 declares it. Both foreign
 // keys of an index row raise the same error code, so the constraint name is
 // what tells a bucket of another tenant from a principal of another tenant.
 const bucketFKConstraint = "bucket_policy_principal_bucket_fkey"
-
-// notTenantsBucket returns the store error for a write refused because the
-// bucket belongs to another tenant, and nil for every other error.
-func notTenantsBucket(err error, bucket, tenant did.DID) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation && pgErr.ConstraintName == bucketFKConstraint {
-		return fmt.Errorf("bucket %s is not a bucket of tenant %s: %w", bucket, tenant, store.ErrInvalidArgument)
-	}
-	return nil
-}
 
 // writeIndex replaces the bucket's index rows with one per named principal
 // and, when the document names the wildcard, one with a NULL principal.
@@ -321,30 +291,28 @@ func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc buck
 	if err := requireLivePrincipals(ctx, tx, tenant, named); err != nil {
 		return err
 	}
-	for _, p := range named {
+	ids := make([]*string, 0, len(named)+1)
+	for i := range named {
+		ids = append(ids, &named[i])
+	}
+	if wildcard {
+		ids = append(ids, nil)
+	}
+	for _, p := range ids {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
 			VALUES ($1, $2, $3)
 		`, bucket.String(), tenant.String(), p); err != nil {
-			if mapped := notTenantsBucket(err, bucket, tenant); mapped != nil {
-				return mapped
-			}
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
-				return fmt.Errorf("principal %q is not a principal of tenant %s: %w", p, tenant, store.ErrInvalidArgument)
+				if pgErr.ConstraintName == bucketFKConstraint {
+					return fmt.Errorf("bucket %s is not a bucket of tenant %s: %w", bucket, tenant, store.ErrInvalidArgument)
+				}
+				if p != nil {
+					return fmt.Errorf("principal %q is not a principal of tenant %s: %w", *p, tenant, store.ErrInvalidArgument)
+				}
 			}
 			return fmt.Errorf("indexing policy principal: %w", err)
-		}
-	}
-	if wildcard {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
-			VALUES ($1, $2, NULL)
-		`, bucket.String(), tenant.String()); err != nil {
-			if mapped := notTenantsBucket(err, bucket, tenant); mapped != nil {
-				return mapped
-			}
-			return fmt.Errorf("indexing policy wildcard: %w", err)
 		}
 	}
 	return nil

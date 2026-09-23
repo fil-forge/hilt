@@ -305,17 +305,18 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 		return nil, err
 	}
 
-	// Remove the bucket's delegations (subject == bucket) and policy, then the
-	// record. Postgres cascades the policy with the bucket row; the explicit
-	// delete keeps the memory backend in step.
+	// Remove the bucket's delegations (subject == bucket), then the record,
+	// then the policy: Postgres cascades the policy with the bucket row, so no
+	// failure leaves a live bucket without its policy; the explicit delete
+	// keeps the memory backend in step.
 	if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
 		return nil, fmt.Errorf("deleting bucket delegations: %w", err)
 	}
-	if err := s.policies.DeleteByBucket(ctx, authz.Bucket.ID); err != nil {
-		return nil, fmt.Errorf("deleting bucket policy: %w", err)
-	}
 	if err := s.buckets.Delete(ctx, authz.Bucket.ID); err != nil {
 		return nil, fmt.Errorf("deleting bucket: %w", err)
+	}
+	if err := s.policies.DeleteByBucket(ctx, authz.Bucket.ID); err != nil {
+		return nil, fmt.Errorf("deleting bucket policy: %w", err)
 	}
 
 	s.logger.Debug("deleted bucket", zap.Stringer("bucket", authz.Bucket.ID), zap.String("name", authz.BucketName))
