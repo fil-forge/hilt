@@ -38,9 +38,9 @@ func New() *Store {
 	return &Store{policies: map[did.DID]entry{}}
 }
 
-// Get ignores the lock option: reads and writes are serialized by the store
+// Get ignores the lock mode: reads and writes are serialized by the store
 // mutex, so a read already waits for an in-flight write.
-func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (bucketpolicystore.Record, error) {
+func (s *Store) Get(ctx context.Context, bucket did.DID, locks ...store.LockMode) (bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -69,7 +69,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 		rec := cloneRecord(e.rec)
 		old = &rec
 	}
-	if err := checkPrecondition(old, in.IfMatch); err != nil {
+	if err := bucketpolicystore.CheckPrecondition(old, in.IfMatch); err != nil {
 		return "", err
 	}
 	if beforeCommit != nil {
@@ -127,7 +127,7 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 	return nil
 }
 
-func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
+func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -146,20 +146,6 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 	return recs, nil
 }
 
-// checkPrecondition applies the If-Match / If-None-Match rule: a nil ifMatch
-// requires no current policy; a non-nil one must equal the current ETag.
-func checkPrecondition(old *bucketpolicystore.Record, ifMatch *string) error {
-	switch {
-	case ifMatch == nil && old != nil:
-		return fmt.Errorf("policy already exists with ETag %s: %w", old.ETag, store.ErrPreconditionFailed)
-	case ifMatch != nil && old == nil:
-		return fmt.Errorf("bucket has no policy: %w", store.ErrPreconditionFailed)
-	case ifMatch != nil && old.ETag != *ifMatch:
-		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
-	}
-	return nil
-}
-
 func cloneRecord(r bucketpolicystore.Record) bucketpolicystore.Record {
 	r.Policy = clonePolicy(r.Policy)
 	return r
@@ -170,13 +156,10 @@ func clonePolicy(d bucketpolicy.Policy) bucketpolicy.Policy {
 		return bucketpolicy.Policy{}
 	}
 	statements := make([]bucketpolicy.Statement, len(d.Statements))
-	for i, st := range d.Statements {
-		statements[i] = bucketpolicy.Statement{
-			Sid:       st.Sid,
-			Effect:    st.Effect,
-			Principal: bucketpolicy.Principal{All: st.Principal.All, IDs: slices.Clone(st.Principal.IDs)},
-			Actions:   slices.Clone(st.Actions),
-		}
+	copy(statements, d.Statements)
+	for i := range statements {
+		statements[i].Principal.IDs = slices.Clone(statements[i].Principal.IDs)
+		statements[i].Actions = slices.Clone(statements[i].Actions)
 	}
 	return bucketpolicy.Policy{Statements: statements}
 }

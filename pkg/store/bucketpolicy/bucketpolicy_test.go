@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -80,22 +78,10 @@ func makeStore(t *testing.T, k StoreKind) (bucketpolicystore.Store, fixtures) {
 	case Memory:
 		return bucketpolicymemory.New(), memoryFixtures{}
 	case Postgres:
-		pool := createPostgresPool(t)
+		pool := htestutil.PostgresOrSkip(t)
 		return bucketpolicypostgres.New(pool), &postgresFixtures{pool: pool}
 	}
 	panic("unknown store kind")
-}
-
-func createPostgresPool(t *testing.T) *pgxpool.Pool {
-	if htestutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
-		if !htestutil.IsDockerAvailable(t) {
-			t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
-		}
-	}
-	if !htestutil.IsDockerAvailable(t) {
-		t.SkipNow()
-	}
-	return htestutil.CreatePostgres(t)
 }
 
 var everyone = bucketpolicy.Everyone()
@@ -154,7 +140,7 @@ func TestPolicyStore(t *testing.T) {
 				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d}, nil)
 				require.NoError(t, err)
 
-				rec, err := s.Get(t.Context(), bucketID, store.WithLock(store.LockShare))
+				rec, err := s.Get(t.Context(), bucketID, store.LockShare)
 				require.NoError(t, err)
 				require.Equal(t, d, rec.Policy)
 			})
@@ -163,7 +149,7 @@ func TestPolicyStore(t *testing.T) {
 				_, bucketID := newBucket(t)
 				_, err := s.Get(t.Context(), bucketID)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				_, err = s.Get(t.Context(), bucketID, store.WithLock(store.LockShare))
+				_, err = s.Get(t.Context(), bucketID, store.LockShare)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
@@ -492,7 +478,7 @@ func TestPolicyStore(t *testing.T) {
 				}
 				require.ElementsMatch(t, []did.DID{wildcard, both}, got)
 
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "alice", store.WithLock(store.LockShare))
+				recs, err = s.ListByPrincipal(t.Context(), tenantID, "alice", store.LockShare)
 				require.NoError(t, err)
 				require.Len(t, recs, 4)
 			})
@@ -542,7 +528,7 @@ func TestPolicyStore(t *testing.T) {
 // index rows themselves, referential integrity, and the locking contract the
 // authorizer relies on.
 func TestPolicyStorePostgres(t *testing.T) {
-	pool := createPostgresPool(t)
+	pool := htestutil.PostgresOrSkip(t)
 	s := bucketpolicypostgres.New(pool)
 	fx := &postgresFixtures{pool: pool}
 
@@ -700,8 +686,6 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound, "nothing was written")
 	})
 
-	const grace = 300 * time.Millisecond
-
 	t.Run("a FOR UPDATE holder blocks a share-locked Get until commit", func(t *testing.T) {
 		tenantID := fx.tenant(t)
 		fx.principal(t, tenantID, "alice")
@@ -714,31 +698,27 @@ func TestPolicyStorePostgres(t *testing.T) {
 		tx, err := pool.Begin(t.Context())
 		require.NoError(t, err)
 		defer tx.Rollback(t.Context())
-		var found bool
-		require.NoError(t, tx.QueryRow(t.Context(), `SELECT TRUE FROM bucket_policy WHERE bucket_id = $1 FOR UPDATE`, bucketID.String()).Scan(&found))
 
-		// An unlocked read is answered from the snapshot and never waits.
-		_, err = s.Get(t.Context(), bucketID)
-		require.NoError(t, err)
-
-		done := make(chan error, 1)
-		go func() {
-			_, err := s.Get(context.Background(), bucketID, store.WithLock(store.LockShare))
-			done <- err
-		}()
-		select {
-		case <-done:
-			t.Fatal("share-locked Get returned while the row was held FOR UPDATE")
-		case <-time.After(grace):
-		}
-
-		require.NoError(t, tx.Commit(t.Context()))
-		select {
-		case err := <-done:
-			require.NoError(t, err)
-		case <-time.After(10 * time.Second):
-			t.Fatal("share-locked Get did not return after the holder committed")
-		}
+		committed, got := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				var found bool
+				if err := tx.QueryRow(t.Context(), `SELECT TRUE FROM bucket_policy WHERE bucket_id = $1 FOR UPDATE`, bucketID.String()).Scan(&found); err != nil {
+					return err
+				}
+				// An unlocked read is answered from the snapshot and never waits.
+				if _, err := s.Get(t.Context(), bucketID); err != nil {
+					return fmt.Errorf("unlocked Get during the hold: %w", err)
+				}
+				close(entered)
+				<-release
+				return tx.Commit(t.Context())
+			},
+			func() error {
+				_, err := s.Get(context.Background(), bucketID, store.LockShare)
+				return err
+			})
+		require.NoError(t, committed)
+		require.NoError(t, got)
 	})
 
 	t.Run("a share-locked Get during Put waits and sees the new policy once it commits", func(t *testing.T) {
@@ -750,46 +730,27 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.NoError(t, err)
 		second := doc(allow(only("alice"), "s3:GetObject", "s3:PutObject"))
 
-		inCallback := make(chan struct{})
-		release := make(chan struct{})
-		written := make(chan error, 1)
-		go func() {
-			_, err := s.Put(context.Background(), bucketpolicystore.Input{
-				Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(etag1),
-			}, func(context.Context, *bucketpolicystore.Record) error {
-				close(inCallback)
-				<-release
-				return nil
+		var rec bucketpolicystore.Record
+		written, got := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(etag1),
+				}, func(context.Context, *bucketpolicystore.Record) error {
+					close(entered)
+					<-release
+					return nil
+				})
+				return err
+			},
+			func() error {
+				var err error
+				rec, err = s.Get(context.Background(), bucketID, store.LockShare)
+				return err
 			})
-			written <- err
-		}()
-		<-inCallback
-
-		type result struct {
-			rec bucketpolicystore.Record
-			err error
-		}
-		got := make(chan result, 1)
-		go func() {
-			rec, err := s.Get(context.Background(), bucketID, store.WithLock(store.LockShare))
-			got <- result{rec, err}
-		}()
-		select {
-		case <-got:
-			t.Fatal("share-locked Get returned while Put held the row")
-		case <-time.After(grace):
-		}
-
-		close(release)
-		require.NoError(t, <-written)
-		select {
-		case res := <-got:
-			require.NoError(t, res.err)
-			require.Equal(t, second, res.rec.Policy, "the waiting read is answered from the committed state")
-			require.Equal(t, bucketpolicy.ETag(second), res.rec.ETag)
-		case <-time.After(10 * time.Second):
-			t.Fatal("share-locked Get did not return after the write committed")
-		}
+		require.NoError(t, written)
+		require.NoError(t, got)
+		require.Equal(t, second, rec.Policy, "the waiting read is answered from the committed state")
+		require.Equal(t, bucketpolicy.ETag(second), rec.ETag)
 	})
 
 	t.Run("a share-locked Get during a first Put waits and sees the created policy", func(t *testing.T) {
@@ -798,49 +759,31 @@ func TestPolicyStorePostgres(t *testing.T) {
 		bucketID := fx.bucket(t, tenantID)
 		created := doc(allow(only("alice"), "s3:GetObject"))
 
-		inCallback := make(chan struct{})
-		release := make(chan struct{})
-		written := make(chan error, 1)
-		go func() {
-			_, err := s.Put(context.Background(), bucketpolicystore.Input{
-				Bucket: bucketID, Tenant: tenantID, Policy: created,
-			}, func(_ context.Context, old *bucketpolicystore.Record) error {
-				close(inCallback)
-				<-release
-				return nil
+		var rec bucketpolicystore.Record
+		written, got := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: created,
+				}, func(context.Context, *bucketpolicystore.Record) error {
+					// An unlocked read sees no row yet; it does not wait.
+					if _, err := s.Get(context.Background(), bucketID); !errors.Is(err, store.ErrRecordNotFound) {
+						return fmt.Errorf("unlocked Get during the create: %v, want ErrRecordNotFound", err)
+					}
+					close(entered)
+					<-release
+					return nil
+				})
+				return err
+			},
+			func() error {
+				// A reader must not cache "no policy" while the create is in flight.
+				var err error
+				rec, err = s.Get(context.Background(), bucketID, store.LockShare)
+				return err
 			})
-			written <- err
-		}()
-		<-inCallback
-
-		// An unlocked read sees no row yet; it does not wait.
-		_, err := s.Get(t.Context(), bucketID)
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
-
-		type result struct {
-			rec bucketpolicystore.Record
-			err error
-		}
-		got := make(chan result, 1)
-		go func() {
-			rec, err := s.Get(context.Background(), bucketID, store.WithLock(store.LockShare))
-			got <- result{rec, err}
-		}()
-		select {
-		case res := <-got:
-			t.Fatalf("share-locked Get returned (%v) while the create was in flight; a reader must not cache \"no policy\"", res.err)
-		case <-time.After(grace):
-		}
-
-		close(release)
-		require.NoError(t, <-written)
-		select {
-		case res := <-got:
-			require.NoError(t, res.err)
-			require.Equal(t, created, res.rec.Policy, "the waiting read is answered from the committed create")
-		case <-time.After(10 * time.Second):
-			t.Fatal("share-locked Get did not return after the create committed")
-		}
+		require.NoError(t, written)
+		require.NoError(t, got)
+		require.Equal(t, created, rec.Policy, "the waiting read is answered from the committed create")
 	})
 
 	t.Run("a share-locked Get during a failed Put sees the old policy once it rolls back", func(t *testing.T) {
@@ -851,45 +794,53 @@ func TestPolicyStorePostgres(t *testing.T) {
 		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first}, nil)
 		require.NoError(t, err)
 
-		inCallback := make(chan struct{})
-		release := make(chan struct{})
-		written := make(chan error, 1)
-		go func() {
-			_, err := s.Put(context.Background(), bucketpolicystore.Input{
-				Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:PutObject")), IfMatch: ptr(etag1),
-			}, func(context.Context, *bucketpolicystore.Record) error {
-				close(inCallback)
-				<-release
-				return errors.New("publish failed")
+		var rec bucketpolicystore.Record
+		written, got := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:PutObject")), IfMatch: ptr(etag1),
+				}, func(context.Context, *bucketpolicystore.Record) error {
+					close(entered)
+					<-release
+					return errors.New("publish failed")
+				})
+				return err
+			},
+			func() error {
+				var err error
+				rec, err = s.Get(context.Background(), bucketID, store.LockShare)
+				return err
 			})
-			written <- err
-		}()
-		<-inCallback
+		require.Error(t, written)
+		require.NoError(t, got)
+		require.Equal(t, first, rec.Policy)
+		require.Equal(t, etag1, rec.ETag)
+	})
 
-		type result struct {
-			rec bucketpolicystore.Record
-			err error
-		}
-		got := make(chan result, 1)
-		go func() {
-			rec, err := s.Get(context.Background(), bucketID, store.WithLock(store.LockShare))
-			got <- result{rec, err}
-		}()
-		select {
-		case <-got:
-			t.Fatal("share-locked Get returned while Put held the row")
-		case <-time.After(grace):
-		}
+	t.Run("DeleteByBucket waits on an in-flight Put and then removes what it wrote", func(t *testing.T) {
+		tenantID := fx.tenant(t)
+		fx.principal(t, tenantID, "alice")
+		bucketID := fx.bucket(t, tenantID)
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"))}, nil)
+		require.NoError(t, err)
 
-		close(release)
-		require.Error(t, <-written)
-		select {
-		case res := <-got:
-			require.NoError(t, res.err)
-			require.Equal(t, first, res.rec.Policy)
-			require.Equal(t, etag1, res.rec.ETag)
-		case <-time.After(10 * time.Second):
-			t.Fatal("share-locked Get did not return after the write rolled back")
-		}
+		written, deleted := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:PutObject")), IfMatch: ptr(etag1),
+				}, func(context.Context, *bucketpolicystore.Record) error {
+					close(entered)
+					<-release
+					return nil
+				})
+				return err
+			},
+			func() error { return s.DeleteByBucket(context.Background(), bucketID) })
+		require.NoError(t, written)
+		require.NoError(t, deleted)
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, principals := indexRows(t, bucketID)
+		require.Empty(t, principals, "the index rows the Put wrote are gone too")
 	})
 }
