@@ -213,6 +213,18 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)
 		}
 	}
+	// A write lock revokes the tenant's write grants (see the tenant service's
+	// SetStatus), and a key created while it holds gets the same treatment, so
+	// its write grants are dead on arrival; unlocking reissues them. A key created
+	// while a lock is being applied can miss both this check and the lock's
+	// sweep: closing that needs one transaction across the tenant and delegation
+	// stores.
+	if tenantRec.Status == tenant.WriteLocked {
+		if err := s.revokeWriteGrants(ctx, issuer, dels); err != nil {
+			rollback()
+			return accesskeystore.Record{}, "", fmt.Errorf("revoking write grants for a write-locked tenant: %w", err)
+		}
+	}
 
 	rec, err := s.accessKeys.Get(ctx, accessKeyID)
 	if err != nil {
@@ -315,6 +327,23 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 	}
 	if err := s.accessKeys.Delete(ctx, id); err != nil {
 		return fmt.Errorf("deleting access key: %w", err)
+	}
+	return nil
+}
+
+// revokeWriteGrants publishes a revocation for each of dels that is for a
+// mutating command (see [s3perm.Mutates]).
+func (s *Service) revokeWriteGrants(ctx context.Context, issuer ucan.Issuer, dels []ucan.Delegation) error {
+	for _, d := range dels {
+		if !s3perm.Mutates(d.Command()) {
+			continue
+		}
+		if s.revocations == nil {
+			return errors.New("revocation publisher is not configured")
+		}
+		if err := s.revocations.Publish(ctx, issuer, d); err != nil {
+			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
+		}
 	}
 	return nil
 }

@@ -257,6 +257,7 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
+	var reissued []ucan.Delegation
 	switch {
 	case next == tenantstore.WriteLocked && rec.Status != tenantstore.WriteLocked:
 		if err := s.revokeWriteGrants(ctx, rec.ID); err != nil {
@@ -267,11 +268,17 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 		// revoked, since revocation is permanent. It runs before the status
 		// changes, so if it fails the tenant keeps its current status and a retry
 		// reissues them.
-		if err := s.reissueWriteGrants(ctx, rec.ID); err != nil {
+		if reissued, err = s.reissueWriteGrants(ctx, rec.ID); err != nil {
 			return fmt.Errorf("reissuing tenant write grants: %w", err)
 		}
 	}
 	if err := s.tenants.SetStatus(ctx, rec.ID, next); err != nil {
+		// The tenant keeps its old status, so the grants just reissued for it must
+		// not stay live: revoke them, and a retried unlock reissues them again.
+		if rerr := s.publishRevocations(ctx, rec.ID, reissued); rerr != nil {
+			s.logger.Error("revoking reissued grants after a failed status update",
+				zap.Stringer("tenant", rec.ID), zap.Error(rerr))
+		}
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return ErrTenantNotFound
 		}
@@ -314,15 +321,22 @@ func (s *Service) writeGrants(ctx context.Context, tenantID did.DID) ([]ucan.Del
 	return grants, nil
 }
 
-// revokeWriteGrants revokes every unexpired write grant the tenant issued to its
-// access keys. Swarf then invalidates Ingot's cached authorization for them, so
-// the next write must re-authorize with Hilt, where the write lock is enforced.
+// revokeWriteGrants revokes every write grant the tenant issued to its access
+// keys. Swarf then invalidates Ingot's cached authorization for them, so the
+// next write must re-authorize with Hilt, where the write lock is enforced.
 // Read grants are left alone so reads keep working through the lock.
 func (s *Service) revokeWriteGrants(ctx context.Context, tenantID did.DID) error {
 	grants, err := s.writeGrants(ctx, tenantID)
 	if err != nil {
 		return err
 	}
+	return s.publishRevocations(ctx, tenantID, grants)
+}
+
+// publishRevocations revokes the given grants, signed by the tenant that issued
+// them. Expired grants are skipped: the revocation service rejects them, and
+// they are unusable regardless. Revoking a grant twice is harmless.
+func (s *Service) publishRevocations(ctx context.Context, tenantID did.DID, grants []ucan.Delegation) error {
 	now := ucan.UnixTimestamp(time.Now().Unix())
 	var revoke []ucan.Delegation
 	for _, d := range grants {
@@ -351,17 +365,22 @@ func (s *Service) revokeWriteGrants(ctx context.Context, tenantID did.DID) error
 
 // reissueWriteGrants replaces every write grant the tenant issued to its access
 // keys with a fresh one of the same audience, subject, command and expiry, so
-// the keys can write again after a write lock revoked their grants. The
-// replacements are stored before the old grants are deleted, so a failure part
-// way leaves both, and a retry replaces both.
-func (s *Service) reissueWriteGrants(ctx context.Context, tenantID did.DID) error {
+// the keys can write again after a write lock revoked their grants, and returns
+// the replacements.
+//
+// The grants it replaces are revoked before they are deleted, whether or not a
+// lock already revoked them: a grant Hilt no longer stores is one a later lock
+// cannot find to revoke, so it must not be left live in a gateway's cache. The
+// replacements are stored first, so a failure part way leaves both, and a retry
+// replaces both.
+func (s *Service) reissueWriteGrants(ctx context.Context, tenantID did.DID) ([]ucan.Delegation, error) {
 	grants, err := s.writeGrants(ctx, tenantID)
 	if err != nil || len(grants) == 0 {
-		return err
+		return nil, err
 	}
 	issuer, err := s.tenantIssuer(ctx, tenantID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	replacements := make([]ucan.Delegation, 0, len(grants))
 	replaced := make([]cid.Cid, 0, len(grants))
@@ -372,18 +391,21 @@ func (s *Service) reissueWriteGrants(ctx context.Context, tenantID did.DID) erro
 		}
 		nd, err := ucandelegation.Delegate(issuer, d.Audience(), d.Subject(), d.Command(), opts...)
 		if err != nil {
-			return fmt.Errorf("reissuing %s: %w", d.Link(), err)
+			return nil, fmt.Errorf("reissuing %s: %w", d.Link(), err)
 		}
 		replacements = append(replacements, nd)
 		replaced = append(replaced, d.Link())
 	}
 	if err := s.delegations.PutBatch(ctx, replacements); err != nil {
-		return fmt.Errorf("storing reissued grants: %w", err)
+		return nil, fmt.Errorf("storing reissued grants: %w", err)
+	}
+	if err := s.publishRevocations(ctx, tenantID, grants); err != nil {
+		return nil, fmt.Errorf("revoking replaced grants: %w", err)
 	}
 	if err := s.delegations.Delete(ctx, replaced...); err != nil {
-		return fmt.Errorf("deleting replaced grants: %w", err)
+		return nil, fmt.Errorf("deleting replaced grants: %w", err)
 	}
-	return nil
+	return replacements, nil
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its
