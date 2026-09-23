@@ -25,6 +25,7 @@ func authFailure(res failer, err error) error {
 		errors.Is(err, auth.ErrSignatureExpired),
 		errors.Is(err, auth.ErrAccessKeyExpired),
 		errors.Is(err, auth.ErrTenantDisabled),
+		errors.Is(err, auth.ErrTenantWriteLocked),
 		errors.Is(err, auth.ErrIssuerForbidden),
 		errors.Is(err, auth.ErrRegionNotServed),
 		errors.Is(err, auth.ErrUnsupportedOperation),

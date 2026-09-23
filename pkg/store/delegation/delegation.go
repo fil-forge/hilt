@@ -10,6 +10,9 @@ import (
 )
 
 type Store interface {
+	// Delete removes the delegation records with the given links. Links with no
+	// record are ignored.
+	Delete(ctx context.Context, links ...cid.Cid) error
 	// DeleteByAudience removes all delegation records for a given audience.
 	DeleteByAudience(ctx context.Context, audience did.DID) error
 	// DeleteBySubject removes all delegation records for a given subject.

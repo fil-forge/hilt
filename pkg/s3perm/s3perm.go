@@ -5,6 +5,8 @@
 package s3perm
 
 import (
+	"slices"
+
 	"github.com/fil-forge/libforge/commands/blob"
 	"github.com/fil-forge/libforge/commands/content"
 	"github.com/fil-forge/libforge/commands/index"
@@ -74,6 +76,16 @@ var permissionCommands = map[string][]ucan.Command{
 func Valid(p string) bool {
 	_, ok := permissionCommands[p]
 	return ok
+}
+
+// Mutates reports whether a delegation of cmd lets its holder change tenant
+// data. Only the read command set is enumerated, so any other command
+// (including one added later) counts as mutating: a write lock revokes these
+// grants, and failing closed is the safe default there. /content/retrieve is
+// also delegated for s3:PutObject, but it only reads, so a write-locked tenant
+// keeps it.
+func Mutates(cmd ucan.Command) bool {
+	return !slices.ContainsFunc(cmdsRetrieve, func(c ucan.Command) bool { return c.String() == cmd.String() })
 }
 
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the

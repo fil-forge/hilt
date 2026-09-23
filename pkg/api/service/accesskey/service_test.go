@@ -8,6 +8,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
@@ -52,8 +53,22 @@ func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan
 	return nil
 }
 
+// lockedOnReread is a tenant store in which the tenant looks active when looked
+// up by external ID and write-locked when re-read by DID: a write lock landing
+// in the middle of creating an access key.
+type lockedOnReread struct {
+	tenant.Store
+}
+
+func (l lockedOnReread) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
+	rec, err := l.Store.Get(ctx, id)
+	rec.Status = tenant.WriteLocked
+	return rec, err
+}
+
 type deps struct {
 	svc         *accesskeysvc.Service
+	tenants     *tenantmemory.Store
 	delegations *delegationmemory.Store
 	buckets     *bucketmemory.Store
 	secrets     *vaultmemory.Store
@@ -93,6 +108,7 @@ func setup(t *testing.T) deps {
 	swarf := &fakeSwarf{}
 	return deps{
 		svc:         accesskeysvc.New(zap.NewNop(), tenants, accessKeys, buckets, delegations, secrets, swarf),
+		tenants:     tenants,
 		delegations: delegations,
 		buckets:     buckets,
 		secrets:     secrets,
@@ -143,6 +159,61 @@ func TestCreate(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "missing", "k1", []string{"s3:GetObject"}, nil, nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantNotFound)
+	})
+
+	t.Run("revokes a new key's write grants while the tenant is write-locked", func(t *testing.T) {
+		d := setup(t)
+		require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.WriteLocked))
+		perms := []string{"s3:GetObject", "s3:PutObject"}
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "k1", perms, nil, nil)
+		require.NoError(t, err)
+
+		page, err := d.delegations.ListByAudience(ctx, rec.ID)
+		require.NoError(t, err)
+		var writes []cid.Cid
+		for _, dlg := range page.Results {
+			if s3perm.Mutates(dlg.Command()) {
+				writes = append(writes, dlg.Link())
+			}
+		}
+		require.NotEmpty(t, writes)
+		var revoked []cid.Cid
+		for _, r := range d.swarf.revocations {
+			require.Equal(t, d.tenantID, r.revoker)
+			revoked = append(revoked, r.revoked)
+		}
+		require.ElementsMatch(t, writes, revoked, "exactly the write grants are revoked; the read grant stays")
+		require.Len(t, page.Results, len(s3perm.CommandsFor(perms...)), "every grant is still stored, for unlock to reissue")
+	})
+
+	t.Run("revokes a new key's write grants when a lock lands while it is created", func(t *testing.T) {
+		// The tenant reads as active when Create starts and write-locked by the
+		// time its grants are stored: the lock's sweep may have run before they
+		// were, so Create must revoke them itself.
+		d := setup(t)
+		svc := accesskeysvc.New(zap.NewNop(), lockedOnReread{d.tenants}, accesskeymemory.New(), d.buckets, d.delegations, d.secrets, d.swarf)
+		_, _, err := svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, nil, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, d.swarf.revocations)
+	})
+
+	t.Run("rolls the key back when a write-locked tenant's revocation fails", func(t *testing.T) {
+		d := setup(t)
+		require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.WriteLocked))
+		d.swarf.err = errors.New("swarf unavailable")
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, nil, nil)
+		require.Error(t, err)
+
+		keys, _, err := d.svc.List(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Empty(t, keys)
+	})
+
+	t.Run("revokes nothing for an active tenant", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, nil, nil)
+		require.NoError(t, err)
+		require.Empty(t, d.swarf.revocations)
 	})
 
 	t.Run("rejects a duplicate name", func(t *testing.T) {
