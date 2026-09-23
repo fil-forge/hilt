@@ -341,11 +341,14 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 }
 
 // Delete revokes an access key belonging to the tenant: publishing UCAN
-// revocations for its delegations, then removing those delegations, its vault
-// key, and its record. Revocations are published first so that a revocation
-// service failure leaves the key intact and the call cleanly retryable —
-// otherwise the delegations would live on with nothing for a verifier to check.
-// Both kinds of key are deleted the same way.
+// revocations for its delegations, then removing its record and those
+// delegations under the key's delegation lock, and its vault key. Revocations
+// are published first so that a revocation service failure leaves the key
+// intact and the call cleanly retryable — otherwise the delegations would live
+// on with nothing for a verifier to check. The record goes under the lock so a
+// policy rotation that listed the key and is waiting on the lock finds it gone
+// rather than issuing it fresh delegations. Both kinds of key are deleted the
+// same way.
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -365,24 +368,28 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
-	// The key's delegations are revoked and removed under the key's delegation
-	// lock, so a policy write rotating the key meanwhile serializes with it.
+	// The key's delegations are revoked and removed, and its record deleted,
+	// under the key's delegation lock, so a policy write rotating the key
+	// meanwhile serializes with it.
 	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantRec.ID)
 	if err != nil {
 		return err
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID), zap.Stringer("access_key", id))
 	err = s.delegations.Replace(ctx, []did.DID{id}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-		return nil, grant.PublishRevocations(ctx, log, s.revocations, issuer, current[id])
+		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, current[id]); err != nil {
+			return nil, err
+		}
+		if err := s.accessKeys.Delete(ctx, id); err != nil {
+			return nil, fmt.Errorf("deleting access key: %w", err)
+		}
+		return nil, nil
 	})
 	if err != nil {
-		return fmt.Errorf("revoking access key delegations: %w", err)
+		return fmt.Errorf("revoking access key: %w", err)
 	}
 	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
-	}
-	if err := s.accessKeys.Delete(ctx, id); err != nil {
-		return fmt.Errorf("deleting access key: %w", err)
 	}
 	return nil
 }

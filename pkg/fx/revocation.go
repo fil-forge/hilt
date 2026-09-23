@@ -13,8 +13,8 @@ import (
 
 // RevocationModule provides the Swarf revocation-service client, published as
 // [grant.RevocationPublisher] as well as the concrete type. The REST access-key
-// service, the UCAN bucket service and the grant rotator all revoke delegations
-// through it, so the client is shared rather than owned by any of their modules.
+// service and the UCAN bucket service both revoke delegations through it, so
+// the client is shared rather than owned by either module.
 var RevocationModule = fx.Module("revocation",
 	fx.Provide(
 		fx.Annotate(
@@ -22,7 +22,6 @@ var RevocationModule = fx.Module("revocation",
 			fx.As(fx.Self()),
 			fx.As(new(grant.RevocationPublisher)),
 		),
-		grant.NewRotator,
 	),
 )
 
