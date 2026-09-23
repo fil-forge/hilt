@@ -113,6 +113,25 @@ func TestDelegationStore(t *testing.T) {
 				require.Empty(t, page.Results)
 			})
 
+			t.Run("Delete removes only the given delegations", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				gone := makeDelegation(t, issuer, audience, testutil.RandomDID(t), cmd)
+				kept := makeDelegation(t, issuer, audience, testutil.RandomDID(t), cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{gone, kept}))
+
+				// An unknown link is ignored alongside a known one.
+				unknown := makeDelegation(t, issuer, audience, testutil.RandomDID(t), cmd)
+				require.NoError(t, s.Delete(t.Context(), gone.Link(), unknown.Link()))
+				require.NoError(t, s.Delete(t.Context()))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, kept.Link().String(), page.Results[0].Link().String())
+			})
+
 			t.Run("DeleteBySubject removes only that subject's delegations", func(t *testing.T) {
 				subjectA, subjectB := testutil.RandomDID(t), testutil.RandomDID(t)
 				audA1, audA2 := testutil.RandomDID(t), testutil.RandomDID(t)
