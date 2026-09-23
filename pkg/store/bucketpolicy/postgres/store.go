@@ -217,6 +217,9 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	return nil
 }
 
+// DeleteByBucket removes the bucket's policy unconditionally, under the
+// bucket's advisory lock so it serializes with a Put or Delete in flight the
+// way the memory backend's mutex does.
 func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -224,6 +227,9 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 	}
 	defer tx.Rollback(ctx)
 
+	if err := advisoryLock(ctx, tx, bucket, false); err != nil {
+		return err
+	}
 	if err := deleteRows(ctx, tx, bucket); err != nil {
 		return err
 	}

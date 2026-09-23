@@ -892,4 +892,48 @@ func TestPolicyStorePostgres(t *testing.T) {
 			t.Fatal("share-locked Get did not return after the write rolled back")
 		}
 	})
+
+	t.Run("DeleteByBucket waits on an in-flight Put and then removes what it wrote", func(t *testing.T) {
+		tenantID := fx.tenant(t)
+		fx.principal(t, tenantID, "alice")
+		bucketID := fx.bucket(t, tenantID)
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"))}, nil)
+		require.NoError(t, err)
+
+		inCallback := make(chan struct{})
+		release := make(chan struct{})
+		written := make(chan error, 1)
+		go func() {
+			_, err := s.Put(context.Background(), bucketpolicystore.Input{
+				Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:PutObject")), IfMatch: ptr(etag1),
+			}, func(context.Context, *bucketpolicystore.Record) error {
+				close(inCallback)
+				<-release
+				return nil
+			})
+			written <- err
+		}()
+		<-inCallback
+
+		deleted := make(chan error, 1)
+		go func() { deleted <- s.DeleteByBucket(context.Background(), bucketID) }()
+		select {
+		case <-deleted:
+			t.Fatal("DeleteByBucket returned while Put held the bucket")
+		case <-time.After(grace):
+		}
+
+		close(release)
+		require.NoError(t, <-written)
+		select {
+		case err := <-deleted:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("DeleteByBucket did not return after the write committed")
+		}
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, principals := indexRows(t, bucketID)
+		require.Empty(t, principals, "the index rows the Put wrote are gone too")
+	})
 }
