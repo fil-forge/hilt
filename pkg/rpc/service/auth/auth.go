@@ -22,7 +22,6 @@ import (
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
-	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/multiformats/go-multibase"
 	"go.uber.org/zap"
@@ -270,15 +269,7 @@ func (a *Authorizer) resolveBucket(ctx context.Context, log *zap.Logger, akRec a
 // returns an issuer that signs as the tenant — used to act on the tenant's
 // behalf (e.g. provisioning a bucket's space with Sprue).
 func (a *Authorizer) TenantIssuer(ctx context.Context, tenantID did.DID) (ucan.Issuer, error) {
-	keyBytes, err := a.secrets.Read(ctx, vault.TenantKeyPath(tenantID))
-	if err != nil {
-		return nil, fmt.Errorf("reading tenant key: %w", err)
-	}
-	signer, err := secp256k1.Decode(keyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("decoding tenant key: %w", err)
-	}
-	return multikey.NewIssuer(tenantID, signer), nil
+	return vault.TenantIssuer(ctx, a.secrets, tenantID)
 }
 
 // AccessKeySigner reads the access key's ed25519 private key from the vault.

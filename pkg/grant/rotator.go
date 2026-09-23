@@ -2,11 +2,13 @@ package grant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -15,6 +17,19 @@ import (
 	"github.com/fil-forge/ucantone/validator"
 	"go.uber.org/zap"
 )
+
+// BatchTimeout bounds every rotation of one write together. A policy write
+// rotates the keys of each principal whose actions changed, the wildcard
+// fanning out to all of the tenant's, and a principal removal revokes each of
+// its keys' delegations; both hold a row lock throughout, while a share-locked
+// reader of that row gives up after [store.LockTimeout]. The batch as a whole
+// gets this deadline, below the reader's bound, so a large batch cannot lock
+// the data path out.
+const BatchTimeout = 8 * time.Second
+
+// The batch bound must stay below the reader's; a negative difference fails
+// to compile.
+const _ = uint(store.LockTimeout - BatchTimeout)
 
 // RevocationPublisher is the subset of the revocation service (Swarf) Hilt
 // needs. It is satisfied by [*swarfclient.Client]; the interface lets the logic
@@ -65,24 +80,13 @@ func NewRotator(
 // leaves every key unchanged; a key that held nothing over the bucket costs no
 // revocation. An empty action set leaves the key with nothing over the bucket.
 func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) error {
-	principalOf := map[did.DID]string{}
-	var keys []accesskeystore.Record
-	for _, p := range slices.Sorted(maps.Keys(actions)) {
-		recs, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipal(p))
-		if err != nil {
-			return fmt.Errorf("listing keys of principal %q: %w", p, err)
-		}
-		for _, rec := range recs {
-			principalOf[rec.ID] = p
-		}
-		keys = append(keys, recs...)
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	issuer, err := vault.TenantIssuer(ctx, r.secrets, tenant)
-	if err != nil {
+	keys, issuer, err := r.load(ctx, tenant, slices.Sorted(maps.Keys(actions))...)
+	if err != nil || len(keys) == 0 {
 		return err
+	}
+	principalOf := make(map[did.DID]string, len(keys))
+	for _, key := range keys {
+		principalOf[key.ID] = *key.Principal
 	}
 	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
 
@@ -90,6 +94,13 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 		var revoked []ucan.Delegation
 		next := make(map[did.DID][]ucan.Delegation, len(keys))
 		for _, key := range keys {
+			// The listing above is a snapshot: a key deleted while this waited
+			// on the lock is left with nothing rather than issued fresh grants.
+			if _, err := r.accessKeys.Get(ctx, key.ID); errors.Is(err, store.ErrRecordNotFound) {
+				continue
+			} else if err != nil {
+				return nil, fmt.Errorf("looking up key %s: %w", key.ID, err)
+			}
 			for _, d := range current[key.ID] {
 				if d.Subject() == bucket {
 					revoked = append(revoked, d)
@@ -113,15 +124,8 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 // Revoke revokes every delegation of every key bound to the principal, in one
 // request, and leaves the keys with none, for a principal being removed.
 func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) error {
-	keys, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipal(principal))
-	if err != nil {
-		return fmt.Errorf("listing keys of principal %q: %w", principal, err)
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	issuer, err := vault.TenantIssuer(ctx, r.secrets, tenant)
-	if err != nil {
+	keys, issuer, err := r.load(ctx, tenant, principal)
+	if err != nil || len(keys) == 0 {
 		return err
 	}
 	log := r.logger.With(zap.Stringer("tenant", tenant), zap.String("principal", principal))
@@ -133,6 +137,27 @@ func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) 
 		}
 		return nil, PublishRevocations(ctx, log, r.revocations, issuer, all)
 	})
+}
+
+// load lists the keys bound to the principals, in principal order, and, when
+// there are any, the tenant's issuer.
+func (r *Rotator) load(ctx context.Context, tenant did.DID, principals ...string) ([]accesskeystore.Record, ucan.Issuer, error) {
+	var keys []accesskeystore.Record
+	for _, p := range principals {
+		recs, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipal(p))
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing keys of principal %q: %w", p, err)
+		}
+		keys = append(keys, recs...)
+	}
+	if len(keys) == 0 {
+		return nil, nil, nil
+	}
+	issuer, err := vault.TenantIssuer(ctx, r.secrets, tenant)
+	if err != nil {
+		return nil, nil, err
+	}
+	return keys, issuer, nil
 }
 
 func audiences(keys []accesskeystore.Record) []did.DID {

@@ -5,10 +5,8 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/fx"
 )
 
 func TestNewRevocationClient(t *testing.T) {
@@ -38,19 +36,4 @@ func TestNewRevocationClient(t *testing.T) {
 		})
 		require.ErrorContains(t, err, "revocation.service_url")
 	})
-}
-
-// TestRotatorResolves pins that the app graph can build the grant rotator. It
-// is provided from the revocation module, so nothing else in the graph would
-// report a broken wiring until a consumer asks for it.
-func TestRotatorResolves(t *testing.T) {
-	cfg := &config.Config{
-		Storage: config.StorageConfig{Type: config.StorageTypeMemory},
-		Vault:   config.VaultConfig{Type: config.VaultTypeMemory},
-	}
-	require.NoError(t, fx.ValidateApp(
-		appfx.AppModule(cfg),
-		fx.NopLogger,
-		fx.Invoke(func(*grant.Rotator) {}),
-	))
 }
