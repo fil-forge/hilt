@@ -24,19 +24,29 @@ var (
 	// the superseded blobs' registrations leak in the space — invisible to the
 	// S3 client (removal is best-effort), but the space can never be emptied
 	// and keeps the tenant's bytes registered with no way to release them.
-	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
+	// Supersession retires the replaced version itself the same way, with
+	// /upload/remove: the space counts one content entry per object version, so
+	// without the grant an overwrite registers the new version and fails to
+	// retract the old, and the tenant's object count climbs with every
+	// overwrite instead of holding steady.
+	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, upload.Remove.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
 	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
-	// /blob/remove.
+	// /blob/remove. Deleting a bucket unwinds the same way, for every blob its
+	// space still holds: in-flight multipart parts, deleted objects' bodies whose
+	// deferred release has not run, and shipped catalog segments. Without the
+	// grant Ingot can release them only with authority left over from some
+	// earlier write, and a bucket that saw none cannot be deleted.
 	cmdsAbort = []ucan.Command{blob.Abort.Command, blob.Remove.Command}
 )
 
 // permissionCommands maps each supported S3 permission to the Forge commands
-// that must be delegated for it. Permissions with no Forge equivalent
-// (bucket-level actions) map to nil — they are valid and stored on the access
-// key, but issue no delegation and are enforced directly by Ingot/Hilt (see the
-// RFC).
+// that must be delegated for it. Permissions with no Forge equivalent map to
+// nil — they are valid and stored on the access key, but issue no delegation
+// and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket-level
+// actions only s3:DeleteBucket needs commands, since it releases the space's
+// blobs.
 var permissionCommands = map[string][]ucan.Command{
 	"s3:GetObject":           cmdsRetrieve,
 	"s3:GetObjectVersion":    cmdsRetrieve,
@@ -51,7 +61,7 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:DeleteObjectVersion": cmdsRemove,
 	"s3:CreateBucket":        nil,
 	"s3:ListAllMyBuckets":    nil,
-	"s3:DeleteBucket":        nil,
+	"s3:DeleteBucket":        cmdsAbort,
 
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.

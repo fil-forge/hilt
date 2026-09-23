@@ -253,6 +253,20 @@ func TestParseErrors(t *testing.T) {
 		})
 		require.Error(t, err)
 	})
+	t.Run("case-variant duplicate header names", func(t *testing.T) {
+		// Header names are case-insensitive, so these are one header with two
+		// values; which one the signature covered is undecidable. Refuse rather
+		// than let verification and a later reader of the header pick differently.
+		_, err := Parse(Request{
+			Method: "PUT",
+			URL:    "https://bucket.s3.fil.one/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=z6MkAbc%2F20260616%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-SignedHeaders=host%3Bx-amz-copy-source&X-Amz-Signature=abc&X-Amz-Date=20260616T091923Z",
+			Headers: map[string]string{
+				"x-amz-copy-source": "theirs/secret",
+				"X-Amz-Copy-Source": "mine/obj",
+			},
+		})
+		require.ErrorContains(t, err, "duplicate header")
+	})
 	t.Run("header auth missing payload hash", func(t *testing.T) {
 		// X-Amz-Content-Sha256 is part of the signed canonical request; refuse to
 		// invent an (empty-payload) hash for it rather than verify against the

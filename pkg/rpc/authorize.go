@@ -110,20 +110,31 @@ func AuthorizeRequest(
 	if authz.Bucket != nil {
 		bucketID = &authz.Bucket.ID
 	}
+	// A copy also names the source bucket it was authorized to read, so the
+	// gateway can key what it caches for the copy by both bucket DIDs.
+	var sourceBucketID *did.DID
+	if authz.SourceBucket != nil {
+		sourceBucketID = &authz.SourceBucket.ID
+	}
 
-	proofSet := map[cid.Cid][]cid.Cid{}
-	var delegations []ucan.Delegation
-	for _, cmd := range s3perm.CommandsFor(perm) {
-		// If the bucket is nil then there _should_ be no commands returned.
-		if bucketID == nil {
-			return nil, nil, fmt.Errorf("delegating %s: missing bucket", cmd)
-		}
-		reDel, err := delegation.Delegate(akIssuer, issuer, *bucketID, cmd, delegation.WithExpiration(exp))
+	delegations, err := issuePermissionDelegations(akIssuer, issuer, bucketID, perm, exp)
+	if err != nil {
+		return nil, nil, err
+	}
+	// A copy from another bucket also needs the read commands over the source:
+	// the destination grant's retrieve is scoped to the destination. A copy
+	// within one bucket is already covered.
+	if src := authz.SourceBucket; src != nil && (bucketID == nil || src.ID != *bucketID) {
+		srcDlgs, err := issuePermissionDelegations(akIssuer, issuer, &src.ID, auth.SourcePermission, exp)
 		if err != nil {
-			return nil, nil, fmt.Errorf("delegating %s: %w", cmd, err)
+			return nil, nil, err
 		}
-		proofSet[reDel.Link()] = []cid.Cid{reDel.Link()}
-		delegations = append(delegations, reDel)
+		delegations = append(delegations, srcDlgs...)
+	}
+	// The proof set keys each issued delegation to its own one-element chain.
+	proofSet := make(map[cid.Cid][]cid.Cid, len(delegations))
+	for _, d := range delegations {
+		proofSet[d.Link()] = []cid.Cid{d.Link()}
 	}
 
 	logger.Debug("authorized request",
@@ -132,8 +143,9 @@ func AuthorizeRequest(
 		zap.Int("delegations", len(proofSet)),
 	)
 	return &s3req.AuthorizeOK{
-		Bucket: bucketID,
-		Tenant: authz.Tenant.ID,
+		Bucket:       bucketID,
+		SourceBucket: sourceBucketID,
+		Tenant:       authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
 			accessKeyID: authz.AccessKey.Permissions,
 		}},
@@ -142,6 +154,26 @@ func AuthorizeRequest(
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, delegations, nil
+}
+
+// issuePermissionDelegations issues one delegation from the access key to
+// audience for each Forge command the S3 permission maps to, over the bucket
+// named by subject, expiring at exp. A permission that maps to commands needs
+// a bucket; one that maps to none (the bucket-level permissions) issues nothing
+// and tolerates a nil subject.
+func issuePermissionDelegations(accessKey ucan.Issuer, audience did.DID, subject *did.DID, perm string, exp ucan.UnixTimestamp) ([]ucan.Delegation, error) {
+	var out []ucan.Delegation
+	for _, cmd := range s3perm.CommandsFor(perm) {
+		if subject == nil {
+			return nil, fmt.Errorf("delegating %s: missing bucket", cmd)
+		}
+		d, err := delegation.Delegate(accessKey, audience, *subject, cmd, delegation.WithExpiration(exp))
+		if err != nil {
+			return nil, fmt.Errorf("delegating %s: %w", cmd, err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // nextUTCMidnight returns 00:00:00 UTC of the day after t — when a date-scoped

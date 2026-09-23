@@ -88,9 +88,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   not hand-write command strings with `command.MustParse`.
 - **Authorization**: signature-bearing S3 commands authenticate via the
   `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
-  provider + region served by that provider). Command-specific S3-permission checks
-  stay in each handler. `/s3/bucket/info` is an unauthenticated lookup (no signed
-  request).
+  provider + region served by that provider), which also classifies the operation
+  and resolves every bucket it addresses within the tenant and the key's scope. A
+  copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
+  destination and `s3:GetObject` on the source, and the header must be a signed
+  header. Command-specific S3-permission checks stay in each handler.
+  `/s3/bucket/info` is an unauthenticated lookup (no signed request).
 - **Identities & keys**: tenants are secp256k1 → did:plc; access keys and buckets
   are ed25519 → did:key. Build issuers with `multikey.NewIssuer(did, signer)`. Bucket
   keys are **ephemeral** — used once to sign the bucket→tenant root delegation, then

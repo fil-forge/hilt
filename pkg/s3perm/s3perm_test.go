@@ -50,13 +50,26 @@ func TestCommandsFor(t *testing.T) {
 		require.Contains(t, strs("s3:PutObject"), "/blob/remove")
 	})
 
+	t.Run("the write path can retire a superseded version", func(t *testing.T) {
+		// The same overwrite retires the replaced version's content entry with
+		// /upload/remove, so the space's object count holds instead of climbing
+		// with every overwrite.
+		require.Contains(t, strs("s3:PutObject"), "/upload/remove")
+	})
+
 	t.Run("bucket-level permissions map to no commands", func(t *testing.T) {
-		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets", "s3:DeleteBucket"))
+		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets"))
+	})
+
+	t.Run("deleting a bucket unwinds the blobs its space holds", func(t *testing.T) {
+		// Parked parts are abandoned, everything else the space still
+		// registers is released.
+		require.ElementsMatch(t, []string{"/blob/abort", "/blob/remove"}, strs("s3:DeleteBucket"))
 	})
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {
 		require.Equal(t, []string{
-			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/blob/abort", "/blob/remove",
+			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/upload/remove", "/blob/abort", "/blob/remove",
 		}, strs("s3:GetObject", "s3:PutObject"))
 	})
 
@@ -94,4 +107,18 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 		require.True(t, s3perm.Valid(op.Permission()),
 			"operation %s requires %q, which s3perm does not recognize", op, op.Permission())
 	}
+
+	// The copies: their destination permission and the source's.
+	copyHdr := map[string]string{"x-amz-copy-source": "src/k"}
+	for _, r := range reqs[4:5] {
+		op, err := auth.OperationFor(s3.Request{Method: r.method, URL: r.url, Headers: copyHdr})
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, op)
+		require.True(t, s3perm.Valid(op.Permission()))
+	}
+	op, err := auth.OperationFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", Headers: copyHdr})
+	require.NoError(t, err)
+	require.Equal(t, auth.OpUploadPartCopy, op)
+	require.True(t, s3perm.Valid(op.Permission()))
+	require.True(t, s3perm.Valid(auth.SourcePermission))
 }

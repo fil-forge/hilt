@@ -253,6 +253,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	log.Debug("created bucket", zap.Int("delegations", len(proofSet)))
 	return &s3req.AuthorizeOK{
 		Bucket: &bucketID,
+		Tenant: authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
 			accessKeyID: authz.AccessKey.Permissions,
 		}},
