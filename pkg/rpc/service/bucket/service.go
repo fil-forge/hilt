@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -25,14 +26,12 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
-	"github.com/fil-forge/ucantone/validator"
 	"github.com/ipfs/go-cid"
 	"go.uber.org/zap"
 )
@@ -50,16 +49,6 @@ type UploadClient interface {
 	UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error
 }
 
-// RevocationPublisher is the subset of the revocation service (Swarf) the bucket
-// operations need. It is satisfied by [*swarfclient.Client]; the interface lets the
-// logic be unit tested without a live revocation service.
-type RevocationPublisher interface {
-	// Publish submits a /ucan/revoke invocation self-signed by revoker for the
-	// revoked delegation, which revoker must have issued unless a witness path is
-	// supplied with [swarfclient.WithWitnessPath].
-	Publish(ctx context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error
-}
-
 // Service implements the S3 bucket operations shared by the UCAN command handlers.
 type Service struct {
 	logger      *zap.Logger
@@ -69,7 +58,7 @@ type Service struct {
 	accessKeys  accesskey.Store
 	policies    bucketpolicystore.Store
 	uploads     UploadClient
-	revocations RevocationPublisher
+	revocations grant.RevocationPublisher
 }
 
 // New constructs the bucket service.
@@ -81,7 +70,7 @@ func New(
 	accessKeys accesskey.Store,
 	policies bucketpolicystore.Store,
 	uploads UploadClient,
-	revocations RevocationPublisher,
+	revocations grant.RevocationPublisher,
 ) *Service {
 	return &Service{
 		logger:      logger,
@@ -323,10 +312,11 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	return &s3bkt.DeleteOK{}, nil
 }
 
-// revokeDelegations publishes a UCAN revocation for the delegations over the
-// bucket that the tenant issued — the grants held by its access keys — signed by
-// the tenant. No witness path accompanies them: the revocation service only
-// requires one to prove authority over a delegation the revoker did not issue.
+// revokeDelegations publishes, in one request, a UCAN revocation for every
+// delegation over the bucket that the tenant issued — the grants held by its
+// access keys, service and principal-bound alike — signed by the tenant. No
+// witness path accompanies them: the revocation service only requires one to
+// prove authority over a delegation the revoker did not issue.
 //
 // Powerline delegations are not affected: they carry no subject because they grant
 // access to every bucket the tenant owns, so deleting one bucket must not revoke
@@ -344,7 +334,7 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
 
-	now := ucan.UnixTimestamp(time.Now().Unix())
+	issued := make([]ucan.Delegation, 0, len(dels))
 	for _, d := range dels {
 		// The bucket→tenant root is signed by the bucket's own key, which was
 		// discarded once it had issued the root, and a root is the start of its own
@@ -355,18 +345,9 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 				zap.Stringer("delegation", d.Link()), zap.Stringer("issuer", d.Issuer()))
 			continue
 		}
-		// An expired delegation is rejected by the revocation service, and is
-		// unusable regardless, so revoking it is moot.
-		if err := validator.ValidateNotExpired(d, now); err != nil {
-			log.Info("skipping revocation of expired delegation", zap.Stringer("delegation", d.Link()))
-			continue
-		}
-		if err := s.revocations.Publish(ctx, revoker, d); err != nil {
-			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
-		}
-		log.Info("published revocation", zap.Stringer("delegation", d.Link()))
+		issued = append(issued, d)
 	}
-	return nil
+	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
 }
 
 // List authorizes the request (which also verifies the access key holds the
