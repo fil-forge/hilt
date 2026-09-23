@@ -57,7 +57,7 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 		audiences = append(audiences, d.Audience().String())
 	}
 	if err := lockAudiences(ctx, tx, audiences...); err != nil {
-		return err
+		return pglock.MapError(err)
 	}
 
 	for _, d := range delegations {
@@ -108,19 +108,14 @@ func insert(ctx context.Context, tx pgx.Tx, d ucan.Delegation) error {
 // hashtext(audience DID).
 const lockNamespace int32 = 0x44454c47 // "DELG"
 
-// lockTimeout bounds how long an audience-mutating write waits on another
-// holding the same audience's lock. Replace runs next while it holds the lock,
-// so a hung next must fail the waiter rather than pin a pool connection.
-const lockTimeout = "10s"
-
-// lockAudiences sets tx's lock timeout and takes the exclusive advisory lock
-// of each distinct audience, in sorted order. The order is what keeps two
+// lockAudiences bounds tx's lock waits at [store.LockTimeout] and takes the
+// exclusive advisory lock of each distinct audience, in sorted order. The order is what keeps two
 // transactions locking overlapping audiences from deadlocking: they queue for
 // the shared audiences in the same sequence. The locks are released when tx
 // commits or rolls back.
 func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+lockTimeout+`'`); err != nil {
-		return fmt.Errorf("setting lock timeout: %w", err)
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
 	}
 	slices.Sort(audiences)
 	for _, aud := range slices.Compact(audiences) {
@@ -139,7 +134,7 @@ func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 // the wait is bounded at [store.LockTimeout] and a longer one returns
 // [store.ErrLockTimeout].
 func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	return s.replace(ctx, audiences, next)
+	return pglock.MapError(s.replace(ctx, audiences, next))
 }
 
 func (s *Store) replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
@@ -309,10 +304,10 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
 	if err := lockAudiences(ctx, tx, audience.String()); err != nil {
-		return err
+		return pglock.MapError(err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE audience = $1`, audience.String()); err != nil {
-		return fmt.Errorf("deleting delegations by audience: %w", err)
+		return pglock.MapError(fmt.Errorf("deleting delegations by audience: %w", err))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -328,7 +323,7 @@ func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
 	if !subject.Defined() {
 		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
 	}
-	return s.deleteBySubject(ctx, subject)
+	return pglock.MapError(s.deleteBySubject(ctx, subject))
 }
 
 func (s *Store) deleteBySubject(ctx context.Context, subject did.DID) error {

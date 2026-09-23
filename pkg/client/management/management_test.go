@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +156,108 @@ func TestManagementClient(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		})
 		require.NoError(t, c.DeleteAccessKey(ctx, "acme", "AKID"))
+	})
+
+	t.Run("CreatePrincipal accepts the created and the existing principal", func(t *testing.T) {
+		for _, status := range []int{http.StatusCreated, http.StatusOK} {
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				assertAuth(t, r)
+				require.Equal(t, http.MethodPut, r.Method)
+				require.Equal(t, "/tenants/acme/principals/user-1", r.URL.Path)
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(api.Principal{PrincipalID: "user-1"})
+			})
+			got, err := c.CreatePrincipal(ctx, "acme", "user-1")
+			require.NoError(t, err)
+			require.Equal(t, "user-1", got.PrincipalID)
+		}
+	})
+
+	t.Run("ListPrincipals returns the items", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, "/tenants/acme/principals", r.URL.Path)
+			_ = json.NewEncoder(w).Encode(api.PrincipalList{Items: []api.Principal{{PrincipalID: "user-1"}}})
+		})
+		got, err := c.ListPrincipals(ctx, "acme")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "user-1", got[0].PrincipalID)
+	})
+
+	t.Run("GetPrincipal returns the principal", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, "/tenants/acme/principals/user-1", r.URL.Path)
+			_ = json.NewEncoder(w).Encode(api.Principal{PrincipalID: "user-1"})
+		})
+		got, err := c.GetPrincipal(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Equal(t, "user-1", got.PrincipalID)
+	})
+
+	t.Run("DeletePrincipal expects 204", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, http.MethodDelete, r.Method)
+			require.Equal(t, "/tenants/acme/principals/user-1", r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		})
+		require.NoError(t, c.DeletePrincipal(ctx, "acme", "user-1"))
+	})
+
+	t.Run("ListPrincipalAccessKeys returns the items", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			assertAuth(t, r)
+			require.Equal(t, "/tenants/acme/principals/user-1/access-keys", r.URL.Path)
+			_ = json.NewEncoder(w).Encode(api.AccessKeyList{Items: []api.AccessKey{{AccessKeyID: "AKID", Principal: "user-1"}}})
+		})
+		got, err := c.ListPrincipalAccessKeys(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, "user-1", got[0].Principal)
+	})
+
+	t.Run("an opaque principal id stays one escaped path segment", func(t *testing.T) {
+		for _, tc := range []struct{ id, escaped string }{
+			{"a/b", "a%2Fb"},
+			{"..", ".."},
+			{".", "."},
+			{"a%b", "a%25b"},
+			{"a b", "a%20b"},
+			{"\u00fcnicode", "%C3%BCnicode"},
+		} {
+			t.Run(tc.id, func(t *testing.T) {
+				var gotMethod, gotPath string
+				c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+					gotMethod, gotPath = r.Method, r.URL.EscapedPath()
+					if r.Method == http.MethodDelete {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(api.Principal{PrincipalID: tc.id})
+				})
+				want := "/tenants/acme/principals/" + tc.escaped
+
+				_, err := c.GetPrincipal(ctx, "acme", tc.id)
+				require.NoError(t, err)
+				require.Equal(t, http.MethodGet, gotMethod)
+				require.Equal(t, want, gotPath)
+
+				require.NoError(t, c.DeletePrincipal(ctx, "acme", tc.id))
+				require.Equal(t, http.MethodDelete, gotMethod)
+				require.Equal(t, want, gotPath)
+				// A traversal segment must not reach the tenant's own route.
+				require.NotEqual(t, "/tenants/acme", gotPath)
+
+				// The server reads the id back from the last segment.
+				segments := strings.Split(gotPath, "/")
+				id, err := url.PathUnescape(segments[len(segments)-1])
+				require.NoError(t, err)
+				require.Equal(t, tc.id, id)
+			})
+		}
 	})
 
 	t.Run("non-2xx returns an APIError carrying status and message", func(t *testing.T) {
