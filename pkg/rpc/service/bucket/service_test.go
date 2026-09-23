@@ -3,6 +3,7 @@ package bucket_test
 import (
 	"context"
 	"errors"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,6 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
-	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -124,7 +124,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &fakeSwarf{}), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &htestutil.FakeSwarf{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -233,37 +233,13 @@ func (f failingListDelegations) ListByAudience(context.Context, did.DID, ...stor
 }
 
 // revocation records one published revocation.
-type revocation struct {
-	revoker did.DID
-	revoked cid.Cid
-}
-
-// fakeSwarf is a stub of the revocation service, recording what it was asked to
-// publish.
-type fakeSwarf struct {
-	err         error
-	calls       int
-	revocations []revocation
-}
-
-func (f *fakeSwarf) PublishBatch(_ context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.calls++
-	for _, d := range revoked {
-		f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: d.Link()})
-	}
-	return nil
-}
-
 // deleteDeps is the world a Delete subtest operates on.
 type deleteDeps struct {
 	svc         *bucketsvc.Service
 	buckets     *bucketmemory.Store
 	delegations *delegationmemory.Store
 	policies    bucketpolicystore.Store
-	swarf       *fakeSwarf
+	swarf       *htestutil.FakeSwarf
 	tenantID    did.DID
 	bucketID    did.DID
 	root        ucan.Delegation // bucket→tenant, signed by the bucket's discarded key
@@ -310,7 +286,7 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		swarf := &fakeSwarf{}
+		swarf := &htestutil.FakeSwarf{}
 		policies := bucketpolicymemory.New()
 		return deleteDeps{
 			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf),
@@ -359,12 +335,12 @@ func TestDelete(t *testing.T) {
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
 
-		require.Len(t, d.swarf.revocations, 1)
-		require.Equal(t, 1, d.swarf.calls)
-		r := d.swarf.revocations[0]
+		require.Len(t, d.swarf.Revocations(), 1)
+		require.Equal(t, 1, d.swarf.Calls())
+		r := d.swarf.Revocations()[0]
 		// The tenant issued the grant, so the tenant revokes it directly.
-		require.Equal(t, tenantID, r.revoker)
-		require.Equal(t, d.grant.Link(), r.revoked)
+		require.Equal(t, tenantID, r.Revoker)
+		require.Equal(t, d.grant.Link(), r.Revoked)
 	})
 
 	t.Run("does not revoke the bucket root", func(t *testing.T) {
@@ -374,8 +350,8 @@ func TestDelete(t *testing.T) {
 
 		// The root was signed by the bucket's discarded key: the tenant is only its
 		// audience, so no revocation it could sign would be accepted.
-		for _, r := range d.swarf.revocations {
-			require.NotEqual(t, d.root.Link(), r.revoked)
+		for _, r := range d.swarf.Revocations() {
+			require.NotEqual(t, d.root.Link(), r.Revoked)
 		}
 	})
 
@@ -387,14 +363,14 @@ func TestDelete(t *testing.T) {
 		// anyway — so the bucket is still deleted, just with nothing published.
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
-		require.Empty(t, d.swarf.revocations)
+		require.Empty(t, d.swarf.Revocations())
 		_, err = d.buckets.GetByName(ctx, bucketName)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("a revocation failure leaves the bucket intact", func(t *testing.T) {
 		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
-		d.swarf.err = errors.New("swarf is down")
+		d.swarf.Err = errors.New("swarf is down")
 
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.ErrorContains(t, err, "publishing revocation")
@@ -425,7 +401,7 @@ func TestDelete(t *testing.T) {
 		require.ErrorIs(t, err, bucketsvc.ErrBucketNotEmpty)
 		_, err = d.buckets.GetByName(ctx, bucketName)
 		require.NoError(t, err)
-		require.Empty(t, d.swarf.revocations, "nothing is revoked when the delete is refused")
+		require.Empty(t, d.swarf.Revocations(), "nothing is revoked when the delete is refused")
 	})
 
 	t.Run("propagates a SpaceEmpty error", func(t *testing.T) {
@@ -455,7 +431,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -573,7 +549,7 @@ func TestInfo(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		// Info does not use the authorizer; a minimal one over the same stores suffices.
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &fakeSwarf{}), accessKeys
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), accessKeys
 	}
 
 	t.Run("returns the bucket, permissions, and delegation chain", func(t *testing.T) {

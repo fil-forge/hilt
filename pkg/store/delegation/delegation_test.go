@@ -241,7 +241,6 @@ func TestDelegationStore(t *testing.T) {
 				freshA, freshB := makeDelegation(t, issuer, a, issuer.DID(), cmd), makeDelegation(t, issuer, b, issuer.DID(), cmd)
 
 				require.NoError(t, s.Replace(t.Context(), []did.DID{a, b}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-					require.Len(t, current, 2)
 					require.Len(t, current[a], 1)
 					require.Equal(t, oldA.Link(), current[a][0].Link())
 					require.Empty(t, current[b])

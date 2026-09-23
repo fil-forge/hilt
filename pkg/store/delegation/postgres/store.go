@@ -41,11 +41,12 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 // PutBatch stores the batch in one transaction holding the advisory lock of
 // every audience it touches, so a concurrent Replace of any of them sees the
 // whole batch or none of it.
-func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) error {
+func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) (err error) {
 	// Validate the whole batch before storing anything.
 	if slices.Contains(delegations, nil) {
 		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
 	}
+	defer func() { err = pglock.MapError(err) }()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -108,19 +109,14 @@ func insert(ctx context.Context, tx pgx.Tx, d ucan.Delegation) error {
 // hashtext(audience DID).
 const lockNamespace int32 = 0x44454c47 // "DELG"
 
-// lockTimeout bounds how long an audience-mutating write waits on another
-// holding the same audience's lock. Replace runs next while it holds the lock,
-// so a hung next must fail the waiter rather than pin a pool connection.
-const lockTimeout = "10s"
-
-// lockAudiences sets tx's lock timeout and takes the exclusive advisory lock
-// of each distinct audience, in sorted order. The order is what keeps two
-// transactions locking overlapping audiences from deadlocking: they queue for
-// the shared audiences in the same sequence. The locks are released when tx
-// commits or rolls back.
+// lockAudiences bounds tx's lock waits at [store.LockTimeout] and takes the
+// exclusive advisory lock of each distinct audience, in sorted order. The
+// order is what keeps two transactions locking overlapping audiences from
+// deadlocking: they queue for the shared audiences in the same sequence. The
+// locks are released when tx commits or rolls back.
 func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
-	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+lockTimeout+`'`); err != nil {
-		return fmt.Errorf("setting lock timeout: %w", err)
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
 	}
 	slices.Sort(audiences)
 	for _, aud := range slices.Compact(audiences) {
@@ -138,11 +134,8 @@ func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 // sees the settled state; the holder runs next while it holds the locks, so
 // the wait is bounded at [store.LockTimeout] and a longer one returns
 // [store.ErrLockTimeout].
-func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	return s.replace(ctx, audiences, next)
-}
-
-func (s *Store) replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) (err error) {
+	defer func() { err = pglock.MapError(err) }()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -158,9 +151,6 @@ func (s *Store) replace(ctx context.Context, audiences []did.DID, next func(ctx 
 	}
 
 	current := make(map[did.DID][]ucan.Delegation, len(audiences))
-	for _, aud := range audiences {
-		current[aud] = nil
-	}
 	rows, err := tx.Query(ctx, `SELECT id, data FROM delegation WHERE audience = ANY($1) ORDER BY id ASC`, strs)
 	if err != nil {
 		return fmt.Errorf("querying delegations by audience: %w", err)
@@ -301,7 +291,8 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 // DeleteByAudience removes the audience's delegations in one transaction
 // holding its advisory lock, so a concurrent Replace of the audience does not
 // reinsert what this call deleted.
-func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
+func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) (err error) {
+	defer func() { err = pglock.MapError(err) }()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -324,14 +315,11 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 // DeleteBySubject locks the audiences holding delegations over the subject
 // before deleting them, so it does not interleave with a Replace of one of
 // those audiences.
-func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
+func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) (err error) {
 	if !subject.Defined() {
 		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
 	}
-	return s.deleteBySubject(ctx, subject)
-}
-
-func (s *Store) deleteBySubject(ctx context.Context, subject did.DID) error {
+	defer func() { err = pglock.MapError(err) }()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
