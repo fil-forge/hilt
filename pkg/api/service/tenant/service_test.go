@@ -255,6 +255,9 @@ type deleteEnv struct {
 	// grants are the delegations the tenant's one access key holds.
 	grants    []cid.Cid
 	directory *plcDirectory
+	// tombstone is the DID's signed tombstone, for a directory that already
+	// served a deactivation.
+	tombstone []byte
 }
 
 func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
@@ -272,6 +275,12 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	var genesisJSON bytes.Buffer
 	require.NoError(t, genesis.MarshalDagJSON(&genesisJSON))
+	tomb, err := plc.NewTombstoneFromPrevious(genesis)
+	require.NoError(t, err)
+	signedTomb, err := plc.SignTombstone(signer, tomb)
+	require.NoError(t, err)
+	var tombstoneJSON bytes.Buffer
+	require.NoError(t, signedTomb.MarshalDagJSON(&tombstoneJSON))
 	directory := &plcDirectory{logLast: genesisJSON.Bytes()}
 	dirServer := httptest.NewServer(directory)
 	t.Cleanup(dirServer.Close)
@@ -315,7 +324,8 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
 		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, swarf)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
-		principals: principals, swarf: swarf, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory}
+		principals: principals, swarf: swarf, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
+		tombstone: tombstoneJSON.Bytes()}
 }
 
 func TestDelete(t *testing.T) {
@@ -347,6 +357,16 @@ func TestDelete(t *testing.T) {
 		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)
 		require.Zero(t, env.directory.deactivations)
+	})
+
+	t.Run("an already deactivated DID publishes nothing and finishes the cascade", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		env.directory.logLast = env.tombstone
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		require.Zero(t, env.swarf.calls)
+		require.Zero(t, env.directory.deactivations)
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("deletes the tenant's buckets and their policies", func(t *testing.T) {

@@ -288,24 +288,33 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 
 	signingVaultKey := vault.TenantKeyPath(rec.ID)
 
-	// Revoke every delegation the tenant's keys hold, in one request, before
-	// the did:plc goes: the tenant signs the revocations and Swarf verifies
-	// them against its DID. A warm key would otherwise keep serving from the
-	// gateway's cache until the next UTC midnight. A failed publish leaves
-	// everything in place for a retry.
 	keys, err := s.accessKeys.ListByTenant(ctx, rec.ID)
 	if err != nil {
 		return fmt.Errorf("listing access keys: %w", err)
 	}
-	if err := s.revokeKeyDelegations(ctx, log, rec.ID, keys); err != nil {
-		return err
-	}
 
-	// Deactivate the did:plc next — it requires the (still-present) tenant key.
-	// Aborting here leaves all local state intact for a retry.
-	if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, signingVaultKey, rec.ID); err != nil {
-		log.Error("deactivating tenant DID", zap.Error(err))
-		return ErrDIDDeactivation
+	// Revoke every delegation the tenant's keys hold, in one request, before
+	// the did:plc goes: the tenant signs the revocations and Swarf verifies
+	// them against its DID. A warm key would otherwise keep serving from the
+	// gateway's cache until the next UTC midnight. A failed publish leaves
+	// everything in place for a retry. A DID an earlier attempt already
+	// deactivated skips both: that attempt published first, and Swarf could
+	// not verify a new publish against the tombstone anyway.
+	last, err := s.plcClient.Last(ctx, rec.ID)
+	if _, deactivated := errors.AsType[*plc.DeactivatedDIDError](err); !deactivated {
+		if err != nil {
+			log.Error("fetching the tenant DID's last operation", zap.Error(err))
+			return ErrDIDDeactivation
+		}
+		if err := s.revokeKeyDelegations(ctx, log, rec.ID, keys); err != nil {
+			return err
+		}
+		// Deactivate the did:plc next — it requires the (still-present) tenant
+		// key. Aborting here leaves all local state intact for a retry.
+		if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, signingVaultKey, rec.ID, last); err != nil {
+			log.Error("deactivating tenant DID", zap.Error(err))
+			return ErrDIDDeactivation
+		}
 	}
 
 	// Cascade: access keys (records + their delegations + vault keys).
@@ -433,17 +442,9 @@ func (s *Service) cleanupKey(ctx context.Context, log *zap.Logger, vaultKey stri
 	}
 }
 
-// deactivateTenantDID publishes a tombstone for the tenant's did:plc, signed with
-// its rotation key from the vault. If the DID is already deactivated it is a no-op.
-func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID) error {
-	last, err := plcClient.Last(ctx, tenantID)
-	if err != nil {
-		if _, ok := errors.AsType[*plc.DeactivatedDIDError](err); ok {
-			return nil // already deactivated
-		}
-		return fmt.Errorf("fetching last operation: %w", err)
-	}
-
+// deactivateTenantDID publishes a tombstone for the tenant's did:plc after its
+// last operation, signed with its rotation key from the vault.
+func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID, last *plc.SignedOperation) error {
 	keyBytes, err := secrets.Read(ctx, vaultKey)
 	if err != nil {
 		return fmt.Errorf("reading tenant key: %w", err)
