@@ -4,6 +4,7 @@ package itest
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -17,11 +18,11 @@ import (
 // testWriteLockBlocksWrites drives the write-lock through the real stack: an
 // active tenant creates a bucket and writes an object, then the tenant is
 // write-locked and the same operations must be refused while reads keep
-// working.
-// The same S3 client and access key are used after the lock, so the test covers
-// Ingot's warm authorization cache. Hilt revokes the access-key delegations
-// when the lock is applied; Ingot must then re-authorize and receive the
-// write-lock rejection.
+// working, and once it is unlocked the same key writes again.
+// The same S3 client and access key are used throughout, so the test covers
+// Ingot's warm authorization cache. Hilt revokes the key's write grants when
+// the lock is applied, so Ingot must re-authorize and receive the write-lock
+// rejection; its read grant is left alone. Unlocking reissues the write grants.
 func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
@@ -44,8 +45,14 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
+	var writeGrants int
+	for _, cmd := range s3perm.CommandsFor(perms...) {
+		if s3perm.Mutates(cmd) {
+			writeGrants++
+		}
+	}
 	require.NoError(t, net.console.SetTenantStatus(ctx, tenantID, api.TenantStatusWriteLocked))
-	net.awaitRevocations(t, ctx, len(s3perm.CommandsFor(perms...)), "did:key:"+ak.AccessKeyID)
+	net.awaitRevocations(t, ctx, writeGrants, "did:key:"+ak.AccessKeyID)
 
 	require.Eventually(t, func() bool {
 		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
@@ -68,8 +75,33 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	require.Error(t, err, "DeleteBucket must be refused while the tenant is write-locked")
 
-	// Reads stay available: listing the tenant's buckets still succeeds.
+	// Reads stay available: listing the tenant's buckets still succeeds, and so
+	// does reading an object, which needs the key's (unrevoked) retrieve grant.
 	out, err := s3c.ListBuckets(ctx, &s3.ListBucketsInput{})
 	require.NoError(t, err, "reads must keep working while the tenant is write-locked")
 	require.NotEmpty(t, out.Buckets)
+	requireObject(t, s3c, bucket, "before-lock.txt", "written while active")
+
+	// Unlocking reissues the revoked write grants, so the same key writes again.
+	require.NoError(t, net.console.SetTenantStatus(ctx, tenantID, api.TenantStatusActive))
+	require.Eventually(t, func() bool {
+		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("after-unlock.txt"),
+			Body:   bytes.NewReader([]byte("written after unlock")),
+		})
+		return err == nil
+	}, 30*time.Second, 500*time.Millisecond, "PutObject must succeed again once the tenant is unlocked")
+	requireObject(t, s3c, bucket, "after-unlock.txt", "written after unlock")
+}
+
+// requireObject reads the object and checks its body.
+func requireObject(t *testing.T, s3c *s3.Client, bucket, key, want string) {
+	t.Helper()
+	obj, err := s3c.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	require.NoError(t, err, "GetObject %s", key)
+	defer obj.Body.Close()
+	got, err := io.ReadAll(obj.Body)
+	require.NoError(t, err)
+	require.Equal(t, want, string(got))
 }

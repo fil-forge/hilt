@@ -6,6 +6,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	s3 "github.com/fil-forge/libforge/commands/s3"
+	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,4 +122,34 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 	require.Equal(t, auth.OpUploadPartCopy, op)
 	require.True(t, s3perm.Valid(op.Permission()))
 	require.True(t, s3perm.Valid(auth.SourcePermission))
+}
+
+// TestMutates checks that a write lock, which revokes the grants for mutating
+// commands, leaves every read permission fully usable and cuts every write
+// permission off.
+func TestMutates(t *testing.T) {
+	reads := []string{
+		"s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectRetention", "s3:GetObjectLegalHold",
+		"s3:ListBucket", "s3:ListBucketVersions", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+	}
+	for _, p := range reads {
+		for _, cmd := range s3perm.CommandsFor(p) {
+			require.False(t, s3perm.Mutates(cmd), "%s needs %s, which a write lock must keep", p, cmd)
+		}
+	}
+
+	writes := []string{
+		"s3:PutObject", "s3:PutObjectRetention", "s3:PutObjectLegalHold",
+		"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:AbortMultipartUpload",
+	}
+	for _, p := range writes {
+		var revoked bool
+		for _, cmd := range s3perm.CommandsFor(p) {
+			revoked = revoked || s3perm.Mutates(cmd)
+		}
+		require.True(t, revoked, "a write lock must revoke at least one of %s's commands", p)
+	}
+
+	// Unrecognized commands fail closed.
+	require.True(t, s3perm.Mutates(command.MustParse("/unknown/cmd")))
 }

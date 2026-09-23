@@ -76,6 +76,21 @@ func Valid(p string) bool {
 	return ok
 }
 
+// Mutates reports whether a delegation of cmd lets its holder change tenant
+// data. Only the read command set is enumerated, so any other command
+// (including one added later) counts as mutating: a write lock revokes these
+// grants, and failing closed is the safe default there. /content/retrieve is
+// also delegated for s3:PutObject, but it only reads, so a write-locked tenant
+// keeps it.
+func Mutates(cmd ucan.Command) bool {
+	for _, c := range cmdsRetrieve {
+		if c.String() == cmd.String() {
+			return false
+		}
+	}
+	return true
+}
+
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the
 // given S3 permissions, preserving first-seen order.
 func CommandsFor(permissions ...string) []ucan.Command {

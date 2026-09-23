@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
@@ -22,6 +23,8 @@ import (
 	wrapkeysmemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	blobcmds "github.com/fil-forge/libforge/commands/blob"
+	contentcmds "github.com/fil-forge/libforge/commands/content"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
@@ -32,7 +35,6 @@ import (
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
-	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/stretchr/testify/require"
@@ -192,7 +194,7 @@ func TestGetAndSetStatus(t *testing.T) {
 		require.Equal(t, tenant.WriteLocked, rec.Status)
 	})
 
-	t.Run("write-lock revokes tenant-issued access-key delegations once", func(t *testing.T) {
+	t.Run("write-lock revokes only write grants, and unlock reissues them", func(t *testing.T) {
 		tenants := tenantmemory.New()
 		accessKeys := accesskeymemory.New()
 		delegations := delegationmemory.New()
@@ -200,25 +202,57 @@ func TestGetAndSetStatus(t *testing.T) {
 		signer, err := secp256k1.Generate()
 		require.NoError(t, err)
 		tenantID := signer.KeyDID()
+		tenantIssuer := multikey.NewIssuer(tenantID, signer)
 		accessKey := testutil.RandomIssuer(t).DID()
+		bucketID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
-		require.NoError(t, accessKeys.Add(ctx, accessKey, tenantID, "key", nil, []string{"s3:GetObject"}, nil))
-		root, err := delegation.Delegate(multikey.NewIssuer(tenantID, signer), accessKey, did.Undef,
-			command.MustParse("/test/run"), delegation.WithNoExpiration())
+		require.NoError(t, accessKeys.Add(ctx, accessKey, tenantID, "key", nil, []string{"s3:GetObject", "s3:PutObject"}, nil))
+
+		read, err := delegation.Delegate(tenantIssuer, accessKey, did.Undef, contentcmds.Retrieve.Command, delegation.WithNoExpiration())
 		require.NoError(t, err)
-		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
+		exp := ucan.UnixTimestamp(time.Now().Add(time.Hour).Unix())
+		write, err := delegation.Delegate(tenantIssuer, accessKey, bucketID, blobcmds.Add.Command, delegation.WithExpiration(exp))
+		require.NoError(t, err)
+		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{read, write}))
 
 		revocations := &recordingRevocations{}
 		svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
 			accessKeys, delegations, secrets, wrapkeysmemory.New(), nil, nil, revocations)
+
+		// Locking revokes the write grant and leaves the read grant valid.
 		require.NoError(t, svc.SetStatus(ctx, "tenant-1", "write-locked"))
 		require.Len(t, revocations.published, 1)
-		require.Equal(t, root.Link(), revocations.published[0].Link())
+		require.Equal(t, write.Link(), revocations.published[0].Link())
 
 		// Repeating the same status must not publish duplicate revocations.
 		require.NoError(t, svc.SetStatus(ctx, "tenant-1", "write-locked"))
 		require.Len(t, revocations.published, 1)
+
+		// Unlocking replaces the revoked write grant with one of the same shape,
+		// and keeps the read grant as it was.
+		require.NoError(t, svc.SetStatus(ctx, "tenant-1", "active"))
+		page, err := delegations.ListByAudience(ctx, accessKey)
+		require.NoError(t, err)
+		require.Len(t, page.Results, 2)
+		var reissued ucan.Delegation
+		for _, d := range page.Results {
+			if d.Link() == read.Link() {
+				continue
+			}
+			require.NotEqual(t, write.Link(), d.Link(), "the revoked grant must be gone")
+			reissued = d
+		}
+		require.NotNil(t, reissued, "the read grant must be kept")
+		require.Equal(t, tenantID, reissued.Issuer())
+		require.Equal(t, bucketID, reissued.Subject())
+		require.Equal(t, blobcmds.Add.Command.String(), reissued.Command().String())
+		require.Equal(t, exp, *reissued.Expiration())
+		require.Len(t, revocations.published, 1, "unlocking revokes nothing")
+
+		rec, err := tenants.Get(ctx, tenantID)
+		require.NoError(t, err)
+		require.Equal(t, tenant.Active, rec.Status)
 	})
 
 	t.Run("set status rejects an invalid status", func(t *testing.T) {

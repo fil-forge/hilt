@@ -179,8 +179,8 @@ func TestOperationPermission(t *testing.T) {
 
 func TestOperationMutates(t *testing.T) {
 	for _, op := range []Operation{
-		OpPutObject, OpCreateBucket, OpDeleteObject, OpDeleteBucket,
-		OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload, OpAbortMultipartUpload,
+		OpPutObject, OpCopyObject, OpCreateBucket, OpDeleteObject, OpDeleteBucket,
+		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload, OpAbortMultipartUpload,
 	} {
 		require.True(t, op.Mutates(), "%s mutates tenant state", op)
 	}
