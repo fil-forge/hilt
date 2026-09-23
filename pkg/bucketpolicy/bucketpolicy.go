@@ -2,7 +2,8 @@
 // actions a principal holds on a bucket, how a policy is canonicalized and
 // tagged for compare-and-set, and which principals a change to it affects. It
 // has no store or transport dependencies; the bucket policy store persists
-// policies and the management API validates them with the rules here.
+// policies, and the management API and bucket creation validate them with the
+// rules here.
 //
 // The document follows the shape of an AWS bucket policy, reduced to what
 // Forge evaluates:

@@ -5,6 +5,8 @@ package itest
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,9 +17,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/management"
+	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/stretchr/testify/require"
 )
@@ -476,4 +480,41 @@ func testPresignedGetFollowsPolicy(t *testing.T, net *forgeNet) {
 	}, time.Minute, time.Second, "the presigned url should be refused once the policy is gone")
 	require.NoError(t, lastErr)
 	require.Equal(t, http.StatusNotFound, lastStatus, "last body: %s", lastBody)
+}
+
+// testCreateBucketWithPolicyHeader covers the policy a CreateBucket request
+// carries in the signed x-bucket-policy header: the bucket is born with it, so
+// the principal it names reaches the bucket on its first request and a
+// principal it does not name is told the bucket does not exist.
+func testCreateBucketWithPolicyHeader(t *testing.T, net *forgeNet) {
+	ctx := t.Context()
+
+	const tenantID, principal, bucket = "tenant-iam-hdr", "member-hdr", "iamhdr-bucket"
+	const other = "member-hdr-other"
+	m := newMember(t, net, tenantID, principal)
+	_, err := net.console.CreatePrincipal(ctx, tenantID, other)
+	require.NoError(t, err)
+	otherKey, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{Name: other + "-key", PrincipalID: other})
+	require.NoError(t, err)
+	otherS3 := net.s3Client(t, otherKey.AccessKeyID, otherKey.SecretAccessKey)
+
+	doc := allow(only(principal), readActions...)
+	doc.Statements[0].Sid = "creator"
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	// The SDK signs every header present when the signer runs, so a header
+	// added at the build step is covered by the request signature.
+	_, err = m.service.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}, func(opts *s3.Options) {
+		opts.APIOptions = append(opts.APIOptions, smithyhttp.AddHeaderValue(bucketsvc.PolicyHeader, base64.StdEncoding.EncodeToString(raw)))
+	})
+	require.NoError(t, err)
+
+	stored, _, err := net.console.GetBucketPolicy(ctx, tenantID, bucket)
+	require.NoError(t, err)
+	require.Equal(t, doc, stored)
+
+	_, err = m.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
+	require.NoError(t, err, "the named principal reaches the bucket on its first request")
+	_, err = otherS3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
+	requireS3Code(t, err, "NoSuchBucket")
 }
