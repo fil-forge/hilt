@@ -24,7 +24,12 @@ var (
 	// the superseded blobs' registrations leak in the space — invisible to the
 	// S3 client (removal is best-effort), but the space can never be emptied
 	// and keeps the tenant's bytes registered with no way to release them.
-	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
+	// Supersession retires the replaced version itself the same way, with
+	// /upload/remove: the space counts one content entry per object version, so
+	// without the grant an overwrite registers the new version and fails to
+	// retract the old, and the tenant's object count climbs with every
+	// overwrite instead of holding steady.
+	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, upload.Remove.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
 	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
