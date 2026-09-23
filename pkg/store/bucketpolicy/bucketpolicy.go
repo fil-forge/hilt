@@ -15,6 +15,7 @@ package bucketpolicy
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -93,4 +94,19 @@ type Store interface {
 	// Principal removal must strip the principal from each listed policy
 	// itself and must not rely on the cascade.
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]Record, error)
+}
+
+// CheckPrecondition applies the If-Match / If-None-Match rule of [Store.Put]:
+// a nil ifMatch requires no current policy; a non-nil one must equal the
+// current ETag.
+func CheckPrecondition(old *Record, ifMatch *string) error {
+	switch {
+	case ifMatch == nil && old != nil:
+		return fmt.Errorf("policy already exists with ETag %s: %w", old.ETag, store.ErrPreconditionFailed)
+	case ifMatch != nil && old == nil:
+		return fmt.Errorf("bucket has no policy: %w", store.ErrPreconditionFailed)
+	case ifMatch != nil && old.ETag != *ifMatch:
+		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
+	}
+	return nil
 }
