@@ -32,12 +32,15 @@ type Store interface {
 	// Add records a principal, or revives a removed one under the same external
 	// ID with a fresh CreatedAt. It returns [store.ErrInvalidArgument] if the
 	// tenant is undef or the external ID is empty, and [store.ErrRecordExists]
-	// if the tenant already has a live principal with that external ID.
+	// if the tenant already has a live principal with that external ID. On
+	// Postgres the wait for a row an in-flight [Store.Delete] holds is bounded
+	// at [store.LockTimeout] and returns [store.ErrLockTimeout].
 	Add(ctx context.Context, tenant did.DID, externalID string) error
 	// Get returns the tenant's principal with the given external ID. It returns
 	// [store.ErrRecordNotFound] if there is none or it was removed. With
 	// [store.LockShare] the read waits for an in-flight [Store.Delete] of the
-	// same row to commit or roll back.
+	// same row to commit or roll back; on Postgres the wait is bounded at
+	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
 	Get(ctx context.Context, tenant did.DID, externalID string, locks ...store.LockMode) (Record, error)
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
@@ -46,7 +49,9 @@ type Store interface {
 	// concurrent removals and revives of the same row for the whole call, runs
 	// beforeCommit (nil allowed), then marks the row and commits. An error from
 	// beforeCommit is returned and leaves the principal live. It is idempotent:
-	// when no live row exists it returns nil without running beforeCommit.
+	// when no live row exists it returns nil without running beforeCommit. On
+	// Postgres the wait for the row lock is bounded at [store.LockTimeout] and
+	// returns [store.ErrLockTimeout], which the caller retries.
 	//
 	// beforeCommit must not read or write this store: a share-locked read or a
 	// write of the same row waits on the lock the call itself holds. It may
@@ -58,7 +63,9 @@ type Store interface {
 	// then releases them. A policy write uses it so that a key created for one
 	// of the principals meanwhile is either included in the write's rotation or
 	// created from the committed policy. IDs with no live row are skipped. fn
-	// follows the contract of [Store.Delete]'s beforeCommit.
+	// follows the contract of [Store.Delete]'s beforeCommit. On Postgres the
+	// wait for the rows is bounded at [store.LockTimeout] and returns
+	// [store.ErrLockTimeout].
 	Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error
 	// DeleteByTenant deletes every row of the tenant, tombstones included. It is
 	// idempotent.
