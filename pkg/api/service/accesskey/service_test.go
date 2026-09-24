@@ -23,7 +23,6 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -36,30 +35,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// revocation records one published revocation. options counts the [PublishOption]s
-// it was published with: Swarf's publishConfig is unexported, so the count is how
-// a witness path being sent is detected.
-type revocation struct {
-	revoker did.DID
-	revoked cid.Cid
-	options int
-}
-
-// fakeSwarf is a stub of the revocation service, recording what it was asked to
-// publish.
-type fakeSwarf struct {
-	err         error
-	revocations []revocation
-}
-
-func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: revoked.Link(), options: len(opts)})
-	return nil
-}
-
+// revocation records one published revocation.
 // failReadBack wraps an access-key store and fails its first Get, standing in
 // for a read-back that cannot see the row the call just wrote. It records the ID
 // it was asked for, so the test can check what the rollback cleaned up.
@@ -84,7 +60,7 @@ type deps struct {
 	delegations *delegationmemory.Store
 	buckets     *bucketmemory.Store
 	secrets     *vaultmemory.Store
-	swarf       *fakeSwarf
+	swarf       *testutil.FakeSwarf
 	tenantID    did.DID
 	bucketID    did.DID
 	bucketRoot  ucan.Delegation
@@ -132,7 +108,7 @@ func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeys
 	}}, nil)
 	require.NoError(t, err)
 
-	swarf := &fakeSwarf{}
+	swarf := &testutil.FakeSwarf{}
 	return deps{
 		svc:         accesskeysvc.New(zap.NewNop(), tenants, keys, principals, buckets, policies, delegations, secrets, swarf),
 		accessKeys:  accessKeys,
@@ -157,6 +133,13 @@ func TestCreate(t *testing.T) {
 		require.NotEmpty(t, secret)
 		require.Equal(t, "k1", rec.Name)
 		require.Equal(t, []did.DID{d.bucketID}, rec.Buckets)
+
+		issued, err := d.delegations.ListByAudience(ctx, rec.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, issued.Results, "the key's delegations are stored")
+		for _, dlg := range issued.Results {
+			require.Equal(t, d.bucketID, dlg.Subject())
+		}
 	})
 
 	t.Run("rejects an empty name", func(t *testing.T) {
@@ -323,9 +306,9 @@ func TestCreatePrincipalBound(t *testing.T) {
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()))
 		// The marker is the one delegation a revocation can name for the key.
-		require.Len(t, d.swarf.revocations, 1)
-		require.Equal(t, d.tenantID, d.swarf.revocations[0].revoker)
-		require.Equal(t, issued.Results[0].Link(), d.swarf.revocations[0].revoked)
+		require.Len(t, d.swarf.Revocations(), 1)
+		require.Equal(t, d.tenantID, d.swarf.Revocations()[0].Revoker)
+		require.Equal(t, issued.Results[0].Link(), d.swarf.Revocations()[0].Revoked)
 		remaining, err := d.delegations.ListByAudience(ctx, rec.ID)
 		require.NoError(t, err)
 		require.Empty(t, remaining.Results)
@@ -412,7 +395,7 @@ func TestListGetDelete(t *testing.T) {
 func TestDeleteRevokes(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("revokes every bucket-scoped delegation, with no witness path", func(t *testing.T) {
+	t.Run("revokes every bucket-scoped delegation in one request, with no witness path", func(t *testing.T) {
 		d := setup(t)
 		// s3:PutObject maps to several commands, so the key gets several delegations.
 		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, []string{"bucket-a"}, "", nil)
@@ -423,14 +406,14 @@ func TestDeleteRevokes(t *testing.T) {
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
 
-		require.Len(t, d.swarf.revocations, len(issued.Results))
+		require.Len(t, d.swarf.Revocations(), len(issued.Results))
+		require.Equal(t, 1, d.swarf.Calls(), "every revocation goes in one request")
 		revoked := map[cid.Cid]bool{}
-		for _, r := range d.swarf.revocations {
+		for _, r := range d.swarf.Revocations() {
 			// The tenant issued the delegations, so the tenant revokes them directly:
 			// no witness path is needed to prove its authority over them.
-			require.Equal(t, d.tenantID, r.revoker)
-			require.Zero(t, r.options)
-			revoked[r.revoked] = true
+			require.Equal(t, d.tenantID, r.Revoker)
+			revoked[r.Revoked] = true
 		}
 		for _, dlg := range issued.Results {
 			require.True(t, revoked[dlg.Link()], "delegation %s was not revoked", dlg.Link())
@@ -450,11 +433,10 @@ func TestDeleteRevokes(t *testing.T) {
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
 
-		require.Len(t, d.swarf.revocations, 1)
-		r := d.swarf.revocations[0]
-		require.Equal(t, d.tenantID, r.revoker)
-		require.Equal(t, issued.Results[0].Link(), r.revoked)
-		require.Zero(t, r.options)
+		require.Len(t, d.swarf.Revocations(), 1)
+		r := d.swarf.Revocations()[0]
+		require.Equal(t, d.tenantID, r.Revoker)
+		require.Equal(t, issued.Results[0].Link(), r.Revoked)
 	})
 
 	t.Run("revokes a powerline delegation when the tenant owns no bucket", func(t *testing.T) {
@@ -466,7 +448,7 @@ func TestDeleteRevokes(t *testing.T) {
 		require.NoError(t, d.buckets.Delete(ctx, d.bucketID))
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
-		require.Len(t, d.swarf.revocations, 1)
+		require.Len(t, d.swarf.Revocations(), 1)
 		_, _, err = d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
 		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 	})
@@ -480,7 +462,7 @@ func TestDeleteRevokes(t *testing.T) {
 		// The revocation service rejects expired delegations, and they are unusable
 		// anyway — so the key is still deleted, just with nothing published.
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
-		require.Empty(t, d.swarf.revocations)
+		require.Empty(t, d.swarf.Revocations())
 		_, _, err = d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
 		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 	})
@@ -489,7 +471,7 @@ func TestDeleteRevokes(t *testing.T) {
 		d := setup(t)
 		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, "", nil)
 		require.NoError(t, err)
-		d.swarf.err = errors.New("swarf is down")
+		d.swarf.Err = errors.New("swarf is down")
 
 		err = d.svc.Delete(ctx, "tenant-1", created.ID.Identifier())
 		require.ErrorContains(t, err, "publishing revocation")
