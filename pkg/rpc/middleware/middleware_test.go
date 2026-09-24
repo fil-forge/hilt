@@ -4,163 +4,77 @@ import (
 	"testing"
 
 	"github.com/fil-forge/hilt/internal/testutil"
-	"github.com/fil-forge/hilt/pkg/rpc/middleware"
+	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
+	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
-	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/execution"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/server/middleware"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
-// wrap applies the middleware to a stand-in command that records whether it ran.
-func wrap(t *testing.T, called *bool, mw ...middleware.Middleware) server.Route {
+// route wraps a command in the logging middleware plus the checks, the way the
+// server serves the commands Hilt holds for others.
+func route(t *testing.T, logger *zap.Logger, service ucan.Issuer, ran *bool) server.Route {
 	t.Helper()
-	routes := middleware.Apply(zap.NewNop(), []server.Route{{
+	routes := middleware.Apply([]server.Route{{
 		Command: s3bkt.List.Command,
 		Handler: func(req execution.Request, res execution.Response) error {
-			*called = true
+			*ran = true
 			return nil
 		},
-	}}, mw...)
+	}},
+		hiltmiddleware.LogRejections(logger),
+		middleware.NotSelfSigned(),
+		middleware.OnlySubject(service.DID()),
+	)
 	require.Len(t, routes, 1)
 	return routes[0]
 }
 
-func TestNotSelfSigned(t *testing.T) {
+func TestLogRejections(t *testing.T) {
 	service := testutil.RandomIssuer(t)
-	provider := testutil.RandomIssuer(t)
-	stranger := testutil.RandomIssuer(t)
+	agent := testutil.RandomIssuer(t)
 
-	tests := []struct {
-		name    string
-		issuer  ucan.Issuer
-		subject did.DID
-		wantErr error
-	}{
-		{
-			name:    "rejects an invocation issued by its own subject",
-			issuer:  stranger,
-			subject: stranger.DID(),
-			wantErr: middleware.ErrSelfSignedInvocation,
-		},
-		{
-			name:    "rejects one self-signed by the service itself",
-			issuer:  service,
-			subject: service.DID(),
-			wantErr: middleware.ErrSelfSignedInvocation,
-		},
-		{
-			name:    "runs the command when the issuer is not the subject",
-			issuer:  provider,
-			subject: service.DID(),
-		},
-	}
+	t.Run("logs the rejection with the issuer and subject refused", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		var ran bool
+		err := testutil.ExecuteRoute(t, route(t, zap.New(core), service, &ran), service, agent, agent.DID())
+		require.ErrorIs(t, err, middleware.ErrSelfSignedInvocation)
+		require.False(t, ran)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var called bool
-			route := wrap(t, &called, middleware.NotSelfSigned())
-			err := testutil.ExecuteRoute(t, route, service, tt.issuer, tt.subject)
-			requireOutcome(t, err, called, tt.wantErr)
-		})
-	}
-}
+		entries := logs.FilterMessage("rejecting invocation").All()
+		require.Len(t, entries, 1)
+		fields := entries[0].ContextMap()
+		require.Equal(t, middleware.SelfSignedInvocationErrorName, fields["reason"])
+		require.Equal(t, agent.DID().String(), fields["issuer"])
+		require.Equal(t, agent.DID().String(), fields["subject"])
+	})
 
-func TestOnlySubject(t *testing.T) {
-	service := testutil.RandomIssuer(t)
-	provider := testutil.RandomIssuer(t)
-	stranger := testutil.RandomIssuer(t)
-
-	tests := []struct {
-		name    string
-		issuer  ucan.Issuer
-		subject did.DID
-		wantErr error
-	}{
-		{
-			name:    "rejects an invocation subjected to someone else",
-			issuer:  provider,
-			subject: stranger.DID(),
-			wantErr: middleware.ErrInvalidSubject,
-		},
-		{
-			name:    "rejects one subjected to the issuer's own DID",
-			issuer:  stranger,
-			subject: stranger.DID(),
-			wantErr: middleware.ErrInvalidSubject,
-		},
-		{
-			name:    "runs the command when the subject is the service",
-			issuer:  provider,
-			subject: service.DID(),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var called bool
-			route := wrap(t, &called, middleware.OnlySubject(service.DID()))
-			err := testutil.ExecuteRoute(t, route, service, tt.issuer, tt.subject)
-			requireOutcome(t, err, called, tt.wantErr)
-		})
-	}
-}
-
-func TestOnlyIssuer(t *testing.T) {
-	service := testutil.RandomIssuer(t)
-	stranger := testutil.RandomIssuer(t)
-
-	tests := []struct {
-		name    string
-		issuer  ucan.Issuer
-		subject did.DID
-		wantErr error
-	}{
-		{
-			name:    "rejects an invocation from another issuer",
-			issuer:  stranger,
-			subject: service.DID(),
-			wantErr: middleware.ErrUnauthorized,
-		},
-		{
-			name:    "runs the command for the service's own self-signed invocation",
-			issuer:  service,
-			subject: service.DID(),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var called bool
-			route := wrap(t, &called, middleware.OnlyIssuer(service.DID()))
-			err := testutil.ExecuteRoute(t, route, service, tt.issuer, tt.subject)
-			requireOutcome(t, err, called, tt.wantErr)
-		})
-	}
-}
-
-// TestApplyOrder checks that the first middleware is the outermost: a
-// self-signed invocation over another DID is reported as self-signed, the
-// rejection the caller most needs to see.
-func TestApplyOrder(t *testing.T) {
-	service := testutil.RandomIssuer(t)
-	stranger := testutil.RandomIssuer(t)
-
-	var called bool
-	route := wrap(t, &called, middleware.NotSelfSigned(), middleware.OnlySubject(service.DID()))
-	err := testutil.ExecuteRoute(t, route, service, stranger, stranger.DID())
-	requireOutcome(t, err, called, middleware.ErrSelfSignedInvocation)
-}
-
-func requireOutcome(t *testing.T, err error, called bool, wantErr error) {
-	t.Helper()
-	if wantErr == nil {
+	t.Run("logs nothing when the command runs", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		var ran bool
+		err := testutil.ExecuteRoute(t, route(t, zap.New(core), service, &ran), service, agent, service.DID())
 		require.NoError(t, err)
-		require.True(t, called, "the command should have run")
-		return
-	}
-	require.ErrorIs(t, err, wantErr)
-	require.False(t, called, "the command should not have run")
+		require.True(t, ran)
+		require.Zero(t, logs.Len())
+	})
+
+	t.Run("leaves a command's own failure to the command", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		routes := middleware.Apply([]server.Route{{
+			Command: s3bkt.List.Command,
+			Handler: func(req execution.Request, res execution.Response) error {
+				return res.SetFailure(bucketsvc.ErrUnknownBucket)
+			},
+		}}, hiltmiddleware.LogRejections(zap.New(core)))
+
+		err := testutil.ExecuteRoute(t, routes[0], service, agent, service.DID())
+		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
+		require.Zero(t, logs.Len(), "handlers log their own errors")
+	})
 }

@@ -6,7 +6,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/rpc"
-	rpcmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
+	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/libforge/identity"
@@ -14,6 +14,7 @@ import (
 	"github.com/fil-forge/ucantone/did/resolver"
 	"github.com/fil-forge/ucantone/did/web"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/server/middleware"
 	"github.com/fil-forge/ucantone/validator"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -46,7 +47,7 @@ var RPCModule = fx.Module("rpc",
 
 // asUCANRoute annotates a handler constructor so its result joins the
 // "ucanRoutes" group consumed by the UCAN server, whose routes are served
-// behind [rpcmiddleware.NotSelfSigned] and [rpcmiddleware.OnlySubject].
+// behind [middleware.NotSelfSigned] and [middleware.OnlySubject].
 func asUCANRoute(constructor any) any {
 	return fx.Annotate(constructor, fx.ResultTags(`group:"ucanRoutes"`))
 }
@@ -55,8 +56,8 @@ func asUCANRoute(constructor any) any {
 // "ucanAdminRoutes" group: the commands the service invokes on itself, whose
 // invocations are issued by the service's own identity over itself as subject
 // and so carry no delegation proofs. They are served behind
-// [rpcmiddleware.OnlyIssuer], since the subject checks reject exactly that
-// shape.
+// [middleware.OnlyIssuer] and [middleware.OnlySubject], which is that
+// shape exactly; [middleware.NotSelfSigned] would reject it.
 func asAdminUCANRoute(constructor any) any {
 	return fx.Annotate(constructor, fx.ResultTags(`group:"ucanAdminRoutes"`))
 }
@@ -98,14 +99,19 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 			validator.WithDIDResolver(didResolver),
 		),
 	)
-	routes := rpcmiddleware.Apply(p.Logger, p.Routes,
-		rpcmiddleware.NotSelfSigned(),
-		rpcmiddleware.OnlySubject(p.Identity.DID()),
+	routes := middleware.Apply(p.Routes,
+		hiltmiddleware.LogRejections(p.Logger),
+		middleware.NotSelfSigned(),
+		middleware.OnlySubject(p.Identity.DID()),
 	)
 	// The admin commands are the ones the service invokes on itself: self-signed
-	// by definition, and safe because only the service's key can issue them.
-	routes = append(routes, rpcmiddleware.Apply(p.Logger, p.AdminRoutes,
-		rpcmiddleware.OnlyIssuer(p.Identity.DID()),
+	// by definition, and safe because only the service's key can issue them. The
+	// subject is still pinned to the service, so an admin command only ever acts
+	// on the service's own authority.
+	routes = append(routes, middleware.Apply(p.AdminRoutes,
+		hiltmiddleware.LogRejections(p.Logger),
+		middleware.OnlyIssuer(p.Identity.DID()),
+		middleware.OnlySubject(p.Identity.DID()),
 	)...)
 	for _, r := range routes {
 		srv.Handle(r.Command, r.Handler)

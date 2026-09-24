@@ -53,9 +53,10 @@ type RoutingClient interface {
 
 // NewAddProviderHandler handles /admin/provider/add — register a regional provider
 // (DID + region, optionally with the storage nodes it operates). It is an admin
-// command: the route is served behind middleware.OnlyIssuer, so only an
-// invocation issued by the service's own identity reaches it (and it carries no
-// delegation proofs, the subject being the service).
+// command: the route is served behind middleware.OnlyIssuer and
+// middleware.OnlySubject, so only an invocation issued by the service's own
+// identity over itself reaches it (and it carries no delegation proofs, the
+// subject being the service).
 func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient) server.Route {
 	log := logger.With(zap.Stringer("command", adminprovider.Add.Command))
 	return adminprovider.Add.Route(func(req *binding.Request[*adminprovider.AddArguments], res *binding.Response[*adminprovider.AddOK]) error {
@@ -68,8 +69,9 @@ func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers p
 	})
 }
 
-// AddProvider registers a provider. Its route admits only the service identity
-// as issuer (middleware.OnlyIssuer, applied in pkg/fx).
+// AddProvider registers a provider. Its route admits only the service identity,
+// as both issuer and subject (middleware.OnlyIssuer and middleware.OnlySubject,
+// applied in pkg/fx).
 //
 // When nodes are given, the provider's routing policy is issued and the nodes are
 // put as its candidates on the upload service before the provider record is

@@ -8,13 +8,15 @@ import (
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
-	rpcmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/execution/batch"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/server/middleware"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/fil-forge/ucantone/ucan/invocation"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -105,14 +107,37 @@ func TestUCANServerRejectsSelfSigned(t *testing.T) {
 	for _, route := range routes {
 		t.Run(route.Command.String(), func(t *testing.T) {
 			err := executeOn(t, srv, id.DID(), route.Command, stranger, stranger.DID())
-			require.ErrorIs(t, err, rpcmiddleware.ErrSelfSignedInvocation)
+			require.ErrorIs(t, err, middleware.ErrSelfSignedInvocation)
 		})
 	}
 
 	for _, route := range admin {
 		t.Run(route.Command.String(), func(t *testing.T) {
 			err := executeOn(t, srv, id.DID(), route.Command, stranger, stranger.DID())
-			require.ErrorIs(t, err, rpcmiddleware.ErrUnauthorized)
+			require.ErrorIs(t, err, middleware.ErrUnauthorized)
+		})
+	}
+}
+
+// TestUCANServerRejectsAdminOverAnotherSubject covers the admin routes' subject
+// check. An admin command may act only on the service's own authority, so an
+// invocation subjected elsewhere is rejected even when the service issues it and
+// holds a delegation from that subject — the case the issuer check alone lets
+// through.
+func TestUCANServerRejectsAdminOverAnotherSubject(t *testing.T) {
+	_, admin, srv, id := newRPCApp(t)
+	stranger := testutil.RandomIssuer(t)
+
+	for _, route := range admin {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			// The stranger delegates the command over itself to the service, so the
+			// invocation carries a chain the validator accepts and the subject check
+			// is what rejects it.
+			prf, err := delegation.Delegate(stranger, id.DID(), stranger.DID(), route.Command)
+			require.NoError(t, err)
+
+			err = executeOn(t, srv, id.DID(), route.Command, id, stranger.DID(), prf)
+			require.ErrorIs(t, err, middleware.ErrInvalidSubject)
 		})
 	}
 }
@@ -126,9 +151,9 @@ func TestUCANServerAdmitsTheServiceOnAdminRoutes(t *testing.T) {
 	for _, route := range admin {
 		t.Run(route.Command.String(), func(t *testing.T) {
 			err := executeOn(t, srv, id.DID(), route.Command, id, id.DID())
-			require.NotErrorIs(t, err, rpcmiddleware.ErrSelfSignedInvocation)
-			require.NotErrorIs(t, err, rpcmiddleware.ErrInvalidSubject)
-			require.NotErrorIs(t, err, rpcmiddleware.ErrUnauthorized)
+			require.NotErrorIs(t, err, middleware.ErrSelfSignedInvocation)
+			require.NotErrorIs(t, err, middleware.ErrInvalidSubject)
+			require.NotErrorIs(t, err, middleware.ErrUnauthorized)
 		})
 	}
 }
@@ -146,12 +171,17 @@ func commandsOf(routes []server.Route) []string {
 // invocation carries no arguments, so a command that runs rejects it on its own
 // terms — which is how these tests tell a rejection by the route's middleware
 // from a command that ran.
-func executeOn(t *testing.T, srv *server.HTTPServer, service did.DID, cmd ucan.Command, issuer ucan.Issuer, subject did.DID) error {
+func executeOn(t *testing.T, srv *server.HTTPServer, service did.DID, cmd ucan.Command, issuer ucan.Issuer, subject did.DID, proofs ...ucan.Delegation) error {
 	t.Helper()
-	inv, err := invocation.Invoke(issuer, subject, cmd, nil, invocation.WithAudience(service))
+	links := make([]cid.Cid, 0, len(proofs))
+	for _, p := range proofs {
+		links = append(links, p.Link())
+	}
+	inv, err := invocation.Invoke(issuer, subject, cmd, nil,
+		invocation.WithAudience(service), invocation.WithProofs(links...))
 	require.NoError(t, err)
 
-	resp, err := srv.ExecuteBatch(batch.NewRequest(t.Context(), []ucan.Invocation{inv}))
+	resp, err := srv.ExecuteBatch(batch.NewRequest(t.Context(), []ucan.Invocation{inv}, batch.WithDelegations(proofs...)))
 	require.NoError(t, err)
 	rcpt, ok := resp.Receipt(inv.Task().Link())
 	require.True(t, ok, "the server issued no receipt for the invocation")

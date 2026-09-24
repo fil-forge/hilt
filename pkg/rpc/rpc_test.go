@@ -33,7 +33,7 @@ func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 	require.NoError(t, err)
 	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), up, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), tenantmemory.New(), up, revocations)
 
 	return []server.Route{
 		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),

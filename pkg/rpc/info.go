@@ -11,13 +11,14 @@ import (
 
 // NewBucketInfoHandler handles /s3/bucket/info — look up a bucket by name and
 // return its DID, the access key's S3 permissions, and the delegation proof
-// chain(s) from the bucket to that access key. It is a lookup: it carries no
-// signed S3 request, so it neither authenticates a signature nor checks the
-// invocation issuer.
+// chain(s) from the bucket to that access key. It carries no signed S3 request,
+// so there is no signature to authenticate; what it checks instead is the
+// invocation issuer, which must be the provider acting for the bucket's tenant,
+// and that the access key belongs to that tenant.
 func NewBucketInfoHandler(logger *zap.Logger, buckets *bucketsvc.Service) server.Route {
 	log := logger.With(zap.Stringer("command", s3bkt.Info.Command))
 	return s3bkt.Info.Route(func(req *binding.Request[*s3bkt.InfoArguments], res *binding.Response[*s3bkt.InfoOK]) error {
-		ok, dlgs, err := buckets.Info(req.Context(), req.Task().Arguments())
+		ok, dlgs, err := buckets.Info(req.Context(), req.Invocation().Issuer(), req.Task().Arguments())
 		if err != nil {
 			log.Error("bucket info failed", zap.Error(err))
 			return bucketFailure(res, err)

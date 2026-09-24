@@ -1,7 +1,8 @@
 // Package bucket provides the S3 bucket business logic for the UCAN RPC API:
 // create (authenticate + create the bucket, its bucket→tenant root delegation, and
 // Sprue space, returning the access key's proof chains), delete (verify empty via
-// Sprue, then tear down), list, and info (a lookup returning proof chains). It
+// Sprue, then tear down), list, and info (a lookup returning proof chains,
+// authorized by the invocation issuer rather than by a signed request). It
 // returns the known errors in errors.go so handlers surface stable failure names;
 // unexpected failures are returned wrapped.
 package bucket
@@ -21,6 +22,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
@@ -66,6 +68,7 @@ type Service struct {
 	buckets     bucketstore.Store
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
+	tenants     tenantstore.Store
 	uploads     UploadClient
 	revocations RevocationPublisher
 }
@@ -77,6 +80,7 @@ func New(
 	buckets bucketstore.Store,
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
+	tenants tenantstore.Store,
 	uploads UploadClient,
 	revocations RevocationPublisher,
 ) *Service {
@@ -86,6 +90,7 @@ func New(
 		buckets:     buckets,
 		delegations: delegations,
 		accessKeys:  accessKeys,
+		tenants:     tenants,
 		uploads:     uploads,
 		revocations: revocations,
 	}
@@ -424,10 +429,11 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 }
 
 // Info resolves the named bucket and returns its DID, the access key's permissions,
-// and the proof chains for the access key's delegations that reach the bucket. It
-// is a lookup: it carries no signed S3 request, so it neither authenticates a
-// signature nor checks the invocation issuer.
-func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
+// and the proof chains for the access key's delegations that reach the bucket.
+// It carries no signed S3 request, so there is no signature to authenticate:
+// what it checks is the caller, which must be the provider acting for the
+// bucket's tenant, and the access key, which must belong to that tenant.
+func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
 	b, err := s.buckets.GetByName(ctx, args.Name)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, args.Name)
@@ -435,11 +441,34 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 		return nil, nil, fmt.Errorf("looking up bucket: %w", err)
 	}
 
+	// The proof chains this returns are the bucket tenant's, so the caller must be
+	// the provider that acts for that tenant — the same rule Authorize applies to
+	// the signature-bearing commands.
+	tenantRec, err := s.tenants.Get(ctx, b.Tenant)
+	if errors.Is(err, store.ErrRecordNotFound) {
+		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, args.Name)
+	} else if err != nil {
+		return nil, nil, fmt.Errorf("looking up tenant: %w", err)
+	}
+	if issuer != tenantRec.Provider {
+		s.logger.Debug("rejecting bucket info not from the tenant's provider",
+			zap.Stringer("bucket", b.ID), zap.Stringer("issuer", issuer), zap.Stringer("provider", tenantRec.Provider))
+		return nil, nil, auth.ErrIssuerForbidden
+	}
+
 	akRec, err := s.accessKeys.Get(ctx, args.AccessKey)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownAccessKey, args.AccessKey)
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("looking up access key: %w", err)
+	}
+	// An access key only ever reaches the buckets of its own tenant. A key from
+	// another tenant learns nothing about this one: the bucket is simply not its
+	// tenant's.
+	if akRec.Tenant != b.Tenant {
+		s.logger.Debug("rejecting access key from another tenant",
+			zap.Stringer("bucket", b.ID), zap.Stringer("accessKey", args.AccessKey))
+		return nil, nil, auth.ErrForeignBucket
 	}
 
 	// Build the proof chains from the bucket to the access key: for each grant to
