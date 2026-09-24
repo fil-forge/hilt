@@ -6,7 +6,7 @@
 // Every write that changes a principal's access takes a beforeCommit callback.
 // The Postgres backend runs it inside the write's transaction, after taking a
 // bucket-keyed advisory lock (and the row lock, when a row exists) and before
-// committing, so a caller can publish an invalidation with the guarantee that
+// committing, so a caller can run a callback with the guarantee that
 // a share-locked read of the bucket (see [store.LockShare]) waits for the
 // outcome, whether the write creates, replaces or deletes the policy. A
 // callback error rolls the write back. The memory backend runs the callback
@@ -55,8 +55,8 @@ type Store interface {
 	// Get returns the bucket's policy. It returns [store.ErrRecordNotFound] if
 	// the bucket has none. With [store.LockShare] the read waits for an
 	// in-flight write of the same bucket's policy, a create included, to
-	// commit or roll back; on Postgres the wait is bounded and an error is
-	// returned when it runs out.
+	// commit or roll back; on Postgres the wait is bounded at
+	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
 	Get(ctx context.Context, bucket did.DID, locks ...store.LockMode) (Record, error)
 	// Put creates or replaces the bucket's policy in one transaction: it locks
 	// the current row, checks in.IfMatch against it, runs beforeCommit (nil
@@ -68,7 +68,9 @@ type Store interface {
 	// on Postgres, the bucket or a named principal does not exist. An error from
 	// beforeCommit is returned and nothing is written. The referential checks
 	// run after beforeCommit, so a callback that published may still see the
-	// write fail.
+	// write fail. On Postgres every lock the write takes is bounded at
+	// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout] and
+	// nothing is written.
 	//
 	// beforeCommit must not read or write this store: on the memory backend it
 	// runs under the store mutex, and on Postgres a locked read of the same row
