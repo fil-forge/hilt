@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/exaring/otelpgx"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/migrations"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -65,6 +66,8 @@ func NewPostgresPool(cfg config.PostgresConfig, lc fx.Lifecycle, logger *zap.Log
 	if cfg.MinConns > 0 {
 		poolCfg.MinConns = cfg.MinConns
 	}
+	// Every query is a span on the caller's trace.
+	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {

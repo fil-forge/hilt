@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/fil-forge/hilt/pkg/config"
+	"github.com/fil-forge/hilt/pkg/tracing"
 	hiltvault "github.com/fil-forge/hilt/pkg/vault"
 	vaultopenbao "github.com/fil-forge/hilt/pkg/vault/openbao"
 	api "github.com/openbao/openbao/api/v2"
@@ -29,6 +30,7 @@ func NewVault(cfg config.OpenBaoConfig, logger *zap.Logger, lc fx.Lifecycle) (hi
 	}
 	clientCfg := api.DefaultConfig()
 	clientCfg.Address = cfg.Address
+	clientCfg.HttpClient.Transport = tracing.Transport(clientCfg.HttpClient.Transport)
 	client, err := api.NewClient(clientCfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating vault client: %w", err)

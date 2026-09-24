@@ -39,6 +39,20 @@ var or config file, **not** flags, to avoid exposing them in process args.
 | --- | --- | --- | --- |
 | `log.level` | _(none)_ | `HILT_LOG_LEVEL` | `info` |
 
+### Tracing
+
+`hilt serve` exports OpenTelemetry traces over OTLP/HTTP when
+`OTEL_EXPORTER_OTLP_ENDPOINT` names a collector; with no endpoint, tracing is
+off. A UCAN request is a trace named for the commands it invokes (such as
+`/s3/request/authorize`) and a Tenant API request for its route (such as
+`GET /tenants/:id`). Each invocation gets its own span, with the Postgres,
+OpenBao, PLC directory, Sprue and Swarf calls it makes as child spans. A
+caller that sends a `traceparent` header, such as Ingot, gets Hilt's spans in
+its own trace. The other standard `OTEL_*` environment variables apply:
+`OTEL_EXPORTER_OTLP_HEADERS` authenticates to the collector, and
+`OTEL_TRACES_SAMPLER_ARG` sets the fraction of requests traced (`0.01` traces
+1%; the default traces every request).
+
 ### Storage
 
 | Key | Flag | Env var | Default |
