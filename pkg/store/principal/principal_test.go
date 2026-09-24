@@ -8,7 +8,11 @@ import (
 	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -405,4 +409,110 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.NoError(t, deleted)
 		require.ErrorIs(t, got, store.ErrRecordNotFound)
 	})
+}
+
+// TestPrincipalStorePostgresLockTimeout pins the bounded wait that keeps a
+// principal removal and the writes that reach onto its row from hanging on
+// each other. Removal holds the principal row FOR UPDATE across a callback
+// that rewrites policies in transactions of its own, while a policy write
+// reaches back onto the same row through the bucket_policy_principal foreign
+// key; re-adding the principal and locking it for a policy write take the
+// row itself. Neither edge is visible to Postgres, so the wait is bounded and
+// one side is told to retry. Postgres only: the memory stores hold no lock
+// across calls.
+func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
+	principals := principalpostgres.New(pool)
+	seed := seeder(pool)
+
+	// Each case is one statement that waits on the held principal row; op runs
+	// it and unwritten checks that its transaction left nothing behind.
+	cases := []struct {
+		name      string
+		op        func(ctx context.Context, tenantID did.DID) error
+		unwritten func(t *testing.T, tenantID did.DID)
+	}{
+		{
+			name: "a policy write naming the principal",
+			op: func(ctx context.Context, tenantID did.DID) error {
+				bucketID := testutil.RandomDID(t)
+				if err := bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, "lock-timeout-bucket"); err != nil {
+					return err
+				}
+				_, err := bucketpolicypostgres.New(pool).Put(ctx, bucketpolicystore.Input{
+					Bucket: bucketID,
+					Tenant: tenantID,
+					Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+						Effect:    bucketpolicy.Allow,
+						Principal: bucketpolicy.Only("held"),
+						Actions:   []string{"s3:GetObject"},
+					}}},
+				}, nil)
+				return err
+			},
+			unwritten: func(t *testing.T, tenantID did.DID) {
+				recs, err := bucketpolicypostgres.New(pool).ListByPrincipal(t.Context(), tenantID, "held")
+				require.NoError(t, err)
+				require.Empty(t, recs)
+			},
+		},
+		{
+			name: "re-adding the principal",
+			op: func(ctx context.Context, tenantID did.DID) error {
+				return principals.Add(ctx, tenantID, "held")
+			},
+			unwritten: func(t *testing.T, tenantID did.DID) {
+				recs, err := principals.ListByTenant(t.Context(), tenantID)
+				require.NoError(t, err)
+				require.Len(t, recs, 1, "the live row is untouched")
+			},
+		},
+		{
+			name: "locking the principal for a policy write",
+			op: func(ctx context.Context, tenantID did.DID) error {
+				return principals.Lock(ctx, tenantID, []string{"held"}, func(context.Context) error {
+					return errors.New("the callback must not run while the row is held")
+				})
+			},
+			unwritten: func(*testing.T, did.DID) {},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenantID := testutil.RandomDID(t)
+			seed(t, tenantID)
+			require.NoError(t, principals.Add(t.Context(), tenantID, "held"))
+
+			// Stand in for a removal in progress: hold the principal row FOR UPDATE.
+			tx, err := pool.Begin(t.Context())
+			require.NoError(t, err)
+			defer tx.Rollback(t.Context())
+			var found bool
+			require.NoError(t, tx.QueryRow(t.Context(),
+				`SELECT TRUE FROM principal WHERE tenant_id = $1 AND external_id = $2 FOR UPDATE`,
+				tenantID.String(), "held").Scan(&found))
+
+			type result struct {
+				err     error
+				elapsed time.Duration
+			}
+			done := make(chan result, 1)
+			go func() {
+				start := time.Now()
+				err := tc.op(context.Background(), tenantID)
+				done <- result{err, time.Since(start)}
+			}()
+
+			select {
+			case res := <-done:
+				require.ErrorIs(t, res.err, store.ErrLockTimeout)
+				require.Greater(t, res.elapsed, store.LockTimeout/2,
+					"the write failed before it could have waited out the lock timeout")
+			case <-time.After(store.LockTimeout + 10*time.Second):
+				t.Fatal("the write did not give up waiting for the principal row lock")
+			}
+			// Nothing was written: the transaction rolled back with its failed lock.
+			tc.unwritten(t, tenantID)
+		})
+	}
 }
