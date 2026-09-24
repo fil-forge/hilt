@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
+	"github.com/ipfs/go-cid"
 	"strings"
 	"testing"
 	"time"
@@ -612,10 +613,26 @@ func TestInfo(t *testing.T) {
 			held = append(held, grant)
 		}
 		require.NoError(t, delegations.PutBatch(ctx, held))
-		// Info does not use the authorizer; a minimal one over empty stores suffices.
+		// Info reads a principal-bound key's principal and policy through the
+		// authorizer, so it shares the stores the test seeds.
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets,
-			principalmemory.New(), bucketpolicymemory.New(), vaultmemory.New())
+			principals, policies, vaultmemory.New())
 		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), policies, root
+	}
+
+	// grantPolicy stores a policy allowing "user-1" the given actions on the bucket.
+	grantPolicy := func(t *testing.T, policies *bucketpolicymemory.Store, actions ...string) {
+		t.Helper()
+		_, err := policies.Put(ctx, bucketpolicystore.Input{
+			Bucket: bucketID,
+			Tenant: tenantID,
+			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Effect:    bucketpolicy.Allow,
+				Principal: bucketpolicy.Only("user-1"),
+				Actions:   actions,
+			}}},
+		}, nil)
+		require.NoError(t, err)
 	}
 
 	t.Run("returns the bucket, permissions, and delegation chain", func(t *testing.T) {
@@ -638,6 +655,37 @@ func TestInfo(t *testing.T) {
 		svc, _, _ := setup(t, allPerms, false, did.DID{})
 		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: testutil.RandomDID(t)})
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownAccessKey)
+	})
+
+	t.Run("a principal-bound key gets its effective set and the chains through its grants", func(t *testing.T) {
+		svc, policies, root := setup(t, nil, true, did.DID{})
+		grantPolicy(t, policies, "s3:GetObject", "s3:ListBucket")
+
+		ok, blocks, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.NoError(t, err)
+		require.Equal(t, bucketID, ok.ID)
+		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, ok.Permissions.Entries[akDID])
+
+		// The chain runs from the bucket root through the tenant's grant to the
+		// key, as a service key scoped to the bucket has it.
+		require.Len(t, blocks, 2)
+		var held ucan.Delegation
+		for _, d := range blocks {
+			if d.Link() != root.Link() {
+				held = d
+			}
+		}
+		require.NotNil(t, held)
+		require.Equal(t, akDID, held.Audience())
+		require.Equal(t, bucketID, held.Subject())
+		require.Equal(t, content.Retrieve.Command.String(), held.Command().String())
+		require.Equal(t, map[cid.Cid][]cid.Cid{held.Link(): {root.Link(), held.Link()}}, ok.Delegations.Entries)
+	})
+
+	t.Run("a bucket outside the principal's reach is unknown", func(t *testing.T) {
+		svc, _, _ := setup(t, nil, true, did.DID{}) // no policy at all
+		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
 	})
 
 	t.Run("returns empty delegations when no grant reaches the bucket", func(t *testing.T) {
