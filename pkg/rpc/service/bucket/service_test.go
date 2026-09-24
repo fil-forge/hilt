@@ -120,7 +120,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue, &fakeSwarf{}), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, sprue, &fakeSwarf{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -305,7 +305,7 @@ func TestDelete(t *testing.T) {
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 		swarf := &fakeSwarf{}
 		return deleteDeps{
-			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, sprue, swarf),
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, sprue, swarf),
 			buckets:     buckets,
 			delegations: delegations,
 			swarf:       swarf,
@@ -430,7 +430,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, perms, nil))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), signer.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, &fakeSprue{}, &fakeSwarf{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -527,12 +527,17 @@ func TestInfo(t *testing.T) {
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
+	providerID := testutil.RandomDID(t)
 
-	// setup seeds a bucket, an access key, a bucket→tenant root, and a
-	// tenant→access-key grant with the given subject (did.DID{} = powerline).
-	setup := func(t *testing.T, grantSubject did.DID) *bucketsvc.Service {
+	// setup seeds a tenant belonging to providerID, its bucket and access key, a
+	// bucket→tenant root, and a tenant→access-key grant with the given subject
+	// (did.DID{} = powerline). It returns the service and its access-key store, so
+	// a test can add a key belonging to another tenant.
+	setup := func(t *testing.T, grantSubject did.DID) (*bucketsvc.Service, *accesskeymemory.Store) {
 		t.Helper()
 		accessKeys, buckets, delegations := accesskeymemory.New(), bucketmemory.New(), delegationmemory.New()
+		tenants := tenantmemory.New()
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
 		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top())
@@ -540,14 +545,14 @@ func TestInfo(t *testing.T) {
 		grant, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, grantSubject, content.Retrieve.Command)
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
-		// Info does not use the authorizer; a minimal one over empty stores suffices.
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, &fakeSprue{}, &fakeSwarf{})
+		// Info does not use the authorizer; a minimal one over the same stores suffices.
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, vaultmemory.New())
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, &fakeSprue{}, &fakeSwarf{}), accessKeys
 	}
 
 	t.Run("returns the bucket, permissions, and delegation chain", func(t *testing.T) {
-		svc := setup(t, did.DID{}) // powerline grant reaches the bucket
-		ok, blocks, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		svc, _ := setup(t, did.DID{}) // powerline grant reaches the bucket
+		ok, blocks, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		require.NoError(t, err)
 		require.Equal(t, bucketID, ok.ID)
 		require.Equal(t, []string{"s3:GetObject"}, ok.Permissions.Entries[akDID])
@@ -555,20 +560,34 @@ func TestInfo(t *testing.T) {
 	})
 
 	t.Run("rejects an unknown bucket", func(t *testing.T) {
-		svc := setup(t, did.DID{})
-		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: "nope", AccessKey: akDID})
+		svc, _ := setup(t, did.DID{})
+		_, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: "nope", AccessKey: akDID})
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
 	})
 
+	t.Run("rejects an issuer that is not the tenant's provider", func(t *testing.T) {
+		svc, _ := setup(t, did.DID{})
+		_, _, err := svc.Info(ctx, testutil.RandomDID(t), &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.ErrorIs(t, err, auth.ErrIssuerForbidden)
+	})
+
+	t.Run("rejects an access key belonging to another tenant", func(t *testing.T) {
+		svc, accessKeys := setup(t, did.DID{})
+		foreign := testutil.RandomDID(t)
+		require.NoError(t, accessKeys.Add(ctx, foreign, testutil.RandomDID(t), "k2", nil, []string{"s3:GetObject"}, nil))
+		_, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: foreign})
+		require.ErrorIs(t, err, auth.ErrForeignBucket)
+	})
+
 	t.Run("rejects an unknown access key", func(t *testing.T) {
-		svc := setup(t, did.DID{})
-		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: testutil.RandomDID(t)})
+		svc, _ := setup(t, did.DID{})
+		_, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: testutil.RandomDID(t)})
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownAccessKey)
 	})
 
 	t.Run("returns empty delegations when no grant reaches the bucket", func(t *testing.T) {
-		svc := setup(t, testutil.RandomDID(t)) // grant scoped to a different bucket
-		ok, blocks, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		svc, _ := setup(t, testutil.RandomDID(t)) // grant scoped to a different bucket
+		ok, blocks, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		require.NoError(t, err)
 		require.Empty(t, ok.Delegations.Entries)
 		require.Empty(t, blocks)

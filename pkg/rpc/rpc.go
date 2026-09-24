@@ -5,6 +5,10 @@
 // (authorize.go), /s3/bucket/{create,delete,info,list} (create.go, delete.go,
 // info.go, list.go), and the self-issued admin commands
 // /admin/provider/{add,list} and /admin/provider/nodes/set (admin.go).
-// Authentication and authorization shared by the signature-bearing commands
-// live in the auth service (service/auth).
+// Authorization of the invocation itself lives in middleware, applied by pkg/fx
+// when it registers the two route groups: the S3 commands require an invocation
+// subjected to the service and issued by someone else, so authority over them
+// comes from a delegation the service issued, while the admin commands require
+// one issued by the service's own identity. Authentication and authorization shared by the
+// signature-bearing commands live in the auth service (service/auth).
 package rpc

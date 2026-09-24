@@ -45,7 +45,7 @@ func TestAddProvider(t *testing.T) {
 
 	t.Run("the service identity registers a provider and its routing policy", func(t *testing.T) {
 		providers, delegations, routing := providermemory.New(), delegationmemory.New(), &fakeRouting{}
-		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegations, routing, serviceID,
+		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegations, routing,
 			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1", Nodes: nodes})
 		require.NoError(t, err)
 		require.NotNil(t, ok)
@@ -73,21 +73,9 @@ func TestAddProvider(t *testing.T) {
 		require.Nil(t, root.Expiration())
 	})
 
-	t.Run("rejects an issuer that is not the service", func(t *testing.T) {
-		providers, routing := providermemory.New(), &fakeRouting{}
-		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, testutil.RandomDID(t),
-			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1", Nodes: nodes})
-		require.ErrorIs(t, err, rpc.ErrUnauthorized)
-		require.False(t, routing.called)
-
-		// nothing was stored
-		_, err = providers.GetByRegion(ctx, "us-east-1")
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
-	})
-
 	t.Run("registers a provider without nodes and without a policy", func(t *testing.T) {
 		providers, routing := providermemory.New(), &fakeRouting{}
-		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, serviceID,
+		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
 			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1"})
 		require.NoError(t, err)
 		require.NotNil(t, ok)
@@ -101,7 +89,7 @@ func TestAddProvider(t *testing.T) {
 	t.Run("stores no provider when the upload service rejects the policy", func(t *testing.T) {
 		providers := providermemory.New()
 		routing := &fakeRouting{err: errors.New("sprue unavailable")}
-		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, serviceID,
+		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
 			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1", Nodes: nodes})
 		require.Error(t, err)
 		_, err = providers.GetByRegion(ctx, "us-east-1")
@@ -112,7 +100,7 @@ func TestAddProvider(t *testing.T) {
 		providers := providermemory.New()
 		routing := &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
-		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, serviceID,
+		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
 			&adminprovider.AddArguments{Provider: testutil.RandomDID(t), Region: "us-east-1", Nodes: nodes})
 		require.ErrorIs(t, err, rpc.ErrProviderExists)
 		require.False(t, routing.called)
@@ -125,7 +113,7 @@ func TestAddProvider(t *testing.T) {
 		} {
 			t.Run(name, func(t *testing.T) {
 				routing := &fakeRouting{}
-				_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing, serviceID, args)
+				_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing, args)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 				require.False(t, routing.called)
 			})
@@ -143,7 +131,7 @@ func TestSetProviderNodes(t *testing.T) {
 	t.Run("puts the nodes as the provider's policy candidates", func(t *testing.T) {
 		providers, routing := providermemory.New(), &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", &policy))
-		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, serviceID,
+		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.NoError(t, err)
 		require.NotNil(t, ok)
@@ -155,7 +143,7 @@ func TestSetProviderNodes(t *testing.T) {
 	t.Run("issues a policy for a provider that has none", func(t *testing.T) {
 		providers, delegations, routing := providermemory.New(), delegationmemory.New(), &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
-		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegations, routing, serviceID,
+		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegations, routing,
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.NoError(t, err)
 		require.NotNil(t, ok)
@@ -176,7 +164,7 @@ func TestSetProviderNodes(t *testing.T) {
 	t.Run("records no policy when the upload service rejects the put", func(t *testing.T) {
 		providers := providermemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), &fakeRouting{err: errors.New("sprue unavailable")}, serviceID,
+		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), &fakeRouting{err: errors.New("sprue unavailable")},
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.Error(t, err)
 
@@ -185,18 +173,10 @@ func TestSetProviderNodes(t *testing.T) {
 		require.Nil(t, rec.Policy)
 	})
 
-	t.Run("rejects an issuer that is not the service", func(t *testing.T) {
-		routing := &fakeRouting{}
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing, testutil.RandomDID(t),
-			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
-		require.ErrorIs(t, err, rpc.ErrUnauthorized)
-		require.False(t, routing.called)
-	})
-
 	t.Run("rejects an empty node set", func(t *testing.T) {
 		providers, routing := providermemory.New(), &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", &policy))
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing, serviceID,
+		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
 			&adminnodes.SetArguments{Provider: providerID})
 		require.ErrorIs(t, err, rpc.ErrInvalidNodes)
 		require.False(t, routing.called)
@@ -204,7 +184,7 @@ func TestSetProviderNodes(t *testing.T) {
 
 	t.Run("rejects an unknown provider", func(t *testing.T) {
 		routing := &fakeRouting{}
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing, serviceID,
+		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing,
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.ErrorIs(t, err, rpc.ErrProviderNotFound)
 		require.False(t, routing.called)
@@ -213,10 +193,9 @@ func TestSetProviderNodes(t *testing.T) {
 
 func TestListProviders(t *testing.T) {
 	ctx := t.Context()
-	serviceID := testutil.RandomDID(t)
 
 	t.Run("reports an empty list when no provider is registered", func(t *testing.T) {
-		ok, err := rpc.ListProviders(ctx, zap.NewNop(), serviceID, providermemory.New(), serviceID, &adminprovider.ListArguments{})
+		ok, err := rpc.ListProviders(ctx, zap.NewNop(), providermemory.New(), &adminprovider.ListArguments{})
 		require.NoError(t, err)
 		require.NotNil(t, ok.Providers)
 		require.Empty(t, ok.Providers)
@@ -232,17 +211,12 @@ func TestListProviders(t *testing.T) {
 		require.NoError(t, providers.Add(ctx, ids[1], "us-east-1", &policy))
 		require.NoError(t, providers.Add(ctx, ids[0], "ap-south-1", nil))
 
-		ok, err := rpc.ListProviders(ctx, zap.NewNop(), serviceID, providers, serviceID, &adminprovider.ListArguments{})
+		ok, err := rpc.ListProviders(ctx, zap.NewNop(), providers, &adminprovider.ListArguments{})
 		require.NoError(t, err)
 		require.Equal(t, []adminprovider.Provider{
 			{Provider: ids[0], Region: "ap-south-1"},
 			{Provider: ids[1], Region: "us-east-1", Policy: &policy},
 			{Provider: ids[2], Region: "eu-west-1"},
 		}, ok.Providers)
-	})
-
-	t.Run("rejects an issuer that is not the service", func(t *testing.T) {
-		_, err := rpc.ListProviders(ctx, zap.NewNop(), serviceID, providermemory.New(), testutil.RandomDID(t), &adminprovider.ListArguments{})
-		require.ErrorIs(t, err, rpc.ErrUnauthorized)
 	})
 }

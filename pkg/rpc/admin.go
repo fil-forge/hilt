@@ -27,7 +27,6 @@ import (
 // Error names for the admin commands' known rejections, exported so callers can
 // match on the stable Name() of a serialized failure.
 const (
-	UnauthorizedErrorName     = "Unauthorized"
 	ProviderExistsErrorName   = "ProviderExists"
 	ProviderNotFoundErrorName = "ProviderNotFound"
 	InvalidNodesErrorName     = "InvalidNodes"
@@ -35,9 +34,6 @@ const (
 
 // Known rejections returned by the admin handlers.
 var (
-	// ErrUnauthorized is returned when the invocation issuer is not the service's
-	// own identity. Admin commands are self-issued only.
-	ErrUnauthorized = ucanerrors.New(UnauthorizedErrorName, "only the service identity may perform this operation")
 	// ErrProviderExists is returned when a provider is already registered for the
 	// given DID or region.
 	ErrProviderExists = ucanerrors.New(ProviderExistsErrorName, "a provider is already registered for this DID or region")
@@ -57,12 +53,14 @@ type RoutingClient interface {
 
 // NewAddProviderHandler handles /admin/provider/add — register a regional provider
 // (DID + region, optionally with the storage nodes it operates). It is an admin
-// command: only an invocation issued by the service's own identity is accepted (no
-// delegation proofs, since the subject is the service).
+// command: the route is served behind middleware.OnlyIssuer and
+// middleware.OnlySubject, so only an invocation issued by the service's own
+// identity over itself reaches it (and it carries no delegation proofs, the
+// subject being the service).
 func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient) server.Route {
 	log := logger.With(zap.Stringer("command", adminprovider.Add.Command))
 	return adminprovider.Add.Route(func(req *binding.Request[*adminprovider.AddArguments], res *binding.Response[*adminprovider.AddOK]) error {
-		ok, err := AddProvider(req.Context(), log, id.DID(), providers, delegations, uploads, req.Invocation().Issuer(), req.Task().Arguments())
+		ok, err := AddProvider(req.Context(), log, id.DID(), providers, delegations, uploads, req.Task().Arguments())
 		if err != nil {
 			log.Error("add provider failed", zap.Error(err))
 			return adminFailure(res, err)
@@ -71,8 +69,9 @@ func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers p
 	})
 }
 
-// AddProvider registers a provider. Only the service identity (issuer == serviceID)
-// may call it; there are no delegation proofs because the subject is the service.
+// AddProvider registers a provider. Its route admits only the service identity,
+// as both issuer and subject (middleware.OnlyIssuer and middleware.OnlySubject,
+// applied in pkg/fx).
 //
 // When nodes are given, the provider's routing policy is issued and the nodes are
 // put as its candidates on the upload service before the provider record is
@@ -83,11 +82,7 @@ func NewAddProviderHandler(logger *zap.Logger, id identity.Identity, providers p
 //
 // It is factored out of the handler so it can be unit tested without constructing
 // a UCAN invocation.
-func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient, issuer did.DID, args *adminprovider.AddArguments) (*adminprovider.AddOK, error) {
-	if issuer != serviceID {
-		return nil, ErrUnauthorized
-	}
-
+func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient, args *adminprovider.AddArguments) (*adminprovider.AddOK, error) {
 	// Validate the arguments and check for an existing registration before any
 	// policy material is issued or sent to the upload service.
 	if args.Provider == did.Undef {
@@ -143,7 +138,7 @@ func AddProvider(ctx context.Context, logger *zap.Logger, serviceID did.DID, pro
 func NewSetProviderNodesHandler(logger *zap.Logger, id identity.Identity, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient) server.Route {
 	log := logger.With(zap.Stringer("command", adminnodes.Set.Command))
 	return adminnodes.Set.Route(func(req *binding.Request[*adminnodes.SetArguments], res *binding.Response[*adminnodes.SetOK]) error {
-		ok, err := SetProviderNodes(req.Context(), log, id.DID(), providers, delegations, uploads, req.Invocation().Issuer(), req.Task().Arguments())
+		ok, err := SetProviderNodes(req.Context(), log, id.DID(), providers, delegations, uploads, req.Task().Arguments())
 		if err != nil {
 			log.Error("set provider nodes failed", zap.Error(err))
 			return adminFailure(res, err)
@@ -154,12 +149,9 @@ func NewSetProviderNodesHandler(logger *zap.Logger, id identity.Identity, provid
 
 // SetProviderNodes replaces the candidates of a registered provider's routing
 // policy on the upload service, issuing the policy first if the provider has
-// none. Only the service identity (issuer == serviceID) may call it. Hilt stores
-// no node list itself: the upload service holds the policy's candidate set.
-func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient, issuer did.DID, args *adminnodes.SetArguments) (*adminnodes.SetOK, error) {
-	if issuer != serviceID {
-		return nil, ErrUnauthorized
-	}
+// none. Hilt stores no node list itself: the upload service holds the policy's
+// candidate set.
+func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, delegations delegationstore.Store, uploads RoutingClient, args *adminnodes.SetArguments) (*adminnodes.SetOK, error) {
 	if args.Provider == did.Undef {
 		return nil, fmt.Errorf("provider ID is required: %w", store.ErrInvalidArgument)
 	}
@@ -203,7 +195,7 @@ func SetProviderNodes(ctx context.Context, logger *zap.Logger, serviceID did.DID
 func NewListProvidersHandler(logger *zap.Logger, id identity.Identity, providers providerstore.Store) server.Route {
 	log := logger.With(zap.Stringer("command", adminprovider.List.Command))
 	return adminprovider.List.Route(func(req *binding.Request[*adminprovider.ListArguments], res *binding.Response[*adminprovider.ListOK]) error {
-		ok, err := ListProviders(req.Context(), log, id.DID(), providers, req.Invocation().Issuer(), req.Task().Arguments())
+		ok, err := ListProviders(req.Context(), log, providers, req.Task().Arguments())
 		if err != nil {
 			log.Error("list providers failed", zap.Error(err))
 			return adminFailure(res, err)
@@ -213,11 +205,8 @@ func NewListProvidersHandler(logger *zap.Logger, id identity.Identity, providers
 }
 
 // ListProviders reports every registered provider, ordered by DID as the store
-// returns them. Only the service identity (issuer == serviceID) may call it.
-func ListProviders(ctx context.Context, logger *zap.Logger, serviceID did.DID, providers providerstore.Store, issuer did.DID, _ *adminprovider.ListArguments) (*adminprovider.ListOK, error) {
-	if issuer != serviceID {
-		return nil, ErrUnauthorized
-	}
+// returns them.
+func ListProviders(ctx context.Context, logger *zap.Logger, providers providerstore.Store, _ *adminprovider.ListArguments) (*adminprovider.ListOK, error) {
 	recs, err := providers.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing providers: %w", err)

@@ -86,6 +86,19 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   delegation map carries only CIDs — the blocks ride back in the container).
 - **Use libforge bound commands** (`.Command`, `.Route`, `.Invoke`, `.Unpack`) — do
   not hand-write command strings with `command.MustParse`.
+- **Invocation authorization** (ucantone's `server/middleware`, applied in
+  `pkg/fx/rpc.go`): routes in the `ucanRoutes` group are served behind
+  `NotSelfSigned` + `OnlySubject(serviceDID)`, so a caller must present
+  authority the service delegated; the admin commands, which Hilt invokes on
+  itself, join `ucanAdminRoutes` (`asAdminUCANRoute`) and are served behind
+  `OnlyIssuer(serviceDID)` + `OnlySubject(serviceDID)`, the shape they are
+  invoked with. A self-signed invocation (issuer == subject) needs no proofs and
+  carries unattenuated authority under the UCAN rules, which is why nothing but
+  the service's own key may issue one. Those checks are silent, so
+  `middleware.LogRejections` (`pkg/rpc/middleware`, Hilt's own) goes outermost
+  and logs what they turn away. Register a new handler with `asUCANRoute` unless
+  the service invokes it on itself, and put the check in middleware rather than
+  in the handler.
 - **Authorization**: signature-bearing S3 commands authenticate via the
   `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
   provider + region served by that provider), which also classifies the operation
@@ -93,7 +106,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
   destination and `s3:GetObject` on the source, and the header must be a signed
   header. Command-specific S3-permission checks stay in each handler.
-  `/s3/bucket/info` is an unauthenticated lookup (no signed request).
+  `/s3/bucket/info` carries no signed request, so it authorizes on the
+  invocation issuer instead: the issuer must be the provider of the bucket's
+  tenant, and the access key in the arguments must belong to that same tenant.
 - **Identities & keys**: tenants are secp256k1 → did:plc; access keys and buckets
   are ed25519 → did:key. Build issuers with `multikey.NewIssuer(did, signer)`. Bucket
   keys are **ephemeral** — used once to sign the bucket→tenant root delegation, then
