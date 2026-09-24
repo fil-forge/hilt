@@ -5,6 +5,8 @@
 package s3perm
 
 import (
+	"slices"
+
 	"github.com/fil-forge/libforge/commands/blob"
 	"github.com/fil-forge/libforge/commands/content"
 	"github.com/fil-forge/libforge/commands/index"
@@ -70,10 +72,45 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:ListBucketMultipartUploads": cmdsRetrieve,
 }
 
+// bucketLevel are the permissions excluded from bucket policies: a key holding
+// CreateBucket or DeleteBucket acts outside the policy that granted it, and
+// every principal holds ListAllMyBuckets.
+var bucketLevel = map[string]bool{
+	"s3:CreateBucket":     true,
+	"s3:DeleteBucket":     true,
+	"s3:ListAllMyBuckets": true,
+}
+
 // Valid reports whether p is a recognized S3 permission.
 func Valid(p string) bool {
 	_, ok := permissionCommands[p]
 	return ok
+}
+
+// PolicyAction reports whether p may appear in a bucket policy statement: a
+// recognized permission other than s3:CreateBucket, s3:DeleteBucket and
+// s3:ListAllMyBuckets. The wildcard PolicyWildcard is not a permission and is
+// expanded by the policy package; it is not a PolicyAction.
+func PolicyAction(p string) bool {
+	return Valid(p) && !bucketLevel[p]
+}
+
+// PolicyWildcard is the action wildcard a bucket policy statement may carry in
+// place of named actions. It stands for every permission PolicyAction accepts
+// and never for the three bucket-level actions.
+const PolicyWildcard = "s3:*"
+
+// PolicyActions returns every permission a bucket policy may grant, sorted, so
+// that expanding PolicyWildcard is deterministic.
+func PolicyActions() []string {
+	actions := make([]string, 0, len(permissionCommands))
+	for p := range permissionCommands {
+		if !bucketLevel[p] {
+			actions = append(actions, p)
+		}
+	}
+	slices.Sort(actions)
+	return actions
 }
 
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the
