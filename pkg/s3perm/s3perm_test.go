@@ -50,6 +50,13 @@ func TestCommandsFor(t *testing.T) {
 		require.Contains(t, strs("s3:PutObject"), "/blob/remove")
 	})
 
+	t.Run("the write path can retire a superseded version", func(t *testing.T) {
+		// The same overwrite retires the replaced version's content entry with
+		// /upload/remove, so the space's object count holds instead of climbing
+		// with every overwrite.
+		require.Contains(t, strs("s3:PutObject"), "/upload/remove")
+	})
+
 	t.Run("bucket-level permissions map to no commands", func(t *testing.T) {
 		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets"))
 	})
@@ -62,7 +69,7 @@ func TestCommandsFor(t *testing.T) {
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {
 		require.Equal(t, []string{
-			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/blob/abort", "/blob/remove",
+			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/upload/remove", "/blob/abort", "/blob/remove",
 		}, strs("s3:GetObject", "s3:PutObject"))
 	})
 
