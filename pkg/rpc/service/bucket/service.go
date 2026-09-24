@@ -434,6 +434,28 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("looking up access key: %w", err)
 	}
+	// A service key carries its own permission set; a principal-bound key its
+	// principal's effective actions on the bucket, whose stored grants over the
+	// bucket are the commands those actions map to. The authorizer reads the
+	// principal and the policy share-locked, so Info observes the same settled
+	// state as authorize: a removed principal is an unknown key, and a bucket
+	// the principal cannot reach is unknown.
+	permissions := akRec.Permissions
+	if akRec.Principal != nil {
+		if akRec.Tenant != b.Tenant {
+			return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, b.Name)
+		}
+		eff, err := s.authorizer.EffectiveActions(ctx, b.Tenant, *akRec.Principal, b.ID)
+		if errors.Is(err, auth.ErrUnknownAccessKey) {
+			return nil, nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
+		} else if err != nil {
+			return nil, nil, err
+		}
+		if len(eff) == 0 {
+			return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+		}
+		permissions = eff
+	}
 
 	// Build the proof chains from the bucket to the access key: for each grant to
 	// the access key that reaches this bucket (scoped to it or powerline), resolve
@@ -480,7 +502,7 @@ func (s *Service) Info(ctx context.Context, args *s3bkt.InfoArguments) (*s3bkt.I
 	return &s3bkt.InfoOK{
 		ID: b.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			args.AccessKey: akRec.Permissions,
+			args.AccessKey: permissions,
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil
