@@ -241,6 +241,14 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		}, decodeError(t, rec))
 	})
 
+	t.Run("disabled tenant is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		require.NoError(t, deps.tenants.SetStatus(t.Context(), deps.tenantID, tenant.Disabled))
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantDisabled", Message: "tenant is disabled"}, decodeError(t, rec))
+	})
+
 	t.Run("unknown tenant is 404", func(t *testing.T) {
 		e, _ := setupAccessKeys(t)
 		rec := createAccessKey(t, e, "missing", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
@@ -308,6 +316,14 @@ func TestListAccessKeysHandler(t *testing.T) {
 		require.Empty(t, names["b"])
 	})
 
+	t.Run("disabled tenant is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		require.NoError(t, deps.tenants.SetStatus(t.Context(), deps.tenantID, tenant.Disabled))
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantDisabled", Message: "tenant is disabled"}, decodeError(t, rec))
+	})
+
 	t.Run("unknown tenant is 404", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/missing/access-keys", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
@@ -368,6 +384,14 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)
+	})
+
+	t.Run("disabled tenant is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		require.NoError(t, deps.tenants.SetStatus(t.Context(), deps.tenantID, tenant.Disabled))
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantDisabled", Message: "tenant is disabled"}, decodeError(t, rec))
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {

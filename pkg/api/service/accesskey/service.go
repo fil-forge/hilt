@@ -100,6 +100,13 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		return accesskeystore.Record{}, "", fmt.Errorf("looking up tenant: %w", err)
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
+	// A disabled tenant is on its way to deletion, which revokes every key it
+	// holds at that point; a key created after that snapshot would keep its
+	// authority. Refuse it, as the deletion itself refuses a tenant that is not
+	// disabled.
+	if tenantRec.Status == tenant.Disabled {
+		return accesskeystore.Record{}, "", ErrTenantDisabled
+	}
 
 	// Load the tenant signer up front: it is required to issue delegations and its
 	// absence is unrecoverable, so fail before creating any state.

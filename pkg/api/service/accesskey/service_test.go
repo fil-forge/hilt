@@ -54,6 +54,7 @@ func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan
 
 type deps struct {
 	svc         *accesskeysvc.Service
+	tenants     *tenantmemory.Store
 	delegations *delegationmemory.Store
 	buckets     *bucketmemory.Store
 	secrets     *vaultmemory.Store
@@ -93,6 +94,7 @@ func setup(t *testing.T) deps {
 	swarf := &fakeSwarf{}
 	return deps{
 		svc:         accesskeysvc.New(zap.NewNop(), tenants, accessKeys, buckets, delegations, secrets, swarf),
+		tenants:     tenants,
 		delegations: delegations,
 		buckets:     buckets,
 		secrets:     secrets,
@@ -143,6 +145,13 @@ func TestCreate(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "missing", "k1", []string{"s3:GetObject"}, nil, nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantNotFound)
+	})
+
+	t.Run("rejects a disabled tenant", func(t *testing.T) {
+		d := setup(t)
+		require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
 	})
 
 	t.Run("rejects a duplicate name", func(t *testing.T) {
