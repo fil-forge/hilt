@@ -148,6 +148,10 @@ func startForge(t *testing.T) *forgeNet {
 		t.Logf("using swarf binary override: %s", bin)
 		opts = append(opts, stack.WithServiceBinary("swarf", bin))
 	}
+	if bin := os.Getenv("HILT_ITEST_INGOT_BINARY"); bin != "" {
+		t.Logf("using ingot binary override: %s", bin)
+		opts = append(opts, stack.WithServiceBinary("ingot", bin))
+	}
 	s := stack.MustNewStack(t, opts...)
 	waitHTTPOK(t, s.HiltEndpoint()+"/health", 2*time.Minute)
 	waitHTTPOK(t, s.IngotEndpoint()+"/health", 2*time.Minute)
@@ -165,7 +169,7 @@ func startForge(t *testing.T) *forgeNet {
 
 	return &forgeNet{
 		stack:   s,
-		console: &console{client: management.NewClient(*hiltURL, s.HiltPartnerKey())},
+		console: &console{Client: management.NewClient(*hiltURL, s.HiltPartnerKey())},
 		swarf:   swarf,
 		s3URL:   s.IngotEndpoint(),
 	}
@@ -180,6 +184,25 @@ func TestForge(t *testing.T) {
 	t.Run("DeleteAccessKeyRevokes", func(t *testing.T) { testDeleteAccessKeyRevokes(t, net) })
 	t.Run("DeleteBucketRevokes", func(t *testing.T) { testDeleteBucketRevokes(t, net) })
 	t.Run("DeleteBucketRevokesOnlyThatBucket", func(t *testing.T) { testDeleteBucketRevokesOnlyThatBucket(t, net) })
+	// The IAM scenarios need an ingot that enforces the effective action set.
+	// Until the published :main image carries it, they run only against the
+	// binary override (or when HILT_ITEST_IAM=1 says the image does); drop this
+	// guard then. Swarf needs nothing: the keys' grants are revoked through
+	// the /ucan/revoke it already serves.
+	iam := func(name string, fn func(*testing.T, *forgeNet)) {
+		t.Run(name, func(t *testing.T) {
+			if os.Getenv("HILT_ITEST_IAM") != "1" && os.Getenv("HILT_ITEST_INGOT_BINARY") == "" {
+				t.Skip("IAM scenarios need HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main image carries the IAM changes")
+			}
+			fn(t, net)
+		})
+	}
+	iam("PrincipalPolicyScopesToOneBucket", testPrincipalPolicyScopesToOneBucket)
+	iam("DenyBeatsAllow", testDenyBeatsAllow)
+	iam("NarrowingRevokesGrants", testNarrowingRevokesGrants)
+	iam("DeletePrincipalRemovesKeysAndPolicies", testDeletePrincipalRemovesKeysAndPolicies)
+	iam("PresignedGetFollowsPolicy", testPresignedGetFollowsPolicy)
+	iam("PrincipalKeyCreateRejectsBadRequests", testPrincipalKeyCreateRejectsBadRequests)
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot
@@ -230,36 +253,16 @@ func (n *forgeNet) awaitRevocations(t *testing.T, ctx context.Context, count int
 
 // console drives hilt's partner-facing REST management API using the real
 // management client, authenticating with smelt's partner key.
+// console is the management client as the console uses it: every method of
+// [management.Client], plus the provisioning shorthand below.
 type console struct {
-	client *management.Client
+	*management.Client
 }
 
 // ProvisionTenant creates (or returns the existing) tenant for the given
 // external id and region.
 func (c *console) ProvisionTenant(ctx context.Context, tenantID, region string) (api.Tenant, error) {
-	return c.client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
-}
-
-// CreateAccessKey creates an S3 access key with the given permissions and
-// returns it, including the one-time secret access key. Naming buckets
-// scopes the key's delegations to them; with none it gets tenant-wide
-// (powerline) access.
-func (c *console) CreateAccessKey(ctx context.Context, tenantID, name string, perms, buckets []string) (api.CreatedAccessKey, error) {
-	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
-		Name:        name,
-		Permissions: perms,
-		Buckets:     buckets,
-	})
-}
-
-// DeleteAccessKey revokes and removes an access key.
-func (c *console) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID string) error {
-	return c.client.DeleteAccessKey(ctx, tenantID, accessKeyID)
-}
-
-// GetAccessKey returns a single access key.
-func (c *console) GetAccessKey(ctx context.Context, tenantID, accessKeyID string) (api.AccessKey, error) {
-	return c.client.GetAccessKey(ctx, tenantID, accessKeyID)
+	return c.Client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
 }
 
 // waitHTTPOK polls url until it returns 2xx or the timeout elapses.
