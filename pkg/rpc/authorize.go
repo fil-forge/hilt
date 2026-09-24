@@ -50,7 +50,7 @@ func NewAuthorizeRequestHandler(
 // AuthorizeRequest authenticates the S3 request (which resolves and scope-checks
 // the addressed bucket and the access key's permission for the action), derives the
 // verification key, and issues delegations for the action's Forge commands to the
-// invocation issuer (TTL ≤ 24h + clock skew). It returns the result and the delegation blocks to
+// invocation issuer (TTL ≤ 24h + clock skew + AsyncOverhang). It returns the result and the delegation blocks to
 // attach to the response. It is factored out of the handler so it can be unit
 // tested without constructing a UCAN invocation.
 func AuthorizeRequest(
@@ -95,11 +95,12 @@ func AuthorizeRequest(
 	// root and is unusable — harmless. The gateway obtains the chain to the
 	// access key via `/s3/bucket/info`.
 	akIssuer := multikey.NewIssuer(accessKeyID, signer)
-	// Expire when the derived key does — 00:00:00 UTC of the following day — plus
-	// the max clock skew, so the gateway can still enact a request signed just
-	// before midnight but received within the skew window after it. Capped to the
-	// access key's own expiry if sooner.
-	exp := ucan.UnixTimestamp(nextUTCMidnight(time.Now()).Add(sigv4.MaxClockSkew).Unix())
+	// Expire when the derived key does — 00:00:00 UTC of the following day —
+	// plus the max clock skew, so the gateway can still enact a request signed
+	// just before midnight but received within the skew window after it, plus
+	// the async overhang so work the request set going outlives the boundary.
+	// Capped to the access key's own expiry if sooner.
+	exp := ucan.UnixTimestamp(nextUTCMidnight(time.Now()).Add(sigv4.MaxClockSkew).Add(AsyncOverhang).Unix())
 	if authz.AccessKey.ExpiresAt != nil {
 		if capExp := authz.AccessKey.ExpiresAt.Unix(); capExp < int64(exp) {
 			exp = ucan.UnixTimestamp(capExp)
@@ -175,6 +176,26 @@ func issuePermissionDelegations(accessKey ucan.Issuer, audience did.DID, subject
 	}
 	return out, nil
 }
+
+// AsyncOverhang is how far past the derived key's own life a delegation stays
+// usable, so that work a request set going can still be finished after the
+// boundary.
+//
+// Aligning the two is right for authorizing requests: the derived key is
+// date-scoped, so the first request after midnight re-authorizes anyway and
+// caches a fresh full day of authority. It is wrong for work that outlives the
+// request. A gateway queues a write's bookkeeping — registering the object
+// with the upload service, releasing a superseded body — and retries it until
+// the service takes it. A request authorized at 23:59 would otherwise hold
+// minutes of authority to finish hours of work, and the queued change would be
+// stuck for good.
+//
+// The size is set by the longest such retry budget, which is the gateway's
+// upload-registration sweep: ten attempts with the backoff capping at thirty
+// minutes, so about three hours. Four leaves headroom. A gateway that retries
+// for longer than this will see work expire rather than complete, so the two
+// have to move together.
+const AsyncOverhang = 4 * time.Hour
 
 // nextUTCMidnight returns 00:00:00 UTC of the day after t — when a date-scoped
 // SigV4 signing key derived for t's date stops being usable.

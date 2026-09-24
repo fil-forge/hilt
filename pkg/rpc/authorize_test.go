@@ -132,11 +132,19 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NotNil(t, exp)
 		now := time.Now().Unix()
 		// Expires at the next UTC midnight plus the max clock skew, so the gateway
-		// can still enact requests signed just before the key's date rolls over.
+		// can still enact requests signed just before the key's date rolls over,
+		// plus the async overhang so work the request queued outlives it.
 		skew := int64(sigv4.MaxClockSkew / time.Second)
-		require.Zero(t, (int64(*exp)-skew)%86400, "expiry should be a UTC midnight plus the max clock skew")
+		overhang := int64(rpc.AsyncOverhang / time.Second)
+		require.Zero(t, (int64(*exp)-skew-overhang)%86400,
+			"expiry should be a UTC midnight plus the max clock skew and the async overhang")
 		require.Greater(t, int64(*exp), now)
-		require.LessOrEqual(t, int64(*exp), now+86400+skew)
+		require.LessOrEqual(t, int64(*exp), now+86400+skew+overhang)
+		// However late in the day the request lands, the delegation outlives
+		// the gateway's retry budget: a change queued at 23:59 is not stuck
+		// with minutes of authority to finish hours of work.
+		require.GreaterOrEqual(t, int64(*exp)-now, overhang,
+			"a delegation must always carry at least the async overhang")
 
 		// The delegations map keys the issued delegation to its own CID (the
 		// initial-implementation proof chain).
