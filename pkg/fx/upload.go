@@ -7,6 +7,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/config"
+	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/libforge/identity"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/did"
@@ -47,6 +48,7 @@ func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.
 		upload.WithBaseProofs(proofs),
 		upload.WithProduct(product),
 		upload.WithLogger(logger),
+		upload.WithHTTPClient(tracing.NewHTTPClient()),
 	)
 }
 

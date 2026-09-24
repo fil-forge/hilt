@@ -2,6 +2,7 @@ package fx
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/config"
@@ -9,6 +10,7 @@ import (
 	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/did/key"
 	"github.com/fil-forge/ucantone/did/resolver"
@@ -98,6 +100,7 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 		server.WithValidationOptions(
 			validator.WithDIDResolver(didResolver),
 		),
+		server.WithEventListener(tracing.SpanNamer{}),
 	)
 	routes := middleware.Apply(p.Routes,
 		hiltmiddleware.LogRejections(p.Logger),
@@ -113,8 +116,10 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 		middleware.OnlyIssuer(p.Identity.DID()),
 		middleware.OnlySubject(p.Identity.DID()),
 	)...)
+	// The invocation span wraps the authorization checks too, so a rejected
+	// invocation shows as a failure receipt on it.
 	for _, r := range routes {
-		srv.Handle(r.Command, r.Handler)
+		srv.Handle(r.Command, tracing.Handler(r.Command, r.Handler))
 	}
 	return srv, nil
 }
@@ -124,7 +129,7 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 // which case they are fetched over HTTP (development only). Resolved documents
 // are cached for three hours.
 func newDIDResolver(id identity.Identity, insecure bool, logger *zap.Logger) (resolver.ByMethod, error) {
-	webResolverOpts := []web.Option{}
+	webResolverOpts := []web.Option{web.WithTransport(tracing.Transport(http.DefaultTransport))}
 	if insecure {
 		logger.Warn("insecure DID resolution enabled: did:web will be resolved over HTTP instead of HTTPS; this should only be used for development purposes")
 		webResolverOpts = append(webResolverOpts, web.WithInsecure(true))

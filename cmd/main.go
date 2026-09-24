@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
@@ -12,6 +14,7 @@ import (
 	"github.com/fil-forge/hilt/cmd/client"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
+	"github.com/fil-forge/hilt/pkg/tracing"
 )
 
 var cfgFile string
@@ -85,6 +88,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	logger, err := appfx.NewLogger(cfg.Log)
+	if err != nil {
+		return err
+	}
+	shutdownTracing, err := tracing.Setup(cmd.Context(), logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			logger.Warn("flushing traces", zap.Error(err))
+		}
+	}()
+
 	app := fx.New(
 		appfx.AppModule(cfg),
 		// Suppress fx's default logging and use our own zap logger.
