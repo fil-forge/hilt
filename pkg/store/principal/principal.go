@@ -71,3 +71,18 @@ type Store interface {
 	// idempotent.
 	DeleteByTenant(ctx context.Context, tenant did.DID) error
 }
+
+// ExternalIDs returns the external IDs of the tenant's live principals, in
+// the order [Store.ListByTenant] returns them. It is the list a caller checks
+// a policy document's principals against.
+func ExternalIDs(ctx context.Context, s Store, tenant did.DID) ([]string, error) {
+	recs, err := s.ListByTenant(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(recs))
+	for _, rec := range recs {
+		ids = append(ids, rec.ExternalID)
+	}
+	return ids, nil
+}

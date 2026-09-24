@@ -143,8 +143,7 @@ func (s *Service) Delete(ctx context.Context, externalID, principalID string) er
 		// so a wait that hits it surfaces as the context error rather than
 		// [store.ErrLockTimeout]; the caller's own deadline running out is
 		// not that case, so it is mapped only while the caller's context lives.
-		if errors.Is(err, store.ErrLockTimeout) || errors.Is(err, store.ErrPreconditionFailed) ||
-			(errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil) {
+		if store.Contended(ctx, err) || errors.Is(err, store.ErrPreconditionFailed) {
 			s.logger.Info("principal removal lost a race with a concurrent write",
 				zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Error(err))
 			return ErrConcurrentChange
