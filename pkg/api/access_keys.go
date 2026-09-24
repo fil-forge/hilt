@@ -25,7 +25,8 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 		errors.Is(err, accesskeysvc.ErrPrincipalScoped),
 		errors.Is(err, accesskeysvc.ErrUnknownPrincipal):
 		return httpError(http.StatusUnprocessableEntity, err)
-	case errors.Is(err, accesskeysvc.ErrNameConflict):
+	case errors.Is(err, accesskeysvc.ErrNameConflict),
+		errors.Is(err, accesskeysvc.ErrConcurrentChange):
 		return httpError(http.StatusConflict, err)
 	default:
 		log.Error("request failed", zap.Error(err))
@@ -37,7 +38,7 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 // an S3 access-key pair (returns the secret once only). Without principalId it
 // is a service key and the tenant→access-key UCAN delegations for the requested
 // permissions are issued; with principalId it is bound to that principal and
-// holds only its marker.
+// holds the delegations the bucket policies grant it.
 func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "CreateAccessKey"))
 	return NewRoute(http.MethodPost, "/tenants/:tenantId/access-keys", func(c echo.Context) error {
