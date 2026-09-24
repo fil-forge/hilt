@@ -40,6 +40,12 @@ func TestDecode(t *testing.T) {
 		}}, d)
 	})
 
+	t.Run("keeps each principal once, in first-seen order", func(t *testing.T) {
+		d, err := bucketpolicy.Decode([]byte(`{"statement": [{"effect": "allow", "principal": ["bob", "alice", "bob", "alice"], "action": ["s3:GetObject"]}]}`))
+		require.NoError(t, err)
+		require.Equal(t, *doc(allow(only("bob", "alice"), "s3:GetObject")), d)
+	})
+
 	t.Run("round-trips the canonical form", func(t *testing.T) {
 		d := *doc(allow(only("alice"), "s3:GetObject"), deny(everyone, "s3:ListBucket"))
 		back, err := bucketpolicy.Decode(bucketpolicy.Canonical(d))
