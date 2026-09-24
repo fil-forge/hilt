@@ -67,8 +67,9 @@ func (p Principal) MarshalJSON() ([]byte, error) {
 	return json.Marshal(nonNil(p.IDs))
 }
 
-// UnmarshalJSON accepts the string "*" or an array of strings. Anything else
-// is an error wrapping [ErrInvalidPolicy].
+// UnmarshalJSON accepts the string "*" or an array of strings, keeping each id
+// once, in the order it first appears. Anything else is an error wrapping
+// [ErrInvalidPolicy].
 func (p *Principal) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) > 0 && data[0] == '"' {
@@ -86,8 +87,21 @@ func (p *Principal) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &ids); err != nil {
 		return fmt.Errorf("principal: must be %q or a list of principal ids: %w", Wildcard, ErrInvalidPolicy)
 	}
-	*p = Principal{IDs: ids}
+	*p = Principal{IDs: dedupe(ids)}
 	return nil
+}
+
+// dedupe keeps the first occurrence of each id.
+func dedupe(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := ids[:0]
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // Statement grants (allow) or withholds (deny) actions to principals. Sid is
