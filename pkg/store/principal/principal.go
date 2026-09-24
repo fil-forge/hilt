@@ -37,7 +37,8 @@ type Store interface {
 	// Get returns the tenant's principal with the given external ID. It returns
 	// [store.ErrRecordNotFound] if there is none or it was removed. With
 	// [store.LockShare] the read waits for an in-flight [Store.Delete] of the
-	// same row to commit or roll back.
+	// same row to commit or roll back; on Postgres the wait is bounded at
+	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
 	Get(ctx context.Context, tenant did.DID, externalID string, locks ...store.LockMode) (Record, error)
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
@@ -46,7 +47,9 @@ type Store interface {
 	// concurrent removals and revives of the same row for the whole call, runs
 	// beforeCommit (nil allowed), then marks the row and commits. An error from
 	// beforeCommit is returned and leaves the principal live. It is idempotent:
-	// when no live row exists it returns nil without running beforeCommit.
+	// when no live row exists it returns nil without running beforeCommit. On
+	// Postgres the wait for the row lock is bounded at [store.LockTimeout] and
+	// returns [store.ErrLockTimeout], which the caller retries.
 	//
 	// beforeCommit must not read or write this store: a share-locked read or a
 	// write of the same row waits on the lock the call itself holds. It may
