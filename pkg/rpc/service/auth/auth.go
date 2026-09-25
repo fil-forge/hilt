@@ -352,7 +352,7 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 	if err != nil {
 		return nil, nil, err
 	}
-	eff, err := a.effectiveActions(ctx, log, principalID, b.ID)
+	eff, _, err := a.effectiveActions(ctx, log, principalID, b.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -374,13 +374,17 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 // it being on its way out; the policy is read the same way. A wait the store
 // gave up on is [ErrTemporarilyUnavailable]. An empty set is a bucket the
 // principal cannot reach.
-func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, error) {
+//
+// It also returns the ETag of the policy the actions came from, so a caller
+// that goes on to read something the same policy write touches can tell
+// whether the two came from one revision. A bucket with no policy reports "".
+func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, string, error) {
 	log := a.logger.With(zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Stringer("bucket", bucketID))
 	if _, err := a.principals.Get(ctx, tenantID, principalID, store.LockShare); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
-			return nil, fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
+			return nil, "", fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
 		}
-		return nil, lookupError(log, "principal", err)
+		return nil, "", lookupError(log, "principal", err)
 	}
 	return a.effectiveActions(ctx, log, principalID, bucketID)
 }
@@ -388,16 +392,17 @@ func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, pri
 // effectiveActions computes the actions the principal holds on a bucket from
 // that bucket's policy, which is read with a share lock so a request arriving
 // while the policy is being changed waits for the outcome. A bucket with no
-// policy grants nothing.
-func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, error) {
+// policy grants nothing, and reports no ETag.
+func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, string, error) {
 	var doc *bucketpolicy.Policy
+	var etag string
 	rec, err := a.policies.Get(ctx, bucketID, store.LockShare)
 	if err == nil {
-		doc = &rec.Policy
+		doc, etag = &rec.Policy, rec.ETag
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
-		return nil, lookupError(log, "bucket policy", err)
+		return nil, "", lookupError(log, "bucket policy", err)
 	}
-	return bucketpolicy.Effective(doc, principalID), nil
+	return bucketpolicy.Effective(doc, principalID), etag, nil
 }
 
 // lookupError reports a failed share-locked read of the named record. A wait

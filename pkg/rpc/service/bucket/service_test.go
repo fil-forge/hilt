@@ -6,6 +6,7 @@ import (
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/ipfs/go-cid"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -270,6 +271,24 @@ type failingListDelegations struct {
 
 func (f failingListDelegations) ListByAudience(context.Context, did.DID, ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
 	return store.Page[ucan.Delegation]{}, f.err
+}
+
+// writeOnFirstList runs write once, when the delegations are listed. Info
+// lists them after it has read the effective actions, so a policy write put
+// here lands wholly between the two reads.
+type writeOnFirstList struct {
+	delegationstore.Store
+	once  sync.Once
+	write func()
+}
+
+func (w *writeOnFirstList) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	w.once.Do(func() {
+		if w.write != nil {
+			w.write()
+		}
+	})
+	return w.Store.ListByAudience(ctx, audience, opts...)
 }
 
 // revocation records one published revocation.
@@ -589,7 +608,7 @@ func TestInfo(t *testing.T) {
 	// principalBound), a bucket→tenant root, and either a tenant→credential
 	// grant with the given subject (did.DID{} = powerline) or, for a
 	// principal-bound key, its grants over the bucket.
-	setup := func(t *testing.T, perms []string, principalBound bool, grantSubject did.DID) (*bucketsvc.Service, *bucketpolicymemory.Store, ucan.Delegation) {
+	setup := func(t *testing.T, perms []string, principalBound bool, grantSubject did.DID, wrap ...func(delegationstore.Store) delegationstore.Store) (*bucketsvc.Service, *bucketpolicymemory.Store, ucan.Delegation) {
 		t.Helper()
 		accessKeys, buckets, delegations := accesskeymemory.New(), bucketmemory.New(), delegationmemory.New()
 		principals, policies := principalmemory.New(), bucketpolicymemory.New()
@@ -617,7 +636,11 @@ func TestInfo(t *testing.T) {
 		// authorizer, so it shares the stores the test seeds.
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenantmemory.New(), providermemory.New(), buckets,
 			principals, policies, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), policies, root
+		var reads delegationstore.Store = delegations
+		for _, w := range wrap {
+			reads = w(reads)
+		}
+		return bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), policies, root
 	}
 
 	// grantPolicy stores a policy allowing "user-1" the given actions on the bucket.
@@ -686,6 +709,38 @@ func TestInfo(t *testing.T) {
 		svc, _, _ := setup(t, nil, true, did.DID{}) // no policy at all
 		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
+	})
+
+	t.Run("a policy write between the two reads is refused, not served", func(t *testing.T) {
+		straddle := &writeOnFirstList{}
+		svc, policies, _ := setup(t, nil, true, did.DID{}, func(s delegationstore.Store) delegationstore.Store {
+			straddle.Store = s
+			return straddle
+		})
+		grantPolicy(t, policies, "s3:GetObject", "s3:ListBucket")
+
+		// The write narrows the policy to s3:ListBucket after Info has read the
+		// effective actions. Both actions map to /content/retrieve, so the
+		// rotation reissues a chain that still serves GetObject; pairing it with
+		// the old action set would report a permission the policy just removed.
+		straddle.write = func() {
+			rec, err := policies.Get(ctx, bucketID)
+			require.NoError(t, err)
+			_, err = policies.Put(ctx, bucketpolicystore.Input{
+				Bucket:  bucketID,
+				Tenant:  tenantID,
+				IfMatch: &rec.ETag,
+				Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+					Effect:    bucketpolicy.Allow,
+					Principal: bucketpolicy.Only("user-1"),
+					Actions:   []string{"s3:ListBucket"},
+				}}},
+			}, nil)
+			require.NoError(t, err)
+		}
+
+		_, _, err := svc.Info(ctx, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
 	})
 
 	t.Run("returns empty delegations when no grant reaches the bucket", func(t *testing.T) {
