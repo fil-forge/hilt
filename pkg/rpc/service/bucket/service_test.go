@@ -109,7 +109,8 @@ func TestCreate(t *testing.T) {
 	// policy is the provider's routing policy; nil registers a provider without one.
 	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, delegations delegationstore.Store, policy *did.DID) (*bucketsvc.Service, *bucketmemory.Store) {
 		t.Helper()
-		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
+		tenants, buckets := tenantmemory.New(), bucketmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, policy))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
@@ -278,7 +279,8 @@ func TestDelete(t *testing.T) {
 	// grantOpts lets a subtest vary the tenant→access-key grant's expiry.
 	setup := func(t *testing.T, perms []string, sprue bucketsvc.UploadClient, grantOpts ...delegation.Option) deleteDeps {
 		t.Helper()
-		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
+		tenants, buckets := tenantmemory.New(), bucketmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
@@ -422,7 +424,8 @@ func TestList(t *testing.T) {
 
 	setup := func(t *testing.T, perms []string) (*bucketsvc.Service, *bucketmemory.Store, did.DID) {
 		t.Helper()
-		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
+		tenants, buckets := tenantmemory.New(), bucketmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
@@ -535,7 +538,7 @@ func TestInfo(t *testing.T) {
 	// a test can add a key belonging to another tenant.
 	setup := func(t *testing.T, grantSubject did.DID) (*bucketsvc.Service, *accesskeymemory.Store) {
 		t.Helper()
-		accessKeys, buckets, delegations := accesskeymemory.New(), bucketmemory.New(), delegationmemory.New()
+		accessKeys, buckets, delegations := accesskeymemory.New(tenantmemory.New()), bucketmemory.New(), delegationmemory.New()
 		tenants := tenantmemory.New()
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, akDID, tenantID, "k1", nil, []string{"s3:GetObject"}, nil))

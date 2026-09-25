@@ -82,7 +82,8 @@ func TestAuthorizeRequest(t *testing.T) {
 	// from them plus the bucket store.
 	setup := func(t *testing.T, perms []string, vaultSigner ed25519.Signer) *auth.Authorizer {
 		t.Helper()
-		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
+		tenants, buckets := tenantmemory.New(), bucketmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, secrets := providermemory.New(), vaultmemory.New()
 
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))

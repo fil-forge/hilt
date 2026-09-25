@@ -71,9 +71,10 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 
 func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	t.Helper()
+	tenants := tenantmemory.New()
 	deps := &accessKeyDeps{
-		tenants:     tenantmemory.New(),
-		accessKeys:  accesskeymemory.New(),
+		tenants:     tenants,
+		accessKeys:  accesskeymemory.New(tenants),
 		buckets:     bucketmemory.New(),
 		delegations: delegationmemory.New(),
 		vault:       vaultmemory.New(),

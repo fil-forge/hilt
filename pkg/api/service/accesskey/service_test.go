@@ -52,9 +52,22 @@ func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan
 	return nil
 }
 
+// disablingTenants disables each tenant right after it is looked up, landing a
+// concurrent disable deterministically between Create's lookup and its insert.
+type disablingTenants struct{ *tenantmemory.Store }
+
+func (s disablingTenants) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
+	rec, err := s.Store.GetByExternalID(ctx, externalID)
+	if err == nil {
+		err = s.SetStatus(ctx, rec.ID, tenant.Disabled)
+	}
+	return rec, err
+}
+
 type deps struct {
 	svc         *accesskeysvc.Service
 	tenants     *tenantmemory.Store
+	accessKeys  *accesskeymemory.Store
 	delegations *delegationmemory.Store
 	buckets     *bucketmemory.Store
 	secrets     *vaultmemory.Store
@@ -72,7 +85,8 @@ type deps struct {
 func setup(t *testing.T) deps {
 	t.Helper()
 	ctx := t.Context()
-	tenants, accessKeys := tenantmemory.New(), accesskeymemory.New()
+	tenants := tenantmemory.New()
+	accessKeys := accesskeymemory.New(tenants)
 	buckets, delegations, secrets := bucketmemory.New(), delegationmemory.New(), vaultmemory.New()
 
 	signer, err := secp256k1.Generate()
@@ -95,6 +109,7 @@ func setup(t *testing.T) deps {
 	return deps{
 		svc:         accesskeysvc.New(zap.NewNop(), tenants, accessKeys, buckets, delegations, secrets, swarf),
 		tenants:     tenants,
+		accessKeys:  accessKeys,
 		delegations: delegations,
 		buckets:     buckets,
 		secrets:     secrets,
@@ -152,6 +167,18 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
 		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
+	})
+
+	t.Run("rejects a tenant disabled after the lookup", func(t *testing.T) {
+		d := setup(t)
+		// The tenant is disabled between Create's lookup and the key's insert, the
+		// window in which a deletion could snapshot the tenant's keys without it.
+		svc := accesskeysvc.New(zap.NewNop(), disablingTenants{d.tenants}, d.accessKeys, d.buckets, d.delegations, d.secrets, d.swarf)
+		_, _, err := svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
+		keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, keys)
 	})
 
 	t.Run("rejects a duplicate name", func(t *testing.T) {
