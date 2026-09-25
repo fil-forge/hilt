@@ -65,6 +65,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
 - `pkg/client` — clients for external services (the Sprue `UploadClient`).
+- `pkg/tracing` — OpenTelemetry: `Setup` installs the OTLP exporter for
+  `serve`; the Echo server-span middleware; `SpanNamer`, which names a UCAN
+  request's span for its commands; `Handler`, which gives each invocation its
+  own span (applied in `NewUCANServer`, outside the authorization middleware);
+  and the instrumented HTTP transport. A new outbound HTTP client should use
+  `tracing.NewHTTPClient()`, or wrap its own transport with `tracing.Transport`.
 - `pkg/migrations` — goose SQL migrations run on startup (unless skipped).
 - `internal/testutil` — test-only helpers (random DIDs/issuers, testcontainers).
 

@@ -2,10 +2,12 @@ package fx
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/config"
+	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/ucantone/did/plc"
 	"go.uber.org/fx"
 )
@@ -24,5 +26,5 @@ func NewPLCClient(cfg config.PLCConfig) (*plc.DirectoryClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing plc.directory %q: %w", cfg.Directory, err)
 	}
-	return plc.NewDirectoryClient(*u, plc.WithTimeout(time.Second*10))
+	return plc.NewDirectoryClient(*u, plc.WithTimeout(time.Second*10), plc.WithTransport(tracing.Transport(http.DefaultTransport)))
 }

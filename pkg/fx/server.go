@@ -11,6 +11,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/build"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/echo/middleware"
+	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/labstack/echo/v4"
@@ -42,6 +43,8 @@ func NewEchoServer(p ServerParams) *echo.Echo {
 	e.HideBanner = true
 	e.HidePort = true
 
+	// The server span goes first, so it times the whole request.
+	e.Use(tracing.Middleware())
 	e.Use(echomiddleware.Recover())
 	e.Use(middleware.RequestLogger(p.Logger))
 

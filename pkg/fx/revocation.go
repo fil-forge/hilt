@@ -7,6 +7,7 @@ import (
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/config"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	"github.com/fil-forge/hilt/pkg/tracing"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"go.uber.org/fx"
@@ -39,5 +40,5 @@ func NewRevocationClient(cfg config.RevocationConfig) (*swarfclient.Client, erro
 	if err != nil {
 		return nil, fmt.Errorf("parsing revocation.service_url %q: %w", cfg.ServiceURL, err)
 	}
-	return swarfclient.New(serviceID, *serviceURL)
+	return swarfclient.New(serviceID, *serviceURL, swarfclient.WithHTTPClient(tracing.NewHTTPClient()))
 }
