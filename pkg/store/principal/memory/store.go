@@ -34,14 +34,24 @@ type entry struct {
 
 type Store struct {
 	mutex      sync.RWMutex
-	removals   sync.Mutex
+	removals   chan struct{}
 	principals map[did.DID]map[string]entry
 }
+
+// hold takes the removal lock and release gives it back. removals is a
+// one-slot channel rather than a mutex so [Store.Lock] can bound its wait.
+func (s *Store) hold()    { s.removals <- struct{}{} }
+func (s *Store) release() { <-s.removals }
+
+// LockWait bounds how long [Store.Lock] waits for a removal in flight before
+// giving up with [store.ErrLockTimeout], as lock_timeout bounds the wait a
+// Postgres row lock gives. It is a variable so a test can shorten it.
+var LockWait = store.LockTimeout
 
 var _ principal.Store = (*Store)(nil)
 
 func New() *Store {
-	return &Store{principals: map[did.DID]map[string]entry{}}
+	return &Store{removals: make(chan struct{}, 1), principals: map[did.DID]map[string]entry{}}
 }
 
 func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) error {
@@ -54,8 +64,8 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 
 	// A revive must not interleave with a removal of the same principal: the
 	// removal would tombstone the row the revive just wrote.
-	s.removals.Lock()
-	defer s.removals.Unlock()
+	s.hold()
+	defer s.release()
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -83,8 +93,8 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 // its snapshot.
 func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, locks ...store.LockMode) (principal.Record, error) {
 	if slices.Contains(locks, store.LockShare) {
-		s.removals.Lock()
-		defer s.removals.Unlock()
+		s.hold()
+		defer s.release()
 	}
 
 	s.mutex.RLock()
@@ -120,8 +130,8 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 // the principal or its tombstone, never a state in between; ListByTenant reads
 // the map and never waits, as on Postgres.
 func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error {
-	s.removals.Lock()
-	defer s.removals.Unlock()
+	s.hold()
+	defer s.release()
 
 	s.mutex.RLock()
 	e, ok := s.principals[tenant][externalID]
@@ -152,20 +162,40 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 	return nil
 }
 
-// Lock runs fn without holding anything, and a removal of one of the named
-// principals may commit while it runs. Holding removals across fn deadlocks:
-// the policy write that calls Lock holds the bucket's policy, and a removal
-// holds removals while its callback rewrites that same policy, so each waits
-// on what the other holds.
+// Lock holds removals while fn runs, so a removal of one of the named
+// principals waits for it, as it waits on the rows Postgres holds FOR UPDATE.
+// Naming no principal locks nothing, as the Postgres call takes no row lock
+// then either.
+//
+// The wait is bounded at [LockWait]. A policy write calls Lock while holding
+// the bucket's policy, and a removal holds removals while its callback
+// rewrites that same policy, so each can end up waiting on what the other
+// holds. Postgres bounds that cycle with lock_timeout; here the bound is the
+// timer below, and the caller gets [store.ErrLockTimeout] to retry.
 func (s *Store) Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
+	if len(externalIDs) == 0 {
+		return fn(ctx)
+	}
+
+	timer := time.NewTimer(LockWait)
+	defer timer.Stop()
+	select {
+	case s.removals <- struct{}{}:
+		defer s.release()
+	case <-timer.C:
+		return fmt.Errorf("waited %s for a principal a removal holds: %w", LockWait, store.ErrLockTimeout)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	return fn(ctx)
 }
 
 func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) error {
 	// A tenant removal waits for an in-flight principal removal, as it would on
 	// the row Postgres holds FOR UPDATE.
-	s.removals.Lock()
-	defer s.removals.Unlock()
+	s.hold()
+	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

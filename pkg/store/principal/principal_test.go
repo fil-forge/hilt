@@ -276,6 +276,27 @@ func TestPrincipalStore(t *testing.T) {
 				require.ErrorIs(t, err, boom)
 			})
 
+			t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+				locked, got := htestutil.RequireWaitsForWriter(t,
+					func(entered chan<- struct{}, release <-chan struct{}) error {
+						return s.Lock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
+							close(entered)
+							<-release
+							return nil
+						})
+					},
+					func() error {
+						_, err := s.Get(context.Background(), tenantID, "held", store.LockShare)
+						return err
+					})
+				require.NoError(t, locked)
+				require.NoError(t, got)
+			})
+
 			t.Run("DeleteByTenant removes every principal of the tenant and is idempotent", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				other := testutil.RandomDID(t)
@@ -342,27 +363,6 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.NoError(t, committed)
 		require.NoError(t, got)
 		require.Equal(t, "locked", rec.ExternalID)
-	})
-
-	t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-		locked, got := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Lock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() error {
-				_, err := s.Get(context.Background(), tenantID, "held", store.LockShare)
-				return err
-			})
-		require.NoError(t, locked)
-		require.NoError(t, got)
 	})
 
 	t.Run("a share-locked Get during Delete sees the row once the callback fails", func(t *testing.T) {
@@ -515,4 +515,36 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 			tc.unwritten(t, tenantID)
 		})
 	}
+}
+
+// TestPrincipalStoreMemoryLockTimeout is the memory counterpart of
+// TestPrincipalStorePostgresLockTimeout: a Lock that waits out a removal in
+// flight gives up with [store.ErrLockTimeout] instead of wedging against it.
+func TestPrincipalStoreMemoryLockTimeout(t *testing.T) {
+	principalmemory.LockWait = 100 * time.Millisecond
+	t.Cleanup(func() { principalmemory.LockWait = store.LockTimeout })
+
+	s := principalmemory.New()
+	tenantID := testutil.RandomDID(t)
+	require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	removed := make(chan error, 1)
+	go func() {
+		removed <- s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	// The policy write waits on the row the removal holds and gives up.
+	err := s.Lock(context.Background(), tenantID, []string{"held"}, func(context.Context) error {
+		return errors.New("the callback must not run while the removal holds the principal")
+	})
+	require.ErrorIs(t, err, store.ErrLockTimeout)
+
+	close(release)
+	require.NoError(t, <-removed)
 }
