@@ -603,11 +603,16 @@ func TestRotations(t *testing.T) {
 }
 
 // TestConcurrentPolicyWriteAndPrincipalRemoval pins the two writes against
-// each other in the order that used to wedge the memory backends: the policy
-// write holds the policy store and reads the principals, the removal holds the
-// principal store and rewrites the policies. Neither store holds a lock across
-// its callback that the other write needs, so both finish.
+// each other in the order that wedges them: the policy write holds the policy
+// store and locks the principals, the removal holds the principal store and
+// rewrites the policies, so each waits on what the other holds. The wait is
+// bounded, so the policy write gives up and the removal finishes. Postgres
+// resolves the same cycle the same way, through lock_timeout.
 func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
+	// The bound is what breaks the cycle; its length is not the point.
+	principalmemory.LockWait = 100 * time.Millisecond
+	t.Cleanup(func() { principalmemory.LockWait = store.LockTimeout })
+
 	reached, resume := make(chan struct{}), make(chan struct{})
 	d := setup(t, func(s principalstore.Store) principalstore.Store {
 		// The second list is the one the policy store's callback makes; the
@@ -640,19 +645,22 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	close(resume)
 
 	deadline := time.After(30 * time.Second)
-	for range 2 {
-		select {
-		case err := <-put:
-			require.NoError(t, err)
-		case err := <-del:
-			require.NoError(t, err)
-		case <-deadline:
-			t.Fatal("the policy write and the principal removal deadlocked")
-		}
+	select {
+	case err := <-put:
+		require.ErrorIs(t, err, bucketpolicysvc.ErrConcurrentChange,
+			"the policy write waits on the principal the removal holds and gives up")
+	case <-deadline:
+		t.Fatal("the policy write and the principal removal deadlocked")
+	}
+	select {
+	case err := <-del:
+		require.NoError(t, err, "the removal holds what it needs and finishes")
+	case <-deadline:
+		t.Fatal("the removal did not finish once the policy write gave up")
 	}
 
-	// The removal ran last and took the policy with it: its only statement
-	// named the principal that is gone.
+	// Nothing was written: the policy write rolled back with its failed lock,
+	// and the caller repeats it against the tenant that no longer has user-1.
 	_, err := d.svc.Get(t.Context(), "tenant-1", "photos")
 	require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound)
 }
