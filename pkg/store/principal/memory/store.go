@@ -152,9 +152,11 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 	return nil
 }
 
-// Lock runs fn without holding anything: the exclusion it provides on
-// Postgres is a row lock a concurrent removal or share-locked read waits on,
-// and the memory backend has no waiting reader to serve.
+// Lock runs fn without holding anything, and a removal of one of the named
+// principals may commit while it runs. Holding removals across fn deadlocks:
+// the policy write that calls Lock holds the bucket's policy, and a removal
+// holds removals while its callback rewrites that same policy, so each waits
+// on what the other holds.
 func (s *Store) Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
 	return fn(ctx)
 }
