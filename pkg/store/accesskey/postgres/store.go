@@ -55,10 +55,20 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 		e := expiresAt.UTC()
 		expires = &e
 	}
-	_, err := s.pool.Exec(ctx, `
+	// FOR SHARE holds the tenant row until the insert commits, so a concurrent
+	// disable either lands first (and the key is refused) or waits for the key,
+	// which a tenant deletion's snapshot of its keys then includes. The FK alone
+	// takes only a KEY SHARE lock, which a status update does not wait for.
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		SELECT $1, id, $3, $4, $5, $6 FROM tenant WHERE id = $2 AND status <> 'disabled'
+		FOR SHARE
 	`, id.String(), tenant.String(), name, bucketStrs, permissions, expires)
+	if err == nil && tag.RowsAffected() == 0 {
+		// No row: the tenant is disabled, or already gone, which a tenant only
+		// gets to once disabled.
+		return accesskey.ErrTenantDisabled
+	}
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {

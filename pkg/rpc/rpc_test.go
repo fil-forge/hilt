@@ -27,13 +27,13 @@ import (
 // set is enumerated: a new handler belongs here (and in pkg/fx's RPCModule).
 func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 	t.Helper()
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(tenantmemory.New()), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
 
 	up, err := upload.NewClient(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "sprue.test"}, testutil.RandomIssuer(t), upload.WithBaseProofs(delegationmemory.New()))
 	require.NoError(t, err)
 	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), tenantmemory.New(), up, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(tenantmemory.New()), tenantmemory.New(), up, revocations)
 
 	return []server.Route{
 		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),
