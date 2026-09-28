@@ -288,6 +288,26 @@ func TestPutAndGet(t *testing.T) {
 		require.Equal(t, "photos", rec.BucketName)
 	})
 
+	t.Run("an unconditional put creates or replaces without a tag", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		first := doc(allow(only("user-1"), "s3:GetObject"))
+		etag, created, err := d.svc.Put(ctx, "tenant-1", "photos", first, nil, bucketpolicysvc.Unconditional())
+		require.NoError(t, err)
+		require.True(t, created)
+		require.Equal(t, bucketpolicy.ETag(first), etag)
+
+		second := doc(allow(only("user-1"), "s3:PutObject"))
+		stale := `"stale"`
+		etag, created, err = d.svc.Put(ctx, "tenant-1", "photos", second, &stale, bucketpolicysvc.Unconditional())
+		require.NoError(t, err, "the tag is ignored")
+		require.False(t, created)
+		require.Equal(t, bucketpolicy.ETag(second), etag)
+		rec, err := d.svc.Get(ctx, "tenant-1", "photos")
+		require.NoError(t, err)
+		require.Equal(t, second, rec.Policy)
+	})
+
 	t.Run("a create over an existing policy fails and writes nothing", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")

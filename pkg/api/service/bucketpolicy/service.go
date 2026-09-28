@@ -94,14 +94,24 @@ func (s *Service) Get(ctx context.Context, externalID, bucketName string) (Recor
 	return Record{BucketName: bucketName, Policy: rec.Policy, ETag: rec.ETag}, nil
 }
 
+// WriteOption adjusts a [Service.Put].
+type WriteOption func(*bucketpolicystore.Input)
+
+// Unconditional makes the write ignore its precondition and replace whatever
+// the bucket holds, as a PutBucketPolicy without If-Match or If-None-Match
+// does.
+func Unconditional() WriteOption {
+	return func(in *bucketpolicystore.Input) { in.Unconditional = true }
+}
+
 // Put creates or replaces the bucket's policy. A nil ifMatch is the create
 // (If-None-Match: *) and requires the bucket to have no policy; a non-nil one
-// must equal the current ETag. It returns the new ETag and whether the call
-// created the first policy for the bucket.
+// must equal the current ETag; [Unconditional] waives both. It returns the new
+// ETag and whether the call created the first policy for the bucket.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
-func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bucketpolicy.Policy, ifMatch *string) (string, bool, error) {
+func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bucketpolicy.Policy, ifMatch *string, opts ...WriteOption) (string, bool, error) {
 	tenantID, err := s.tenant(ctx, externalID)
 	if err != nil {
 		return "", false, err
@@ -118,13 +128,18 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 		return "", false, err
 	}
 
-	created := ifMatch == nil
-	etag, err := s.policies.Put(ctx, bucketpolicystore.Input{
+	in := bucketpolicystore.Input{
 		Bucket:  b.ID,
 		Tenant:  tenantID,
 		Policy:  doc,
 		IfMatch: ifMatch,
-	}, func(ctx context.Context, old *bucketpolicystore.Record) error {
+	}
+	for _, opt := range opts {
+		opt(&in)
+	}
+	var created bool
+	etag, err := s.policies.Put(ctx, in, func(ctx context.Context, old *bucketpolicystore.Record) error {
+		created = old == nil
 		var oldDoc *bucketpolicy.Policy
 		if old != nil {
 			oldDoc = &old.Policy
