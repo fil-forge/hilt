@@ -192,7 +192,7 @@ func TestForge(t *testing.T) {
 	iam := func(name string, fn func(*testing.T, *forgeNet)) {
 		t.Run(name, func(t *testing.T) {
 			if os.Getenv("HILT_ITEST_IAM") != "1" && os.Getenv("HILT_ITEST_INGOT_BINARY") == "" {
-				t.Skip("IAM scenarios need HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main image carries the IAM changes")
+				t.Skip("IAM scenarios need HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main image carries the IAM changes and forwards ?policy")
 			}
 			fn(t, net)
 		})
