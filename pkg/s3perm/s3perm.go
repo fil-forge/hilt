@@ -113,6 +113,9 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:CreateBucket":        nil,
 	"s3:ListAllMyBuckets":    nil,
 	"s3:DeleteBucket":        cmdsDeleteBucket,
+	"s3:GetBucketPolicy":     nil,
+	"s3:PutBucketPolicy":     nil,
+	"s3:DeleteBucketPolicy":  nil,
 
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.
@@ -122,12 +125,16 @@ var permissionCommands = map[string][]ucan.Command{
 }
 
 // bucketLevel are the permissions excluded from bucket policies: a key holding
-// CreateBucket or DeleteBucket acts outside the policy that granted it, and
-// every principal holds ListAllMyBuckets.
+// CreateBucket or DeleteBucket acts outside the policy that granted it, a key
+// holding a policy action could rewrite the policy that granted it, and every
+// principal holds ListAllMyBuckets.
 var bucketLevel = map[string]bool{
-	"s3:CreateBucket":     true,
-	"s3:DeleteBucket":     true,
-	"s3:ListAllMyBuckets": true,
+	"s3:CreateBucket":       true,
+	"s3:DeleteBucket":       true,
+	"s3:ListAllMyBuckets":   true,
+	"s3:GetBucketPolicy":    true,
+	"s3:PutBucketPolicy":    true,
+	"s3:DeleteBucketPolicy": true,
 }
 
 // Valid reports whether p is a recognized S3 permission.
@@ -137,8 +144,8 @@ func Valid(p string) bool {
 }
 
 // PolicyAction reports whether p may appear in a bucket policy statement: a
-// recognized permission other than s3:CreateBucket, s3:DeleteBucket and
-// s3:ListAllMyBuckets. The wildcard PolicyWildcard is not a permission and is
+// recognized permission other than the bucket-level ones (bucket creation and
+// deletion, the policy operations, and s3:ListAllMyBuckets). The wildcard PolicyWildcard is not a permission and is
 // expanded by the policy package; it is not a PolicyAction.
 func PolicyAction(p string) bool {
 	return Valid(p) && !bucketLevel[p]
@@ -146,7 +153,7 @@ func PolicyAction(p string) bool {
 
 // PolicyWildcard is the action wildcard a bucket policy statement may carry in
 // place of named actions. It stands for every permission PolicyAction accepts
-// and never for the three bucket-level actions.
+// and never for a bucket-level action.
 const PolicyWildcard = "s3:*"
 
 // PolicyActions returns every permission a bucket policy may grant, sorted, so
