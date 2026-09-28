@@ -63,8 +63,17 @@ func TestCommandsFor(t *testing.T) {
 
 	t.Run("deleting a bucket unwinds the blobs its space holds", func(t *testing.T) {
 		// Parked parts are abandoned, everything else the space still
-		// registers is released.
-		require.ElementsMatch(t, []string{"/blob/abort", "/blob/remove"}, strs("s3:DeleteBucket"))
+		// registers is released, and the retractions the emptying owed are
+		// applied before the space goes — nothing else would ever send them.
+		require.ElementsMatch(t,
+			[]string{"/blob/abort", "/blob/remove", "/upload/remove"},
+			strs("s3:DeleteBucket"))
+	})
+
+	t.Run("abandoning a multipart upload retracts nothing", func(t *testing.T) {
+		// It never committed a version, so it has no content entry to retract
+		// and no reason to hold /upload/remove.
+		require.NotContains(t, strs("s3:AbortMultipartUpload"), "/upload/remove")
 	})
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {
