@@ -69,7 +69,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 		rec := cloneRecord(e.rec)
 		old = &rec
 	}
-	if err := bucketpolicystore.CheckPrecondition(old, in.IfMatch); err != nil {
+	if err := bucketpolicystore.CheckInputPrecondition(in, old); err != nil {
 		return "", err
 	}
 	if beforeCommit != nil {
@@ -107,7 +107,7 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	if !ok {
 		return store.ErrRecordNotFound
 	}
-	if e.rec.ETag != ifMatch {
+	if ifMatch != "" && e.rec.ETag != ifMatch {
 		return fmt.Errorf("policy ETag is %s: %w", e.rec.ETag, store.ErrPreconditionFailed)
 	}
 	if beforeCommit != nil {

@@ -125,7 +125,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	if err != nil {
 		return "", err
 	}
-	if err := bucketpolicystore.CheckPrecondition(old, in.IfMatch); err != nil {
+	if err := bucketpolicystore.CheckInputPrecondition(in, old); err != nil {
 		return "", err
 	}
 	if beforeCommit != nil {
@@ -188,7 +188,7 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	if old == nil {
 		return store.ErrRecordNotFound
 	}
-	if old.ETag != ifMatch {
+	if ifMatch != "" && old.ETag != ifMatch {
 		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
 	}
 	if beforeCommit != nil {
