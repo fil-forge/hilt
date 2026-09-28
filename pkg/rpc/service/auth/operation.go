@@ -39,6 +39,12 @@ const (
 	OpDeleteObjectVersion Operation = "DeleteObjectVersion" // DELETE, bucket + key, ?versionId
 	OpListBucketVersions  Operation = "ListBucketVersions"  // GET, bucket, no key, ?versions
 
+	// Bucket policy operations, distinguished from the plain bucket operations
+	// by the ?policy query parameter.
+	OpGetBucketPolicy    Operation = "GetBucketPolicy"    // GET, bucket, no key, ?policy
+	OpPutBucketPolicy    Operation = "PutBucketPolicy"    // PUT, bucket, no key, ?policy
+	OpDeleteBucketPolicy Operation = "DeleteBucketPolicy" // DELETE, bucket, no key, ?policy
+
 	// Multipart upload operations, distinguished from their plain-object
 	// counterparts by the query parameters on the signed URL.
 	OpCreateMultipartUpload      Operation = "CreateMultipartUpload"      // POST, bucket + key, ?uploads
@@ -71,6 +77,10 @@ var operationPermission = map[Operation]string{
 	OpPutObjectLegalHold:  "s3:PutObjectLegalHold",
 	OpDeleteObjectVersion: "s3:DeleteObjectVersion",
 	OpListBucketVersions:  "s3:ListBucketVersions",
+
+	OpGetBucketPolicy:    "s3:GetBucketPolicy",
+	OpPutBucketPolicy:    "s3:PutBucketPolicy",
+	OpDeleteBucketPolicy: "s3:DeleteBucketPolicy",
 
 	OpCreateMultipartUpload:      "s3:PutObject",
 	OpUploadPart:                 "s3:PutObject",
@@ -110,6 +120,7 @@ func (o Operation) addressesExistingBucket() bool {
 	case OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpDeleteObject, OpDeleteBucket,
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
+		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads:
 		return true
@@ -231,6 +242,7 @@ func classifyRequest(req s3.Request) (classification, error) {
 	retention := query.Has("retention")  // valueless flag: `?retention`
 	legalHold := query.Has("legal-hold") // valueless flag: `?legal-hold`
 	versionID := query.Get("versionId")
+	policy := query.Has("policy") // valueless flag: `?policy`
 
 	// A plain-object or part PUT with a parseable copy source is a copy.
 	copy := func(plain, copied Operation) Operation {
@@ -260,6 +272,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 		switch {
 		case c.bucket == "":
 			return classify(OpListBuckets)
+		case c.key == "" && policy:
+			return classify(OpGetBucketPolicy)
 		case c.key == "" && uploads:
 			return classify(OpListBucketMultipartUploads)
 		case c.key == "" && versions:
@@ -282,6 +296,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classification{}, fmt.Errorf("%s request has no bucket in its path", req.Method)
 		}
 		switch {
+		case c.key == "" && policy && method == http.MethodPut:
+			return classify(OpPutBucketPolicy)
 		case c.key == "":
 			return classify(OpCreateBucket)
 		case method == http.MethodPost && uploads:
@@ -302,6 +318,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classification{}, fmt.Errorf("%s request has no bucket in its path", req.Method)
 		}
 		switch {
+		case c.key == "" && policy:
+			return classify(OpDeleteBucketPolicy)
 		case c.key == "":
 			return classify(OpDeleteBucket)
 		case uploadID != "":
