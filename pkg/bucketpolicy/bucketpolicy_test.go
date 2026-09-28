@@ -1,11 +1,14 @@
 package bucketpolicy_test
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/s3perm"
+	"github.com/ipfs/go-cid"
+	mh "github.com/multiformats/go-multihash"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,24 +29,32 @@ func doc(statements ...bucketpolicy.Statement) *bucketpolicy.Policy {
 }
 
 func TestDecode(t *testing.T) {
-	t.Run("decodes the documented shape", func(t *testing.T) {
+	t.Run("decodes the documented shape in canonical form", func(t *testing.T) {
 		d, err := bucketpolicy.Decode([]byte(`{
 			"statement": [
-				{"sid": "owners", "effect": "allow", "principal": ["alice", "bob"], "action": ["s3:GetObject", "s3:ListBucket"]},
+				{"sid": "owners", "effect": "allow", "principal": ["bob", "alice"], "action": ["s3:ListBucket", "s3:GetObject"]},
 				{"effect": "deny", "principal": "*", "action": ["s3:PutObjectRetention"]}
 			]
 		}`))
 		require.NoError(t, err)
+		// Lists are sets: sorted and deduplicated, statements ordered by their
+		// encoding (a statement without a sid sorts before one with).
 		require.Equal(t, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}},
 			{Effect: bucketpolicy.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}},
+			{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}},
 		}}, d)
 	})
 
-	t.Run("keeps each principal once, in first-seen order", func(t *testing.T) {
-		d, err := bucketpolicy.Decode([]byte(`{"statement": [{"effect": "allow", "principal": ["bob", "alice", "bob", "alice"], "action": ["s3:GetObject"]}]}`))
+	t.Run("keeps each principal and action once, sorted", func(t *testing.T) {
+		d, err := bucketpolicy.Decode([]byte(`{"statement": [{"effect": "allow", "principal": ["bob", "alice", "bob", "alice"], "action": ["s3:PutObject", "s3:GetObject", "s3:PutObject"]}]}`))
 		require.NoError(t, err)
-		require.Equal(t, *doc(allow(only("bob", "alice"), "s3:GetObject")), d)
+		require.Equal(t, *doc(allow(only("alice", "bob"), "s3:GetObject", "s3:PutObject")), d)
+	})
+
+	t.Run("drops a duplicate statement", func(t *testing.T) {
+		d, err := bucketpolicy.Decode([]byte(`{"statement": [{"effect": "allow", "principal": "*", "action": ["s3:GetObject"]}, {"effect": "allow", "principal": "*", "action": ["s3:GetObject"]}]}`))
+		require.NoError(t, err)
+		require.Equal(t, *doc(allow(everyone, "s3:GetObject")), d)
 	})
 
 	t.Run("round-trips the canonical form", func(t *testing.T) {
@@ -138,13 +149,13 @@ func TestValidate(t *testing.T) {
 }
 
 func TestCanonical(t *testing.T) {
-	t.Run("compact JSON with fixed field order and input order kept", func(t *testing.T) {
+	t.Run("compact JSON with fixed field order and every list sorted", func(t *testing.T) {
 		d := *doc(
 			bucketpolicy.Statement{Sid: "rw", Effect: bucketpolicy.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:PutObject", "s3:GetObject"}},
 			deny(everyone, "s3:DeleteObject"),
 		)
 		require.Equal(t,
-			`{"statement":[{"sid":"rw","effect":"allow","principal":["bob","alice"],"action":["s3:PutObject","s3:GetObject"]},{"effect":"deny","principal":"*","action":["s3:DeleteObject"]}]}`,
+			`{"statement":[{"effect":"deny","principal":"*","action":["s3:DeleteObject"]},{"sid":"rw","effect":"allow","principal":["alice","bob"],"action":["s3:GetObject","s3:PutObject"]}]}`,
 			string(bucketpolicy.Canonical(d)))
 	})
 
@@ -172,10 +183,11 @@ func TestCanonical(t *testing.T) {
 		require.Equal(t, `{"statement":[{"effect":"allow","principal":"*","action":["s3:GetObject"]}]}`, string(bucketpolicy.Canonical(d)))
 	})
 
-	t.Run("order is significant", func(t *testing.T) {
-		a := *doc(allow(only("alice", "bob"), "s3:GetObject"))
-		b := *doc(allow(only("bob", "alice"), "s3:GetObject"))
-		require.NotEqual(t, bucketpolicy.Canonical(a), bucketpolicy.Canonical(b))
+	t.Run("order and duplicates are not significant", func(t *testing.T) {
+		a := *doc(allow(only("alice", "bob"), "s3:GetObject", "s3:PutObject"), deny(everyone, "s3:DeleteObject"))
+		b := *doc(deny(everyone, "s3:DeleteObject"), allow(only("bob", "alice", "bob"), "s3:PutObject", "s3:GetObject", "s3:PutObject"))
+		require.Equal(t, bucketpolicy.Canonical(a), bucketpolicy.Canonical(b))
+		require.Equal(t, bucketpolicy.ETag(a), bucketpolicy.ETag(b))
 	})
 
 	t.Run("does not alias the input", func(t *testing.T) {
@@ -189,10 +201,23 @@ func TestCanonical(t *testing.T) {
 func TestETag(t *testing.T) {
 	d := *doc(allow(only("alice"), "s3:GetObject"))
 
-	t.Run("is a quoted hex sha256 of the canonical form", func(t *testing.T) {
+	t.Run("is a quoted dag-cbor CID of the canonical form", func(t *testing.T) {
 		tag := bucketpolicy.ETag(d)
-		require.Len(t, tag, 66) // two quotes + 64 hex characters
-		require.Regexp(t, `^"[0-9a-f]{64}"$`, tag)
+		require.Regexp(t, `^"bafy[a-z2-7]+"$`, tag)
+		c, err := cid.Decode(tag[1 : len(tag)-1])
+		require.NoError(t, err)
+		require.EqualValues(t, cid.DagCBOR, c.Type())
+		// The DAG-CBOR bytes of {"statement":[{"action":["s3:GetObject"],"effect":"allow","principal":["alice"]}]}:
+		// keys in canonical order, every string a text string, definite lengths.
+		encoded := "a1" + "69" + hex.EncodeToString([]byte("statement")) + "81" + "a3" +
+			"66" + hex.EncodeToString([]byte("action")) + "81" + "6c" + hex.EncodeToString([]byte("s3:GetObject")) +
+			"66" + hex.EncodeToString([]byte("effect")) + "65" + hex.EncodeToString([]byte("allow")) +
+			"69" + hex.EncodeToString([]byte("principal")) + "81" + "65" + hex.EncodeToString([]byte("alice"))
+		raw, err := hex.DecodeString(encoded)
+		require.NoError(t, err)
+		sum, err := mh.Sum(raw, mh.SHA2_256, -1)
+		require.NoError(t, err)
+		require.Equal(t, cid.NewCidV1(cid.DagCBOR, sum), c)
 	})
 
 	t.Run("is stable and changes with the document", func(t *testing.T) {
@@ -207,8 +232,8 @@ func TestETag(t *testing.T) {
 	t.Run("pins the canonical hashes", func(t *testing.T) {
 		// Stored tags are compared against freshly computed ones for If-Match, so
 		// these values must never change without a deliberate decision.
-		require.Equal(t, `"6aad9d356389c27aa54b4ed7e706c3ba31b53c9f25d1e656a0b01bf7a5f1f35a"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
-		require.Equal(t, `"8c99a1df6101e5df5153b0250526e23ab18d3ae6f0a85e728476930a5dab7d3e"`, bucketpolicy.ETag(d))
+		require.Equal(t, `"bafyreiedzxytox7hvs65sh5dylxereq3szlo64rvgpwevv43wydnjo5beq"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
+		require.Equal(t, `"bafyreiavi3i43kuahhwgpmlnzf7m6rwqvqxgiawj4eon66bowco44o4b64"`, bucketpolicy.ETag(d))
 		require.Equal(t, bucketpolicy.ETag(bucketpolicy.Policy{}), bucketpolicy.ETag(bucketpolicy.Policy{Statements: []bucketpolicy.Statement{}}))
 	})
 }
