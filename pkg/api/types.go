@@ -1,10 +1,9 @@
 package api
 
 import (
-	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 )
 
 // TenantStatus is the access mode of a tenant.
@@ -86,12 +85,6 @@ type Principal struct {
 type PrincipalList struct {
 	Items []Principal `json:"items"`
 }
-
-// BucketPolicy is the body of GET and PUT
-// /tenants/{tenantId}/buckets/{bucketName}/policy. It is the stored document
-// (see [bucketpolicy.Policy]); the strong ETag the writes condition on travels in
-// the ETag response header.
-type BucketPolicy = bucketpolicy.Policy
 
 // PrincipalPolicy is one of the policies naming a principal, addressed by the
 // bucket it applies to.
