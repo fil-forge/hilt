@@ -89,6 +89,7 @@ func TestRPCModuleRouteGroups(t *testing.T) {
 		"/s3/bucket/delete",
 		"/s3/bucket/info",
 		"/s3/bucket/list",
+		"/s3/bucket/policy",
 	}, commandsOf(routes))
 
 	require.ElementsMatch(t, []string{
