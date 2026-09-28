@@ -210,7 +210,8 @@ func TestManagementClient(t *testing.T) {
 	t.Run("ListPrincipalAccessKeys returns the items", func(t *testing.T) {
 		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 			assertAuth(t, r)
-			require.Equal(t, "/tenants/acme/principals/user-1/access-keys", r.URL.Path)
+			require.Equal(t, "/tenants/acme/access-keys", r.URL.Path)
+			require.Equal(t, "user-1", r.URL.Query().Get("principalId"))
 			_ = json.NewEncoder(w).Encode(api.AccessKeyList{Items: []api.AccessKey{{AccessKeyID: "AKID", Principal: "user-1"}}})
 		})
 		got, err := c.ListPrincipalAccessKeys(ctx, "acme", "user-1")

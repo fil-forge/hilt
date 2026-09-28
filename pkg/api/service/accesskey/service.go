@@ -295,7 +295,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 
 // List returns the tenant's access keys and a DID→name map for the buckets they
 // reference (for rendering).
-func (s *Service) List(ctx context.Context, externalID string) ([]accesskeystore.Record, map[did.DID]string, error) {
+func (s *Service) List(ctx context.Context, externalID string, opts ...accesskeystore.ListOption) ([]accesskeystore.Record, map[did.DID]string, error) {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, ErrTenantNotFound
@@ -303,7 +303,7 @@ func (s *Service) List(ctx context.Context, externalID string) ([]accesskeystore
 		return nil, nil, fmt.Errorf("looking up tenant: %w", err)
 	}
 
-	recs, err := s.accessKeys.ListByTenant(ctx, tenantRec.ID)
+	recs, err := s.accessKeys.ListByTenant(ctx, tenantRec.ID, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing access keys: %w", err)
 	}

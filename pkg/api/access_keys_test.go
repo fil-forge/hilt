@@ -397,6 +397,21 @@ func TestListAccessKeysHandler(t *testing.T) {
 		require.Empty(t, byName["laptop"].Buckets)
 	})
 
+	t.Run("principalId filters to that principal's keys", func(t *testing.T) {
+		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys?principalId=alice", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var list api.AccessKeyList
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+		require.Len(t, list.Items, 1)
+		require.Equal(t, "laptop", list.Items[0].Name)
+		require.Equal(t, "alice", list.Items[0].Principal)
+
+		rec = doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys?principalId=nobody", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+		require.Empty(t, list.Items)
+	})
+
 	t.Run("unknown tenant is 404", func(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/missing/access-keys", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
