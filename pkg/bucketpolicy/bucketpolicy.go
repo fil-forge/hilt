@@ -1,6 +1,7 @@
 // Package bucketpolicy defines the bucket policy and its evaluation: which
-// actions a principal holds on a bucket, how a policy is canonicalized and
-// tagged for compare-and-set, and which principals a change to it affects. It
+// actions a principal holds on a bucket, how a policy is canonicalized (its
+// lists are sets) and tagged for compare-and-set, and which principals a
+// change to it affects. It
 // has no store or transport dependencies; the bucket policy store persists
 // policies and the management API validates them with the rules here.
 //
@@ -21,8 +22,6 @@ package bucketpolicy
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +29,9 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/ucantone/errors"
+	"github.com/ipfs/go-cid"
+	mh "github.com/multiformats/go-multihash"
+	cbg "github.com/whyrusleeping/cbor-gen"
 )
 
 // Effect is whether a statement grants or withholds its actions.
@@ -146,7 +148,7 @@ func Decode(data []byte) (Policy, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return Policy{}, fmt.Errorf("decoding policy: trailing data after the document: %w", ErrInvalidPolicy)
 	}
-	return d, nil
+	return normalize(d), nil
 }
 
 // strictKeys rejects any property name that is not spelled exactly as the
@@ -218,29 +220,107 @@ func Validate(d Policy, principalExists func(string) bool) error {
 	return nil
 }
 
-// Canonical returns the canonical encoding of d: compact JSON with the fields
-// of each statement in the order sid (omitted when empty), effect, principal,
-// action, and every list in the order given. Nil lists encode as empty lists
-// and a wildcard principal as "*". Two policies with the same statements in
-// the same order have the same canonical form.
-func Canonical(d Policy) []byte {
+// normalize returns a copy of d in canonical form. The statement, principal
+// and action lists are sets: each is deduplicated and sorted, a wildcard
+// principal drops any stray ids, nil lists become empty lists, and the
+// statements are ordered by their JSON encoding. Two policies that differ
+// only in order or in duplicates normalize to the same value.
+func normalize(d Policy) Policy {
 	statements := make([]Statement, len(d.Statements))
-	copy(statements, d.Statements)
-	for i := range statements {
-		statements[i].Actions = nonNil(statements[i].Actions)
+	for i, st := range d.Statements {
+		st.Actions = sortedSet(st.Actions)
+		if st.Principal.All {
+			st.Principal.IDs = nil
+		} else {
+			st.Principal.IDs = sortedSet(st.Principal.IDs)
+		}
+		statements[i] = st
 	}
-	// json.Marshal writes struct fields in declaration order without whitespace,
-	// so the struct definitions above fix the layout; a marshalling error is
-	// impossible for these types.
-	out, _ := json.Marshal(Policy{Statements: statements})
+	slices.SortStableFunc(statements, func(a, b Statement) int {
+		return bytes.Compare(encodeJSON(a), encodeJSON(b))
+	})
+	statements = slices.CompactFunc(statements, func(a, b Statement) bool {
+		return bytes.Equal(encodeJSON(a), encodeJSON(b))
+	})
+	return Policy{Statements: statements}
+}
+
+// sortedSet returns s deduplicated and sorted, never nil.
+func sortedSet(s []string) []string {
+	out := slices.Clone(nonNil(s))
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// encodeJSON is json.Marshal for the types here, whose encoding cannot fail:
+// struct fields are written in declaration order without whitespace, so the
+// struct definitions above fix the layout.
+func encodeJSON(v any) []byte {
+	out, _ := json.Marshal(v)
 	return out
 }
 
-// ETag returns the entity tag of d: the hex SHA-256 of its canonical encoding,
-// in double quotes as HTTP carries it.
+// Canonical returns the canonical JSON encoding of d: the [normalize]d
+// document, compact, with the fields of each statement in the order sid
+// (omitted when empty), effect, principal, action. It is what Hilt stores and
+// returns.
+func Canonical(d Policy) []byte {
+	return encodeJSON(normalize(d))
+}
+
+// ETag returns the entity tag of d: the CID of the DAG-CBOR encoding of the
+// [normalize]d document (CIDv1, dag-cbor, sha2-256), in double quotes as HTTP
+// carries it. Callers treat it as opaque.
 func ETag(d Policy) string {
-	sum := sha256.Sum256(Canonical(d))
-	return `"` + hex.EncodeToString(sum[:]) + `"`
+	sum, err := mh.Sum(encodeCBOR(normalize(d)), mh.SHA2_256, -1)
+	if err != nil {
+		panic(err) // sha2-256 with the default length cannot fail
+	}
+	return `"` + cid.NewCidV1(cid.DagCBOR, sum).String() + `"`
+}
+
+// encodeCBOR is the DAG-CBOR encoding of d, which must be normalized: a map
+// {"statement": [...]} of statement maps whose keys are in canonical order
+// (shorter first, then bytewise): sid (omitted when empty), action, effect,
+// principal. A wildcard principal is the text string "*", otherwise the array
+// of ids. Every string is a text string and every container definite-length.
+func encodeCBOR(d Policy) []byte {
+	var buf bytes.Buffer
+	text := func(s string) {
+		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajTextString, uint64(len(s)))
+		buf.WriteString(s)
+	}
+	strings := func(ss []string) {
+		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajArray, uint64(len(ss)))
+		for _, s := range ss {
+			text(s)
+		}
+	}
+	_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajMap, 1)
+	text("statement")
+	_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajArray, uint64(len(d.Statements)))
+	for _, st := range d.Statements {
+		keys := uint64(3)
+		if st.Sid != "" {
+			keys = 4
+		}
+		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajMap, keys)
+		if st.Sid != "" {
+			text("sid")
+			text(st.Sid)
+		}
+		text("action")
+		strings(st.Actions)
+		text("effect")
+		text(string(st.Effect))
+		text("principal")
+		if st.Principal.All {
+			text(Wildcard)
+		} else {
+			strings(st.Principal.IDs)
+		}
+	}
+	return buf.Bytes()
 }
 
 // Effective returns the actions principal p holds under d: the actions of the
