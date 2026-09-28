@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
+
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/ucantone/did"
@@ -67,11 +69,16 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 }
 
 // NewListAccessKeysHandler handles GET /tenants/{tenantId}/access-keys — list all
-// S3 access keys for a tenant (excludes secrets).
+// S3 access keys for a tenant (excludes secrets), or only the keys bound to
+// the principal named by the principalId query parameter.
 func NewListAccessKeysHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "ListAccessKeys"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/access-keys", func(c echo.Context) error {
-		recs, bucketNames, err := accessKeys.List(c.Request().Context(), c.Param("tenantId"))
+		var opts []accesskeystore.ListOption
+		if p := c.QueryParam("principalId"); p != "" {
+			opts = append(opts, accesskeystore.WithPrincipal(p))
+		}
+		recs, bucketNames, err := accessKeys.List(c.Request().Context(), c.Param("tenantId"), opts...)
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}

@@ -216,33 +216,6 @@ func TestListGet(t *testing.T) {
 	})
 }
 
-func TestListAccessKeys(t *testing.T) {
-	ctx := t.Context()
-
-	t.Run("lists the principal's keys and no other principal's", func(t *testing.T) {
-		d := setup(t)
-		for _, id := range []string{"user-1", "user-2"} {
-			_, _, err := d.svc.Create(ctx, "tenant-1", id)
-			require.NoError(t, err)
-			d.addKey(t, d.tenantID, id, "laptop-"+id)
-		}
-
-		recs, err := d.svc.ListAccessKeys(ctx, "tenant-1", "user-1")
-		require.NoError(t, err)
-		require.Len(t, recs, 1)
-		require.Equal(t, "user-1", *recs[0].Principal)
-
-		_, err = d.svc.ListAccessKeys(ctx, "tenant-1", "user-3")
-		require.ErrorIs(t, err, principalsvc.ErrPrincipalNotFound)
-	})
-
-	t.Run("rejects an unknown tenant", func(t *testing.T) {
-		d := setup(t)
-		_, err := d.svc.ListAccessKeys(ctx, "missing", "user-1")
-		require.ErrorIs(t, err, principalsvc.ErrTenantNotFound)
-	})
-}
-
 func TestDelete(t *testing.T) {
 	ctx := t.Context()
 
@@ -320,7 +293,7 @@ func TestDelete(t *testing.T) {
 		require.True(t, created, "a revive is reported as a create")
 		require.Equal(t, "user-1", rec.ExternalID)
 
-		keys, err := d.svc.ListAccessKeys(ctx, "tenant-1", "user-1")
+		keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID, accesskeystore.WithPrincipal("user-1"))
 		require.NoError(t, err)
 		require.Empty(t, keys, "the old keys are gone")
 		_, err = d.policies.Get(ctx, alone)
@@ -350,7 +323,7 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err, "the principal row must survive")
 		require.Equal(t, "user-1", rec.ExternalID)
 
-		keys, err := d.svc.ListAccessKeys(ctx, "tenant-1", "user-1")
+		keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID, accesskeystore.WithPrincipal("user-1"))
 		require.NoError(t, err)
 		require.Len(t, keys, 1, "its keys must survive")
 		require.Equal(t, key, keys[0].ID)

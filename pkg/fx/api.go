@@ -38,7 +38,6 @@ var APIModule = fx.Module("api",
 		asRoute(api.NewListPrincipalsHandler),
 		asRoute(api.NewGetPrincipalHandler),
 		asRoute(api.NewDeletePrincipalHandler),
-		asRoute(api.NewListPrincipalAccessKeysHandler),
 	),
 )
 

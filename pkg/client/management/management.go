@@ -177,7 +177,7 @@ func (c *Client) DeletePrincipal(ctx context.Context, tenantID, principalID stri
 // never included).
 func (c *Client) ListPrincipalAccessKeys(ctx context.Context, tenantID, principalID string) ([]api.AccessKey, error) {
 	var list api.AccessKeyList
-	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", principalID, "access-keys"}, nil, &list, http.StatusOK)
+	err := c.doQuery(ctx, http.MethodGet, []string{"tenants", tenantID, "access-keys"}, url.Values{"principalId": {principalID}}, nil, &list, http.StatusOK)
 	return list.Items, err
 }
 
@@ -185,7 +185,13 @@ func (c *Client) ListPrincipalAccessKeys(ctx context.Context, tenantID, principa
 // auth/JSON headers, sends the (optional) JSON body, checks the status against
 // wantStatus, and decodes the response into out when non-nil.
 func (c *Client) do(ctx context.Context, method string, segments []string, body, out any, wantStatus ...int) error {
+	return c.doQuery(ctx, method, segments, nil, body, out, wantStatus...)
+}
+
+// doQuery is [Client.do] with a query string.
+func (c *Client) doQuery(ctx context.Context, method string, segments []string, query url.Values, body, out any, wantStatus ...int) error {
 	u := c.resolve(segments)
+	u.RawQuery = query.Encode()
 
 	var reqBody io.Reader
 	if body != nil {
