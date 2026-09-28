@@ -74,7 +74,6 @@ func setupPrincipals(t *testing.T) (*echo.Echo, *principalDeps) {
 		api.NewListPrincipalsHandler(zap.NewNop(), svc),
 		api.NewGetPrincipalHandler(zap.NewNop(), svc),
 		api.NewDeletePrincipalHandler(zap.NewNop(), svc),
-		api.NewListPrincipalAccessKeysHandler(zap.NewNop(), svc),
 	} {
 		e.Add(r.Method, r.Path, r.Handler)
 	}
@@ -244,31 +243,5 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		e, _ := setupPrincipals(t)
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/missing/principals/user-1", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
-	})
-}
-
-func TestListPrincipalAccessKeysHandler(t *testing.T) {
-	t.Run("lists the principal's keys and never the secret", func(t *testing.T) {
-		e, deps := setupPrincipals(t)
-		createPrincipal(t, e, "user-1")
-		keyID := addPrincipalKey(t, deps, "user-1", "laptop")
-
-		list := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/user-1/access-keys", nil)
-		require.Equal(t, http.StatusOK, list.Code)
-		require.NotContains(t, list.Body.String(), "secretAccessKey")
-		var keys api.AccessKeyList
-		require.NoError(t, json.Unmarshal(list.Body.Bytes(), &keys))
-		require.Len(t, keys.Items, 1)
-		require.Equal(t, keyID.Identifier(), keys.Items[0].AccessKeyID)
-		require.Equal(t, "laptop", keys.Items[0].Name)
-		require.Equal(t, "user-1", keys.Items[0].Principal)
-		require.Empty(t, keys.Items[0].Permissions, "a principal-bound key carries none")
-		require.Empty(t, keys.Items[0].Buckets, "a principal-bound key carries none")
-	})
-
-	t.Run("an unknown principal is 404", func(t *testing.T) {
-		e, _ := setupPrincipals(t)
-		list := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/user-1/access-keys", nil)
-		require.Equal(t, http.StatusNotFound, list.Code)
 	})
 }

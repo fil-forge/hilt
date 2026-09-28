@@ -232,22 +232,6 @@ func (s *Service) deleteKeys(ctx context.Context, tenantID did.DID, principalID 
 	return nil
 }
 
-// ListAccessKeys returns the keys bound to the principal.
-func (s *Service) ListAccessKeys(ctx context.Context, externalID, principalID string) ([]accesskeystore.Record, error) {
-	tenantID, err := s.tenant(ctx, externalID)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.principal(ctx, tenantID, principalID); err != nil {
-		return nil, err
-	}
-	recs, err := s.accessKeys.ListByTenant(ctx, tenantID, accesskeystore.WithPrincipal(principalID))
-	if err != nil {
-		return nil, fmt.Errorf("listing the principal's access keys: %w", err)
-	}
-	return recs, nil
-}
-
 // tenant resolves the caller's external id to the tenant DID.
 func (s *Service) tenant(ctx context.Context, externalID string) (did.DID, error) {
 	rec, err := s.tenants.GetByExternalID(ctx, externalID)

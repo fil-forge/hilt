@@ -89,25 +89,6 @@ func NewDeletePrincipalHandler(logger *zap.Logger, principals *principalsvc.Serv
 	})
 }
 
-// NewListPrincipalAccessKeysHandler handles
-// GET /tenants/{tenantId}/principals/{principalId}/access-keys — list the keys bound
-// to the principal (excludes secrets).
-func NewListPrincipalAccessKeysHandler(logger *zap.Logger, principals *principalsvc.Service) Route {
-	log := logger.With(zap.String("handler", "ListPrincipalAccessKeys"))
-	return NewRoute(http.MethodGet, "/tenants/:tenantId/principals/:principalId/access-keys", func(c echo.Context) error {
-		recs, err := principals.ListAccessKeys(c.Request().Context(), c.Param("tenantId"), c.Param("principalId"))
-		if err != nil {
-			return principalHTTPError(log, err)
-		}
-		// A principal-bound key references no bucket, so no name map is needed.
-		items := make([]AccessKey, 0, len(recs))
-		for _, rec := range recs {
-			items = append(items, accessKeyResponse(rec, nil))
-		}
-		return c.JSON(http.StatusOK, AccessKeyList{Items: items})
-	})
-}
-
 // principalResponse builds the API representation of a principal.
 func principalResponse(rec principalstore.Record) Principal {
 	return Principal{PrincipalID: rec.ExternalID, CreatedAt: rec.CreatedAt}
