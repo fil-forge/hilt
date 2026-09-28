@@ -3,6 +3,7 @@ package rpc
 import (
 	"errors"
 
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -71,9 +72,14 @@ func bucketFailure(res failer, err error) error {
 		errors.Is(err, bucketsvc.ErrUnknownBucket),
 		errors.Is(err, bucketsvc.ErrUnknownAccessKey),
 		errors.Is(err, bucketsvc.ErrInvalidArgument),
-		// The policy carried on a create: unsigned, undecodable or invalid, all
-		// under the InvalidBucketPolicy name the management API also uses.
-		errors.Is(err, bucketpolicy.ErrInvalidPolicy):
+		// A policy document, on a create's header or a PutBucketPolicy:
+		// unsigned, undecodable or invalid, all under InvalidBucketPolicy.
+		errors.Is(err, bucketpolicy.ErrInvalidPolicy),
+		// The policy operations' own rejections.
+		errors.Is(err, bucketpolicysvc.ErrPolicyNotFound),
+		errors.Is(err, bucketpolicysvc.ErrInvalidPrecondition),
+		errors.Is(err, bucketpolicysvc.ErrPreconditionFailed),
+		errors.Is(err, bucketpolicysvc.ErrConcurrentChange):
 		return res.SetFailure(err)
 	default:
 		return authFailure(res, err)
