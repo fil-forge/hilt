@@ -221,6 +221,34 @@ func TestPolicyStore(t *testing.T) {
 				require.Equal(t, etag2, rec.ETag)
 			})
 
+			t.Run("Put Unconditional replaces whatever is stored and creates when nothing is", func(t *testing.T) {
+				tenantID, bucketID := newBucket(t, "alice", "bob")
+				first := doc(allow(only("alice"), "s3:GetObject"))
+				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Unconditional: true}, nil)
+				require.NoError(t, err)
+				require.Equal(t, bucketpolicy.ETag(first), etag1)
+
+				second := doc(allow(only("bob"), "s3:PutObject"))
+				etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(`"stale"`), Unconditional: true,
+				}, nil)
+				require.NoError(t, err, "IfMatch is ignored")
+				rec, err := s.Get(t.Context(), bucketID)
+				require.NoError(t, err)
+				require.Equal(t, second, rec.Policy)
+				require.Equal(t, etag2, rec.ETag)
+			})
+
+			t.Run("Delete with an empty ETag removes the policy unconditionally", func(t *testing.T) {
+				tenantID, bucketID := newBucket(t, "alice")
+				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"))}, nil)
+				require.NoError(t, err)
+				require.NoError(t, s.Delete(t.Context(), bucketID, "", nil))
+				_, err = s.Get(t.Context(), bucketID)
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+				require.ErrorIs(t, s.Delete(t.Context(), bucketID, "", nil), store.ErrRecordNotFound)
+			})
+
 			t.Run("Put with a stale IfMatch fails and writes nothing", func(t *testing.T) {
 				tenantID, bucketID := newBucket(t, "alice", "bob")
 				first := doc(allow(only("alice"), "s3:GetObject"))

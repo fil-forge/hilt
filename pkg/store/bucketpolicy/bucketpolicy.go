@@ -48,6 +48,10 @@ type Input struct {
 	// IfMatch is the ETag the bucket's current policy must carry for the write
 	// to proceed. Nil means the bucket must have no policy (If-None-Match: *).
 	IfMatch *string
+	// Unconditional writes whether or not the bucket has a policy and
+	// whatever tag it carries; IfMatch is ignored. It is the write a
+	// PutBucketPolicy without a precondition makes.
+	Unconditional bool
 }
 
 // Store persists bucket policies.
@@ -61,10 +65,10 @@ type Store interface {
 	// Put creates or replaces the bucket's policy in one transaction: it locks
 	// the current row, checks in.IfMatch against it, runs beforeCommit (nil
 	// allowed) with the current record (nil when creating), writes the row and
-	// its index rows, and commits. It returns the new ETag. It returns
-	// [store.ErrPreconditionFailed] when IfMatch is nil and a policy exists, or
-	// IfMatch names a tag other than the current one (including when no policy
-	// exists); [store.ErrInvalidArgument] when the bucket or tenant is undef or,
+	// its index rows, and commits. It returns the new ETag. Unless in is
+	// Unconditional, it returns [store.ErrPreconditionFailed] when IfMatch is
+	// nil and a policy exists, or IfMatch names a tag other than the current
+	// one (including when no policy exists); [store.ErrInvalidArgument] when the bucket or tenant is undef or,
 	// on Postgres, the bucket or a named principal does not exist. An error from
 	// beforeCommit is returned and nothing is written. The referential checks
 	// run after beforeCommit, so a callback that published may still see the
@@ -78,7 +82,7 @@ type Store interface {
 	// locking and callback contract as [Store.Put]. It returns
 	// [store.ErrRecordNotFound] if the bucket has no policy and
 	// [store.ErrPreconditionFailed] if ifMatch is not the current ETag; in both
-	// cases beforeCommit does not run.
+	// cases beforeCommit does not run. An empty ifMatch is unconditional.
 	Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old Record) error) error
 	// DeleteByBucket removes the bucket's policy and index rows
 	// unconditionally. It is idempotent and is used by bucket and tenant
@@ -94,6 +98,15 @@ type Store interface {
 	// Principal removal must strip the principal from each listed policy
 	// itself and must not rely on the cascade.
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]Record, error)
+}
+
+// CheckInputPrecondition applies [CheckPrecondition] to in unless it is
+// Unconditional.
+func CheckInputPrecondition(in Input, old *Record) error {
+	if in.Unconditional {
+		return nil
+	}
+	return CheckPrecondition(old, in.IfMatch)
 }
 
 // CheckPrecondition applies the If-Match / If-None-Match rule of [Store.Put]:
