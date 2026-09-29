@@ -594,6 +594,28 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrAccessKeyExpired)
 	})
 
+	t.Run("a write-locked tenant reads and deletes but cannot upload", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{
+			tenantStatus:         tenant.WriteLocked,
+			accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject"},
+		})
+		signed := func(method string) s3.Request {
+			secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+			require.NoError(t, err)
+			req, err := sigv4.Presign(sigv4.Request{Method: method, URL: "https://s3.fil.one/bucket/object-key"},
+				accessKey.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+			require.NoError(t, err)
+			return s3.Request{Method: req.Method, URL: req.URL}
+		}
+		_, err := az.Authorize(ctx, providerID, signed("PUT"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+		require.ErrorContains(t, err, "write-locked")
+		for _, method := range []string{"GET", "DELETE"} {
+			_, err := az.Authorize(ctx, providerID, signed(method))
+			require.NoError(t, err, method)
+		}
+	})
+
 	t.Run("rejects a disabled tenant", func(t *testing.T) {
 		// A freshly-signed request from the tenant's provider must be rejected when
 		// the tenant is disabled (so disabled status is the only variable).
