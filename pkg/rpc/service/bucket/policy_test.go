@@ -191,6 +191,9 @@ func TestPolicy(t *testing.T) {
 			"unsigned If-Match":      {headers: map[string]string{"If-Match": `"x"`}, unsigned: []string{"If-Match"}},
 			"both headers":           {headers: map[string]string{"If-Match": `"x"`, "If-None-Match": "*"}},
 			"If-None-Match not star": {headers: map[string]string{"If-None-Match": `"x"`}},
+			"empty If-Match":         {headers: map[string]string{"If-Match": ""}},
+			"blank If-Match":         {headers: map[string]string{"If-Match": "  "}},
+			"empty If-None-Match":    {headers: map[string]string{"If-None-Match": ""}},
 		} {
 			o.body = encode(t, read)
 			_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", o))
@@ -230,6 +233,8 @@ func TestPolicy(t *testing.T) {
 		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
 		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-None-Match": "*"}}))
 		require.ErrorIs(t, err, bucketpolicysvc.ErrInvalidPrecondition)
+		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-Match": "  "}}))
+		require.ErrorIs(t, err, bucketpolicysvc.ErrInvalidPrecondition, "a blank tag is not an unconditional delete")
 		ok, err := f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-Match": first.ETag}}))
 		require.NoError(t, err)
 		require.Empty(t, ok.ETag)
