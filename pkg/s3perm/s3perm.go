@@ -33,12 +33,24 @@ var (
 	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
-	// /blob/remove. Deleting a bucket unwinds the same way, for every blob its
-	// space still holds: in-flight multipart parts, deleted objects' bodies whose
-	// deferred release has not run, and shipped catalog segments. Without the
-	// grant Ingot can release them only with authority left over from some
-	// earlier write, and a bucket that saw none cannot be deleted.
+	// /blob/remove. Without the grant Ingot can release them only with authority
+	// left over from some earlier write. No /upload/remove: an abandoned upload
+	// never committed a version, so it has no content entry to retract.
 	cmdsAbort = []ucan.Command{blob.Abort.Command, blob.Remove.Command}
+	// Deleting a bucket unwinds every blob its space still holds — in-flight
+	// multipart parts, deleted objects' bodies whose deferred release has not
+	// run, and shipped catalog segments — so it needs what an abort needs, and
+	// a bucket that saw no write has no captured authority to fall back on.
+	//
+	// It also needs /upload/remove. Emptying a bucket queues a retraction per
+	// object version, and the gateway applies whatever is still queued before
+	// asking to delete the space, because nothing else ever will: this delete
+	// checks that the space holds no blobs and never touches its content
+	// entries, and the upload service keeps a space's entries and counters
+	// after the space is gone. Those retractions normally travel on authority
+	// the original write left behind; this grant is what lets them go out when
+	// that authority has expired.
+	cmdsDeleteBucket = []ucan.Command{blob.Abort.Command, blob.Remove.Command, upload.Remove.Command}
 )
 
 // permissionCommands maps each supported S3 permission to the Forge commands
@@ -61,7 +73,7 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:DeleteObjectVersion": cmdsRemove,
 	"s3:CreateBucket":        nil,
 	"s3:ListAllMyBuckets":    nil,
-	"s3:DeleteBucket":        cmdsAbort,
+	"s3:DeleteBucket":        cmdsDeleteBucket,
 
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.
