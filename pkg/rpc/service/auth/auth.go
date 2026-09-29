@@ -182,8 +182,8 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	log = log.With(zap.Stringer("provider", tenantRec.Provider))
 
 	// Disabled is the hard lock-out state (lifecycle Active → Disabled → delete).
-	// WriteLocked still authenticates here so reads (like ListBuckets) work; write
-	// handlers gate WriteLocked themselves, since Authorize is operation-agnostic.
+	// WriteLocked still authenticates here so reads, listings and deletes work;
+	// the operations it blocks are refused once the request is classified below.
 	if tenantRec.Status == tenant.Disabled {
 		log.Debug("rejecting disabled tenant")
 		return nil, ErrTenantDisabled
@@ -212,6 +212,14 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrUnsupportedOperation
 	}
 	op, bucketName := c.op, c.bucket
+
+	// A write-locked tenant is read-only: uploads, bucket creation and policy
+	// writes are refused, while reads, listings and deletes succeed (the
+	// management API's TenantStatus contract).
+	if tenantRec.Status == tenant.WriteLocked && op.blockedByWriteLock() {
+		log.Debug("rejecting write for a write-locked tenant", zap.Stringer("operation", op))
+		return nil, fmt.Errorf("tenant is write-locked: %w", ErrOperationNotPermitted)
+	}
 
 	// A copy also reads its source, named by a header. The path is always
 	// signed; a header only when listed, so the naming must be covered by the

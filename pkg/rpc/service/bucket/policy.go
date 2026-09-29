@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/fil-forge/hilt/pkg/store"
 
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -30,14 +33,18 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 	if err != nil {
 		return nil, err
 	}
-	tenant, name := authz.Tenant.ExternalID, authz.BucketName
+	// The bucket the authorizer resolved and scope-checked, by DID: looking it
+	// up again by name could reach a bucket recreated under that name since.
+	tenantID, bucketID, name := authz.Tenant.ID, authz.Bucket.ID, authz.BucketName
 	log := s.logger.With(zap.Stringer("tenant", authz.Tenant.ID), zap.String("bucket", name), zap.Stringer("operation", authz.Operation))
 
 	switch authz.Operation {
 	case auth.OpGetBucketPolicy:
-		rec, err := s.policyWrites.Get(ctx, tenant, name)
-		if err != nil {
-			return nil, err
+		rec, err := s.policies.Get(ctx, bucketID)
+		if errors.Is(err, store.ErrRecordNotFound) {
+			return nil, bucketpolicysvc.ErrPolicyNotFound
+		} else if err != nil {
+			return nil, fmt.Errorf("reading the policy of bucket %q: %w", name, err)
 		}
 		return &s3bkt.PolicyOK{ETag: rec.ETag, Policy: bucketpolicy.Canonical(rec.Policy)}, nil
 
@@ -57,7 +64,7 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		if unconditional {
 			opts = append(opts, bucketpolicysvc.Unconditional())
 		}
-		etag, _, err := s.policyWrites.Put(ctx, tenant, name, doc, ifMatch, opts...)
+		etag, _, err := s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, ifMatch, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -78,7 +85,7 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		default:
 			tag = *ifMatch
 		}
-		if err := s.policyWrites.Delete(ctx, tenant, name, tag); err != nil {
+		if err := s.policyWrites.Remove(ctx, tenantID, bucketID, name, tag); err != nil {
 			return nil, err
 		}
 		log.Info("deleted bucket policy over S3")
@@ -111,6 +118,14 @@ func bodyMatchesSignature(authz *auth.AuthorizedRequest, body []byte) error {
 // Both headers, an If-None-Match other than *, or a header the signature does
 // not cover is [bucketpolicysvc.ErrInvalidPrecondition].
 func precondition(authz *auth.AuthorizedRequest, headers map[string]string) (ifMatch *string, unconditional bool, err error) {
+	// HeaderValue reads an empty value as absent, which would turn a malformed
+	// precondition into an unconditional write; only a header that is not sent
+	// at all means unconditional.
+	for k, v := range headers {
+		if (strings.EqualFold(k, "If-Match") || strings.EqualFold(k, "If-None-Match")) && strings.TrimSpace(v) == "" {
+			return nil, false, fmt.Errorf("%s is empty: %w", k, bucketpolicysvc.ErrInvalidPrecondition)
+		}
+	}
 	match, hasMatch := auth.HeaderValue(headers, "If-Match")
 	noneMatch, hasNoneMatch := auth.HeaderValue(headers, "If-None-Match")
 	for name, present := range map[string]bool{"If-Match": hasMatch, "If-None-Match": hasNoneMatch} {

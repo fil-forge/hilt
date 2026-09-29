@@ -197,13 +197,20 @@ func (s *Service) Delete(ctx context.Context, externalID, bucketName, ifMatch st
 	if err != nil {
 		return err
 	}
-	err = s.policies.Delete(ctx, b.ID, ifMatch, func(ctx context.Context, old bucketpolicystore.Record) error {
+	return s.Remove(ctx, tenantID, b.ID, bucketName, ifMatch)
+}
+
+// Remove is the delete [Service.Delete] makes once it has resolved the tenant
+// and the bucket, for a caller that already holds both, as [Service.Write] is
+// for a write. bucketName names the bucket in errors and logs.
+func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName, ifMatch string) error {
+	err := s.policies.Delete(ctx, bucketID, ifMatch, func(ctx context.Context, old bucketpolicystore.Record) error {
 		// Re-list under the bucket lock, as Put does.
 		principals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
 		if err != nil {
 			return err
 		}
-		return s.rotate(ctx, tenantID, b.ID, &old.Policy, nil, principals)
+		return s.rotate(ctx, tenantID, bucketID, &old.Policy, nil, principals)
 	})
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return ErrPolicyNotFound
