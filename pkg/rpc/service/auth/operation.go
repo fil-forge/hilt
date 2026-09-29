@@ -111,19 +111,6 @@ func (o Operation) CopiesSource() bool {
 
 func (o Operation) String() string { return string(o) }
 
-// blockedByWriteLock reports whether a write-locked tenant is refused the
-// operation: every upload, bucket creation, and a policy write, which could
-// grant new access. Reads, listings and deletes stay open.
-func (o Operation) blockedByWriteLock() bool {
-	switch o {
-	case OpPutObject, OpCopyObject, OpCreateBucket, OpPutBucketPolicy,
-		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload:
-		return true
-	default:
-		return false
-	}
-}
-
 // addressesExistingBucket reports whether the operation acts on a bucket that must
 // already exist, so it can be resolved and scope-checked. ListBuckets addresses no
 // bucket; CreateBucket's bucket does not exist yet. Every multipart operation acts
