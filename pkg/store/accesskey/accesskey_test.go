@@ -146,11 +146,11 @@ func TestAccessKeyStore(t *testing.T) {
 				seed.tenant(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), service(id, tenantID, "locked", nil, "s3:GetObject")))
 
-				rec, err := s.Get(t.Context(), id, store.LockShare)
+				rec, err := s.Get(t.Context(), id, store.WithShareLock())
 				require.NoError(t, err)
 				require.Equal(t, id, rec.ID)
 
-				_, err = s.Get(t.Context(), testutil.RandomDID(t), store.LockShare)
+				_, err = s.Get(t.Context(), testutil.RandomDID(t), store.WithShareLock())
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
@@ -353,7 +353,7 @@ func TestAccessKeyStorePostgresLocking(t *testing.T) {
 		},
 		func() error {
 			var err error
-			rec, err = s.Get(context.Background(), id, store.LockShare)
+			rec, err = s.Get(context.Background(), id, store.WithShareLock())
 			return err
 		})
 	require.NoError(t, committed)

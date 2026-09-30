@@ -69,12 +69,12 @@ type failReadBack struct {
 	failed bool
 }
 
-func (f *failReadBack) Get(ctx context.Context, id did.DID, locks ...store.LockMode) (accesskeystore.Record, error) {
+func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
 	if !f.failed {
 		f.failed, f.id = true, id
 		return accesskeystore.Record{}, errors.New("read-back failed")
 	}
-	return f.Store.Get(ctx, id, locks...)
+	return f.Store.Get(ctx, id, opts...)
 }
 
 type deps struct {
