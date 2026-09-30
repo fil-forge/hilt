@@ -125,6 +125,23 @@ func page(dlgs []ucan.Delegation, opts []store.PaginationOption) store.Page[ucan
 	return store.Page[ucan.Delegation]{Cursor: cursor, Results: dlgs}
 }
 
+func (s *Store) Delete(ctx context.Context, links ...cid.Cid) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for aud, dlgs := range s.byAudience {
+		kept := slices.DeleteFunc(dlgs, func(d ucan.Delegation) bool {
+			return slices.Contains(links, d.Link())
+		})
+		if len(kept) == 0 {
+			delete(s.byAudience, aud)
+		} else {
+			s.byAudience[aud] = kept
+		}
+	}
+	return nil
+}
+
 func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
