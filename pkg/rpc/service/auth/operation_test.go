@@ -186,7 +186,7 @@ func TestOperationPermission(t *testing.T) {
 		OpDeleteObject, OpDeleteBucket,
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
-		OpDeleteObject, OpDeleteBucket, OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
+		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}
