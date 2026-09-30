@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
@@ -12,14 +13,19 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -692,4 +698,49 @@ func TestTenantIssuer(t *testing.T) {
 		_, err := az.TenantIssuer(ctx, testutil.RandomDID(t))
 		require.Error(t, err)
 	})
+}
+
+// TestEffectiveActionsDuringPolicyWrite runs the principal-bound read path
+// against Postgres while a policy write is in flight. The write holds the
+// policy row and then locks the principal, as its delegation rotation does;
+// the read takes the principal and then the policy. Each read runs in its own
+// short transaction, so the read waits for the write and neither waits on the
+// other.
+func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
+	principals := principalpostgres.New(pool)
+	policies := bucketpolicypostgres.New(pool)
+	az := auth.NewAuthorizer(zap.NewNop(), nil, nil, nil, nil, principals, policies, nil)
+
+	tenantID, providerID, bucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, tenantID.String(), nil))
+	require.NoError(t, tenantpostgres.New(pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "effective-actions"))
+	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
+	statement := func(actions ...string) bucketpolicy.Policy {
+		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("alice"), Actions: actions}}}
+	}
+	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject")}, nil)
+	require.NoError(t, err)
+
+	var actions []string
+	written, read := htestutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
+				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:PutObject"), IfMatch: &etag,
+			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
+				close(entered)
+				<-release
+				return principals.Lock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
+			})
+			return err
+		},
+		func() error {
+			var err error
+			actions, err = az.EffectiveActions(context.Background(), tenantID, "alice", bucketID)
+			return err
+		})
+	require.NoError(t, written)
+	require.NoError(t, read)
+	require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions, "the read is answered from the committed write")
 }
