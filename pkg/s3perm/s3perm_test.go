@@ -24,15 +24,16 @@ func TestValid(t *testing.T) {
 	}
 }
 
-func TestCommandsFor(t *testing.T) {
-	strs := func(perms ...string) []string {
-		var out []string
-		for _, c := range s3perm.CommandsFor(perms...) {
-			out = append(out, c.String())
-		}
-		return out
+// strs names the Forge commands a set of S3 permissions delegates.
+func strs(perms ...string) []string {
+	var out []string
+	for _, c := range s3perm.CommandsFor(perms...) {
+		out = append(out, c.String())
 	}
+	return out
+}
 
+func TestCommandsFor(t *testing.T) {
 	t.Run("maps multipart permissions", func(t *testing.T) {
 		// Stopping an upload abandons parts still parked and releases those already
 		// accepted.
@@ -144,6 +145,32 @@ func TestCommandsFor(t *testing.T) {
 	})
 }
 
+// TestClassifiedPermissionsCoverTheirShapes covers the fallbacks in
+// auth.classifyRequest. Each of these permissions names a narrower shape of
+// the one beside it, and a request that misses the narrower branch is
+// classified as the broader operation and re-delegated its commands. So the
+// broader set has to grant everything the narrower one does. Narrowing one
+// below its counterpart would leave such a request a command short at
+// runtime, where nothing else would catch it.
+func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
+	for _, c := range []struct{ classified, specialized string }{
+		{"s3:PutObject", "s3:PutObjectRetention"},
+		{"s3:PutObject", "s3:PutObjectLegalHold"},
+		{"s3:DeleteObject", "s3:DeleteObjectVersion"},
+		{"s3:GetObject", "s3:GetObjectVersion"},
+		{"s3:GetObject", "s3:GetObjectRetention"},
+		{"s3:GetObject", "s3:GetObjectLegalHold"},
+		{"s3:ListBucket", "s3:ListBucketVersions"},
+	} {
+		// Guard against the check going vacuous if a set is ever emptied.
+		require.NotEmpty(t, strs(c.specialized), c.specialized)
+		for _, cmd := range strs(c.specialized) {
+			require.Contains(t, strs(c.classified), cmd,
+				"%s classifies as %s, which must therefore grant %s", c.specialized, c.classified, cmd)
+		}
+	}
+}
+
 // TestOperationPermissionsAreValid keeps the two hardcoded permission lists in
 // lockstep: every permission an operation requires must be one this package can map
 // to Forge commands, otherwise an authorized request would be re-delegated nothing.
@@ -165,6 +192,13 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 		{"DELETE", "https://s3.example.com/bkt/k?uploadId=abc"},
 		{"GET", "https://s3.example.com/bkt/k?uploadId=abc"},
 		{"GET", "https://s3.example.com/bkt?uploads"},
+		{"GET", "https://s3.example.com/bkt?versions"},
+		{"GET", "https://s3.example.com/bkt/k?versionId=v"},
+		{"GET", "https://s3.example.com/bkt/k?retention"},
+		{"GET", "https://s3.example.com/bkt/k?legal-hold"},
+		{"PUT", "https://s3.example.com/bkt/k?retention"},
+		{"PUT", "https://s3.example.com/bkt/k?legal-hold"},
+		{"DELETE", "https://s3.example.com/bkt/k?versionId=v"},
 	}
 	for _, r := range reqs {
 		op, err := auth.OperationFor(s3.Request{Method: r.method, URL: r.url})

@@ -87,6 +87,15 @@ var (
 // and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket-level
 // actions only s3:DeleteBucket needs commands, since it releases the space's
 // blobs.
+//
+// Several permissions name a narrower shape of another: s3:PutObjectRetention
+// and s3:PutObjectLegalHold against s3:PutObject, s3:DeleteObjectVersion
+// against s3:DeleteObject, the version-scoped reads against s3:GetObject and
+// s3:ListBucket. auth.classifyRequest gives each shape its own operation, but
+// a request that misses the narrower branch falls back to the broader one — a
+// lock parameter on a method the gateway does not route it on, a versionId
+// naming no version. So each broad set has to grant what its narrower
+// counterparts do, which TestClassifiedPermissionsCoverTheirShapes pins.
 var permissionCommands = map[string][]ucan.Command{
 	"s3:GetObject":           cmdsRetrieve,
 	"s3:GetObjectVersion":    cmdsRetrieve,
