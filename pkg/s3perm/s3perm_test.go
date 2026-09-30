@@ -1,6 +1,7 @@
 package s3perm_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -121,9 +122,20 @@ func TestCommandsFor(t *testing.T) {
 	})
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {
-		require.Equal(t, []string{
-			"/content/retrieve", "/blob/add", "/index/add", "/upload/add", "/upload/remove", "/blob/abort", "/blob/remove",
-		}, strs("s3:GetObject", "s3:PutObject"))
+		// /content/retrieve belongs to both permissions. It comes out once, in
+		// the place the first permission put it, and the second permission's
+		// other commands follow in their own order. Derive that expectation
+		// from the sets rather than spelling it out, so a set reordered on its
+		// own terms does not fail a test about deduplication.
+		var want []string
+		for _, c := range append(strs("s3:GetObject"), strs("s3:PutObject")...) {
+			if !slices.Contains(want, c) {
+				want = append(want, c)
+			}
+		}
+		require.Equal(t, want, strs("s3:GetObject", "s3:PutObject"))
+		// And the two sets do overlap, so the deduplication is exercised.
+		require.Less(t, len(want), len(strs("s3:GetObject"))+len(strs("s3:PutObject")))
 	})
 
 	t.Run("ignores unknown permissions", func(t *testing.T) {
