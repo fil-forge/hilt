@@ -88,7 +88,8 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 	return rec, nil
 }
 
-// Put runs in one transaction: it takes the bucket's advisory lock, locks the
+// Put runs in one transaction: it checks the named principals (see
+// [requireLivePrincipals]), takes the bucket's advisory lock, locks the
 // current row FOR UPDATE when there is one, checks the precondition, runs
 // beforeCommit while holding the locks, writes the row and rewrites its index
 // rows, and commits. A share-locked read of the bucket (see [Store.Get])
@@ -97,8 +98,8 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 // first's row and fails its precondition.
 //
 // beforeCommit runs before the row and index writes, so a callback that has
-// published sees its write fail if the bucket or a named principal does not
-// exist; the RFC treats such a record as harmless.
+// published sees its write fail if the bucket does not exist; the RFC treats
+// such a record as harmless.
 //
 // Every index row write takes a FOR KEY SHARE lock on the bucket row, which its
 // foreign key onto (id, tenant_id) requires: the write waits on an in-flight
@@ -117,6 +118,10 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
+	named, _ := bucketpolicy.Named(in.Policy)
+	if err := requireLivePrincipals(ctx, tx, in.Tenant, named); err != nil {
+		return "", err
+	}
 	if err := pglock.Advisory(ctx, tx, lockNamespace, in.Bucket.String(), false); err != nil {
 		return "", err
 	}
@@ -293,9 +298,6 @@ func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc buck
 		return fmt.Errorf("clearing policy index: %w", err)
 	}
 	named, wildcard := bucketpolicy.Named(doc)
-	if err := requireLivePrincipals(ctx, tx, tenant, named); err != nil {
-		return err
-	}
 	ids := make([]*string, 0, len(named)+1)
 	for i := range named {
 		ids = append(ids, &named[i])
@@ -356,13 +358,18 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 	return bucketpolicystore.Record{Bucket: bucket, Policy: doc, ETag: etag, UpdatedAt: updatedAt}, nil
 }
 
-// requireLivePrincipals locks the named principals FOR SHARE inside tx and
+// requireLivePrincipals locks the named principals FOR KEY SHARE inside tx and
 // refuses the write when one is missing or removed. A removal holds the row FOR
 // UPDATE while it strips its policies, so this read waits for it to commit and
-// then sees the tombstone: the caller's validation ran against live rows, but
-// only this check, inside the writing transaction, keeps a statement naming a
-// removed principal out of the store. The row's foreign key cannot, because a
-// tombstone still satisfies it.
+// then sees the tombstone, and a removal that starts later waits for tx: the
+// caller's validation ran against live rows, but only this check, inside the
+// writing transaction, keeps a statement naming a removed principal out of the
+// store. The row's foreign key cannot, because a tombstone still satisfies it.
+//
+// Put takes it before any other lock, so a removal whose callback rewrites
+// this bucket's policy never waits on a Put that waits on the removal. FOR KEY
+// SHARE conflicts only with FOR UPDATE, so it does not block the FOR NO KEY
+// UPDATE the principal store's Lock takes from inside beforeCommit.
 func requireLivePrincipals(ctx context.Context, tx pgx.Tx, tenant did.DID, named []string) error {
 	if len(named) == 0 {
 		return nil
@@ -371,7 +378,7 @@ func requireLivePrincipals(ctx context.Context, tx pgx.Tx, tenant did.DID, named
 		SELECT external_id, deleted_at IS NOT NULL
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = ANY($2)
-		FOR SHARE
+		FOR KEY SHARE
 	`, tenant.String(), named)
 	if err != nil {
 		return fmt.Errorf("checking policy principals: %w", err)

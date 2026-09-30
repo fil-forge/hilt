@@ -144,9 +144,11 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 	return nil
 }
 
-// Lock runs in one transaction: it locks the live rows FOR UPDATE in external
-// ID order, runs fn while holding them and commits. Sorting keeps two Lock
-// calls over overlapping principals from deadlocking.
+// Lock runs in one transaction: it locks the live rows FOR NO KEY UPDATE in
+// external ID order, runs fn while holding them and commits. Sorting keeps two
+// Lock calls over overlapping principals from deadlocking. The mode blocks a
+// share-locked Get and a Delete, and leaves alone the FOR KEY SHARE a policy
+// write holds on the principals it names, since fn may run inside that write.
 func (s *Store) Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
 	if len(externalIDs) == 0 {
 		return fn(ctx)
@@ -162,7 +164,7 @@ func (s *Store) Lock(ctx context.Context, tenant did.DID, externalIDs []string, 
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = ANY($2) AND deleted_at IS NULL
 		ORDER BY external_id ASC
-		FOR UPDATE
+		FOR NO KEY UPDATE
 	`, tenant.String(), externalIDs); err != nil {
 		return fmt.Errorf("locking principals: %w", err)
 	}
