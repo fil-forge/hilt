@@ -40,7 +40,7 @@ func New() *Store {
 
 // Get ignores the lock mode: reads and writes are serialized by the store
 // mutex, so a read already waits for an in-flight write.
-func (s *Store) Get(ctx context.Context, bucket did.DID, locks ...store.LockMode) (bucketpolicystore.Record, error) {
+func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -127,7 +127,7 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 	return nil
 }
 
-func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]bucketpolicystore.Record, error) {
+func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 

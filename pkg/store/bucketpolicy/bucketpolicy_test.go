@@ -140,7 +140,7 @@ func TestPolicyStore(t *testing.T) {
 				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d}, nil)
 				require.NoError(t, err)
 
-				rec, err := s.Get(t.Context(), bucketID, store.LockShare)
+				rec, err := s.Get(t.Context(), bucketID, store.WithShareLock())
 				require.NoError(t, err)
 				require.Equal(t, d, rec.Policy)
 			})
@@ -149,7 +149,7 @@ func TestPolicyStore(t *testing.T) {
 				_, bucketID := newBucket(t)
 				_, err := s.Get(t.Context(), bucketID)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				_, err = s.Get(t.Context(), bucketID, store.LockShare)
+				_, err = s.Get(t.Context(), bucketID, store.WithShareLock())
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
@@ -506,7 +506,7 @@ func TestPolicyStore(t *testing.T) {
 				}
 				require.ElementsMatch(t, []did.DID{wildcard, both}, got)
 
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "alice", store.LockShare)
+				recs, err = s.ListByPrincipal(t.Context(), tenantID, "alice", store.WithShareLock())
 				require.NoError(t, err)
 				require.Len(t, recs, 4)
 			})
@@ -742,7 +742,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 				return tx.Commit(t.Context())
 			},
 			func() error {
-				_, err := s.Get(context.Background(), bucketID, store.LockShare)
+				_, err := s.Get(context.Background(), bucketID, store.WithShareLock())
 				return err
 			})
 		require.NoError(t, committed)
@@ -772,7 +772,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 			},
 			func() error {
 				var err error
-				rec, err = s.Get(context.Background(), bucketID, store.LockShare)
+				rec, err = s.Get(context.Background(), bucketID, store.WithShareLock())
 				return err
 			})
 		require.NoError(t, written)
@@ -806,7 +806,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 			func() error {
 				// A reader must not cache "no policy" while the create is in flight.
 				var err error
-				rec, err = s.Get(context.Background(), bucketID, store.LockShare)
+				rec, err = s.Get(context.Background(), bucketID, store.WithShareLock())
 				return err
 			})
 		require.NoError(t, written)
@@ -836,7 +836,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 			},
 			func() error {
 				var err error
-				rec, err = s.Get(context.Background(), bucketID, store.LockShare)
+				rec, err = s.Get(context.Background(), bucketID, store.WithShareLock())
 				return err
 			})
 		require.Error(t, written)
