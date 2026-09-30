@@ -9,6 +9,9 @@ import (
 // returning early.
 const Grace = 300 * time.Millisecond
 
+// Patience is how long a call that must finish is given before the test fails.
+const Patience = 10 * time.Second
+
 // RequireWaitsForWriter runs write in the background; write must close
 // entered once it holds its lock and park on release before finishing. It
 // then starts wait, requires that wait has not returned within [Grace],
@@ -23,7 +26,7 @@ func RequireWaitsForWriter(t *testing.T, write func(entered chan<- struct{}, rel
 	case <-entered:
 	case err := <-wrote:
 		t.Fatalf("the writer returned before taking its lock: %v", err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(Patience):
 		t.Fatal("the writer did not take its lock")
 	}
 
@@ -39,7 +42,7 @@ func RequireWaitsForWriter(t *testing.T, write func(entered chan<- struct{}, rel
 	writeErr = <-wrote
 	select {
 	case waitErr = <-waited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(Patience):
 		t.Fatal("the waiting call did not return after the writer finished")
 	}
 	return writeErr, waitErr
