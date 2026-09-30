@@ -139,7 +139,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrInvalidAccessKeyID
 	}
 
-	akRec, err := a.accessKeys.Get(ctx, accessKeyID, store.LockShare)
+	akRec, err := a.accessKeys.Get(ctx, accessKeyID, store.WithShareLock())
 	if errors.Is(err, store.ErrRecordNotFound) {
 		log.Debug("rejecting unknown access key")
 		return nil, ErrUnknownAccessKey
@@ -295,7 +295,7 @@ func (a *Authorizer) authorizeOperation(
 
 	// The share lock makes the read wait on a removal of this principal that is
 	// committing, so the request is answered from the settled state.
-	if _, err := a.principals.Get(ctx, tenantRec.ID, principalID, store.LockShare); err != nil {
+	if _, err := a.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock()); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
 			// The key outlived its principal, which removal deletes it with. It
 			// is on its way out; report it as the unknown credential it is about
@@ -376,7 +376,7 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 // principal cannot reach.
 func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, error) {
 	log := a.logger.With(zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Stringer("bucket", bucketID))
-	if _, err := a.principals.Get(ctx, tenantID, principalID, store.LockShare); err != nil {
+	if _, err := a.principals.Get(ctx, tenantID, principalID, store.WithShareLock()); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return nil, fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
 		}
@@ -391,7 +391,7 @@ func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, pri
 // policy grants nothing.
 func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, error) {
 	var doc *bucketpolicy.Policy
-	rec, err := a.policies.Get(ctx, bucketID, store.LockShare)
+	rec, err := a.policies.Get(ctx, bucketID, store.WithShareLock())
 	if err == nil {
 		doc = &rec.Policy
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
