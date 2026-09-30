@@ -915,4 +915,51 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.Empty(t, principals)
 	})
 
+	t.Run("a replacing Put and a removal of a principal it keeps both complete", func(t *testing.T) {
+		// Put checks alice before it takes the bucket, so the removal, whose
+		// callback rewrites this bucket's policy, waits for the Put to commit and
+		// then strips alice from what it wrote. The Put is bounded so a lock cycle
+		// fails the test instead of hanging it.
+		tenantID := fx.tenant(t)
+		fx.principal(t, tenantID, "alice")
+		bucketID := fx.bucket(t, tenantID)
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"), allow(everyone, "s3:GetObject"))}, nil)
+		require.NoError(t, err)
+
+		putCtx, cancel := context.WithTimeout(context.Background(), 2*htestutil.WaitTimeout)
+		defer cancel()
+		written, removed := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(putCtx, bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:PutObject"), allow(everyone, "s3:GetObject")), IfMatch: ptr(etag1),
+				}, func(context.Context, *bucketpolicystore.Record) error {
+					close(entered)
+					<-release
+					return nil
+				})
+				return err
+			},
+			func() error {
+				// The principal service strips alice from the policies naming her.
+				return principalpostgres.New(pool).Delete(context.Background(), tenantID, "alice", func(ctx context.Context) error {
+					recs, err := s.ListByPrincipal(ctx, tenantID, "alice")
+					if err != nil {
+						return err
+					}
+					for _, rec := range recs {
+						if _, err := s.Put(ctx, bucketpolicystore.Input{
+							Bucket: rec.Bucket, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), IfMatch: ptr(rec.ETag),
+						}, nil); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
+			})
+		require.NoError(t, written)
+		require.NoError(t, removed)
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, doc(allow(everyone, "s3:GetObject")), rec.Policy, "the removal stripped alice from the policy the Put wrote")
+	})
 }
