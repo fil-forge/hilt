@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -52,14 +51,14 @@ const lockNamespace int32 = 0x504f4c49 // "POLI"
 // would otherwise pin one pool connection per waiting read.
 const shareLockTimeout = "10s"
 
-// Get reads the row. With [store.LockShare] the read runs in a short
+// Get reads the row. With [store.WithShareLock] the read runs in a short
 // transaction that waits on the bucket's advisory lock (held by an in-flight
 // Put or Delete until it commits or rolls back) and then reads the row FOR
 // SHARE, so it is answered from the settled state; if the wait exceeds
 // [shareLockTimeout] an error is returned.
-func (s *Store) Get(ctx context.Context, bucket did.DID, locks ...store.LockMode) (bucketpolicystore.Record, error) {
+func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (bucketpolicystore.Record, error) {
 	query := selectColumns + ` WHERE bucket_id = $1`
-	if !slices.Contains(locks, store.LockShare) {
+	if !store.NewReadConfig(opts...).Share {
 		rec, err := scanRecord(s.pool.QueryRow(ctx, query, bucket.String()))
 		return getResult(rec, err)
 	}
@@ -230,7 +229,7 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 // ListByPrincipal answers from the index: a policy is listed when
 // bucket_policy_principal holds a row for the principal or a wildcard row
 // (NULL principal) under the tenant.
-func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, locks ...store.LockMode) ([]bucketpolicystore.Record, error) {
+func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
 	query := selectColumns + ` p
 		WHERE EXISTS (
 			SELECT 1 FROM bucket_policy_principal i
@@ -239,7 +238,7 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 			  AND (i.principal_id = $2 OR i.principal_id IS NULL)
 		)
 		ORDER BY bucket_id ASC`
-	if slices.Contains(locks, store.LockShare) {
+	if store.NewReadConfig(opts...).Share {
 		query += ` FOR SHARE`
 	}
 	rows, err := s.pool.Query(ctx, query, tenant.String(), principal)
