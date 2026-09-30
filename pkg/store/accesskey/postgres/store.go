@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
@@ -99,14 +98,14 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	return nil
 }
 
-// Get reads the row, with FOR SHARE when [store.LockShare] is requested so the
+// Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
 // read waits on a Delete that holds the row FOR UPDATE. The share-locked read
 // runs in a short transaction of its own so its wait is bounded at
 // [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
-func (s *Store) Get(ctx context.Context, id did.DID, locks ...store.LockMode) (rec accesskey.Record, err error) {
+func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (rec accesskey.Record, err error) {
 	defer func() { err = pglock.MapError(err) }()
 	query := selectColumns + ` WHERE id = $1`
-	if !slices.Contains(locks, store.LockShare) {
+	if !store.NewReadConfig(opts...).Share {
 		rec, err = scanRecord(s.pool.QueryRow(ctx, query, id.String()))
 		return pglock.Found(rec, err, "access key")
 	}
