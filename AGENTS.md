@@ -129,7 +129,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   principal with its old access, never with more (`pkg/api/service/bucketpolicy`
   and `grant.Rotator` document the sequence and its recovery). A reader that
   must not be answered from a snapshot older than an in-flight write passes
-  `store.LockShare` (`SELECT … FOR SHARE`). Every lock wait is bounded by
+  `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
   `store.LockTimeout` and a statement that gives up returns
   `store.ErrLockTimeout`, which the caller retries.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
