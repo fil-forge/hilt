@@ -5,6 +5,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -78,7 +79,11 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 		}
 	}
 
-	doc := clonePolicy(in.Policy)
+	// Store the normalized document, as the Postgres backend does.
+	var doc bucketpolicy.Policy
+	if err := json.Unmarshal(bucketpolicy.Canonical(in.Policy), &doc); err != nil {
+		return "", fmt.Errorf("normalizing policy: %w", err)
+	}
 	named, wildcard := bucketpolicy.Named(doc)
 	namedSet := make(map[string]bool, len(named))
 	for _, p := range named {
