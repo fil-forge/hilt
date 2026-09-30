@@ -19,7 +19,13 @@ func RequireWaitsForWriter(t *testing.T, write func(entered chan<- struct{}, rel
 	release := make(chan struct{})
 	wrote := make(chan error, 1)
 	go func() { wrote <- write(entered, release) }()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-wrote:
+		t.Fatalf("the writer returned before taking its lock: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the writer did not take its lock")
+	}
 
 	waited := make(chan error, 1)
 	go func() { waited <- wait() }()
