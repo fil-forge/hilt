@@ -605,7 +605,7 @@ type lockedAccessKeys struct {
 	err error
 }
 
-func (l *lockedAccessKeys) Get(context.Context, did.DID, ...store.LockMode) (accesskey.Record, error) {
+func (l *lockedAccessKeys) Get(context.Context, did.DID, ...store.ReadOption) (accesskey.Record, error) {
 	return accesskey.Record{}, l.err
 }
 
@@ -614,7 +614,7 @@ type lockedPrincipals struct {
 	err error
 }
 
-func (l *lockedPrincipals) Get(context.Context, did.DID, string, ...store.LockMode) (principalstore.Record, error) {
+func (l *lockedPrincipals) Get(context.Context, did.DID, string, ...store.ReadOption) (principalstore.Record, error) {
 	return principalstore.Record{}, l.err
 }
 
@@ -623,7 +623,7 @@ type lockedPolicies struct {
 	err error
 }
 
-func (l *lockedPolicies) Get(context.Context, did.DID, ...store.LockMode) (bucketpolicystore.Record, error) {
+func (l *lockedPolicies) Get(context.Context, did.DID, ...store.ReadOption) (bucketpolicystore.Record, error) {
 	return bucketpolicystore.Record{}, l.err
 }
 
