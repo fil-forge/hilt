@@ -5,16 +5,15 @@ import (
 	"time"
 )
 
-// Grace is how long a call that must wait on a writer is watched for
-// returning early.
-const Grace = 300 * time.Millisecond
+// MinBlock is how long a call that must wait on a writer has to stay blocked.
+const MinBlock = 300 * time.Millisecond
 
 // WaitTimeout is how long a call that must finish is given before the test fails.
 const WaitTimeout = 10 * time.Second
 
 // RequireWaitsForWriter runs write in the background; write must close
 // entered once it holds its lock and park on release before finishing. It
-// then starts wait, requires that wait has not returned within [Grace],
+// then starts wait, requires that wait has not returned within [MinBlock],
 // releases the writer, and returns the writer's and wait's errors.
 func RequireWaitsForWriter(t *testing.T, write func(entered chan<- struct{}, release <-chan struct{}) error, wait func() error) (writeErr, waitErr error) {
 	t.Helper()
@@ -35,7 +34,7 @@ func RequireWaitsForWriter(t *testing.T, write func(entered chan<- struct{}, rel
 	select {
 	case <-waited:
 		t.Fatal("the waiting call returned while the writer held its lock")
-	case <-time.After(Grace):
+	case <-time.After(MinBlock):
 	}
 
 	close(release)
