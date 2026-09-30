@@ -355,6 +355,21 @@ func TestPolicyStore(t *testing.T) {
 				require.Equal(t, "s3:GetObject", again.Policy.Statements[0].Actions[0])
 			})
 
+			t.Run("Put stores the normalized document whatever the backend", func(t *testing.T) {
+				// A document built directly, without Decode, may repeat and misorder
+				// its sets; the ETag is computed from the normalized form either way.
+				tenantID, bucketID := newBucket(t, "alice", "bob")
+				d := doc(allow(only("bob", "alice", "bob"), "s3:PutObject", "s3:GetObject", "s3:PutObject"))
+				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d}, nil)
+				require.NoError(t, err)
+
+				want, err := bucketpolicy.Decode(bucketpolicy.Canonical(d))
+				require.NoError(t, err)
+				rec, err := s.Get(t.Context(), bucketID)
+				require.NoError(t, err)
+				require.Equal(t, want, rec.Policy)
+			})
+
 			t.Run("Delete with the current ETag removes the policy and hands the callback the old record", func(t *testing.T) {
 				tenantID, bucketID := newBucket(t, "alice")
 				d := doc(allow(only("alice"), "s3:GetObject"))
@@ -871,4 +886,5 @@ func TestPolicyStorePostgres(t *testing.T) {
 		_, principals := indexRows(t, bucketID)
 		require.Empty(t, principals, "the index rows the Put wrote are gone too")
 	})
+
 }
