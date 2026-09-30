@@ -36,9 +36,9 @@ type Store interface {
 	Add(ctx context.Context, tenant did.DID, externalID string) error
 	// Get returns the tenant's principal with the given external ID. It returns
 	// [store.ErrRecordNotFound] if there is none or it was removed. With
-	// [store.LockShare] the read waits for an in-flight [Store.Delete] of the
+	// [store.WithShareLock] the read waits for an in-flight [Store.Delete] of the
 	// same row to commit or roll back.
-	Get(ctx context.Context, tenant did.DID, externalID string, locks ...store.LockMode) (Record, error)
+	Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (Record, error)
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
 	ListByTenant(ctx context.Context, tenant did.DID) ([]Record, error)

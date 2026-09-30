@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
@@ -55,15 +54,15 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	return nil
 }
 
-// Get reads the row, with FOR SHARE when [store.LockShare] is requested so the
+// Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
 // read waits on a Delete that holds the row FOR UPDATE.
-func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, locks ...store.LockMode) (principal.Record, error) {
+func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principal.Record, error) {
 	query := `
 		SELECT tenant_id, external_id, created_at
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
 	`
-	if slices.Contains(locks, store.LockShare) {
+	if store.NewReadConfig(opts...).Share {
 		query += ` FOR SHARE`
 	}
 	rec, err := scanRecord(s.pool.QueryRow(ctx, query, tenant.String(), externalID))

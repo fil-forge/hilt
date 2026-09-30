@@ -76,13 +76,13 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	return nil
 }
 
-// Get with [store.LockShare] waits for an in-flight Delete of any principal
+// Get with [store.WithShareLock] waits for an in-flight Delete of any principal
 // to finish, the way the Postgres read waits on the row held FOR UPDATE. An
 // unlocked read takes the map alone and may be answered while a removal's
 // callback is still running, as the unlocked Postgres read is answered from
 // its snapshot.
-func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, locks ...store.LockMode) (principal.Record, error) {
-	if slices.Contains(locks, store.LockShare) {
+func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principal.Record, error) {
+	if store.NewReadConfig(opts...).Share {
 		s.removals.Lock()
 		defer s.removals.Unlock()
 	}
