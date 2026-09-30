@@ -79,6 +79,7 @@ func TestDecode(t *testing.T) {
 		{"a capitalized top-level field", `{"Statement": []}`, `unknown field "Statement"`},
 		{"a capitalized statement field", `{"statement": [{"Effect": "allow", "principal": "*", "action": ["s3:GetObject"]}]}`, `unknown field "Effect"`},
 		{"an upper-case statement field", `{"statement": [{"effect": "allow", "principal": "*", "ACTION": ["s3:GetObject"]}]}`, `unknown field "ACTION"`},
+		{"a null sid", `{"statement": [{"sid": null, "effect": "allow", "principal": "*", "action": ["s3:GetObject"]}]}`, `sid must be a string`},
 	}
 	for _, tt := range rejects {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
