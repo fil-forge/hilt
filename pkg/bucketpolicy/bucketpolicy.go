@@ -152,8 +152,9 @@ func Decode(data []byte) (Policy, error) {
 }
 
 // strictKeys rejects any property name that is not spelled exactly as the
-// schema defines it. encoding/json matches field names case-insensitively, so
-// DisallowUnknownFields alone would accept "Statement", "Effect" or "ACTION".
+// schema defines it, and a null sid. encoding/json matches field names
+// case-insensitively, so DisallowUnknownFields alone would accept "Statement",
+// "Effect" or "ACTION".
 // A document this cannot parse is left to the decoder, which reports it.
 func strictKeys(data []byte) error {
 	var top map[string]json.RawMessage
@@ -170,9 +171,15 @@ func strictKeys(data []byte) error {
 		return nil
 	}
 	for _, st := range statements {
-		for k := range st {
+		for k, v := range st {
 			switch k {
-			case "sid", "effect", "principal", "action":
+			case "sid":
+				// encoding/json decodes null into "" without error, which would
+				// read as an absent sid.
+				if string(bytes.TrimSpace(v)) == "null" {
+					return fmt.Errorf("decoding policy: sid must be a string: %w", ErrInvalidPolicy)
+				}
+			case "effect", "principal", "action":
 			default:
 				return fmt.Errorf("decoding policy: unknown field %q: %w", k, ErrInvalidPolicy)
 			}
