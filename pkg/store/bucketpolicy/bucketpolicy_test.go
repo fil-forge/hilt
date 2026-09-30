@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -1004,5 +1005,42 @@ func TestPolicyStorePostgres(t *testing.T) {
 			})
 		require.NoError(t, written)
 		require.NoError(t, added)
+	})
+
+	t.Run("a share-locked ListByPrincipal behind a stuck writer gives up", func(t *testing.T) {
+		// A writer parks in its callback holding the policy row; a share-locked
+		// listing gives up at the lock timeout, as a share-locked Get does.
+		tenantID := fx.tenant(t)
+		fx.principal(t, tenantID, "alice")
+		bucketID := fx.bucket(t, tenantID)
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"))}, nil)
+		require.NoError(t, err)
+
+		entered, release := make(chan struct{}), make(chan struct{})
+		wrote := make(chan error, 1)
+		go func() {
+			_, err := s.Put(context.Background(), bucketpolicystore.Input{
+				Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:PutObject")), IfMatch: ptr(etag1),
+			}, func(context.Context, *bucketpolicystore.Record) error {
+				close(entered)
+				<-release
+				return nil
+			})
+			wrote <- err
+		}()
+		<-entered
+		defer func() { close(release); <-wrote }()
+
+		listed := make(chan error, 1)
+		go func() {
+			_, err := s.ListByPrincipal(context.Background(), tenantID, "alice", store.WithShareLock())
+			listed <- err
+		}()
+		select {
+		case err := <-listed:
+			require.ErrorIs(t, err, store.ErrLockTimeout)
+		case <-time.After(store.LockTimeout + htestutil.WaitTimeout):
+			t.Fatal("the share-locked listing waited on the writer without a bound")
+		}
 	})
 }
