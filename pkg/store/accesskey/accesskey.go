@@ -114,10 +114,10 @@ type Store interface {
 	Add(ctx context.Context, in Input) error
 	// Get retrieves the record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID. With
-	// [store.LockShare] the read waits for a transaction holding the row to
+	// [store.WithShareLock] the read waits for a transaction holding the row to
 	// commit or roll back; on Postgres the wait is bounded at
 	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
-	Get(ctx context.Context, id did.DID, locks ...store.LockMode) (Record, error)
+	Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (Record, error)
 	// ListByTenant retrieves the tenant's records, optionally restricted to one
 	// principal's keys (see [WithPrincipal]).
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) ([]Record, error)

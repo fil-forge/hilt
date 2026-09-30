@@ -71,7 +71,7 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 
 // Get ignores the lock mode: reads and writes are serialized by the store
 // mutex, so a read already waits for an in-flight Delete.
-func (s *Store) Get(ctx context.Context, id did.DID, locks ...store.LockMode) (accesskey.Record, error) {
+func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 

@@ -129,7 +129,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		// The share lock waits for an in-flight removal of the principal, or a
 		// policy write holding the principal while it rotates its keys, so the
 		// delegations below are derived from the committed policies.
-		_, err := s.principals.Get(ctx, tenantRec.ID, principalID, store.LockShare)
+		_, err := s.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock())
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		} else if err != nil {
@@ -245,7 +245,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	// starts after the key row exists rotates the key like any other.
 	var dels []ucan.Delegation
 	if principalRef != nil {
-		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, principalID, store.LockShare)
+		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, principalID, store.WithShareLock())
 		if err != nil {
 			rollback()
 			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
