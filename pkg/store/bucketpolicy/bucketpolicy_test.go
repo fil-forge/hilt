@@ -887,4 +887,32 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.Empty(t, principals, "the index rows the Put wrote are gone too")
 	})
 
+	t.Run("a replacing Put and a bucket deletion both complete", func(t *testing.T) {
+		// Both take the bucket row before the policy row, so the deletion waits
+		// for the Put and then removes what it wrote.
+		tenantID := fx.tenant(t)
+		bucketID := fx.bucket(t, tenantID)
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject"))}, nil)
+		require.NoError(t, err)
+
+		written, deleted := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:PutObject")), IfMatch: ptr(etag1),
+				}, func(context.Context, *bucketpolicystore.Record) error {
+					close(entered)
+					<-release
+					return nil
+				})
+				return err
+			},
+			func() error { return bucketpostgres.New(pool).Delete(context.Background(), bucketID) })
+		require.NoError(t, written)
+		require.NoError(t, deleted)
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, principals := indexRows(t, bucketID)
+		require.Empty(t, principals)
+	})
+
 }

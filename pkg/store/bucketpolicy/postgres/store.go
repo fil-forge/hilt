@@ -120,6 +120,12 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	if err := pglock.Advisory(ctx, tx, lockNamespace, in.Bucket.String(), false); err != nil {
 		return "", err
 	}
+	// A bucket deletion locks the bucket row and then cascades to the policy
+	// row; the index writes below key-share lock the bucket row after this
+	// locks the policy row. Taking the bucket first keeps the two in one order.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM bucket WHERE id = $1 FOR KEY SHARE`, in.Bucket.String()); err != nil {
+		return "", fmt.Errorf("locking bucket: %w", err)
+	}
 	old, err := lockRow(ctx, tx, in.Bucket)
 	if err != nil {
 		return "", err
