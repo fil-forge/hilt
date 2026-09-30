@@ -57,6 +57,50 @@ func TestCommandsFor(t *testing.T) {
 		require.Contains(t, strs("s3:PutObject"), "/upload/remove")
 	})
 
+	t.Run("a delete registers the delete marker it writes", func(t *testing.T) {
+		// A delete with no version id may write a delete marker, which is a
+		// version and is counted as one, so it has to be registrable — and it
+		// changes the catalog, so it owes the ship that change costs.
+		require.ElementsMatch(t,
+			[]string{"/blob/remove", "/upload/add", "/upload/remove", "/blob/add", "/index/add", "/content/retrieve"},
+			strs("s3:DeleteObject"))
+	})
+
+	t.Run("deleting one version registers nothing", func(t *testing.T) {
+		// A version-scoped delete mints no version, so it has nothing to
+		// register and does not hold the grant to. It still changes the
+		// catalog, so it still owes the ship.
+		require.ElementsMatch(t,
+			[]string{"/blob/remove", "/upload/remove", "/blob/add", "/index/add", "/content/retrieve"},
+			strs("s3:DeleteObjectVersion"))
+		require.NotContains(t, strs("s3:DeleteObjectVersion"), "/upload/add")
+	})
+
+	t.Run("setting a lock ships the catalog change it makes", func(t *testing.T) {
+		// Retention and legal hold rewrite one version's lock state: no bytes
+		// stored, no version minted or retired, no blob released. What is left
+		// is the catalog write itself, and the ship it owes.
+		want := []string{"/blob/add", "/index/add", "/content/retrieve"}
+		require.ElementsMatch(t, want, strs("s3:PutObjectRetention"))
+		require.ElementsMatch(t, want, strs("s3:PutObjectLegalHold"))
+		for _, p := range []string{"s3:PutObjectRetention", "s3:PutObjectLegalHold"} {
+			require.NotContains(t, strs(p), "/upload/add", p)
+			require.NotContains(t, strs(p), "/blob/remove", p)
+		}
+	})
+
+	t.Run("every catalog-changing permission can ship the change", func(t *testing.T) {
+		// The floor: a change to the catalog is sealed into a CAR and sent,
+		// and its index published, whoever caused it.
+		for _, p := range []string{
+			"s3:PutObject", "s3:PutObjectRetention", "s3:PutObjectLegalHold",
+			"s3:DeleteObject", "s3:DeleteObjectVersion",
+		} {
+			require.Contains(t, strs(p), "/blob/add", p)
+			require.Contains(t, strs(p), "/index/add", p)
+		}
+	})
+
 	t.Run("bucket-level permissions map to no commands", func(t *testing.T) {
 		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets"))
 	})
