@@ -295,7 +295,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		lock := "https://s3.fil.one/" + bucketName + "/object-key?retention"
 		version := "https://s3.fil.one/" + bucketName + "/object-key?versionId=v"
 
-		az := setup(t, []string{"s3:PutObject", "s3:DeleteObject"}, akSigner)
+		az, _ := setup(t, []string{"s3:PutObject", "s3:DeleteObject"}, false, akSigner)
 		_, _, err := call(t, az, providerID, signedArgs(t, akSigner, "PUT", lock, region))
 		require.Error(t, err, "s3:PutObject alone must not authorize a retention write")
 		_, _, err = call(t, az, providerID, signedArgs(t, akSigner, "DELETE", version, region))
@@ -303,7 +303,7 @@ func TestAuthorizeRequest(t *testing.T) {
 
 		// Granted, the retention write is delegated its own narrower set: it
 		// ships the catalog change it makes and nothing more.
-		az = setup(t, []string{"s3:PutObjectRetention"}, akSigner)
+		az, _ = setup(t, []string{"s3:PutObjectRetention"}, false, akSigner)
 		_, blocks, err := call(t, az, providerID, signedArgs(t, akSigner, "PUT", lock, region))
 		require.NoError(t, err)
 		var cmds []string
