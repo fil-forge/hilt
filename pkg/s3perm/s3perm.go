@@ -40,7 +40,8 @@ var (
 	// without the grant an overwrite registers the new version and fails to
 	// retract the old, and the tenant's object count climbs with every
 	// overwrite instead of holding steady.
-	cmdsAdd = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, upload.Remove.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
+	cmdsAdd = append([]ucan.Command{upload.Add.Command, upload.Remove.Command, blob.Abort.Command, blob.Remove.Command},
+		cmdsCatalogWrite...)
 	// The two deletes differ, so they get their own sets.
 	//
 	// A delete with no version id may write a delete marker, and a delete
