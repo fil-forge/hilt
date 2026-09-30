@@ -70,8 +70,39 @@ func TestClassifyRequest(t *testing.T) {
 		// Unrelated query parameters do not change the classification, and the
 		// multipart parameter names are case-sensitive.
 		{name: "list objects with prefix", method: "GET", url: "https://s3.example.com/bkt?prefix=a/", want: OpListBucket, wantBucket: "bkt"},
-		{name: "get object with version", method: "GET", url: "https://s3.example.com/bkt/k?versionId=v", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
 		{name: "uploadid wrong case is not multipart", method: "DELETE", url: "https://s3.example.com/bkt/k?uploadid=abc", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
+
+		// Object-lock and version-scoped shapes, named by the query parameters
+		// the gateway routes on. Each has its own permission, so an access key
+		// granted plain reads, writes or deletes does not get these too.
+		{name: "list object versions", method: "GET", url: "https://s3.example.com/bkt?versions", want: OpListBucketVersions, wantBucket: "bkt"},
+		{name: "get object version", method: "GET", url: "https://s3.example.com/bkt/k?versionId=v", want: OpGetObjectVersion, wantBucket: "bkt", wantKey: "k"},
+		{name: "get object retention", method: "GET", url: "https://s3.example.com/bkt/k?retention", want: OpGetObjectRetention, wantBucket: "bkt", wantKey: "k"},
+		{name: "get object legal hold", method: "GET", url: "https://s3.example.com/bkt/k?legal-hold", want: OpGetObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
+		{name: "put object retention", method: "PUT", url: "https://s3.example.com/bkt/k?retention", want: OpPutObjectRetention, wantBucket: "bkt", wantKey: "k"},
+		{name: "put object legal hold", method: "PUT", url: "https://s3.example.com/bkt/k?legal-hold", want: OpPutObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
+		{name: "delete object version", method: "DELETE", url: "https://s3.example.com/bkt/k?versionId=v", want: OpDeleteObjectVersion, wantBucket: "bkt", wantKey: "k"},
+
+		// A lock parameter decides the operation on its own: there is no
+		// version-scoped variant of the lock permissions to fall to.
+		{name: "retention on a named version is a retention write", method: "PUT", url: "https://s3.example.com/bkt/k?retention&versionId=v", want: OpPutObjectRetention, wantBucket: "bkt", wantKey: "k"},
+		{name: "legal hold on a named version is a legal hold read", method: "GET", url: "https://s3.example.com/bkt/k?legal-hold&versionId=v", want: OpGetObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
+
+		// A lock parameter on a method the gateway does not route it on is not
+		// a lock operation, and falls back to the broader plain-object
+		// permission. A PUT carrying one is a lock write rather than a copy.
+		{name: "retention on POST is not a retention write", method: "POST", url: "https://s3.example.com/bkt/k?retention", want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "retention on DELETE is not a retention write", method: "DELETE", url: "https://s3.example.com/bkt/k?retention", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "copy source on a retention write is a retention write", method: "PUT", url: "https://s3.example.com/bkt/k?retention", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpPutObjectRetention, wantBucket: "bkt", wantKey: "k"},
+
+		// The parameter names are case-sensitive, as the multipart ones are,
+		// and an empty versionId names no version.
+		{name: "versionid wrong case is a plain get", method: "GET", url: "https://s3.example.com/bkt/k?versionid=v", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "empty versionId is a plain delete", method: "DELETE", url: "https://s3.example.com/bkt/k?versionId=", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
+
+		// An abort names its upload, so it is an abort before it is a version
+		// delete.
+		{name: "abort with a version id is an abort", method: "DELETE", url: "https://s3.example.com/bkt/k?uploadId=abc&versionId=v", want: OpAbortMultipartUpload, wantBucket: "bkt", wantKey: "k"},
 
 		// Nested keys keep their full remainder as the key.
 		{name: "nested key", method: "POST", url: "https://s3.example.com/bkt/a/b/c?uploads", want: OpCreateMultipartUpload, wantBucket: "bkt", wantKey: "a/b/c"},
@@ -149,6 +180,8 @@ func TestOperationPermission(t *testing.T) {
 	ops := []Operation{
 		OpListBuckets, OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpCreateBucket,
 		OpDeleteObject, OpDeleteBucket,
+		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
+		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}
