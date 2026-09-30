@@ -78,7 +78,7 @@ func TestPrincipalStore(t *testing.T) {
 				seed(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), tenantID, "user-1"))
 
-				rec, err := s.Get(t.Context(), tenantID, "user-1", store.LockShare)
+				rec, err := s.Get(t.Context(), tenantID, "user-1", store.WithShareLock())
 				require.NoError(t, err)
 				require.Equal(t, "user-1", rec.ExternalID)
 			})
@@ -88,7 +88,7 @@ func TestPrincipalStore(t *testing.T) {
 				seed(t, tenantID)
 				_, err := s.Get(t.Context(), tenantID, "nobody")
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				_, err = s.Get(t.Context(), tenantID, "nobody", store.LockShare)
+				_, err = s.Get(t.Context(), tenantID, "nobody", store.WithShareLock())
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
@@ -218,7 +218,7 @@ func TestPrincipalStore(t *testing.T) {
 						})
 					},
 					func() error {
-						_, err := s.Get(context.Background(), tenantID, "held", store.LockShare)
+						_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
 						return err
 					})
 				require.NoError(t, deleted)
@@ -332,7 +332,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 			},
 			func() error {
 				var err error
-				rec, err = s.Get(context.Background(), tenantID, "locked", store.LockShare)
+				rec, err = s.Get(context.Background(), tenantID, "locked", store.WithShareLock())
 				return err
 			})
 		require.NoError(t, committed)
@@ -354,7 +354,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 				})
 			},
 			func() error {
-				_, err := s.Get(context.Background(), tenantID, "held", store.LockShare)
+				_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
 				return err
 			})
 		require.NoError(t, locked)
@@ -377,7 +377,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 			},
 			func() error {
 				var err error
-				rec, err = s.Get(context.Background(), tenantID, "rollback", store.LockShare)
+				rec, err = s.Get(context.Background(), tenantID, "rollback", store.WithShareLock())
 				return err
 			})
 		require.Error(t, deleted)
@@ -399,7 +399,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 				})
 			},
 			func() error {
-				_, err := s.Get(context.Background(), tenantID, "gone", store.LockShare)
+				_, err := s.Get(context.Background(), tenantID, "gone", store.WithShareLock())
 				return err
 			})
 		require.NoError(t, deleted)
