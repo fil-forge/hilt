@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
@@ -57,6 +58,23 @@ func TestBucketFailure(t *testing.T) {
 		require.NoError(t, bucketFailure(f, err))
 		require.True(t, f.called)
 		requireName(t, f.got, bucketpolicy.InvalidPolicyErrorName)
+	})
+
+	t.Run("the policy operations' rejections are set as failures with their names", func(t *testing.T) {
+		for _, tc := range []struct {
+			err  error
+			name string
+		}{
+			{bucketpolicysvc.ErrPolicyNotFound, bucketpolicysvc.PolicyNotFoundErrorName},
+			{bucketpolicysvc.ErrInvalidPrecondition, bucketpolicysvc.InvalidPreconditionName},
+			{bucketpolicysvc.ErrPreconditionFailed, bucketpolicysvc.PreconditionFailedErrorName},
+			{bucketpolicysvc.ErrConcurrentChange, bucketpolicysvc.ConcurrentChangeErrorName},
+		} {
+			f := &recordingFailer{}
+			require.NoError(t, bucketFailure(f, fmt.Errorf("photos: %w", tc.err)))
+			require.True(t, f.called)
+			requireName(t, f.got, tc.name)
+		}
 	})
 
 	t.Run("propagated auth sentinel is set as failure with its name", func(t *testing.T) {
