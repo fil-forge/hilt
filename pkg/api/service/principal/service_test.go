@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
@@ -13,13 +14,20 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -385,6 +393,18 @@ func (l *lockedPrincipals) Delete(ctx context.Context, tenant did.DID, externalI
 	return l.err
 }
 
+// renamingPrincipals runs write before Delete locks the row, standing in for a
+// policy write that names the principal between the strip and the lock.
+type renamingPrincipals struct {
+	principalstore.Store
+	write func()
+}
+
+func (r *renamingPrincipals) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(context.Context) error) error {
+	r.write()
+	return r.Store.Delete(ctx, tenant, externalID, beforeCommit)
+}
+
 func TestDeleteConcurrentChange(t *testing.T) {
 	ctx := t.Context()
 
@@ -430,10 +450,91 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		require.Equal(t, "user-1", rec.ExternalID)
 	})
 
+	t.Run("a policy naming the principal again before its row is locked is a retryable conflict", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+		principals := &renamingPrincipals{Store: d.principals, write: func() {
+			d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
+				{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+			}})
+		}}
+		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.secrets, d.grants)
+		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
+
+		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
+		require.NoError(t, err, "the principal row must survive")
+		require.Equal(t, "user-1", rec.ExternalID)
+	})
+
 	t.Run("a lock the store gave up on is a retryable conflict", func(t *testing.T) {
 		d := setup(t)
 		principals := &lockedPrincipals{Store: d.principals, err: store.ErrLockTimeout}
 		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.secrets, d.grants)
 		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
 	})
+}
+
+// TestDeleteDuringPolicyWritePostgres removes a principal while a policy write
+// that drops it is in flight, on Postgres. The write holds the bucket and then
+// locks the principal, as its delegation rotation does. The removal rewrites
+// the bucket's policy before it locks the principal, so neither waits on the
+// other: the removal returns at once when the write commits, with the work
+// done or a conflict the caller repeats.
+func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := t.Context()
+	tenants, principals, policies := tenantpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool)
+	accessKeys, secrets, swarf := accesskeypostgres.New(pool), vaultmemory.New(), &testutil.FakeSwarf{}
+
+	tenantID, providerID, bucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, tenantID.String(), nil))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-pg", providerID, tenant.Active))
+	require.NoError(t, bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, "principal-removal"))
+	signer, err := secp256k1.Generate()
+	require.NoError(t, err)
+	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	grants := grant.NewRotator(zap.NewNop(), delegationpostgres.New(pool), accessKeys, secrets, swarf)
+	svc := principalsvc.New(zap.NewNop(), tenants, principals, policies, accessKeys, secrets, grants)
+
+	_, _, err = svc.Create(ctx, "tenant-pg", "alice")
+	require.NoError(t, err)
+	_, _, err = svc.Create(ctx, "tenant-pg", "bob")
+	require.NoError(t, err)
+	statement := func(ids ...string) bucketpolicy.Policy {
+		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(ids...), Actions: []string{"s3:GetObject"}}}}
+	}
+	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("alice", "bob")}, nil)
+	require.NoError(t, err)
+
+	var released, returned time.Time
+	written, removed := testutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
+				Bucket: bucketID, Tenant: tenantID, Policy: statement("bob"), IfMatch: &etag,
+			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
+				close(entered)
+				<-release
+				released = time.Now()
+				return principals.Lock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
+			})
+			return err
+		},
+		func() error {
+			err := svc.Delete(context.Background(), "tenant-pg", "alice")
+			returned = time.Now()
+			return err
+		})
+	require.NoError(t, written)
+	if removed != nil {
+		require.ErrorIs(t, removed, principalsvc.ErrConcurrentChange)
+	}
+	require.Less(t, returned.Sub(released), grant.BatchTimeout/2, "the removal must not wait out the write")
+
+	require.NoError(t, svc.Delete(ctx, "tenant-pg", "alice"), "a repeat finishes the removal")
+	_, err = svc.Get(ctx, "tenant-pg", "alice")
+	require.ErrorIs(t, err, principalsvc.ErrPrincipalNotFound)
+	rec, err := policies.Get(ctx, bucketID)
+	require.NoError(t, err)
+	require.Equal(t, statement("bob"), rec.Policy)
 }
