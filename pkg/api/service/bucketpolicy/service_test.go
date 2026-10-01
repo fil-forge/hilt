@@ -21,6 +21,7 @@ import (
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
@@ -724,6 +725,22 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	access, err := svc.Access(ctx, "tenant-1", "user-1")
 	require.NoError(t, err)
 	require.Empty(t, access, "a revived principal is named in no statement")
+}
+
+// TestPolicyWriteToMissingBucketPostgres writes a policy for a bucket the
+// service resolves but Postgres has no row for, standing in for a bucket
+// deleted between the lookup and the write. It is reported as a missing
+// bucket.
+func TestPolicyWriteToMissingBucketPostgres(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	d := setup(t)
+	tenants := tenantmemory.New()
+	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals,
+		bucketpolicypostgres.New(pool), d.rotator(d.swarf))
+
+	_, _, err := svc.Put(t.Context(), "tenant-1", "photos", doc(allow(everyone, "s3:ListBucket")), nil)
+	require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound)
 }
 
 func TestPrincipalReads(t *testing.T) {

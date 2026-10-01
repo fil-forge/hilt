@@ -288,15 +288,18 @@ func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc
 // deadline of the rotation is a locking failure too: it fires before the lock
 // timeout it runs under, and the write is retried the same way; the caller's
 // own deadline running out is not, so the context error counts only while the
-// caller's ctx lives. A document the store refuses for naming a principal the
-// tenant no longer has (removed between the validation above and the write)
-// is an invalid policy.
+// caller's ctx lives. A bucket the store no longer has (deleted since the
+// lookup) is a missing bucket. A document the store refuses for naming a
+// principal the tenant no longer has (removed between the validation and the
+// write) is an invalid policy.
 func (s *Service) writeError(ctx context.Context, bucketName string, err error) error {
 	switch {
 	case errors.Is(err, store.ErrPreconditionFailed):
 		return ErrPreconditionFailed
 	case store.Contended(ctx, err):
 		return ErrConcurrentChange
+	case errors.Is(err, store.ErrRecordNotFound):
+		return ErrBucketNotFound
 	case errors.Is(err, store.ErrInvalidArgument):
 		return fmt.Errorf("%w: a principal the policy names no longer exists", bucketpolicy.ErrInvalidPolicy)
 	}
