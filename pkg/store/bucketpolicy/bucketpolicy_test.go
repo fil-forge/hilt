@@ -648,12 +648,15 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.Empty(t, principals)
 	})
 
-	t.Run("Put rejects a bucket that does not exist", func(t *testing.T) {
+	// Postgres-only: the memory store has no bucket table and keys policies by bucket DID.
+	t.Run("Put rejects a bucket that does not exist before running the callback", func(t *testing.T) {
 		tenantID := fx.tenant(t)
+		called := false
 		_, err := s.Put(t.Context(), bucketpolicystore.Input{
 			Bucket: testutil.RandomDID(t), Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
-		}, nil)
-		require.ErrorIs(t, err, store.ErrInvalidArgument)
+		}, func(context.Context, *bucketpolicystore.Record) error { called = true; return nil })
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.False(t, called, "the callback must not run for a missing bucket")
 	})
 
 	t.Run("Put rejects a bucket of another tenant", func(t *testing.T) {

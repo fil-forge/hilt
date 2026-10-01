@@ -97,9 +97,10 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 // Two concurrent creates serialize on the advisory lock; the second finds the
 // first's row and fails its precondition.
 //
-// beforeCommit runs before the row and index writes, so a callback that has
-// published sees its write fail if the bucket does not exist; the RFC treats
-// such a record as harmless.
+// A bucket with no row fails with store.ErrRecordNotFound before beforeCommit
+// runs. beforeCommit runs before the row and index writes, so a callback that
+// has published can still see a later write fail; the RFC treats such a record
+// as harmless.
 //
 // Every index row write takes a FOR KEY SHARE lock on the bucket row, which its
 // foreign key onto (id, tenant_id) requires: the write waits on an in-flight
@@ -128,7 +129,11 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	// A bucket deletion locks the bucket row and then cascades to the policy
 	// row; the index writes below key-share lock the bucket row after this
 	// locks the policy row. Taking the bucket first keeps the two in one order.
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM bucket WHERE id = $1 FOR KEY SHARE`, in.Bucket.String()); err != nil {
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM bucket WHERE id = $1 FOR KEY SHARE`, in.Bucket.String()).Scan(&one); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrRecordNotFound)
+		}
 		return "", fmt.Errorf("locking bucket: %w", err)
 	}
 	old, err := lockRow(ctx, tx, in.Bucket)
