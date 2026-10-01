@@ -1013,8 +1013,7 @@ func TestCreateWithPolicy(t *testing.T) {
 		policies    *bucketpolicymemory.Store
 		delegations *delegationmemory.Store
 		secrets     *vaultmemory.Store
-		swarf       *htestutil.FakeSwarf
-		publisher   *deadlinePublisher
+		swarf       *deadlinePublisher
 		// member is a key bound to "user-1", which the policy names.
 		member did.DID
 	}
@@ -1034,7 +1033,7 @@ func TestCreateWithPolicy(t *testing.T) {
 		swarf := &deadlinePublisher{FakeSwarf: &htestutil.FakeSwarf{}}
 		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf.FakeSwarf, swarf, member}
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf, member}
 	}
 
 	// create presigns a CreateBucket carrying header as x-bucket-policy, covered
@@ -1134,7 +1133,7 @@ func TestCreateWithPolicy(t *testing.T) {
 		// The rollback runs detached from the request's cancellation, so a
 		// Swarf that accepts the request and never answers must be cut off
 		// by a deadline of the rollback's own.
-		require.Equal(t, []bool{true}, f.publisher.deadlines)
+		require.Equal(t, []bool{true}, f.swarf.deadlines)
 	})
 
 	t.Run("deletes the bucket when the policy write fails before it issues a grant", func(t *testing.T) {
