@@ -168,9 +168,13 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	//
 	// Cleanup runs on a context detached from the request (values retained, but
 	// cancellation/deadline dropped) so a client disconnect — which cancels ctx —
-	// cannot abort the rollback partway and leave an orphaned bucket record.
+	// cannot abort the rollback partway and leave an orphaned bucket record. It
+	// gets a deadline of its own, the Swarf batch bound, so a revocation service
+	// that accepts the request and never answers cannot hang the create: the
+	// publish fails and the bucket stays for a DeleteBucket retry.
 	rollback := func() {
-		cleanupCtx := context.WithoutCancel(ctx)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grant.BatchTimeout)
+		defer cancel()
 		// The grants the policy write issued over the bucket are revoked before
 		// they are deleted, as a bucket deletion revokes them: a chain the
 		// gateway fetched meanwhile must not outlive the bucket. A publish
