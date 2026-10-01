@@ -132,6 +132,24 @@ func TestCreatePrincipalHandler(t *testing.T) {
 		require.Equal(t, http.StatusCreated, doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/user-1", nil).Code)
 	})
 
+	t.Run("a principalId holding a slash arrives escaped and is decoded", func(t *testing.T) {
+		e, deps := setupPrincipals(t)
+		rec := doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/a%2Fb", nil)
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var p api.Principal
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &p))
+		require.Equal(t, "a/b", p.PrincipalID)
+
+		get := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb", nil)
+		require.Equal(t, http.StatusOK, get.Code)
+		require.NoError(t, json.Unmarshal(get.Body.Bytes(), &p))
+		require.Equal(t, "a/b", p.PrincipalID)
+
+		stored, err := deps.principals.Get(t.Context(), deps.tenantID, "a/b")
+		require.NoError(t, err)
+		require.Equal(t, "a/b", stored.ExternalID)
+	})
+
 	t.Run("unknown tenant is 404", func(t *testing.T) {
 		e, _ := setupPrincipals(t)
 		rec := doRequest(t, e, http.MethodPut, "/tenants/missing/principals/user-1", nil)
