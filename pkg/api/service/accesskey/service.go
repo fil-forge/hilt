@@ -127,8 +127,10 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	var principalRef *string
 	if principalID != "" {
 		// The share lock waits for an in-flight removal of the principal, or a
-		// policy write holding the principal while it rotates its keys, so the
-		// delegations below are derived from the committed policies.
+		// policy write holding the principal's row while it rotates its keys.
+		// A principal added while a policy is being written is ordered by the
+		// tenant lock its add took: it is committed before the write rotates
+		// or after the write commits, so the policies read below are settled.
 		_, err := s.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock())
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
@@ -241,7 +243,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	// where subject is each bucket DID or a single powerline (undefined subject).
 	// A service key's come from its permissions and buckets. A principal-bound
 	// key's come from the bucket policies naming its principal, read under a
-	// share lock so that a policy write in flight commits first; a write that
+	// share lock so that a write holding one of those rows commits first; a
+	// policy created meanwhile has no row to wait on, and the tenant lock the
+	// principal's add took is what keeps the key behind it. A write that
 	// starts after the key row exists rotates the key like any other.
 	var dels []ucan.Delegation
 	if principalRef != nil {
