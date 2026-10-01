@@ -31,7 +31,11 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 // Add runs the upsert in a short transaction so its wait is bounded at
 // [store.LockTimeout]: the row lock it takes waits for an in-flight Delete of
-// the same principal, and a longer wait returns [store.ErrLockTimeout].
+// the same principal, and a longer wait returns [store.ErrLockTimeout]. It
+// first takes the tenant's advisory lock exclusive ([pglock.TenantNamespace]),
+// which a policy write holds shared for its transaction, so the new principal
+// is committed either before the write's callback lists the tenant's
+// principals or after the write itself; that wait is bounded the same way.
 func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err error) {
 	if tenant == did.Undef {
 		return fmt.Errorf("principal tenant is required: %w", store.ErrInvalidArgument)
@@ -47,6 +51,9 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	if err := pglock.Advisory(ctx, tx, pglock.TenantNamespace, tenant.String(), false); err != nil {
 		return err
 	}
 	// The upsert revives a tombstone under the same id; it touches nothing when
