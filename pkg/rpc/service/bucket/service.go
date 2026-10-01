@@ -171,14 +171,20 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		cleanupCtx := context.WithoutCancel(ctx)
 		// The grants the policy write issued over the bucket are revoked before
 		// they are deleted, as a bucket deletion revokes them: a chain the
-		// gateway fetched meanwhile must not outlive the bucket. Then the
-		// delegations and the policy: Postgres cascades the policy from the
-		// bucket row, the memory store does not, and nothing cascades the
+		// gateway fetched meanwhile must not outlive the bucket. A publish
+		// that fails deletes nothing, as Delete does: the bucket row, policy
+		// and grants stay for a DeleteBucket retry, which revokes first. Then
+		// the delegations and the policy: Postgres cascades the policy from
+		// the bucket row, the memory store does not, and nothing cascades the
 		// delegations.
-		if revoker, err := s.authorizer.TenantIssuer(cleanupCtx, authz.Tenant.ID); err != nil {
-			log.Error("rollback: loading tenant issuer", zap.Error(err))
-		} else if err := s.revokeDelegations(cleanupCtx, authz.Tenant.ID, bucketID, revoker); err != nil {
-			log.Error("rollback: revoking bucket delegations", zap.Error(err))
+		revoker, err := s.authorizer.TenantIssuer(cleanupCtx, authz.Tenant.ID)
+		if err != nil {
+			log.Error("rollback: loading tenant issuer, bucket left for deletion", zap.Error(err))
+			return
+		}
+		if err := s.revokeDelegations(cleanupCtx, authz.Tenant.ID, bucketID, revoker); err != nil {
+			log.Error("rollback: revoking bucket delegations, bucket left for deletion", zap.Error(err))
+			return
 		}
 		if err := s.delegations.DeleteBySubject(cleanupCtx, bucketID); err != nil {
 			log.Error("rollback: deleting bucket delegations", zap.Error(err))
