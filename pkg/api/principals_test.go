@@ -67,7 +67,7 @@ func setupPrincipals(t *testing.T) (*echo.Echo, *principalDeps) {
 	deps.tenant = multikey.NewIssuer(deps.tenantID, signer)
 
 	grants := grant.NewRotator(zap.NewNop(), deps.delegations, deps.accessKeys, deps.vault, deps.revocations)
-	svc := principalsvc.New(zap.NewNop(), tenants, deps.principals, deps.policies, deps.accessKeys, deps.vault, grants)
+	svc := principalsvc.New(zap.NewNop(), tenants, deps.principals, deps.policies, deps.accessKeys, deps.delegations, deps.vault, deps.revocations, grants)
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreatePrincipalHandler(zap.NewNop(), svc),
