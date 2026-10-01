@@ -521,24 +521,6 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, fmt.Errorf("listing delegations: %w", err)
 	}
 
-	// The two reads above are not tied together: a policy write rotates the
-	// grants and commits them before the policy row it belongs to becomes
-	// visible, so one landing between them pairs the old actions with the new
-	// grants. Both s3:GetObject and s3:ListBucket map to /content/retrieve, so
-	// that pairing can report an action the write removed over a chain that
-	// still serves it. The reread waits on a write still in flight, whose grants
-	// may already be listed, and a policy that moved meanwhile says the caller
-	// should ask again.
-	if akRec.Principal != nil {
-		settled, err := s.policyETag(ctx, b.ID)
-		if err != nil {
-			return nil, nil, err
-		}
-		if settled != etag {
-			return nil, nil, fmt.Errorf("%w: the bucket policy is being rewritten", auth.ErrTemporarilyUnavailable)
-		}
-	}
-
 	proofSet := map[cid.Cid][]cid.Cid{}
 	var blocks []ucan.Delegation
 	seen := map[string]bool{}
@@ -559,6 +541,26 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 				seen[k] = true
 				blocks = append(blocks, p)
 			}
+		}
+	}
+
+	// The effective actions and the delegation reads above are not tied
+	// together: a policy write rotates the grants and commits them before the
+	// policy row it belongs to becomes visible, so one landing between them
+	// pairs the old actions with the new grants. ProofChain reads by command
+	// and subject, so it too can return a chain the write just stored. Both
+	// s3:GetObject and s3:ListBucket map to /content/retrieve, so that pairing
+	// can report an action the write removed over a chain that still serves it.
+	// The reread comes after every delegation read and waits on a write still
+	// in flight, whose grants may already have been read, and a policy that
+	// moved meanwhile says the caller should ask again.
+	if akRec.Principal != nil {
+		settled, err := s.policyETag(ctx, b.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if settled != etag {
+			return nil, nil, fmt.Errorf("%w: the bucket policy is being rewritten", auth.ErrTemporarilyUnavailable)
 		}
 	}
 
