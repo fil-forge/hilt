@@ -101,7 +101,13 @@ func (s *Service) Create(ctx context.Context, externalID, principalID string) (p
 	}
 
 	rec, err := s.principals.Get(ctx, tenantID, principalID)
-	if err != nil {
+	if errors.Is(err, store.ErrRecordNotFound) {
+		// The read is unlocked, so a removal committing between the record
+		// and the read is what removed it; the caller repeats the call.
+		s.logger.Info("principal creation lost a race with a removal",
+			zap.Stringer("tenant", tenantID), zap.String("principal", principalID))
+		return principalstore.Record{}, false, ErrConcurrentChange
+	} else if err != nil {
 		return principalstore.Record{}, false, fmt.Errorf("loading principal: %w", err)
 	}
 	if created {

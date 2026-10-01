@@ -170,6 +170,16 @@ func TestCreate(t *testing.T) {
 		require.ErrorIs(t, err, principalsvc.ErrInvalidPrincipalID)
 	})
 
+	t.Run("a removal landing between the record and its read is a retryable conflict", func(t *testing.T) {
+		d := setup(t)
+		principals := &vanishingPrincipals{Store: d.principals, remove: func() {
+			require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
+		}}
+		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
+		_, _, err := svc.Create(ctx, "tenant-1", "user-1")
+		require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
+	})
+
 	t.Run("rejects the reserved policy wildcard", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "tenant-1", bucketpolicy.Wildcard)
@@ -383,6 +393,22 @@ func (f *flakyPolicies) Put(ctx context.Context, in bucketpolicystore.Input, bef
 		return "", err
 	}
 	return f.Store.Put(ctx, in, beforeCommit)
+}
+
+// vanishingPrincipals runs remove before the first Get, standing in for a
+// removal that commits between a create's record and its read.
+type vanishingPrincipals struct {
+	principalstore.Store
+	remove func()
+}
+
+func (v *vanishingPrincipals) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principalstore.Record, error) {
+	if v.remove != nil {
+		remove := v.remove
+		v.remove = nil
+		remove()
+	}
+	return v.Store.Get(ctx, tenant, externalID, opts...)
 }
 
 // lockedPrincipals fails Delete with err, standing in for the store giving up
