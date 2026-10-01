@@ -297,6 +297,24 @@ func (w *writeOnFirstList) ListByAudience(ctx context.Context, audience did.DID,
 	return w.Store.ListByAudience(ctx, audience, opts...)
 }
 
+// writeOnFirstProofChain runs write once, when the first proof chain is built.
+// Info builds the chains after it has listed the delegations, so a policy write
+// put here lands between the listing and the chain reads.
+type writeOnFirstProofChain struct {
+	delegationstore.Store
+	once  sync.Once
+	write func()
+}
+
+func (w *writeOnFirstProofChain) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
+	w.once.Do(func() {
+		if w.write != nil {
+			w.write()
+		}
+	})
+	return w.Store.ProofChain(ctx, aud, cmd, sub)
+}
+
 // revocation records one published revocation.
 // deleteDeps is the world a Delete subtest operates on.
 type deleteDeps struct {
@@ -767,6 +785,46 @@ func TestInfo(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
 	})
 
+	t.Run("a policy write before the proof chains are built is refused, not served", func(t *testing.T) {
+		straddle := &writeOnFirstProofChain{}
+		svc, policies, _, _ := setup(t, nil, true, did.DID{}, func(s delegationstore.Store) delegationstore.Store {
+			straddle.Store = s
+			return straddle
+		})
+		grantPolicy(t, policies, "s3:GetObject", "s3:ListBucket")
+
+		// The write narrows the policy and rotates the key's grants after Info
+		// has listed them. ProofChain reads by command and subject, so it would
+		// return the new chain under the old grant's CID, paired with the old
+		// action set.
+		straddle.write = func() {
+			rec, err := policies.Get(ctx, bucketID)
+			require.NoError(t, err)
+			_, err = policies.Put(ctx, bucketpolicystore.Input{
+				Bucket:  bucketID,
+				Tenant:  tenantID,
+				IfMatch: &rec.ETag,
+				Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+					Effect:    bucketpolicy.Allow,
+					Principal: bucketpolicy.Only("user-1"),
+					Actions:   []string{"s3:ListBucket"},
+				}}},
+			}, nil)
+			require.NoError(t, err)
+			narrowed, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, []string{"s3:ListBucket"}, nil)
+			require.NoError(t, err)
+			require.NoError(t, straddle.Store.Replace(ctx, []did.DID{akDID}, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+				return map[did.DID][]ucan.Delegation{akDID: narrowed}, nil
+			}))
+		}
+
+		ok, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		if err == nil {
+			t.Fatalf("Info answered %v over the rotated grants", ok.Permissions.Entries[akDID])
+		}
+		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
+	})
+
 	t.Run("returns empty delegations when no grant reaches the bucket", func(t *testing.T) {
 		svc, _, _, _ := setup(t, allPerms, false, testutil.RandomDID(t)) // grant scoped to a different bucket
 		ok, blocks, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
@@ -783,6 +841,24 @@ func TestInfo(t *testing.T) {
 // new grants, so it must wait for the write to settle before it rereads the
 // policy rather than pair them with the old actions.
 func TestInfoDuringPolicyWrite(t *testing.T) {
+	infoDuringPolicyWrite(t, func(s delegationstore.Store, write func()) delegationstore.Store {
+		return &writeOnFirstList{Store: s, write: write}
+	})
+}
+
+// TestInfoDuringPolicyWriteBeforeProofChains is TestInfoDuringPolicyWrite with
+// the write starting after Info has listed the grants, before it builds their
+// proof chains. ProofChain reads the new chain, so Info must still wait for the
+// write before it rereads the policy.
+func TestInfoDuringPolicyWriteBeforeProofChains(t *testing.T) {
+	infoDuringPolicyWrite(t, func(s delegationstore.Store, write func()) delegationstore.Store {
+		return &writeOnFirstProofChain{Store: s, write: write}
+	})
+}
+
+// infoDuringPolicyWrite runs the in-flight policy write once Info reaches the
+// delegation read straddle hooks it into.
+func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, write func()) delegationstore.Store) {
 	pool := htestutil.PostgresOrSkip(t)
 	ctx := t.Context()
 	principals, policies := principalpostgres.New(pool), bucketpolicypostgres.New(pool)
@@ -826,7 +902,7 @@ func TestInfoDuringPolicyWrite(t *testing.T) {
 	releaseWriter := func() { releaseOnce.Do(func() { close(release) }) }
 	defer releaseWriter()
 	wrote := make(chan error, 1)
-	straddle := &writeOnFirstList{Store: delegations, write: func() {
+	reads := straddle(delegations, func() {
 		go func() {
 			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
 				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:ListBucket"), IfMatch: &etag,
@@ -855,10 +931,10 @@ func TestInfoDuringPolicyWrite(t *testing.T) {
 		case <-time.After(htestutil.WaitTimeout):
 			t.Error("the writer did not take its lock")
 		}
-	}}
+	})
 
 	az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, policies, vaultmemory.New())
-	svc := bucketsvc.New(zap.NewNop(), az, buckets, straddle, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{})
+	svc := bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{})
 
 	type result struct {
 		ok  *s3bkt.InfoOK
