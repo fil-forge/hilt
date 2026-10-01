@@ -327,6 +327,22 @@ func TestPrincipalStore(t *testing.T) {
 // relies on: a share-locked Get waits for a transaction that holds the row FOR
 // UPDATE, and is answered once that transaction commits. Postgres only: the
 // memory store cannot hold a row across calls.
+// Postgres refuses a NUL byte in a text parameter (SQLSTATE 22021) and the
+// store passes that through unmapped, so callers must reject such an id before
+// it reaches the store. The memory store accepts it.
+func TestPrincipalStorePostgresRejectsNUL(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
+	s := principalpostgres.New(pool)
+	tenantID := testutil.RandomDID(t)
+	seeder(pool)(t, tenantID)
+
+	err := s.Add(t.Context(), tenantID, "a\x00b")
+	require.Error(t, err)
+	for _, sentinel := range []error{store.ErrRecordExists, store.ErrRecordNotFound, store.ErrInvalidArgument, store.ErrPreconditionFailed, store.ErrLockTimeout} {
+		require.NotErrorIs(t, err, sentinel)
+	}
+}
+
 func TestPrincipalStorePostgresLocking(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	s := principalpostgres.New(pool)

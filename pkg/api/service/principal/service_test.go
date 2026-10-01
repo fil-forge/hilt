@@ -170,6 +170,14 @@ func TestCreate(t *testing.T) {
 		require.ErrorIs(t, err, principalsvc.ErrInvalidPrincipalID)
 	})
 
+	t.Run("rejects a principalId that is not valid UTF-8 or holds a NUL", func(t *testing.T) {
+		d := setup(t)
+		for _, id := range []string{"a\x00b", "\xff"} {
+			_, _, err := d.svc.Create(ctx, "tenant-1", id)
+			require.ErrorIs(t, err, principalsvc.ErrInvalidPrincipalID, "%q", id)
+		}
+	})
+
 	t.Run("a removal landing between the record and its read is a retryable conflict", func(t *testing.T) {
 		d := setup(t)
 		principals := &vanishingPrincipals{Store: d.principals, remove: func() {
