@@ -88,14 +88,18 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 	return rec, nil
 }
 
-// Put runs in one transaction: it checks the named principals (see
+// Put runs in one transaction: it takes the tenant's advisory lock shared
+// ([pglock.TenantNamespace]), checks the named principals (see
 // [requireLivePrincipals]), takes the bucket's advisory lock, locks the
 // current row FOR UPDATE when there is one, checks the precondition, runs
 // beforeCommit while holding the locks, writes the row and rewrites its index
 // rows, and commits. A share-locked read of the bucket (see [Store.Get])
 // waits for the commit or the rollback, on a create as much as on a replace.
-// Two concurrent creates serialize on the advisory lock; the second finds the
-// first's row and fails its precondition.
+// Two concurrent creates serialize on the bucket's advisory lock; the second
+// finds the first's row and fails its precondition. The tenant lock holds off
+// a principal add for the whole transaction, so the tenant's principals do not
+// change between what beforeCommit lists and what is committed; concurrent
+// writes under one tenant share it and do not wait on each other.
 //
 // A bucket with no row fails with store.ErrRecordNotFound before beforeCommit
 // runs. beforeCommit runs before the row and index writes, so a callback that
@@ -119,6 +123,9 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
+	if err := pglock.Advisory(ctx, tx, pglock.TenantNamespace, in.Tenant.String(), true); err != nil {
+		return "", err
+	}
 	named, _ := bucketpolicy.Named(in.Policy)
 	if err := requireLivePrincipals(ctx, tx, in.Tenant, named); err != nil {
 		return "", err
