@@ -13,6 +13,7 @@ import (
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -409,6 +410,33 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.NoError(t, deleted)
 		require.ErrorIs(t, got, store.ErrRecordNotFound)
 	})
+
+	t.Run("Add waits on the tenant lock a policy write holds shared", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer tx.Rollback(t.Context())
+
+		released, added := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				if err := pglock.Advisory(t.Context(), tx, pglock.TenantNamespace, tenantID.String(), true); err != nil {
+					return err
+				}
+				close(entered)
+				<-release
+				return tx.Rollback(t.Context())
+			},
+			func() error {
+				return s.Add(context.Background(), tenantID, "late")
+			})
+		require.NoError(t, released)
+		require.NoError(t, added)
+		rec, err := s.Get(t.Context(), tenantID, "late")
+		require.NoError(t, err)
+		require.Equal(t, "late", rec.ExternalID)
+	})
 }
 
 // TestPrincipalStorePostgresLockTimeout pins the bounded wait that keeps a
@@ -515,6 +543,29 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 			tc.unwritten(t, tenantID)
 		})
 	}
+
+	t.Run("adding a principal behind a stuck policy write gives up", func(t *testing.T) {
+		// Stand in for a policy write parked in its callback: hold the tenant
+		// lock shared for longer than the timeout.
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer tx.Rollback(t.Context())
+		require.NoError(t, pglock.Advisory(t.Context(), tx, pglock.TenantNamespace, tenantID.String(), true))
+
+		done := make(chan error, 1)
+		go func() { done <- principals.Add(context.Background(), tenantID, "late") }()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, store.ErrLockTimeout)
+		case <-time.After(store.LockTimeout + 10*time.Second):
+			t.Fatal("the add did not give up waiting for the tenant lock")
+		}
+		recs, err := principals.ListByTenant(t.Context(), tenantID)
+		require.NoError(t, err)
+		require.Empty(t, recs, "nothing was written")
+	})
 }
 
 // TestPrincipalStoreMemoryLockTimeout is the memory counterpart of
