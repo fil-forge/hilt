@@ -1097,6 +1097,7 @@ func TestCreateWithPolicy(t *testing.T) {
 		buckets     *bucketmemory.Store
 		policies    *bucketpolicymemory.Store
 		delegations *delegationmemory.Store
+		secrets     *vaultmemory.Store
 		swarf       *htestutil.FakeSwarf
 		// member is a key bound to "user-1", which the policy names.
 		member did.DID
@@ -1117,7 +1118,7 @@ func TestCreateWithPolicy(t *testing.T) {
 		swarf := &htestutil.FakeSwarf{}
 		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, swarf, member}
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf, member}
 	}
 
 	// create presigns a CreateBucket carrying header as x-bucket-policy, covered
@@ -1208,6 +1209,20 @@ func TestCreateWithPolicy(t *testing.T) {
 		held, err := f.delegations.ListByAudience(ctx, f.member)
 		require.NoError(t, err)
 		require.Len(t, held.Results, len(s3perm.CommandsFor(s3perm.PolicyActions()...)))
+	})
+
+	t.Run("deletes the bucket when the policy write fails before it issues a grant", func(t *testing.T) {
+		f := setup(t, &fakeSprue{})
+		// The policy write signs the named principal's grants as the tenant;
+		// without the tenant key it fails before issuing any. The rollback
+		// then has nothing to revoke, so it must not need the key either, or
+		// the row would outlive the failed create with no way to delete it.
+		require.NoError(t, f.secrets.Delete(ctx, vault.TenantKeyPath(tenantID)))
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "storing bucket policy")
+		_, err = f.buckets.GetByName(ctx, bucketName)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.Zero(t, f.swarf.Calls(), "nothing was issued, so nothing is revoked")
 	})
 
 	t.Run("a create without the header stores no policy", func(t *testing.T) {

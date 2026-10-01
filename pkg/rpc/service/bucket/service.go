@@ -175,18 +175,28 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		// they are deleted, as a bucket deletion revokes them: a chain the
 		// gateway fetched meanwhile must not outlive the bucket. A publish
 		// that fails deletes nothing, as Delete does: the bucket row, policy
-		// and grants stay for a DeleteBucket retry, which revokes first. Then
-		// the delegations and the policy: Postgres cascades the policy from
-		// the bucket row, the memory store does not, and nothing cascades the
-		// delegations.
-		revoker, err := s.authorizer.TenantIssuer(cleanupCtx, authz.Tenant.ID)
+		// and grants stay for a DeleteBucket retry, which revokes first. The
+		// tenant key is read only when there is a grant to revoke: a policy
+		// write that failed on that same key issued nothing, and a rollback
+		// that needed it would leave a row behind that DeleteBucket, needing
+		// the key too, could never remove. Then the delegations and the
+		// policy: Postgres cascades the policy from the bucket row, the
+		// memory store does not, and nothing cascades the delegations.
+		issued, err := s.tenantIssuedDelegations(cleanupCtx, authz.Tenant.ID, bucketID)
 		if err != nil {
-			log.Error("rollback: loading tenant issuer, bucket left for deletion", zap.Error(err))
+			log.Error("rollback: listing bucket delegations, bucket left for deletion", zap.Error(err))
 			return
 		}
-		if err := s.revokeDelegations(cleanupCtx, authz.Tenant.ID, bucketID, revoker); err != nil {
-			log.Error("rollback: revoking bucket delegations, bucket left for deletion", zap.Error(err))
-			return
+		if len(issued) > 0 {
+			revoker, err := s.authorizer.TenantIssuer(cleanupCtx, authz.Tenant.ID)
+			if err != nil {
+				log.Error("rollback: loading tenant issuer, bucket left for deletion", zap.Error(err))
+				return
+			}
+			if err := grant.PublishRevocations(cleanupCtx, log, s.revocations, revoker, issued); err != nil {
+				log.Error("rollback: revoking bucket delegations, bucket left for deletion", zap.Error(err))
+				return
+			}
 		}
 		if err := s.delegations.DeleteBySubject(cleanupCtx, bucketID); err != nil {
 			log.Error("rollback: deleting bucket delegations", zap.Error(err))
@@ -413,6 +423,17 @@ func sameLinks(a, b []ucan.Delegation) bool {
 // access to every bucket the tenant owns, so deleting one bucket must not revoke
 // them.
 func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.DID, revoker ucan.Issuer) error {
+	issued, err := s.tenantIssuedDelegations(ctx, tenantID, bucketID)
+	if err != nil {
+		return err
+	}
+	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
+	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
+}
+
+// tenantIssuedDelegations lists the delegations over the bucket that the
+// tenant issued: the ones revokeDelegations publishes revocations for.
+func (s *Service) tenantIssuedDelegations(ctx context.Context, tenantID, bucketID did.DID) ([]ucan.Delegation, error) {
 	dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
 		var listOpts []store.PaginationOption
 		if opts.Cursor != nil {
@@ -421,7 +442,7 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 		return s.delegations.ListBySubject(ctx, bucketID, listOpts...)
 	})
 	if err != nil {
-		return fmt.Errorf("listing bucket delegations: %w", err)
+		return nil, fmt.Errorf("listing bucket delegations: %w", err)
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
 
@@ -438,7 +459,7 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 		}
 		issued = append(issued, d)
 	}
-	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
+	return issued, nil
 }
 
 // List authorizes the request (which also verifies the access key holds the
