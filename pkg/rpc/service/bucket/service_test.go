@@ -1194,6 +1194,22 @@ func TestCreateWithPolicy(t *testing.T) {
 		require.Len(t, f.swarf.Revocations(), len(s3perm.CommandsFor(s3perm.PolicyActions()...)))
 	})
 
+	t.Run("keeps the bucket, policy and grants when the rollback cannot revoke", func(t *testing.T) {
+		f := setup(t, &fakeSprue{provErr: errors.New("sprue unavailable")})
+		f.swarf.Err = errors.New("swarf is down")
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "sprue unavailable")
+		// Nothing is deleted while the grants are unrevoked: a DeleteBucket
+		// retry publishes the revocations first, then cleans up.
+		rec, err := f.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err)
+		_, err = f.policies.Get(ctx, rec.ID)
+		require.NoError(t, err)
+		held, err := f.delegations.ListByAudience(ctx, f.member)
+		require.NoError(t, err)
+		require.Len(t, held.Results, len(s3perm.CommandsFor(s3perm.PolicyActions()...)))
+	})
+
 	t.Run("a create without the header stores no policy", func(t *testing.T) {
 		f := setup(t, &fakeSprue{})
 		_, _, err := f.svc.Create(ctx, providerID, &s3bkt.CreateArguments{Request: presign(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName, region)})
