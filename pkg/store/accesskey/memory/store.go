@@ -56,13 +56,18 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 		e := in.ExpiresAt.UTC()
 		expires = &e
 	}
+	var principal *string
+	if in.Principal != nil {
+		p := *in.Principal
+		principal = &p
+	}
 	s.keys[in.ID] = accesskey.Record{
 		ID:          in.ID,
 		Tenant:      in.Tenant,
 		Name:        in.Name,
 		Buckets:     slices.Clone(in.Buckets),
 		Permissions: slices.Clone(in.Permissions),
-		Principal:   in.Principal,
+		Principal:   principal,
 		ExpiresAt:   expires,
 		CreatedAt:   time.Now().UTC(),
 	}
