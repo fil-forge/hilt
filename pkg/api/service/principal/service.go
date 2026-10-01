@@ -19,6 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
@@ -84,8 +86,10 @@ func New(
 func (s *Service) Create(ctx context.Context, externalID, principalID string) (principalstore.Record, bool, error) {
 	// bucketpolicy.Wildcard is the policy language's "every principal", so a
 	// principal of that name would collide with it: deleting the principal would
-	// strip the wildcard from every policy the tenant has.
-	if principalID == "" || len(principalID) > maxPrincipalIDLength || principalID == bucketpolicy.Wildcard {
+	// strip the wildcard from every policy the tenant has. Postgres refuses
+	// invalid UTF-8 and NUL in text, so those are rejected here too.
+	if principalID == "" || len(principalID) > maxPrincipalIDLength || principalID == bucketpolicy.Wildcard ||
+		!utf8.ValidString(principalID) || strings.ContainsRune(principalID, 0) {
 		return principalstore.Record{}, false, ErrInvalidPrincipalID
 	}
 	tenantID, err := s.tenant(ctx, externalID)

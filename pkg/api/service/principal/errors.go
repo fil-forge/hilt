@@ -20,9 +20,9 @@ var (
 	// ErrPrincipalNotFound is returned when the tenant has no principal with
 	// that principalId.
 	ErrPrincipalNotFound = errors.New(PrincipalNotFoundErrorName, "principal not found")
-	// ErrInvalidPrincipalID is returned when the principalId is empty, too long, or the
-	// reserved policy wildcard.
-	ErrInvalidPrincipalID = errors.New(InvalidPrincipalIDErrorName, `principalId must be between 1 and 255 characters and must not be "*", which is reserved for the policy wildcard`)
+	// ErrInvalidPrincipalID is returned when the principalId is empty, too long,
+	// not valid UTF-8, holds a NUL, or is the reserved policy wildcard.
+	ErrInvalidPrincipalID = errors.New(InvalidPrincipalIDErrorName, `principalId must be between 1 and 255 characters of valid UTF-8 without NUL, and must not be "*", which is reserved for the policy wildcard`)
 	// ErrConcurrentChange is returned when another write to the principal or to
 	// one of its bucket policies was in flight and this call gave up rather
 	// than wait on it. Nothing was changed and the call can be repeated.
