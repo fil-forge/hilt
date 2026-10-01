@@ -57,6 +57,21 @@ func (r *rejectingPolicies) Put(context.Context, bucketpolicystore.Input, func(c
 	return "", r.err
 }
 
+// parkedPolicies holds Put until resume is closed, closing reached when it
+// gets there. It parks before the wrapped store takes its lock, so the write
+// has validated its document and holds nothing.
+type parkedPolicies struct {
+	bucketpolicystore.Store
+	reached chan struct{}
+	resume  chan struct{}
+}
+
+func (p *parkedPolicies) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(context.Context, *bucketpolicystore.Record) error) (string, error) {
+	close(p.reached)
+	<-p.resume
+	return p.Store.Put(ctx, in, beforeCommit)
+}
+
 // growingPrincipals records a new principal for the tenant right after the
 // first ListByTenant answers, so the list a write takes before the bucket lock
 // and the one its store callback takes differ: it stands in for a principal
@@ -675,6 +690,40 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	// named the principal that is gone.
 	_, err := d.svc.Get(t.Context(), "tenant-1", "photos")
 	require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound)
+}
+
+// TestPolicyWriteAfterPrincipalRemoval removes a principal after a policy
+// write naming it has validated its document and before the write reaches the
+// store. The write must fail, so a principal revived under the same id starts
+// named in no statement.
+func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
+	ctx := t.Context()
+	d := setup(t)
+	d.principal(t, "user-1")
+	tenants := tenantmemory.New()
+	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	policies := &parkedPolicies{Store: d.policies, reached: make(chan struct{}), resume: make(chan struct{})}
+	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
+	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
+		d.accessKeys, d.secrets, d.rotator(d.swarf))
+
+	put := make(chan error, 1)
+	go func() {
+		_, _, err := svc.Put(context.Background(), "tenant-1", "photos",
+			doc(allow(only("user-1"), "s3:GetObject")), nil)
+		put <- err
+	}()
+	<-policies.reached
+	require.NoError(t, principals.Delete(ctx, "tenant-1", "user-1"))
+	close(policies.resume)
+	require.ErrorIs(t, <-put, bucketpolicy.ErrInvalidPolicy)
+
+	_, created, err := principals.Create(ctx, "tenant-1", "user-1")
+	require.NoError(t, err)
+	require.True(t, created)
+	access, err := svc.Access(ctx, "tenant-1", "user-1")
+	require.NoError(t, err)
+	require.Empty(t, access, "a revived principal is named in no statement")
 }
 
 func TestPrincipalReads(t *testing.T) {
