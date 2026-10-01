@@ -81,15 +81,15 @@ func Advisory(ctx context.Context, tx pgx.Tx, namespace int32, key string, share
 }
 
 // Found maps a single-row read's result: no row is [store.ErrRecordNotFound],
-// any other error is wrapped as "getting <what>", and a found row is returned
+// any other error is wrapped as "getting <recordType>", and a found row is returned
 // as is.
-func Found[T any](v T, err error, what string) (T, error) {
+func Found[T any](v T, err error, recordType string) (T, error) {
 	var zero T
 	if errors.Is(err, pgx.ErrNoRows) {
 		return zero, store.ErrRecordNotFound
 	}
 	if err != nil {
-		return zero, fmt.Errorf("getting %s: %w", what, err)
+		return zero, fmt.Errorf("getting %s: %w", recordType, err)
 	}
 	return v, nil
 }
