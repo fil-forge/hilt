@@ -1078,6 +1078,19 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	require.ErrorIs(t, res.err, auth.ErrTemporarilyUnavailable)
 }
 
+// deadlinePublisher is a FakeSwarf that also records, per PublishBatch call,
+// whether the context it was given carries a deadline.
+type deadlinePublisher struct {
+	*htestutil.FakeSwarf
+	deadlines []bool
+}
+
+func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
+	_, ok := ctx.Deadline()
+	p.deadlines = append(p.deadlines, ok)
+	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
+}
+
 // TestCreateWithPolicy covers the policy a CreateBucket request carries in the
 // x-bucket-policy header: signed and valid, it is stored with the bucket;
 // unsigned, undecodable or invalid, the create is refused and no bucket exists.
@@ -1099,6 +1112,7 @@ func TestCreateWithPolicy(t *testing.T) {
 		delegations *delegationmemory.Store
 		secrets     *vaultmemory.Store
 		swarf       *htestutil.FakeSwarf
+		publisher   *deadlinePublisher
 		// member is a key bound to "user-1", which the policy names.
 		member did.DID
 	}
@@ -1115,10 +1129,10 @@ func TestCreateWithPolicy(t *testing.T) {
 		member, principal := testutil.RandomDID(t), "user-1"
 		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: member, Tenant: tenantID, Name: "laptop", Principal: &principal}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		swarf := &htestutil.FakeSwarf{}
+		swarf := &deadlinePublisher{FakeSwarf: &htestutil.FakeSwarf{}}
 		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf, member}
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf.FakeSwarf, swarf, member}
 	}
 
 	// create presigns a CreateBucket carrying header as x-bucket-policy, covered
@@ -1209,6 +1223,16 @@ func TestCreateWithPolicy(t *testing.T) {
 		held, err := f.delegations.ListByAudience(ctx, f.member)
 		require.NoError(t, err)
 		require.Len(t, held.Results, len(s3perm.CommandsFor(s3perm.PolicyActions()...)))
+	})
+
+	t.Run("bounds the rollback's publish with a deadline", func(t *testing.T) {
+		f := setup(t, &fakeSprue{provErr: errors.New("sprue unavailable")})
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "sprue unavailable")
+		// The rollback runs detached from the request's cancellation, so a
+		// Swarf that accepts the request and never answers must be cut off
+		// by a deadline of the rollback's own.
+		require.Equal(t, []bool{true}, f.publisher.deadlines)
 	})
 
 	t.Run("deletes the bucket when the policy write fails before it issues a grant", func(t *testing.T) {
