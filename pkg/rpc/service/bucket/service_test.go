@@ -1128,6 +1128,8 @@ func TestCreateWithPolicy(t *testing.T) {
 		want     string
 	}{
 		"an unsigned header":               {encode(t, valid), true, "not covered by the request signature"},
+		"an empty header":                  {"", false, "is empty"},
+		"a blank header":                   {" \t ", false, "is empty"},
 		"a header that is not base64":      {"%%not-base64%%", false, "is not base64"},
 		"a document with an unknown field": {base64.StdEncoding.EncodeToString([]byte(`{"statement":[],"resource":"x"}`)), false, `unknown field "resource"`},
 		"a document naming an unknown principal": {encode(t, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
