@@ -124,26 +124,39 @@ func (s *Service) Get(ctx context.Context, externalID, principalID string) (prin
 	return s.principal(ctx, tenantID, principalID)
 }
 
-// Delete removes the principal, its access to every bucket, and its keys. The
-// store holds the principal row locked while [Service.remove] runs, so an
-// authorize request for the principal waits for the outcome. It is idempotent:
-// a principal that is already gone is a no-op.
+// Delete removes the principal, its access to every bucket, and its keys, in
+// two steps. It first revokes the delegations of the principal's keys and
+// strips the principal from every policy naming it, without locking the
+// principal row: a policy write holds its bucket while its rotation locks the
+// principals it changes, so a removal that held the row while it waited for a
+// bucket would wait on that write as it waited on the removal. The store then
+// holds the row locked while [Service.remove] finishes, so an authorize request
+// for the principal waits for the outcome. It is idempotent: a principal that
+// is already gone is a no-op.
 func (s *Service) Delete(ctx context.Context, externalID, principalID string) error {
 	tenantID, err := s.tenant(ctx, externalID)
 	if err != nil {
 		return err
 	}
-	if err := s.principals.Delete(ctx, tenantID, principalID, func(ctx context.Context) error {
-		return s.remove(ctx, tenantID, principalID)
-	}); err != nil {
-		// A lock the removal waited on, or a policy edited between the listing
-		// and the rewrite, means another writer got there first. Nothing was
-		// committed, so the caller repeats the call. The removal's batch
+	err = s.grants.Revoke(ctx, tenantID, principalID)
+	if err == nil {
+		err = s.stripFromPolicies(ctx, tenantID, principalID)
+	}
+	if err == nil {
+		err = s.principals.Delete(ctx, tenantID, principalID, func(ctx context.Context) error {
+			return s.remove(ctx, tenantID, principalID)
+		})
+	}
+	if err != nil {
+		// A lock the removal waited on, a policy edited between the listing
+		// and the rewrite, or a policy naming the principal again by the time
+		// its row is locked, means another writer got there first. Each step is
+		// idempotent, so the caller repeats the call. The removal's batch
 		// deadline ([grant.BatchTimeout]) is below the stores' lock timeout,
 		// so a wait that hits it surfaces as the context error rather than
 		// [store.ErrLockTimeout]; the caller's own deadline running out is
 		// not that case, so it is mapped only while the caller's context lives.
-		if errors.Is(err, store.ErrLockTimeout) || errors.Is(err, store.ErrPreconditionFailed) ||
+		if errors.Is(err, store.ErrLockTimeout) || errors.Is(err, store.ErrPreconditionFailed) || errors.Is(err, errNamedAgain) ||
 			(errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil) {
 			s.logger.Info("principal removal lost a race with a concurrent write",
 				zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Error(err))
@@ -155,20 +168,31 @@ func (s *Service) Delete(ctx context.Context, externalID, principalID string) er
 	return nil
 }
 
-// remove runs while the principal row is locked, in the RFC's order: revoke
-// the delegations of the principal's keys, strip the principal from every policy
-// naming it, delete its keys. Each step is idempotent, so a failure is retried
-// by repeating the call. The revocations cover everything the removal changes,
-// so the policy and key writes it makes publish none of their own. It runs
-// under the principal row's lock, so the whole of it is bounded at
-// [grant.BatchTimeout], below the wait a share-locked reader gives the row.
+// errNamedAgain is a policy naming the principal once its row is locked: a
+// write named it after [Service.stripFromPolicies] ran.
+var errNamedAgain = errors.New("a policy names the principal again")
+
+// remove runs while the principal row is locked. A write naming the principal
+// now waits for the outcome, so it checks that no policy names the principal,
+// revokes the delegations of keys created since the first revocation, and
+// deletes the keys. Nothing here waits on a bucket. The revocations cover
+// everything the removal changes, so the policy and key writes it makes
+// publish none of their own. It runs under the principal row's lock, so the
+// whole of it is bounded at [grant.BatchTimeout], below the wait a
+// share-locked reader gives the row.
 func (s *Service) remove(ctx context.Context, tenantID did.DID, principalID string) error {
 	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
 	defer cancel()
-	if err := s.grants.Revoke(ctx, tenantID, principalID); err != nil {
-		return err
+	recs, err := s.policies.ListByPrincipal(ctx, tenantID, principalID)
+	if err != nil {
+		return fmt.Errorf("listing the principal's policies: %w", err)
 	}
-	if err := s.stripFromPolicies(ctx, tenantID, principalID); err != nil {
+	for _, rec := range recs {
+		if _, named := bucketpolicy.WithoutPrincipal(rec.Policy, principalID); named {
+			return fmt.Errorf("bucket %s: %w", rec.Bucket, errNamedAgain)
+		}
+	}
+	if err := s.grants.Revoke(ctx, tenantID, principalID); err != nil {
 		return err
 	}
 	return s.deleteKeys(ctx, tenantID, principalID)
