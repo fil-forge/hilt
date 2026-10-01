@@ -622,17 +622,12 @@ func TestRotations(t *testing.T) {
 	})
 }
 
-// TestConcurrentPolicyWriteAndPrincipalRemoval pins the two writes against
-// each other in the order that wedges them: the policy write holds the policy
-// store and locks the principals, the removal holds the principal store and
-// rewrites the policies, so each waits on what the other holds. The wait is
-// bounded, so the policy write gives up and the removal finishes. Postgres
-// resolves the same cycle the same way, through lock_timeout.
+// TestConcurrentPolicyWriteAndPrincipalRemoval runs a policy write against the
+// removal of a principal it names: the write holds the bucket while it reads
+// and locks the principals, and the removal rewrites that bucket's policy. The
+// removal strips its policies before it locks the principal, so neither waits
+// on what the other holds and both finish.
 func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
-	// The bound is what breaks the cycle; its length is not the point.
-	principalmemory.LockWait = 100 * time.Millisecond
-	t.Cleanup(func() { principalmemory.LockWait = store.LockTimeout })
-
 	reached, resume := make(chan struct{}), make(chan struct{})
 	d := setup(t, func(s principalstore.Store) principalstore.Store {
 		// The second list is the one the policy store's callback makes; the
@@ -645,7 +640,7 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
 	started := make(chan struct{})
 	// A principal removal revokes its keys' delegations first, so the first
-	// publish says the removal is inside the principal store's write.
+	// publish says the removal has started and is about to strip its policies.
 	d.swarf.OnPublish = sync.OnceFunc(func() { close(started) })
 	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
 		d.accessKeys, d.secrets, d.rotator(d.swarf))
@@ -660,27 +655,24 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 
 	del := make(chan error, 1)
 	go func() { del <- principals.Delete(context.Background(), "tenant-1", "user-1") }()
-	<-started // the removal holds the principal store and is about to read the policies
+	<-started // the removal has revoked and is about to read the policies
 
 	close(resume)
 
 	deadline := time.After(30 * time.Second)
-	select {
-	case err := <-put:
-		require.ErrorIs(t, err, bucketpolicysvc.ErrConcurrentChange,
-			"the policy write waits on the principal the removal holds and gives up")
-	case <-deadline:
-		t.Fatal("the policy write and the principal removal deadlocked")
-	}
-	select {
-	case err := <-del:
-		require.NoError(t, err, "the removal holds what it needs and finishes")
-	case <-deadline:
-		t.Fatal("the removal did not finish once the policy write gave up")
+	for range 2 {
+		select {
+		case err := <-put:
+			require.NoError(t, err)
+		case err := <-del:
+			require.NoError(t, err)
+		case <-deadline:
+			t.Fatal("the policy write and the principal removal deadlocked")
+		}
 	}
 
-	// Nothing was written: the policy write rolled back with its failed lock,
-	// and the caller repeats it against the tenant that no longer has user-1.
+	// The removal ran last and took the policy with it: its only statement
+	// named the principal that is gone.
 	_, err := d.svc.Get(t.Context(), "tenant-1", "photos")
 	require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound)
 }
