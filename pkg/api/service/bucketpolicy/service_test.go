@@ -659,7 +659,7 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	// publish says the removal has started and is about to strip its policies.
 	d.swarf.OnPublish = sync.OnceFunc(func() { close(started) })
 	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
-		d.accessKeys, d.secrets, d.rotator(d.swarf))
+		d.accessKeys, d.delegations, d.secrets, d.swarf, d.rotator(d.swarf))
 
 	put := make(chan error, 1)
 	go func() {
@@ -706,7 +706,7 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	policies := &parkedPolicies{Store: d.policies, reached: make(chan struct{}), resume: make(chan struct{})}
 	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
 	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
-		d.accessKeys, d.secrets, d.rotator(d.swarf))
+		d.accessKeys, d.delegations, d.secrets, d.swarf, d.rotator(d.swarf))
 
 	put := make(chan error, 1)
 	go func() {
