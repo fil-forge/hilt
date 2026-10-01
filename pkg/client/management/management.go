@@ -1,6 +1,6 @@
-// Package management provides a REST client for Hilt's tenant, principal and
-// access-key management API (the handlers in pkg/api). It authenticates with
-// the partner
+// Package management provides a REST client for Hilt's tenant, principal,
+// access-key and bucket policy management API (the handlers in pkg/api). It
+// authenticates with the partner
 // key as an HTTP bearer token and speaks plain JSON — it is not a UCAN client
 // (cf. the UCAN clients in the parent pkg/client package).
 package management
@@ -179,6 +179,24 @@ func (c *Client) ListPrincipalAccessKeys(ctx context.Context, tenantID, principa
 	var list api.AccessKeyList
 	err := c.doQuery(ctx, http.MethodGet, []string{"tenants", tenantID, "access-keys"}, url.Values{"principalId": {principalID}}, nil, &list, http.StatusOK)
 	return list.Items, err
+}
+
+// Bucket policies
+
+// ListPrincipalPolicies lists every policy of the tenant with a statement
+// naming the principal or the wildcard.
+func (c *Client) ListPrincipalPolicies(ctx context.Context, tenantID, principalID string) ([]api.PrincipalPolicy, error) {
+	var list api.PrincipalPolicyList
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", principalID, "policies"}, nil, &list, http.StatusOK)
+	return list.Items, err
+}
+
+// GetPrincipalAccess returns the principal's effective actions per bucket.
+// Buckets it has no action on are omitted.
+func (c *Client) GetPrincipalAccess(ctx context.Context, tenantID, principalID string) ([]api.BucketAccess, error) {
+	var access api.PrincipalAccess
+	err := c.do(ctx, http.MethodGet, []string{"tenants", tenantID, "principals", principalID, "access"}, nil, &access, http.StatusOK)
+	return access.Buckets, err
 }
 
 // do executes a single request: it builds the URL with [Client.resolve], sets

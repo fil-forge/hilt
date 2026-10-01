@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/api"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/management"
 	"github.com/stretchr/testify/require"
 )
@@ -288,4 +289,37 @@ type errRoundTripper struct{}
 
 func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("transport boom")
+}
+
+func TestManagementClientPolicies(t *testing.T) {
+	ctx := context.Background()
+	document := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+		Effect:    bucketpolicy.Allow,
+		Principal: bucketpolicy.Only("user-1"),
+		Actions:   []string{"s3:GetObject"},
+	}}}
+
+	t.Run("the principal reads unwrap their list", func(t *testing.T) {
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/tenants/acme/principals/user-1/policies":
+				_ = json.NewEncoder(w).Encode(api.PrincipalPolicyList{Items: []api.PrincipalPolicy{
+					{BucketName: "photos", ETag: `"abc"`, Policy: document},
+				}})
+			case "/tenants/acme/principals/user-1/access":
+				_ = json.NewEncoder(w).Encode(api.PrincipalAccess{Buckets: []api.BucketAccess{
+					{Name: "photos", Actions: []string{"s3:GetObject"}},
+				}})
+			default:
+				t.Errorf("unexpected path %q", r.URL.Path)
+			}
+		})
+		policies, err := c.ListPrincipalPolicies(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Equal(t, []api.PrincipalPolicy{{BucketName: "photos", ETag: `"abc"`, Policy: document}}, policies)
+
+		access, err := c.GetPrincipalAccess(ctx, "acme", "user-1")
+		require.NoError(t, err)
+		require.Equal(t, []api.BucketAccess{{Name: "photos", Actions: []string{"s3:GetObject"}}}, access)
+	})
 }

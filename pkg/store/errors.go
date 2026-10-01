@@ -1,6 +1,10 @@
 package store
 
-import "github.com/fil-forge/ucantone/errors"
+import (
+	"context"
+
+	"github.com/fil-forge/ucantone/errors"
+)
 
 const (
 	// RecordExistsErrorName is the name given to an error where the record
@@ -39,3 +43,11 @@ var (
 	// retry proceeds from whichever state it leaves.
 	ErrLockTimeout = errors.New(LockTimeoutErrorName, "timed out waiting for a lock")
 )
+
+// Contended reports whether a write lost a race with another: it gave up on a
+// lock ([ErrLockTimeout]), or its own deadline ran out while the caller's ctx
+// is still live, which is how a write bounded below the lock timeout reports
+// the same wait. The caller repeats the call.
+func Contended(ctx context.Context, err error) bool {
+	return errors.Is(err, ErrLockTimeout) || (errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil)
+}
