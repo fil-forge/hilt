@@ -151,6 +151,14 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 		if err != nil {
 			return err
 		}
+		// A principal removed since the validation above must not be named in
+		// the committed document. The memory store checks no principals itself.
+		named, _ := bucketpolicy.Named(doc)
+		for _, p := range named {
+			if !slices.Contains(principals, p) {
+				return fmt.Errorf("principal %q was removed: %w", p, store.ErrInvalidArgument)
+			}
+		}
 		return s.rotate(ctx, tenantID, b.ID, oldDoc, &doc, principals)
 	})
 	if err != nil {
