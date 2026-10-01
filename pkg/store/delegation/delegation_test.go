@@ -492,6 +492,51 @@ func TestDelegationStore(t *testing.T) {
 	}
 }
 
+// TestDelegationStoreMemoryLockTimeout: a write that waits out a Replace in
+// flight gives up with [store.ErrLockTimeout] instead of wedging against it,
+// as lock_timeout bounds the advisory lock wait on Postgres.
+func TestDelegationStoreMemoryLockTimeout(t *testing.T) {
+	delegationmemory.LockWait = 100 * time.Millisecond
+	t.Cleanup(func() { delegationmemory.LockWait = store.LockTimeout })
+
+	s := delegationmemory.New()
+	issuer := testutil.RandomIssuer(t)
+	audience := testutil.RandomDID(t)
+	fresh := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	replaced := make(chan error, 1)
+	go func() {
+		replaced <- replaceOne(context.Background(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+			close(entered)
+			<-release
+			return []ucan.Delegation{fresh}, nil
+		})
+	}()
+	<-entered
+
+	// The second Replace waits on the audience the first holds and gives up.
+	waited := make(chan error, 1)
+	go func() {
+		waited <- replaceOne(context.Background(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+			return nil, errors.New("next must not run while the first Replace holds the audience")
+		})
+	}()
+	select {
+	case err := <-waited:
+		require.ErrorIs(t, err, store.ErrLockTimeout)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the second Replace waited on the first without a bound")
+	}
+
+	close(release)
+	require.NoError(t, <-replaced)
+	page, err := s.ListByAudience(t.Context(), audience)
+	require.NoError(t, err)
+	require.Len(t, page.Results, 1)
+	require.Equal(t, fresh.Link(), page.Results[0].Link())
+}
+
 // replaceOne calls Replace over one audience, the shape most tests need.
 func replaceOne(ctx context.Context, s dlgstore.Store, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error {
 	return s.Replace(ctx, []did.DID{audience}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
