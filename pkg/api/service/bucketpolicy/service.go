@@ -145,8 +145,10 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 			oldDoc = &old.Policy
 		}
 		// Re-list under the bucket lock: a principal created since the list above
-		// is one the wildcard now reaches, and its first authorize waits on this
-		// same lock, so rotating its keys here reaches it in time.
+		// is one the wildcard now reaches, so its keys are rotated here. One
+		// created after this list commits after the write does, since the add
+		// waits on the tenant lock the write holds, and its keys are created
+		// from the committed policy.
 		principals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
 		if err != nil {
 			return err
