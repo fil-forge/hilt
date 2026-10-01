@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"net/url"
 
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
@@ -28,13 +29,25 @@ func principalHTTPError(log *zap.Logger, err error) error {
 	}
 }
 
+// principalParam returns the principalId route parameter decoded. Echo matches
+// on the raw path and hands parameters over as they came, and the management
+// client escapes each segment, so an id holding "/" arrives as "%2F". A value
+// that is not a valid encoding is returned as it came.
+func principalParam(c echo.Context) string {
+	raw := c.Param("principalId")
+	if id, err := url.PathUnescape(raw); err == nil {
+		return id
+	}
+	return raw
+}
+
 // NewCreatePrincipalHandler handles PUT /tenants/{tenantId}/principals/{principalId}
 // — record a principal of the tenant. It is idempotent: 201 when the call
 // created the principal, 200 when it already existed.
 func NewCreatePrincipalHandler(logger *zap.Logger, principals *principalsvc.Service) Route {
 	log := logger.With(zap.String("handler", "CreatePrincipal"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId/principals/:principalId", func(c echo.Context) error {
-		rec, created, err := principals.Create(c.Request().Context(), c.Param("tenantId"), c.Param("principalId"))
+		rec, created, err := principals.Create(c.Request().Context(), c.Param("tenantId"), principalParam(c))
 		if err != nil {
 			return principalHTTPError(log, err)
 		}
@@ -68,7 +81,7 @@ func NewListPrincipalsHandler(logger *zap.Logger, principals *principalsvc.Servi
 func NewGetPrincipalHandler(logger *zap.Logger, principals *principalsvc.Service) Route {
 	log := logger.With(zap.String("handler", "GetPrincipal"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/principals/:principalId", func(c echo.Context) error {
-		rec, err := principals.Get(c.Request().Context(), c.Param("tenantId"), c.Param("principalId"))
+		rec, err := principals.Get(c.Request().Context(), c.Param("tenantId"), principalParam(c))
 		if err != nil {
 			return principalHTTPError(log, err)
 		}
@@ -82,7 +95,7 @@ func NewGetPrincipalHandler(logger *zap.Logger, principals *principalsvc.Service
 func NewDeletePrincipalHandler(logger *zap.Logger, principals *principalsvc.Service) Route {
 	log := logger.With(zap.String("handler", "DeletePrincipal"))
 	return NewRoute(http.MethodDelete, "/tenants/:tenantId/principals/:principalId", func(c echo.Context) error {
-		if err := principals.Delete(c.Request().Context(), c.Param("tenantId"), c.Param("principalId")); err != nil {
+		if err := principals.Delete(c.Request().Context(), c.Param("tenantId"), principalParam(c)); err != nil {
 			return principalHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)
