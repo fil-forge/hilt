@@ -25,10 +25,12 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/fil-forge/ucantone/ucan"
 	"go.uber.org/zap"
 )
 
@@ -39,13 +41,15 @@ const (
 
 // Service implements the principal operations shared by the REST handlers.
 type Service struct {
-	logger     *zap.Logger
-	tenants    tenantstore.Store
-	principals principalstore.Store
-	policies   bucketpolicystore.Store
-	accessKeys accesskeystore.Store
-	secrets    vault.Vault
-	grants     *grant.Rotator
+	logger      *zap.Logger
+	tenants     tenantstore.Store
+	principals  principalstore.Store
+	policies    bucketpolicystore.Store
+	accessKeys  accesskeystore.Store
+	delegations delegationstore.Store
+	secrets     vault.Vault
+	revocations grant.RevocationPublisher
+	grants      *grant.Rotator
 }
 
 // New constructs the principal service.
@@ -55,17 +59,21 @@ func New(
 	principals principalstore.Store,
 	policies bucketpolicystore.Store,
 	accessKeys accesskeystore.Store,
+	delegations delegationstore.Store,
 	secrets vault.Vault,
+	revocations grant.RevocationPublisher,
 	grants *grant.Rotator,
 ) *Service {
 	return &Service{
-		logger:     logger,
-		tenants:    tenants,
-		principals: principals,
-		policies:   policies,
-		accessKeys: accessKeys,
-		secrets:    secrets,
-		grants:     grants,
+		logger:      logger,
+		tenants:     tenants,
+		principals:  principals,
+		policies:    policies,
+		accessKeys:  accessKeys,
+		delegations: delegations,
+		secrets:     secrets,
+		revocations: revocations,
+		grants:      grants,
 	}
 }
 
@@ -174,12 +182,13 @@ var errNamedAgain = errors.New("a policy names the principal again")
 
 // remove runs while the principal row is locked. A write naming the principal
 // now waits for the outcome, so it checks that no policy names the principal,
-// revokes the delegations of keys created since the first revocation, and
-// deletes the keys. Nothing here waits on a bucket. The revocations cover
-// everything the removal changes, so the policy and key writes it makes
-// publish none of their own. It runs under the principal row's lock, so the
-// whole of it is bounded at [grant.BatchTimeout], below the wait a
-// share-locked reader gives the row.
+// then revokes what the principal's keys hold and deletes their rows under the
+// keys' delegation locks, in one write: a creation storing a key's grants
+// meanwhile either lands first and is revoked here, or waits and finds the row
+// gone. Nothing here waits on a bucket. The revocations cover everything the
+// removal changes, so the policy and key writes it makes publish none of their
+// own. It runs under the principal row's lock, so the whole of it is bounded at
+// [grant.BatchTimeout], below the wait a share-locked reader gives the row.
 func (s *Service) remove(ctx context.Context, tenantID did.DID, principalID string) error {
 	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
 	defer cancel()
@@ -192,10 +201,51 @@ func (s *Service) remove(ctx context.Context, tenantID did.DID, principalID stri
 			return fmt.Errorf("bucket %s: %w", rec.Bucket, errNamedAgain)
 		}
 	}
-	if err := s.grants.Revoke(ctx, tenantID, principalID); err != nil {
+	keys, err := s.accessKeys.ListByTenant(ctx, tenantID, accesskeystore.WithPrincipal(principalID))
+	if err != nil {
+		return fmt.Errorf("listing the principal's access keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
+	if err != nil {
 		return err
 	}
-	return s.deleteKeys(ctx, tenantID, principalID)
+	audiences := make([]did.DID, len(keys))
+	for i, key := range keys {
+		audiences[i] = key.ID
+	}
+	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.String("principal", principalID))
+	err = s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		var all []ucan.Delegation
+		for _, key := range keys {
+			all = append(all, current[key.ID]...)
+		}
+		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, all); err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			if err := s.accessKeys.Delete(ctx, key.ID); err != nil {
+				return nil, fmt.Errorf("deleting access key %s: %w", key.ID, err)
+			}
+		}
+		return nil, nil
+	})
+	if err != nil {
+		return err
+	}
+	// The rows went first, so a key whose vault entry outlives it is
+	// unreachable rather than unusable-but-present.
+	for _, key := range keys {
+		if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantID, key.ID)); err != nil {
+			s.logger.Warn("removing access key from vault",
+				zap.Stringer("access_key", key.ID),
+				zap.Error(err),
+			)
+		}
+	}
+	return nil
 }
 
 // stripFromPolicies removes the principal from every statement naming it,
@@ -228,29 +278,6 @@ func (s *Service) stripFromPolicies(ctx context.Context, tenantID did.DID, princ
 			IfMatch: &etag,
 		}, nil); err != nil {
 			return fmt.Errorf("rewriting the policy of bucket %s: %w", rec.Bucket, err)
-		}
-	}
-	return nil
-}
-
-// deleteKeys removes the principal's access keys: the row first, so a key
-// whose vault entry outlives it is unreachable rather than unusable-but-present.
-func (s *Service) deleteKeys(ctx context.Context, tenantID did.DID, principalID string) error {
-	recs, err := s.accessKeys.ListByTenant(ctx, tenantID, accesskeystore.WithPrincipal(principalID))
-	if err != nil {
-		return fmt.Errorf("listing the principal's access keys: %w", err)
-	}
-	for _, rec := range recs {
-		// The key's delegations are already revoked and gone, so the deletion
-		// publishes nothing of its own.
-		if err := s.accessKeys.Delete(ctx, rec.ID); err != nil {
-			return fmt.Errorf("deleting access key %s: %w", rec.ID, err)
-		}
-		if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantID, rec.ID)); err != nil {
-			s.logger.Warn("removing access key from vault",
-				zap.Stringer("access_key", rec.ID),
-				zap.Error(err),
-			)
 		}
 	}
 	return nil

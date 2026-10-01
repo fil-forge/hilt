@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
+	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
@@ -15,10 +16,12 @@ import (
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
@@ -82,7 +85,7 @@ func setup(t *testing.T) deps {
 	require.NoError(t, d.secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	d.tenant = multikey.NewIssuer(tenantID, signer)
 	d.grants = grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf)
-	d.svc = principalsvc.New(zap.NewNop(), d.tenants, d.principals, d.policies, d.accessKeys, d.secrets, d.grants)
+	d.svc = principalsvc.New(zap.NewNop(), d.tenants, d.principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
 	return d
 }
 
@@ -421,7 +424,7 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		}})
 
 		policies := &flakyPolicies{Store: d.policies, err: store.ErrPreconditionFailed}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, d.principals, policies, d.accessKeys, d.secrets, d.grants)
+		svc := principalsvc.New(zap.NewNop(), d.tenants, d.principals, policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
 		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
 
 		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
@@ -442,7 +445,7 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		// The removal's deadline is below the stores' lock timeout, so a wait
 		// long enough reaches the caller as the context error.
 		policies := &flakyPolicies{Store: d.policies, err: context.DeadlineExceeded}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, d.principals, policies, d.accessKeys, d.secrets, d.grants)
+		svc := principalsvc.New(zap.NewNop(), d.tenants, d.principals, policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
 		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
 
 		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
@@ -459,7 +462,7 @@ func TestDeleteConcurrentChange(t *testing.T) {
 				{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
 			}})
 		}}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.secrets, d.grants)
+		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
 		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
 
 		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
@@ -470,8 +473,85 @@ func TestDeleteConcurrentChange(t *testing.T) {
 	t.Run("a lock the store gave up on is a retryable conflict", func(t *testing.T) {
 		d := setup(t)
 		principals := &lockedPrincipals{Store: d.principals, err: store.ErrLockTimeout}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.secrets, d.grants)
+		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
 		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
+	})
+}
+
+// racingKeys runs race once, after the first Add commits, standing in for a
+// removal of the key's principal that starts as the key's creation goes on to
+// store its grants.
+type racingKeys struct {
+	accesskeystore.Store
+	race  func()
+	added did.DID
+}
+
+func (r *racingKeys) Add(ctx context.Context, in accesskeystore.Input) error {
+	err := r.Store.Add(ctx, in)
+	if err == nil && r.race != nil {
+		r.added = in.ID
+		race := r.race
+		r.race = nil
+		race()
+	}
+	return err
+}
+
+// pausingDelegations closes revoked once the first Replace made while armed
+// returns, and parks there until released: a removal that has revoked under
+// the principal's row lock and has not yet deleted the key rows.
+type pausingDelegations struct {
+	delegationstore.Store
+	armed    bool
+	revoked  chan struct{}
+	released chan struct{}
+}
+
+func (p *pausingDelegations) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	err := p.Store.Replace(ctx, audiences, next)
+	if p.armed {
+		p.armed = false
+		close(p.revoked)
+		<-p.released
+	}
+	return err
+}
+
+func TestDeleteDuringKeyCreate(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("a key created as the principal is removed is left no delegations", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+		// The wildcard policy survives the removal, so the creation has grants
+		// to store.
+		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}},
+		}})
+
+		// The removal starts once the key row is committed, and the creation
+		// stores the key's grants while the removal, having revoked under the
+		// principal's row lock, has not yet deleted the row.
+		delegations := &pausingDelegations{Store: d.delegations, revoked: make(chan struct{}), released: make(chan struct{})}
+		principals := &renamingPrincipals{Store: d.principals, write: func() { delegations.armed = true }}
+		grants := grant.NewRotator(zap.NewNop(), delegations, d.accessKeys, d.secrets, d.swarf)
+		removal := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, delegations, d.secrets, d.swarf, grants)
+		removed := make(chan error, 1)
+		keys := &racingKeys{Store: d.accessKeys, race: func() {
+			go func() { removed <- removal.Delete(ctx, "tenant-1", "user-1") }()
+			<-delegations.revoked
+		}}
+		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketmemory.New(), d.policies, delegations, d.secrets, d.swarf)
+
+		_, _, _ = creator.Create(ctx, "tenant-1", "laptop", nil, nil, "user-1", nil)
+		close(delegations.released)
+		require.NoError(t, <-removed)
+
+		_, err = d.accessKeys.Get(ctx, keys.added)
+		require.ErrorIs(t, err, store.ErrRecordNotFound, "the key row is gone")
+		require.Empty(t, d.held(t, keys.added), "no delegation outlives the key")
 	})
 }
 
@@ -494,8 +574,9 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
-	grants := grant.NewRotator(zap.NewNop(), delegationpostgres.New(pool), accessKeys, secrets, swarf)
-	svc := principalsvc.New(zap.NewNop(), tenants, principals, policies, accessKeys, secrets, grants)
+	delegations := delegationpostgres.New(pool)
+	grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
+	svc := principalsvc.New(zap.NewNop(), tenants, principals, policies, accessKeys, delegations, secrets, swarf, grants)
 
 	_, _, err = svc.Create(ctx, "tenant-pg", "alice")
 	require.NoError(t, err)
