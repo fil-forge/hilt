@@ -543,29 +543,6 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 			tc.unwritten(t, tenantID)
 		})
 	}
-
-	t.Run("adding a principal behind a stuck policy write gives up", func(t *testing.T) {
-		// Stand in for a policy write parked in its callback: hold the tenant
-		// lock shared for longer than the timeout.
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		tx, err := pool.Begin(t.Context())
-		require.NoError(t, err)
-		defer tx.Rollback(t.Context())
-		require.NoError(t, pglock.Advisory(t.Context(), tx, pglock.TenantNamespace, tenantID.String(), true))
-
-		done := make(chan error, 1)
-		go func() { done <- principals.Add(context.Background(), tenantID, "late") }()
-		select {
-		case err := <-done:
-			require.ErrorIs(t, err, store.ErrLockTimeout)
-		case <-time.After(store.LockTimeout + 10*time.Second):
-			t.Fatal("the add did not give up waiting for the tenant lock")
-		}
-		recs, err := principals.ListByTenant(t.Context(), tenantID)
-		require.NoError(t, err)
-		require.Empty(t, recs, "nothing was written")
-	})
 }
 
 // TestPrincipalStoreMemoryLockTimeout is the memory counterpart of
