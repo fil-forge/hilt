@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
+	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -19,14 +20,18 @@ import (
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -96,14 +101,16 @@ func (g *growingPrincipals) ListByTenant(ctx context.Context, tenant did.DID) ([
 }
 
 // gatedPrincipals holds the nth ListByTenant until resume is closed, closing
-// reached when it gets there. A policy write makes that call from inside the
-// policy store's write, so the gate parks the write holding one store and
-// about to read the other.
+// reached when it gets there; with after set it holds once that call has
+// returned. A policy write makes that call from inside the policy store's
+// write, so the gate parks the write holding one store and about to read the
+// other, or having read it.
 type gatedPrincipals struct {
 	principalstore.Store
 	mu      sync.Mutex
 	calls   int
 	nth     int
+	after   bool
 	reached chan struct{}
 	resume  chan struct{}
 }
@@ -116,11 +123,16 @@ func (g *gatedPrincipals) ListByTenant(ctx context.Context, tenant did.DID) ([]p
 		hold = true
 	}
 	g.mu.Unlock()
-	if hold {
+	if hold && !g.after {
 		close(g.reached)
 		<-g.resume
 	}
-	return g.Store.ListByTenant(ctx, tenant)
+	recs, err := g.Store.ListByTenant(ctx, tenant)
+	if hold && g.after {
+		close(g.reached)
+		<-g.resume
+	}
+	return recs, err
 }
 
 type deps struct {
@@ -725,6 +737,49 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	access, err := svc.Access(ctx, "tenant-1", "user-1")
 	require.NoError(t, err)
 	require.Empty(t, access, "a revived principal is named in no statement")
+}
+
+// TestPrincipalAddedDuringPolicyWritePostgres adds a principal while a policy
+// write granting the wildcard is parked after its callback listed the
+// tenant's principals, so the write cannot rotate the new principal's keys.
+// The add waits for the write to commit, and the key created for the
+// principal afterwards reads the committed policy and holds its grants.
+func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := t.Context()
+	d := setup(t)
+	// The rows the policy tables reference, under the memory setup's DIDs.
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
+	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
+	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, "photos"))
+	tenants := tenantmemory.New()
+	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
+	principals := principalpostgres.New(pool)
+	policies := bucketpolicypostgres.New(pool)
+
+	// The second list is the one the policy store's callback makes.
+	reached, resume := make(chan struct{}), make(chan struct{})
+	gated := &gatedPrincipals{Store: principals, nth: 2, after: true, reached: reached, resume: resume}
+	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, gated, policies, d.rotator(d.swarf))
+	keys := accesskeysvc.New(zap.NewNop(), tenants, d.accessKeys, principals, d.buckets, policies, d.delegations, d.secrets, d.swarf)
+
+	written, added := testutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			go func() { <-reached; close(entered) }()
+			go func() { <-release; close(resume) }()
+			_, _, err := svc.Put(context.Background(), "tenant-1", "photos", doc(allow(everyone, "s3:GetObject")), nil)
+			return err
+		},
+		func() error {
+			return principals.Add(context.Background(), d.tenantID, "user-2")
+		})
+	require.NoError(t, written)
+	require.NoError(t, added)
+
+	rec, _, err := keys.Create(ctx, "tenant-1", "key", nil, nil, "user-2", nil)
+	require.NoError(t, err)
+	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, rec.ID, d.photos), "the key is created from the committed policy")
 }
 
 // TestPolicyWriteToMissingBucketPostgres writes a policy for a bucket the
