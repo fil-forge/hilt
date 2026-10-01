@@ -467,6 +467,20 @@ func TestDeleteRevokes(t *testing.T) {
 		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 	})
 
+	t.Run("deletes a key holding no delegations without the tenant key", func(t *testing.T) {
+		d := setup(t)
+		require.NoError(t, d.principals.Add(ctx, d.tenantID, "bob"))
+		created, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "bob", nil)
+		require.NoError(t, err)
+		// With nothing to revoke, the tenant's signing key is never needed.
+		require.NoError(t, d.secrets.Delete(ctx, vault.TenantKeyPath(d.tenantID)))
+
+		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
+		require.Empty(t, d.swarf.Revocations())
+		_, _, err = d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
+		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
+	})
+
 	t.Run("a revocation failure leaves the key intact", func(t *testing.T) {
 		d := setup(t)
 		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, "", nil)

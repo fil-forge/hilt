@@ -374,15 +374,18 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 
 	// The key's delegations are revoked and removed, and its record deleted,
 	// under the key's delegation lock, so a policy write rotating the key
-	// meanwhile serializes with it.
-	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantRec.ID)
-	if err != nil {
-		return err
-	}
+	// meanwhile serializes with it. The tenant key is read only when there is
+	// something to revoke: a key holding no delegations is deleted without it.
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID), zap.Stringer("access_key", id))
 	err = s.delegations.Replace(ctx, []did.DID{id}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, current[id]); err != nil {
-			return nil, err
+		if len(current[id]) > 0 {
+			issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantRec.ID)
+			if err != nil {
+				return nil, err
+			}
+			if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, current[id]); err != nil {
+				return nil, err
+			}
 		}
 		if err := s.accessKeys.Delete(ctx, id); err != nil {
 			return nil, fmt.Errorf("deleting access key: %w", err)
