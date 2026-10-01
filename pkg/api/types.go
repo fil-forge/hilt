@@ -33,11 +33,14 @@ type UpdateTenantStatusRequest struct {
 }
 
 // AccessKey is the metadata for an S3 access key (never includes the secret).
+// A service key carries its permissions and buckets; a principal-bound key
+// carries the principal it is bound to in their place.
 type AccessKey struct {
 	AccessKeyID string     `json:"accessKeyId"`
 	Name        string     `json:"name"`
-	Permissions []string   `json:"permissions"`
+	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
+	Principal   string     `json:"principal,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt"`
 	CreatedAt   time.Time  `json:"createdAt"`
 }
@@ -55,9 +58,13 @@ type AccessKeyList struct {
 }
 
 // CreateAccessKeyRequest is the body of POST /tenants/{tenantId}/access-keys.
+// Without a principal it creates a service key from the permissions and
+// buckets. With one it creates a key bound to that principal, and permissions
+// and buckets must be empty.
 type CreateAccessKeyRequest struct {
 	Name        string     `json:"name"`
-	Permissions []string   `json:"permissions"`
+	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
+	PrincipalID string     `json:"principalId,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
