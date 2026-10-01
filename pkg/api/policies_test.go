@@ -125,4 +125,22 @@ func TestPrincipalPolicyReadHandlers(t *testing.T) {
 			require.Equal(t, http.StatusNotFound, rec.Code)
 		}
 	})
+
+	t.Run("a principalId holding a slash arrives escaped and is decoded", func(t *testing.T) {
+		e, deps := setupPolicies(t)
+		require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "a/b"))
+		createPolicy(t, deps, bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("a/b"), Actions: []string{"s3:GetObject"}})
+
+		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb/access", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var access api.PrincipalAccess
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &access))
+		require.Equal(t, []api.BucketAccess{{Name: "photos", Actions: []string{"s3:GetObject"}}}, access.Buckets)
+
+		rec = doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb/policies", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var list api.PrincipalPolicyList
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+		require.Len(t, list.Items, 1)
+	})
 }
