@@ -24,8 +24,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const policyPath = "/tenants/tenant-1/buckets/photos/policy"
-
 type policyDeps struct {
 	buckets    *bucketmemory.Store
 	principals *principalmemory.Store
