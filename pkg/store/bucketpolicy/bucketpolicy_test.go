@@ -14,6 +14,7 @@ import (
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -964,5 +965,44 @@ func TestPolicyStorePostgres(t *testing.T) {
 		rec, err := s.Get(t.Context(), bucketID)
 		require.NoError(t, err)
 		require.Equal(t, doc(allow(everyone, "s3:GetObject")), rec.Policy, "the removal stripped alice from the policy the Put wrote")
+	})
+
+	t.Run("Put holds the tenant lock shared across its callback", func(t *testing.T) {
+		// A principal Add takes the tenant lock exclusive, so it waits for a
+		// Put in flight; another Put, taking it shared, does not.
+		tenantID := fx.tenant(t)
+		bucketID := fx.bucket(t, tenantID)
+
+		written, added := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
+				}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
+					tx, err := pool.Begin(ctx)
+					if err != nil {
+						return err
+					}
+					if err := pglock.Advisory(ctx, tx, pglock.TenantNamespace, tenantID.String(), true); err != nil {
+						return fmt.Errorf("shared request during the Put: %w", err)
+					}
+					if err := tx.Rollback(ctx); err != nil { // released before the exclusive request starts
+						return err
+					}
+					close(entered)
+					<-release
+					return nil
+				})
+				return err
+			},
+			func() error {
+				tx, err := pool.Begin(context.Background())
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback(context.Background())
+				return pglock.Advisory(context.Background(), tx, pglock.TenantNamespace, tenantID.String(), false)
+			})
+		require.NoError(t, written)
+		require.NoError(t, added)
 	})
 }
