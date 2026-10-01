@@ -421,6 +421,24 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	return out, nil
 }
 
+// policyETag reads the bucket policy's entity tag share-locked, so a policy
+// write in flight is waited out and its ETag read once it commits. A bucket
+// with no policy reports "", as [auth.Authorizer.EffectiveActions] does. A
+// wait the store gave up on is [auth.ErrTemporarilyUnavailable].
+func (s *Service) policyETag(ctx context.Context, bucketID did.DID) (string, error) {
+	rec, err := s.policies.Get(ctx, bucketID, store.WithShareLock())
+	if errors.Is(err, store.ErrRecordNotFound) {
+		return "", nil
+	}
+	if errors.Is(err, store.ErrLockTimeout) {
+		return "", fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("looking up bucket policy: %w", err)
+	}
+	return rec.ETag, nil
+}
+
 // Info resolves the named bucket and returns its DID, the access key's permissions,
 // and the proof chains for the access key's delegations that reach the bucket.
 // It carries no signed S3 request, so there is no signature to authenticate:
@@ -464,6 +482,26 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, auth.ErrForeignBucket
 	}
 
+	// A service key carries its own permission set; a principal-bound key its
+	// principal's effective actions on the bucket, whose stored grants over the
+	// bucket are the commands those actions map to. The authorizer reads the
+	// principal and the policy share-locked, so Info observes the same settled
+	// state as authorize: a removed principal is an unknown key, and a bucket
+	// the principal cannot reach is unknown.
+	permissions, etag := akRec.Permissions, ""
+	if akRec.Principal != nil {
+		eff, tag, err := s.authorizer.EffectiveActions(ctx, b.Tenant, *akRec.Principal, b.ID)
+		if errors.Is(err, auth.ErrUnknownAccessKey) {
+			return nil, nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
+		} else if err != nil {
+			return nil, nil, err
+		}
+		if len(eff) == 0 {
+			return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+		}
+		permissions, etag = eff, tag
+	}
+
 	// Build the proof chains from the bucket to the access key: for each grant to
 	// the access key that reaches this bucket (scoped to it or powerline), resolve
 	// its chain up to the bucket→tenant root.
@@ -501,6 +539,26 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		}
 	}
 
+	// The effective actions and the delegation reads above are not tied
+	// together: a policy write rotates the grants and commits them before the
+	// policy row it belongs to becomes visible, so one landing between them
+	// pairs the old actions with the new grants. ProofChain reads by command
+	// and subject, so it too can return a chain the write just stored. Both
+	// s3:GetObject and s3:ListBucket map to /content/retrieve, so that pairing
+	// can report an action the write removed over a chain that still serves it.
+	// The reread comes after every delegation read and waits on a write still
+	// in flight, whose grants may already have been read, and a policy that
+	// moved meanwhile says the caller should ask again.
+	if akRec.Principal != nil {
+		settled, err := s.policyETag(ctx, b.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if settled != etag {
+			return nil, nil, fmt.Errorf("%w: the bucket policy is being rewritten", auth.ErrTemporarilyUnavailable)
+		}
+	}
+
 	s.logger.Debug("bucket info",
 		zap.Stringer("bucket", b.ID),
 		zap.String("name", args.Name),
@@ -509,7 +567,7 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 	return &s3bkt.InfoOK{
 		ID: b.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			args.AccessKey: akRec.Permissions,
+			args.AccessKey: permissions,
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil
