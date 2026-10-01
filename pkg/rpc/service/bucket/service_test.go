@@ -20,14 +20,20 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/libforge/commands/content"
@@ -768,4 +774,128 @@ func TestInfo(t *testing.T) {
 		require.Empty(t, ok.Delegations.Entries)
 		require.Empty(t, blocks)
 	})
+}
+
+// TestInfoDuringPolicyWrite runs a principal-bound Info against Postgres while
+// a policy write is in flight. The write starts after Info has read the
+// effective actions, commits the narrowed grants from its callback as the
+// rotation does, and parks before the policy row is written. Info lists the
+// new grants, so it must wait for the write to settle before it rereads the
+// policy rather than pair them with the old actions.
+func TestInfoDuringPolicyWrite(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
+	ctx := t.Context()
+	principals, policies := principalpostgres.New(pool), bucketpolicypostgres.New(pool)
+	tenants, buckets, delegations := tenantpostgres.New(pool), bucketpostgres.New(pool), delegationpostgres.New(pool)
+	accessKeys := accesskeymemory.New()
+
+	akSigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	akDID := akSigner.KeyDID()
+	tenantSigner, err := secp256k1.Generate()
+	require.NoError(t, err)
+	tenantID := tenantSigner.KeyDID()
+	tenantIssuer := multikey.NewIssuer(tenantID, tenantSigner)
+	bucketSigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	bucketID := bucketSigner.KeyDID()
+	providerID := testutil.RandomDID(t)
+	const bucketName = "infowrite"
+
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, tenantID.String(), nil))
+	require.NoError(t, tenants.Add(ctx, tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
+	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
+	principal := "user-1"
+	require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Principal: &principal}))
+
+	root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
+	require.NoError(t, err)
+	grants, err := grant.Issue(tenantIssuer, akDID, []did.DID{bucketID}, []string{"s3:GetObject", "s3:ListBucket"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, delegations.PutBatch(ctx, append([]ucan.Delegation{root}, grants...)))
+
+	statement := func(actions ...string) bucketpolicy.Policy {
+		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions}}}
+	}
+	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket")}, nil)
+	require.NoError(t, err)
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWriter := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseWriter()
+	wrote := make(chan error, 1)
+	straddle := &writeOnFirstList{Store: delegations, write: func() {
+		go func() {
+			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
+				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:ListBucket"), IfMatch: &etag,
+			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
+				// The rotation commits the new grants in its own transaction
+				// before the policy row is written.
+				narrowed, err := grant.Issue(tenantIssuer, akDID, []did.DID{bucketID}, []string{"s3:ListBucket"}, nil)
+				if err != nil {
+					return err
+				}
+				if err := delegations.Replace(ctx, []did.DID{akDID}, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					return map[did.DID][]ucan.Delegation{akDID: narrowed}, nil
+				}); err != nil {
+					return err
+				}
+				close(entered)
+				<-release
+				return nil
+			})
+			wrote <- err
+		}()
+		select {
+		case <-entered:
+		case err := <-wrote:
+			t.Errorf("the writer returned before taking its lock: %v", err)
+		case <-time.After(htestutil.WaitTimeout):
+			t.Error("the writer did not take its lock")
+		}
+	}}
+
+	az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, policies, vaultmemory.New())
+	svc := bucketsvc.New(zap.NewNop(), az, buckets, straddle, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{})
+
+	type result struct {
+		ok  *s3bkt.InfoOK
+		err error
+	}
+	answered := make(chan result, 1)
+	go func() {
+		ok, _, err := svc.Info(context.Background(), providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		answered <- result{ok, err}
+	}()
+
+	// Info must still be waiting while the writer holds its lock.
+	select {
+	case <-entered:
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the write never started")
+	}
+	var res result
+	select {
+	case res = <-answered:
+	case <-time.After(htestutil.MinBlock):
+		releaseWriter()
+		select {
+		case res = <-answered:
+		case <-time.After(htestutil.WaitTimeout):
+			t.Fatal("Info did not return after the writer finished")
+		}
+	}
+	releaseWriter()
+	select {
+	case err := <-wrote:
+		require.NoError(t, err)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the writer did not finish")
+	}
+	if res.err == nil {
+		t.Fatalf("Info answered %v over the new grants while the write was in flight", res.ok.Permissions.Entries[akDID])
+	}
+	require.ErrorIs(t, res.err, auth.ErrTemporarilyUnavailable)
 }

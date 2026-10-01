@@ -421,12 +421,17 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	return out, nil
 }
 
-// policyETag reads the bucket policy's entity tag without a lock. A bucket
-// with no policy reports "", as [auth.Authorizer.EffectiveActions] does.
+// policyETag reads the bucket policy's entity tag share-locked, so a policy
+// write in flight is waited out and its ETag read once it commits. A bucket
+// with no policy reports "", as [auth.Authorizer.EffectiveActions] does. A
+// wait the store gave up on is [auth.ErrTemporarilyUnavailable].
 func (s *Service) policyETag(ctx context.Context, bucketID did.DID) (string, error) {
-	rec, err := s.policies.Get(ctx, bucketID)
+	rec, err := s.policies.Get(ctx, bucketID, store.WithShareLock())
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return "", nil
+	}
+	if errors.Is(err, store.ErrLockTimeout) {
+		return "", fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, err)
 	}
 	if err != nil {
 		return "", fmt.Errorf("looking up bucket policy: %w", err)
@@ -516,8 +521,9 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 	// visible, so one landing between them pairs the old actions with the new
 	// grants. Both s3:GetObject and s3:ListBucket map to /content/retrieve, so
 	// that pairing can report an action the write removed over a chain that
-	// still serves it. A policy that moved meanwhile says the caller should ask
-	// again.
+	// still serves it. The reread waits on a write still in flight, whose grants
+	// may already be listed, and a policy that moved meanwhile says the caller
+	// should ask again.
 	if akRec.Principal != nil {
 		settled, err := s.policyETag(ctx, b.ID)
 		if err != nil {
