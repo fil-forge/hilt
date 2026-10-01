@@ -34,7 +34,8 @@ func TestNewIdentityMissingKeyFile(t *testing.T) {
 	require.Error(t, err)
 }
 
-// newRPCApp builds the RPC module over in-memory backends and returns the two
+// newRPCApp builds the RPC module, with the API module that provides the
+// policy writes CreateBucket uses, over in-memory backends and returns the two
 // route groups and the server built from them, so a test sees the wiring the
 // app actually gets (RPCModule decides which group a handler joins). fx.New
 // executes Invoke functions immediately, so the values are populated without
@@ -53,6 +54,7 @@ func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *
 		appfx.LoggerModule,
 		appfx.IdentityModule,
 		appfx.RevocationModule,
+		appfx.APIModule,
 		appfx.RPCModule,
 		storememory.Module,
 		vaultmemory.Module,
