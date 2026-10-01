@@ -135,9 +135,11 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 // beforeCommit while holding the lock, sets deleted_at and commits. A locked
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
 //
-// The lock is held across beforeCommit, which rewrites the policies naming the
-// principal in transactions of its own. Those policy writes take locks back on
-// this table through the index foreign key, so the wait here and the wait
+// The lock is held across beforeCommit, which checks that no policy names the
+// principal, revokes what its keys hold and deletes their rows, in
+// transactions of its own; the caller strips the principal from its policies
+// before locking. A policy write naming the principal meanwhile key-share
+// locks this row and waits for the outcome, so the wait here and the wait
 // there are bounded at [store.LockTimeout] and one of the two callers is given
 // [store.ErrLockTimeout] to retry instead of both hanging.
 func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) (err error) {
