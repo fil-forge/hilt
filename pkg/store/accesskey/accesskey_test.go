@@ -140,6 +140,21 @@ func TestAccessKeyStore(t *testing.T) {
 				require.Nil(t, rec.Buckets)
 			})
 
+			t.Run("Add keeps the principal when the caller later changes its variable", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				tenantID := testutil.RandomDID(t)
+				seed.tenant(t, tenantID)
+				seed.principal(t, tenantID, "user-1")
+				principal := "user-1"
+				require.NoError(t, s.Add(t.Context(), accesskey.Input{ID: id, Tenant: tenantID, Name: "laptop", Principal: &principal}))
+				principal = "user-2"
+
+				rec, err := s.Get(t.Context(), id)
+				require.NoError(t, err)
+				require.NotNil(t, rec.Principal)
+				require.Equal(t, "user-1", *rec.Principal)
+			})
+
 			t.Run("Get honours the share lock option", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
