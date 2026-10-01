@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
@@ -680,11 +681,18 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 
 // policyFromHeader reads the policy a CreateBucket request carries in
 // [PolicyHeader]. It returns nil when the header is absent. The header must be
-// covered by the request signature and decode as base64 JSON; otherwise the
-// error wraps [bucketpolicy.ErrInvalidPolicy], which the caller records as the
-// InvalidBucketPolicy failure. The document's content is validated when it is
-// stored.
+// non-blank, covered by the request signature and decode as base64 JSON;
+// otherwise the error wraps [bucketpolicy.ErrInvalidPolicy], which the caller
+// records as the InvalidBucketPolicy failure. The document's content is
+// validated when it is stored.
 func policyFromHeader(authz *auth.AuthorizedRequest, headers map[string]string) (*bucketpolicy.Policy, error) {
+	// HeaderValue reads an empty value as absent; a header that is present
+	// but blank is a refusal, not a bucket without a policy.
+	for k, v := range headers {
+		if strings.EqualFold(k, PolicyHeader) && strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf("%s is empty: %w", PolicyHeader, bucketpolicy.ErrInvalidPolicy)
+		}
+	}
 	encoded, ok := auth.HeaderValue(headers, PolicyHeader)
 	if !ok {
 		return nil, nil
