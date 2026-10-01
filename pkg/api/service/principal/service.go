@@ -4,12 +4,12 @@
 // appears in no UCAN; each key bound to it holds the delegations the policies
 // grant the principal.
 //
-// Removal is the one operation that spans three tables. It runs under the
-// principal store's row lock: the callback revokes the delegations of the
-// principal's keys, strips the principal from every policy naming it, and
-// deletes its keys, and only then does the store mark the row removed and commit. A
-// failure part way leaves the principal with narrower access and a retryable
-// delete.
+// Removal is the one operation that spans three tables. It first strips the
+// principal from every policy naming it, then takes the principal store's row
+// lock: the callback checks that no policy names the principal again, revokes
+// the delegations of the principal's keys and deletes the keys, and only then
+// does the store mark the row removed and commit. A failure part way leaves the
+// principal with narrower access and a retryable delete.
 //
 // Known errors are in errors.go so handlers can map them to HTTP responses;
 // unexpected failures are returned wrapped for the handler to log.
