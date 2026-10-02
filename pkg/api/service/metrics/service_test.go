@@ -106,7 +106,6 @@ func TestSampleUsesThePersistedProofChain(t *testing.T) {
 	require.Equal(t, []did.DID{bucketID}, seen.subjects)
 }
 
-
 // A range lying wholly in the future is a valid question with no data behind it
 // yet. Clamping its end to the present puts that end before its start, and the
 // upload service rejects an inverted range, so the series has to be answered
