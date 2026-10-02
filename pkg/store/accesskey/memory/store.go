@@ -13,24 +13,47 @@ import (
 )
 
 type Store struct {
-	mutex sync.RWMutex
-	keys  map[did.DID]accesskey.Record
+	mutex      sync.RWMutex
+	keys       map[did.DID]accesskey.Record
+	principals func(ctx context.Context, tenant did.DID, principal string, fn func() error) error
 }
 
 var _ accesskey.Store = (*Store)(nil)
 
-func New() *Store {
-	return &Store{keys: map[did.DID]accesskey.Record{}}
+// Option configures a Store.
+type Option func(*Store)
+
+// WithPrincipals makes Add run a principal-bound key's insert inside guard,
+// which holds the principal against a removal and refuses one that is not
+// live with [store.ErrInvalidArgument], as the Postgres insert's FOR SHARE on
+// the principal row does. The memory principal store's WithLive is the guard.
+// Without it any principal may be named.
+func WithPrincipals(guard func(ctx context.Context, tenant did.DID, principal string, fn func() error) error) Option {
+	return func(s *Store) { s.principals = guard }
 }
 
-// Add stores the record. Like the other memory stores it enforces no
-// referential integrity: a principal-bound key is accepted whether or not the
-// principal exists.
+func New(opts ...Option) *Store {
+	s := &Store{keys: map[did.DID]accesskey.Record{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// Add stores the record. It enforces no referential integrity of its own: a
+// principal-bound key's principal is checked only when the store is built with
+// [WithPrincipals], and then the insert runs while the principal is held.
 func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 	if err := in.Validate(); err != nil {
 		return err
 	}
+	if in.Principal != nil && s.principals != nil {
+		return s.principals(ctx, in.Tenant, *in.Principal, func() error { return s.add(in) })
+	}
+	return s.add(in)
+}
 
+func (s *Store) add(in accesskey.Input) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
