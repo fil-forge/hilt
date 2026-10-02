@@ -9,6 +9,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -142,9 +143,21 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	return store.Page[bucket.Record]{Cursor: cursor, Results: recs}, nil
 }
 
+// Delete removes the bucket row, and with it, by cascade, its policy. Inside a
+// callback whose ctx carries a transaction (see [pglock.WithTx]) the delete
+// joins that transaction.
 func (s *Store) Delete(ctx context.Context, id did.DID) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM bucket WHERE id = $1`, id.String()); err != nil {
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	if _, err := tx.Exec(ctx, `DELETE FROM bucket WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting bucket: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
