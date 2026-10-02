@@ -126,7 +126,7 @@ func ParseRange(from, to, window string) (time.Time, time.Time, time.Duration, e
 
 // Bucket returns the usage series for one of the tenant's buckets. It may return
 // [ErrTenantNotFound] or [ErrBucketNotFound], or a failure named by the upload
-// service.
+// service. A range starting in the future holds no samples yet and returns none.
 func (s *Service) Bucket(ctx context.Context, externalID, bucketName string, from, to time.Time, window time.Duration) ([]Sample, error) {
 	tenantRec, err := s.tenant(ctx, externalID)
 	if err != nil {
@@ -144,16 +144,22 @@ func (s *Service) Bucket(ctx context.Context, externalID, bucketName string, fro
 		return nil, ErrBucketNotFound
 	}
 
+	end := s.clamp(to)
+	if !end.After(from) {
+		return []Sample{}, nil
+	}
+
 	issuer, err := s.tenantIssuer(ctx, tenantRec.ID)
 	if err != nil {
 		return nil, err
 	}
-	return s.sample(ctx, issuer, page.Results[0].ID, from, s.clamp(to), window)
+	return s.sample(ctx, issuer, page.Results[0].ID, from, end, window)
 }
 
 // Tenant returns the usage series for every bucket the tenant holds, summed. It
 // may return [ErrTenantNotFound], or a failure named by the upload service. A
-// tenant holding no buckets has nothing to report and returns no samples.
+// tenant holding no buckets, and a range starting in the future, each have
+// nothing to report and return no samples.
 func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.Time, window time.Duration) ([]Sample, error) {
 	tenantRec, err := s.tenant(ctx, externalID)
 	if err != nil {
@@ -174,16 +180,19 @@ func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.T
 		return []Sample{}, nil
 	}
 
-	issuer, err := s.tenantIssuer(ctx, tenantRec.ID)
-	if err != nil {
-		return nil, err
-	}
-
 	// Clamped once, before the fan out. The upload service shortens a range
 	// running past its own clock, so sampling each bucket against its own
 	// reading of "now" would end their last buckets at different instants and
 	// leave the sum carrying two nearly identical trailing samples.
 	end := s.clamp(to)
+	if !end.After(from) {
+		return []Sample{}, nil
+	}
+
+	issuer, err := s.tenantIssuer(ctx, tenantRec.ID)
+	if err != nil {
+		return nil, err
+	}
 
 	var mu sync.Mutex
 	runs := make([][]Sample, len(buckets))
@@ -271,6 +280,11 @@ func sum(runs [][]Sample) []Sample {
 
 // clamp keeps the end of a range at or before the present, so every bucket of a
 // tenant-wide query is asked for the same one.
+//
+// A range lying wholly in the future clamps to an end at or before its start.
+// That is a well-formed question with no data to answer it yet, so callers
+// return an empty series rather than asking the upload service, which would
+// reject the inverted range as invalid.
 func (s *Service) clamp(to time.Time) time.Time {
 	if now := s.now(); to.After(now) {
 		return now

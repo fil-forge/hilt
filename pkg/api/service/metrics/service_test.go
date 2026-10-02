@@ -32,6 +32,7 @@ import (
 // served, so a test can tell which space was asked about.
 type sampled struct {
 	subjects []did.DID
+	args     []*metricscmds.SampleArguments
 }
 
 // setup wires the metrics service over memory stores against an in-process Sprue
@@ -71,6 +72,7 @@ func setup(t *testing.T) (*metricssvc.Service, did.DID, *sampled) {
 		func(req *binding.Request[*metricscmds.SampleArguments], res *binding.Response[*metricscmds.SampleOK]) error {
 			args := req.Task().Arguments()
 			seen.subjects = append(seen.subjects, req.Task().Subject())
+			seen.args = append(seen.args, args)
 			return res.SetSuccess(&metricscmds.SampleOK{
 				From: args.From, To: args.To, Window: args.Window,
 				Samples: []metricscmds.SampleItem{{
@@ -102,4 +104,52 @@ func TestSampleUsesThePersistedProofChain(t *testing.T) {
 	require.Equal(t, uint64(1024), samples[0].BytesStored)
 	require.Equal(t, uint64(3), samples[0].ObjectCount)
 	require.Equal(t, []did.DID{bucketID}, seen.subjects)
+}
+
+
+// A range lying wholly in the future is a valid question with no data behind it
+// yet. Clamping its end to the present puts that end before its start, and the
+// upload service rejects an inverted range, so the series has to be answered
+// here instead of being asked for.
+func TestFutureOnlyRangeReturnsNoSamplesWithoutAsking(t *testing.T) {
+	from := time.Now().Add(24 * time.Hour).UTC()
+
+	t.Run("bucket", func(t *testing.T) {
+		svc, _, seen := setup(t)
+		samples, err := svc.Bucket(t.Context(), "tenant-1", "bucket-a", from, from.Add(time.Hour), time.Hour)
+		require.NoError(t, err)
+		require.Empty(t, samples)
+		require.Empty(t, seen.args, "no invocation should reach the upload service")
+	})
+
+	t.Run("tenant", func(t *testing.T) {
+		svc, _, seen := setup(t)
+		samples, err := svc.Tenant(t.Context(), "tenant-1", from, from.Add(time.Hour), time.Hour)
+		require.NoError(t, err)
+		require.Empty(t, samples)
+		require.Empty(t, seen.args, "no invocation should reach the upload service")
+	})
+}
+
+// A range straddling the present keeps the part that has already happened.
+func TestRangeEndingInTheFutureIsTrimmedNotDropped(t *testing.T) {
+	svc, _, seen := setup(t)
+	from := time.Now().Add(-time.Hour).UTC()
+
+	samples, err := svc.Bucket(t.Context(), "tenant-1", "bucket-a", from, from.Add(24*time.Hour), time.Hour)
+	require.NoError(t, err)
+	require.Len(t, samples, 1)
+	require.Len(t, seen.args, 1)
+	require.Greater(t, seen.args[0].To, seen.args[0].From)
+	require.Less(t, seen.args[0].To, from.Add(24*time.Hour).Unix(), "the end should be clamped to the present")
+}
+
+// An unknown bucket is still a 404, even when the range would have been empty:
+// the resource genuinely does not exist, and that is the more specific answer.
+func TestUnknownBucketOutranksAnEmptyRange(t *testing.T) {
+	svc, _, _ := setup(t)
+	from := time.Now().Add(24 * time.Hour).UTC()
+
+	_, err := svc.Bucket(t.Context(), "tenant-1", "nope", from, from.Add(time.Hour), time.Hour)
+	require.ErrorIs(t, err, metricssvc.ErrBucketNotFound)
 }
