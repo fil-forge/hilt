@@ -44,7 +44,7 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err
 		return fmt.Errorf("principal external ID is required: %w", store.ErrInvalidArgument)
 	}
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -93,7 +93,7 @@ func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts
 		return pglock.Found(rec, err, "principal")
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return principal.Record{}, fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -136,15 +136,16 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
 //
 // The lock is held across beforeCommit, which checks that no policy names the
-// principal, revokes what its keys hold and deletes their rows, in
-// transactions of its own; the caller strips the principal from its policies
-// before locking. A policy write naming the principal meanwhile key-share
+// principal, revokes what its keys hold and deletes their rows. It receives
+// this transaction through [pglock.WithTx], so a store that opens with
+// [pglock.Begin] writes inside it and commits or rolls back with the removal;
+// the caller strips the principal from its policies before locking. A policy write naming the principal meanwhile key-share
 // locks this row and waits for the outcome, so the wait here and the wait
 // there are bounded at [store.LockTimeout] and one of the two callers is given
 // [store.ErrLockTimeout] to retry instead of both hanging.
 func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) (err error) {
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -168,7 +169,7 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	}
 
 	if beforeCommit != nil {
-		if err := beforeCommit(ctx); err != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx)); err != nil {
 			return fmt.Errorf("before tombstoning principal: %w", err)
 		}
 	}
@@ -192,13 +193,15 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 // removal holds is bounded at [store.LockTimeout] and a longer one returns
 // [store.ErrLockTimeout]. The mode blocks a share-locked Get and a Tombstone, and
 // leaves alone the FOR KEY SHARE a policy write holds on the principals it
-// names, since fn may run inside that write.
+// names, since fn may run inside that write. fn receives this transaction
+// through [pglock.WithTx], so a store that opens with [pglock.Begin] writes
+// inside it.
 func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) (err error) {
 	if len(externalIDs) == 0 {
 		return fn(ctx)
 	}
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -216,7 +219,7 @@ func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []stri
 	`, tenant.String(), externalIDs); err != nil {
 		return fmt.Errorf("locking principals: %w", err)
 	}
-	if err := fn(ctx); err != nil {
+	if err := fn(pglock.WithTx(ctx, tx)); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -231,7 +234,7 @@ func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []stri
 // [store.ErrLockTimeout] with nothing written.
 func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) {
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
