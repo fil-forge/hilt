@@ -123,11 +123,17 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   and cover it in that suite.
 - **Locking and callbacks**: a write that another service must learn about runs
   in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
-  caller-supplied `beforeCommit` callback, commit. A policy write's callback
-  rewrites the affected keys' delegations and publishes the revocations before
-  anything is stored, so a failed publish rolls the write back and leaves the
-  principal with its old access, never with more (`pkg/api/service/bucketpolicy`
-  and `grant.Rotator` document the sequence and its recovery). A reader that
+  caller-supplied `beforeCommit` callback, commit. The callback's ctx carries
+  the transaction (`pglock.WithTx`), and a store that opens its own through
+  `pglock.Begin` joins it, so what the callback writes commits with the
+  caller's write or not at all. A policy write's callback rewrites the
+  affected keys' delegations and publishes the revocations before anything is
+  stored, so a failure before the commit, a failed publish included, rolls the
+  write and the rotation back together and leaves the principal with its old
+  access, never with more; a publish that succeeded followed by a commit that
+  failed leaves revoked grants without a replacement, the one window the
+  gateway's revoked set covers (`pkg/api/service/bucketpolicy` and
+  `grant.Rotator` document the sequence). A reader that
   must not be answered from a snapshot older than an in-flight write passes
   `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
   `store.LockTimeout` and a statement that gives up returns
