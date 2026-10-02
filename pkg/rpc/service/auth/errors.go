@@ -87,6 +87,8 @@ var (
 	// key, its principal or the bucket's policy waited out the store's lock
 	// timeout behind a write still committing. Nothing about the request was
 	// decided; a retry is answered from whichever state the write leaves. The
-	// returned error wraps [store.ErrLockTimeout] as well.
+	// returned error wraps [store.ErrLockTimeout] as well. Bucket info also
+	// returns it, without the store's timeout, when the policy or the key's
+	// grants moved between its reads.
 	ErrTemporarilyUnavailable = errors.New(TemporarilyUnavailableErrorName, "authorization state is being changed, retry the request")
 )
