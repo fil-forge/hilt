@@ -300,3 +300,16 @@ func TestRotatorPublishesUnderBatchTimeout(t *testing.T) {
 		require.LessOrEqual(t, left, grant.BatchTimeout)
 	}
 }
+
+// PublishRevocations bounds its own publish, so a caller that holds a
+// delegation lock with no deadline of its own still releases it at BatchTimeout.
+func TestPublishRevocationsUnderBatchTimeout(t *testing.T) {
+	d := setup(t, nil)
+	pub := &deadlinePublisher{FakeSwarf: d.swarf}
+	held := d.held(t, d.alice[0], d.photos)
+	require.NotEmpty(t, held)
+	require.NoError(t, grant.PublishRevocations(context.Background(), zap.NewNop(), pub, d.tenant, held))
+	require.Len(t, pub.remaining, 1)
+	require.Greater(t, pub.remaining[0], time.Duration(0))
+	require.LessOrEqual(t, pub.remaining[0], grant.BatchTimeout)
+}
