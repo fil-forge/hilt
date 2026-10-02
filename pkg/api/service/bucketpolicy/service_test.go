@@ -19,12 +19,14 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -39,6 +41,7 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -780,6 +783,139 @@ func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
 	rec, _, err := keys.Create(ctx, "tenant-1", "key", nil, nil, "user-2", nil)
 	require.NoError(t, err)
 	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, rec.ID, d.photos), "the key is created from the committed policy")
+}
+
+// postgresDeps is the memory setup's world on Postgres: the rows the policy
+// tables reference under the setup's DIDs, and the stores a write's callback
+// joins the transaction of.
+type postgresDeps struct {
+	tenants     *tenantmemory.Store
+	principals  *principalpostgres.Store
+	policies    *bucketpolicypostgres.Store
+	accessKeys  *accesskeypostgres.Store
+	delegations *delegationpostgres.Store
+}
+
+func (d deps) postgres(t *testing.T, pool *pgxpool.Pool) postgresDeps {
+	t.Helper()
+	ctx := t.Context()
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
+	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
+	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, "photos"))
+	tenants := tenantmemory.New()
+	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
+	return postgresDeps{
+		tenants:     tenants,
+		principals:  principalpostgres.New(pool),
+		policies:    bucketpolicypostgres.New(pool),
+		accessKeys:  accesskeypostgres.New(pool),
+		delegations: delegationpostgres.New(pool),
+	}
+}
+
+// over returns the commands the key holds over the bucket in the Postgres
+// delegation store, sorted.
+func (p postgresDeps) over(t *testing.T, key, bucket did.DID) []string {
+	t.Helper()
+	page, err := p.delegations.ListByAudience(t.Context(), key)
+	require.NoError(t, err)
+	var out []string
+	for _, dlg := range page.Results {
+		if dlg.Subject() == bucket {
+			out = append(out, dlg.Command().String())
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// afterLock calls after once, when the first Lock returns: under a policy
+// write that is after the rotation and before the document is written, with
+// the write's transaction still open.
+type afterLock struct {
+	principalstore.Store
+	after func()
+}
+
+func (a *afterLock) Lock(ctx context.Context, tenant did.DID, ids []string, fn func(context.Context) error) error {
+	err := a.Store.Lock(ctx, tenant, ids, fn)
+	if a.after != nil {
+		after := a.after
+		a.after = nil
+		after()
+	}
+	return err
+}
+
+// TestPolicyWriteCancelledAfterRotationPostgres cancels a policy write once
+// its rotation has run and its principal lock call has returned, before the
+// document is written. The rotation's delegation writes joined the policy
+// transaction, so the old policy stays with its own grants: a principal is
+// never left with the grants of a policy that was not stored.
+func TestPolicyWriteCancelledAfterRotationPostgres(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := t.Context()
+	d := setup(t)
+	pg := d.postgres(t, pool)
+	require.NoError(t, pg.principals.Add(ctx, d.tenantID, "user-1"))
+	key := testutil.RandomDID(t)
+	user := "user-1"
+	require.NoError(t, pg.accessKeys.Add(ctx, accesskeystore.Input{ID: key, Tenant: d.tenantID, Name: "laptop", Principal: &user}))
+
+	rotator := grant.NewRotator(zap.NewNop(), pg.delegations, pg.accessKeys, d.secrets, d.swarf)
+	svc := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, pg.principals, pg.policies, rotator)
+	etagA, _, err := svc.Put(ctx, "tenant-1", "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:ListBucket")), nil)
+	require.NoError(t, err)
+	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), pg.over(t, key, d.photos))
+
+	writeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	principals := &afterLock{Store: pg.principals, after: cancel}
+	cancelling := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, principals, pg.policies, rotator)
+	_, _, err = cancelling.Put(writeCtx, "tenant-1", "photos", doc(allow(only("user-1"), "s3:ListBucket")), &etagA)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, principals.after, "the rotation ran")
+
+	rec, err := pg.policies.Get(ctx, d.photos)
+	require.NoError(t, err)
+	require.Equal(t, etagA, rec.ETag, "the document was not replaced")
+	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), pg.over(t, key, d.photos), "and the key keeps the stored policy's grants")
+}
+
+// TestKeyCreatedDuringPolicyCreatePostgres creates a key for an existing
+// principal while the first policy naming it is being written, parked once
+// its principal lock call has returned. The write holds the principal's row
+// until it commits, so the creation waits and then reads the committed policy,
+// and the key holds its grants.
+func TestKeyCreatedDuringPolicyCreatePostgres(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := t.Context()
+	d := setup(t)
+	pg := d.postgres(t, pool)
+	require.NoError(t, pg.principals.Add(ctx, d.tenantID, "user-1"))
+	// The principal holds a key already, so the write has a rotation to run.
+	user := "user-1"
+	require.NoError(t, pg.accessKeys.Add(ctx, accesskeystore.Input{ID: testutil.RandomDID(t), Tenant: d.tenantID, Name: "phone", Principal: &user}))
+
+	keys := accesskeysvc.New(zap.NewNop(), pg.tenants, pg.accessKeys, pg.principals, d.buckets, pg.policies, pg.delegations, d.secrets, d.swarf)
+	var created accesskeystore.Record
+	written, added := testutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			principals := &afterLock{Store: pg.principals, after: func() { close(entered); <-release }}
+			svc := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, principals, pg.policies,
+				grant.NewRotator(zap.NewNop(), pg.delegations, pg.accessKeys, d.secrets, d.swarf))
+			_, _, err := svc.Put(context.Background(), "tenant-1", "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+			return err
+		},
+		func() error {
+			var err error
+			created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, "user-1", nil)
+			return err
+		})
+	require.NoError(t, written)
+	require.NoError(t, added)
+	require.Equal(t, commandsFor("s3:GetObject"), pg.over(t, created.ID, d.photos), "the key is created from the committed policy")
 }
 
 // TestPolicyWriteToMissingBucketPostgres writes a policy for a bucket the
