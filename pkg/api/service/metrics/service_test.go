@@ -15,6 +15,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
+	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -23,7 +24,6 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
-	"github.com/fil-forge/ucantone/binding"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
