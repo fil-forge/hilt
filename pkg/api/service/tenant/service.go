@@ -431,6 +431,10 @@ func (s *Service) revokeKeyDelegations(ctx context.Context, log *zap.Logger, ten
 	if err != nil {
 		return err
 	}
+	// The publish runs while the keys' delegations are locked, so the whole
+	// write is bounded at the batch deadline, as the rotator's is.
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
 	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		var all []ucan.Delegation
 		for _, held := range current {
