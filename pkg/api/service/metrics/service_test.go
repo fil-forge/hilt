@@ -156,7 +156,6 @@ func TestUnknownBucketOutranksAnEmptyRange(t *testing.T) {
 	require.ErrorIs(t, err, metricssvc.ErrBucketNotFound)
 }
 
-
 // The wire carries whole Unix seconds, so a range finer than that collapses on
 // the way out. Resolving the bounds here means the API accepts exactly the
 // ranges it can forward, and a caller gets a reason rather than an upstream
