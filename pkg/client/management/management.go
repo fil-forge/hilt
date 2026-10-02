@@ -231,8 +231,9 @@ func (c *Client) doQuery(ctx context.Context, method string, segments []string, 
 }
 
 // resolve appends the segments to the base URL, one escaped path element each.
-// Tenant and principal ids are opaque — the API refuses only the empty id, one
-// over 255 bytes, and "*" — so a segment can hold "/", "%", a space or "..",
+// Tenant and principal ids are opaque (a tenant id need only be non-empty; a
+// principal id is refused when empty, over 255 bytes, not valid UTF-8, holding
+// a NUL, or "*"), so a segment can hold "/", "%", a space or "..",
 // and each must stay a single element. Neither url.URL.JoinPath nor path.Join
 // can be used for that: both split a segment on "/" and clean away "." and
 // ".." elements, so DeletePrincipal(t, "..") would issue DELETE /tenants/t (a
