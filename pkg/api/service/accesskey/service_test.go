@@ -3,6 +3,7 @@ package accesskey_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -78,11 +79,15 @@ type deps struct {
 // setup is setupWith over the memory stores.
 func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
 	t.Helper()
-	return setupWith(t, backend{
+	return setupWith(t, memoryBackend(t), wrapAccessKeys...)
+}
+
+func memoryBackend(t *testing.T) backend {
+	return backend{
 		tenants: tenantmemory.New(), accessKeys: accesskeymemory.New(), principals: principalmemory.New(),
 		buckets: bucketmemory.New(), delegations: delegationmemory.New(), policies: bucketpolicymemory.New(),
 		providerID: testutil.RandomDID(t),
-	}, wrapAccessKeys...)
+	}
 }
 
 // setupPostgres is setup over the Postgres stores, for what only a real
@@ -592,4 +597,59 @@ func TestDeletePostgresRollsBackAfterRowDelete(t *testing.T) {
 	require.Empty(t, page.Results)
 	_, err = d.secrets.Read(t.Context(), vault.AccessKeyPath(d.tenantID, rec.ID))
 	require.Error(t, err)
+}
+
+// lockTimeoutPrincipals answers a share-locked Get with the store's lock timeout.
+type lockTimeoutPrincipals struct{ principal.Store }
+
+func (l *lockTimeoutPrincipals) Get(ctx context.Context, tenant did.DID, id string, opts ...store.ReadOption) (principal.Record, error) {
+	if store.NewReadConfig(opts...).Share {
+		return principal.Record{}, fmt.Errorf("locking principal: %w", store.ErrLockTimeout)
+	}
+	return l.Store.Get(ctx, tenant, id, opts...)
+}
+
+// lockTimeoutPolicies answers a share-locked ListByPrincipal with the lock timeout.
+type lockTimeoutPolicies struct{ bucketpolicystore.Store }
+
+func (l *lockTimeoutPolicies) ListByPrincipal(ctx context.Context, tenant did.DID, id string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
+	if store.NewReadConfig(opts...).Share {
+		return nil, fmt.Errorf("listing policies: %w", store.ErrLockTimeout)
+	}
+	return l.Store.ListByPrincipal(ctx, tenant, id, opts...)
+}
+
+// lockTimeoutKeys answers Add with the lock timeout.
+type lockTimeoutKeys struct{ accesskeystore.Store }
+
+func (l *lockTimeoutKeys) Add(context.Context, accesskeystore.Input) error {
+	return fmt.Errorf("locking principal: %w", store.ErrLockTimeout)
+}
+
+// lockTimeoutDelegations answers Replace with the lock timeout.
+type lockTimeoutDelegations struct{ delegationstore.Store }
+
+func (l *lockTimeoutDelegations) Replace(context.Context, []did.DID, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return fmt.Errorf("locking audiences: %w", store.ErrLockTimeout)
+}
+
+// TestCreateLockTimeoutsAreConcurrentChanges checks that every lock a
+// principal-bound key's creation waits on is bounded, and that a wait running
+// out is reported as a concurrent change for the caller to retry.
+func TestCreateLockTimeoutsAreConcurrentChanges(t *testing.T) {
+	cases := map[string]func(b *backend){
+		"looking the principal up": func(b *backend) { b.principals = &lockTimeoutPrincipals{b.principals} },
+		"storing the key":          func(b *backend) { b.accessKeys = &lockTimeoutKeys{b.accessKeys} },
+		"listing its policies":     func(b *backend) { b.policies = &lockTimeoutPolicies{b.policies} },
+		"storing the delegations":  func(b *backend) { b.delegations = &lockTimeoutDelegations{b.delegations} },
+	}
+	for name, wrap := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := memoryBackend(t)
+			wrap(&b)
+			d := setupWith(t, b)
+			_, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, "alice", nil)
+			require.ErrorIs(t, err, accesskeysvc.ErrConcurrentChange)
+		})
+	}
 }

@@ -37,7 +37,8 @@ import (
 )
 
 const (
-	// maxPrincipalIDLength bounds the opaque principalId the caller supplies.
+	// maxPrincipalIDLength bounds the opaque principalId the caller supplies,
+	// in bytes.
 	maxPrincipalIDLength = 255
 )
 
@@ -100,6 +101,11 @@ func (s *Service) Create(ctx context.Context, externalID, principalID string) (p
 	created := true
 	if err := s.principals.Add(ctx, tenantID, principalID); errors.Is(err, store.ErrRecordExists) {
 		created = false
+	} else if errors.Is(err, store.ErrLockTimeout) {
+		// A removal holding the row, or a policy write holding the tenant,
+		// outlasted the lock timeout; nothing was recorded and the caller
+		// repeats the call.
+		return principalstore.Record{}, false, ErrConcurrentChange
 	} else if err != nil {
 		return principalstore.Record{}, false, fmt.Errorf("recording principal: %w", err)
 	}
