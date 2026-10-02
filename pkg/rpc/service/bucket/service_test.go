@@ -315,6 +315,35 @@ func (w *writeOnFirstProofChain) ProofChain(ctx context.Context, aud did.DID, cm
 	return w.Store.ProofChain(ctx, aud, cmd, sub)
 }
 
+// writesAroundProofChains runs onList once, before the first delegation list,
+// and afterProofChain once, after the first proof chain is built: a write that
+// lands before Info reads the grants and another that lands after.
+type writesAroundProofChains struct {
+	delegationstore.Store
+	listed, chained sync.Once
+	onList          func()
+	afterProofChain func()
+}
+
+func (w *writesAroundProofChains) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	w.listed.Do(func() {
+		if w.onList != nil {
+			w.onList()
+		}
+	})
+	return w.Store.ListByAudience(ctx, audience, opts...)
+}
+
+func (w *writesAroundProofChains) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
+	proofs, links, err := w.Store.ProofChain(ctx, aud, cmd, sub)
+	w.chained.Do(func() {
+		if w.afterProofChain != nil {
+			w.afterProofChain()
+		}
+	})
+	return proofs, links, err
+}
+
 // revocation records one published revocation.
 // deleteDeps is the world a Delete subtest operates on.
 type deleteDeps struct {
@@ -842,6 +871,54 @@ func TestInfo(t *testing.T) {
 		ok, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		if err == nil {
 			t.Fatalf("Info answered %v over the rotated grants", ok.Permissions.Entries[akDID])
+		}
+		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
+	})
+
+	t.Run("a policy written and written back between the reads is refused, not served", func(t *testing.T) {
+		straddle := &writesAroundProofChains{}
+		svc, policies, _, _ := setup(t, nil, true, did.DID{}, func(s delegationstore.Store) delegationstore.Store {
+			straddle.Store = s
+			return straddle
+		})
+		grantPolicy(t, policies, "s3:GetObject", "s3:ListBucket")
+		original, err := policies.Get(ctx, bucketID)
+		require.NoError(t, err)
+
+		// write stores a policy allowing the actions and the key's grants for it.
+		write := func(actions ...string) string {
+			rec, err := policies.Get(ctx, bucketID)
+			require.NoError(t, err)
+			etag, err := policies.Put(ctx, bucketpolicystore.Input{
+				Bucket:  bucketID,
+				Tenant:  tenantID,
+				IfMatch: &rec.ETag,
+				Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+					Effect:    bucketpolicy.Allow,
+					Principal: bucketpolicy.Only("user-1"),
+					Actions:   actions,
+				}}},
+			}, nil)
+			require.NoError(t, err)
+			dels, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, actions, nil)
+			require.NoError(t, err)
+			require.NoError(t, straddle.Store.Replace(ctx, []did.DID{akDID}, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+				return map[did.DID][]ucan.Delegation{akDID: dels}, nil
+			}))
+			return etag
+		}
+		// The policy is narrowed before Info lists the grants and restored after
+		// it built the chains. The ETag is the document's content, so the
+		// reread finds the one Info started from while the chains it holds are
+		// the narrowed write's, which the restoring write revoked.
+		straddle.onList = func() { write("s3:ListBucket") }
+		straddle.afterProofChain = func() {
+			require.Equal(t, original.ETag, write("s3:GetObject", "s3:ListBucket"), "the restored policy has the original ETag")
+		}
+
+		ok, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
+		if err == nil {
+			t.Fatalf("Info answered %v over the grants of a write it did not read", ok.Permissions.Entries[akDID])
 		}
 		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
 	})
