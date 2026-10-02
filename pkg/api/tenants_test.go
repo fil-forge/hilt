@@ -321,6 +321,30 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.Equal(t, "did:key:"+wrapRec.KID, wrapVM.String())
 	})
 
+	t.Run("a tenantId holding a slash arrives escaped and is decoded", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+
+		rec := provisionRequest(t, e, "a%2Fb", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusCreated, rec.Code)
+		require.Contains(t, rec.Body.String(), `"tenantId":"a/b"`)
+		stored, err := deps.tenants.GetByExternalID(ctx, "a/b")
+		require.NoError(t, err)
+		require.Equal(t, "a/b", stored.ExternalID)
+	})
+
+	t.Run("a tenantId holding a percent is decoded once", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+
+		// The wire form of "x%25y" is "x%2525y"; the request's path decodes it
+		// once, and nothing here may decode it again.
+		rec := provisionRequest(t, e, "x%2525y", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusCreated, rec.Code)
+		_, err := deps.tenants.GetByExternalID(ctx, "x%25y")
+		require.NoError(t, err)
+	})
+
 	t.Run("is idempotent on the external id", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
