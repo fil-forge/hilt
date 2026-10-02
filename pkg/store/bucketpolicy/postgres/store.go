@@ -283,7 +283,7 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 		return collectRecords(rows)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)
 	}
