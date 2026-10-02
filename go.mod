@@ -3,7 +3,7 @@ module github.com/fil-forge/hilt
 go 1.27.0
 
 require (
-	github.com/alanshaw/dag-json-gen v0.0.9
+	github.com/alanshaw/dag-json-gen v0.0.10
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.24
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.23
@@ -11,7 +11,7 @@ require (
 	github.com/aws/smithy-go v1.27.2
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/exaring/otelpgx v0.12.0
-	github.com/fil-forge/libforge v0.0.0-20260914100934-63f5b20252fe
+	github.com/fil-forge/libforge v0.0.0-20260928151559-99540866a323
 	github.com/fil-forge/smelt v0.0.0-20260914083257-f594cf02655c
 	github.com/fil-forge/swarf v0.0.1-0.20260821142121-d5d1a0a56f00
 	github.com/fil-forge/ucantone v0.0.0-20260924160040-c31dec73d9b3
@@ -39,6 +39,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
+	golang.org/x/sync v0.22.0
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da
 )
 
@@ -216,7 +217,6 @@ require (
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect

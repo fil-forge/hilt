@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	upload "github.com/fil-forge/hilt/pkg/client/upload"
 	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
+	metricscmds "github.com/fil-forge/libforge/commands/metrics"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
 	routingcmds "github.com/fil-forge/libforge/commands/routing"
 	"github.com/fil-forge/libforge/testutil"
@@ -406,5 +408,141 @@ func TestUseRoutingPolicy(t *testing.T) {
 		err := c.UseRoutingPolicy(t.Context(), testutil.RandomDID(t), nil, upload.WithProofs(errProofStore{err: errors.New("boom")}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "getting proof chain")
+	})
+}
+
+func TestSampleUsage(t *testing.T) {
+	// newSampleServer builds an in-process server whose /metrics/sample handler
+	// returns the given series, capturing the invocation for assertions.
+	newSampleServer := func(t *testing.T, service ucan.Issuer, items []metricscmds.SampleItem) (*server.HTTPServer, func() (*metricscmds.SampleArguments, did.DID, did.DID)) {
+		t.Helper()
+		var gotArgs *metricscmds.SampleArguments
+		var gotSub, gotAud did.DID
+		srv := server.NewHTTP(service)
+		srv.Handle(metricscmds.Sample.Command, metricscmds.Sample.Handler(
+			func(req *binding.Request[*metricscmds.SampleArguments], res *binding.Response[*metricscmds.SampleOK]) error {
+				gotArgs = req.Task().Arguments()
+				gotSub = req.Invocation().Subject()
+				gotAud = req.Invocation().Audience()
+				return res.SetSuccess(&metricscmds.SampleOK{
+					From: gotArgs.From, To: gotArgs.To, Window: gotArgs.Window, Samples: items,
+				})
+			}))
+		return srv, func() (*metricscmds.SampleArguments, did.DID, did.DID) { return gotArgs, gotSub, gotAud }
+	}
+
+	// sampleProofs delegates /metrics/sample over the space to alice, the root
+	// the client's proof chain is looked up against.
+	sampleProofs := func(t *testing.T, space, alice ucan.Issuer) ucanlib.ProofStore {
+		t.Helper()
+		dlg, err := metricscmds.Sample.Delegate(space, alice.DID(), space.DID())
+		require.NoError(t, err)
+		return ucanlib.NewContainerProofStore(container.New(container.WithDelegations(dlg)))
+	}
+
+	t.Run("sends the range as whole seconds and returns the series", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+		proofs := sampleProofs(t, space, alice)
+
+		srv, captured := newSampleServer(t, service, []metricscmds.SampleItem{
+			{Timestamp: 1767225600, BytesStored: 1024, BytesIngested: 512, UploadCount: 3},
+			{Timestamp: 1767229200, BytesStored: 2048, BytesIngested: 1024, UploadCount: 5},
+		})
+
+		from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		to := from.Add(2 * time.Hour)
+
+		c := newClient(t, service, srv, alice, nil)
+		ok, err := c.SampleUsage(t.Context(), space.DID(), from, to, time.Hour,
+			upload.WithIssuer(alice), upload.WithProofs(proofs))
+		require.NoError(t, err)
+
+		gotArgs, gotSub, gotAud := captured()
+		require.Equal(t, from.Unix(), gotArgs.From)
+		require.Equal(t, to.Unix(), gotArgs.To)
+		require.Equal(t, int64(3600), gotArgs.Window, "the window travels as seconds")
+		require.Equal(t, space.DID(), gotSub, "the space is the subject, not an argument")
+		require.Equal(t, service.DID(), gotAud)
+
+		require.Len(t, ok.Samples, 2)
+		require.Equal(t, int64(1767225600), ok.Samples[0].Timestamp)
+		require.Equal(t, uint64(1024), ok.Samples[0].BytesStored)
+		require.Equal(t, uint64(512), ok.Samples[0].BytesIngested)
+		require.Equal(t, uint64(3), ok.Samples[0].UploadCount)
+		require.Equal(t, uint64(5), ok.Samples[1].UploadCount)
+	})
+
+	t.Run("rounds a sub-second window down to whole seconds", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+		proofs := sampleProofs(t, space, alice)
+
+		srv, captured := newSampleServer(t, service, nil)
+		from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		c := newClient(t, service, srv, alice, nil)
+		_, err := c.SampleUsage(t.Context(), space.DID(), from, from.Add(time.Hour), 1500*time.Millisecond,
+			upload.WithIssuer(alice), upload.WithProofs(proofs))
+		require.NoError(t, err)
+
+		gotArgs, _, _ := captured()
+		require.Equal(t, int64(1), gotArgs.Window)
+	})
+
+	t.Run("proof chain error", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		srv := server.NewHTTP(service)
+
+		c := newClient(t, service, srv, alice, nil)
+		_, err := c.SampleUsage(t.Context(), testutil.RandomDID(t), time.Now(), time.Now().Add(time.Hour), time.Hour,
+			upload.WithIssuer(alice), upload.WithProofs(errProofStore{err: errors.New("boom")}))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "getting proof chain")
+	})
+
+	t.Run("execution error", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+		proofs := sampleProofs(t, space, alice)
+
+		u, err := url.Parse("http://upload.test")
+		require.NoError(t, err)
+		c, err := upload.NewClient(service.DID(), *u, alice,
+			upload.WithHTTPClient(&http.Client{Transport: errRoundTripper{}}))
+		require.NoError(t, err)
+
+		_, err = c.SampleUsage(t.Context(), space.DID(), time.Now(), time.Now().Add(time.Hour), time.Hour,
+			upload.WithIssuer(alice), upload.WithProofs(proofs))
+		require.Error(t, err)
+	})
+
+	// A named failure is how the upload service says the request itself is
+	// unusable. The name has to survive the round trip, because the REST handler
+	// chooses a status from it rather than from the message.
+	t.Run("failure receipt keeps its name", func(t *testing.T) {
+		service := testutil.RandomIssuer(t)
+		alice := testutil.RandomIssuer(t)
+		space := testutil.RandomIssuer(t)
+		proofs := sampleProofs(t, space, alice)
+
+		srv := server.NewHTTP(service)
+		srv.Handle(metricscmds.Sample.Command, metricscmds.Sample.Handler(
+			func(req *binding.Request[*metricscmds.SampleArguments], res *binding.Response[*metricscmds.SampleOK]) error {
+				return res.SetFailure(ucanerrors.New(metricscmds.UsageUnstableErrorName, "try again"))
+			}))
+
+		c := newClient(t, service, srv, alice, nil)
+		_, err := c.SampleUsage(t.Context(), space.DID(), time.Now(), time.Now().Add(time.Hour), time.Hour,
+			upload.WithIssuer(alice), upload.WithProofs(proofs))
+		require.Error(t, err)
+
+		var named ucanerrors.Named
+		require.ErrorAs(t, err, &named)
+		require.Equal(t, metricscmds.UsageUnstableErrorName, named.Name())
 	})
 }

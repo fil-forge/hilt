@@ -61,3 +61,52 @@ type CreateAccessKeyRequest struct {
 	Buckets     []string   `json:"buckets,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
+
+// StorageSample is the space a tenant or bucket occupies at the end of one
+// window. Storage is a gauge, so this is a reading rather than a total over the
+// window.
+type StorageSample struct {
+	Timestamp   time.Time `json:"timestamp"`
+	BytesUsed   uint64    `json:"bytesUsed"`
+	ObjectCount uint64    `json:"objectCount"`
+}
+
+// EgressSample is the bytes served during one window.
+type EgressSample struct {
+	Timestamp     time.Time `json:"timestamp"`
+	BytesEgressed uint64    `json:"bytesEgressed"`
+}
+
+// IngressSample is the bytes written during one window.
+type IngressSample struct {
+	Timestamp     time.Time `json:"timestamp"`
+	BytesIngested uint64    `json:"bytesIngested"`
+}
+
+// StorageMetrics is the storage series of a metrics response.
+type StorageMetrics struct {
+	Samples []StorageSample `json:"samples"`
+}
+
+// EgressMetrics is the egress series of a metrics response.
+type EgressMetrics struct {
+	Samples []EgressSample `json:"samples"`
+}
+
+// IngressMetrics is the ingress series of a metrics response.
+type IngressMetrics struct {
+	Samples []IngressSample `json:"samples"`
+}
+
+// Metrics is the body of GET /tenants/{tenantId}/metrics and of
+// GET /tenants/{tenantId}/buckets/{bucketName}/metrics. All three series share
+// the range and window the request asked for.
+//
+// Egress is always empty: it is served by the storage nodes and accounted for by
+// the egress tracking service, which this API does not read. An empty series
+// says there is no reading rather than claiming nothing was served.
+type Metrics struct {
+	Storage StorageMetrics `json:"storage"`
+	Egress  EgressMetrics  `json:"egress"`
+	Ingress IngressMetrics `json:"ingress"`
+}
