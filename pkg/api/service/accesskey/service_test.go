@@ -13,14 +13,23 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -57,31 +66,67 @@ type deps struct {
 	svc         *accesskeysvc.Service
 	accessKeys  accesskeystore.Store
 	principals  principal.Store
-	delegations *delegationmemory.Store
-	buckets     *bucketmemory.Store
-	secrets     *vaultmemory.Store
+	delegations delegationstore.Store
+	buckets     bucket.Store
+	secrets     vault.Vault
 	swarf       *testutil.FakeSwarf
 	tenantID    did.DID
 	bucketID    did.DID
 	bucketRoot  ucan.Delegation
 }
 
-// setup wires the service over memory stores with one tenant ("tenant-1") whose
-// secp256k1 key is in the vault, owning one bucket ("bucket-a") that has issued
-// the tenant top authority over itself — the root of every proof chain through
-// the bucket, as [bucket.Service.Create] would have stored it. Its audience is the
-// tenant, not an access key, so it must never be revoked along with one. The
-// tenant has one principal, "alice".
-// wrapAccessKeys, when given, wraps the memory access-key store the service is
-// built over, so a test can make one of its methods fail.
+// setup is setupWith over the memory stores.
 func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
 	t.Helper()
-	ctx := t.Context()
-	tenants, accessKeys, principals := tenantmemory.New(), accesskeymemory.New(), principalmemory.New()
-	buckets, delegations, secrets := bucketmemory.New(), delegationmemory.New(), vaultmemory.New()
-	policies := bucketpolicymemory.New()
+	return setupWith(t, backend{
+		tenants: tenantmemory.New(), accessKeys: accesskeymemory.New(), principals: principalmemory.New(),
+		buckets: bucketmemory.New(), delegations: delegationmemory.New(), policies: bucketpolicymemory.New(),
+		providerID: testutil.RandomDID(t),
+	}, wrapAccessKeys...)
+}
 
-	var keys accesskeystore.Store = accessKeys
+// setupPostgres is setup over the Postgres stores, for what only a real
+// transaction shows. It skips without Docker.
+func setupPostgres(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
+	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, "region-1", nil))
+	return setupWith(t, backend{
+		tenants: tenantpostgres.New(pool), accessKeys: accesskeypostgres.New(pool), principals: principalpostgres.New(pool),
+		buckets: bucketpostgres.New(pool), delegations: delegationpostgres.New(pool), policies: bucketpolicypostgres.New(pool),
+		providerID: providerID,
+	}, wrapAccessKeys...)
+}
+
+// backend is the stores setupWith builds the service over, and the provider
+// the tenant is placed with.
+type backend struct {
+	tenants     tenant.Store
+	accessKeys  accesskeystore.Store
+	principals  principal.Store
+	buckets     bucket.Store
+	delegations delegationstore.Store
+	policies    bucketpolicystore.Store
+	providerID  did.DID
+}
+
+// setupWith wires the service over b with one tenant ("tenant-1") whose
+// secp256k1 key is in the vault, owning one bucket ("bucket-a") that has issued
+// the tenant top authority over itself: the root of every proof chain through
+// the bucket, as [bucket.Service.Create] would have stored it. Its audience is
+// the tenant, not an access key, so it must never be revoked along with one.
+// The tenant has one principal, "alice". wrapAccessKeys, when given, wraps the
+// access-key store the service is built over, so a test can make one of its
+// methods fail.
+func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
+	t.Helper()
+	ctx := t.Context()
+	tenants, accessKeys, principals := b.tenants, b.accessKeys, b.principals
+	buckets, delegations, policies := b.buckets, b.delegations, b.policies
+	secrets := vaultmemory.New()
+
+	keys := accessKeys
 	for _, wrap := range wrapAccessKeys {
 		keys = wrap(keys)
 	}
@@ -89,7 +134,7 @@ func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeys
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", b.providerID, tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	require.NoError(t, principals.Add(ctx, tenantID, "alice"))
 
@@ -499,4 +544,52 @@ func TestDeleteRevokes(t *testing.T) {
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, created.ID))
 		require.NoError(t, err)
 	})
+}
+
+// cancelAfterDelete cancels the request's ctx once the key row's delete has
+// run, so the delegation write that follows it fails and the transaction rolls
+// back.
+type cancelAfterDelete struct {
+	accesskeystore.Store
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterDelete) Delete(ctx context.Context, id did.DID) error {
+	err := c.Store.Delete(ctx, id)
+	c.cancel()
+	return err
+}
+
+// A deletion that fails after the key row's delete leaves the row, its
+// delegations and its secret for a retry: the row's delete commits with the
+// delegation write or not at all.
+func TestDeletePostgresRollsBackAfterRowDelete(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	wrap := &cancelAfterDelete{cancel: cancel}
+	d := setupPostgres(t, func(s accesskeystore.Store) accesskeystore.Store { wrap.Store = s; return wrap })
+	rec, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, "alice", nil)
+	require.NoError(t, err)
+	page, err := d.delegations.ListByAudience(t.Context(), rec.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, page.Results, "the key holds alice's delegations")
+
+	require.ErrorIs(t, d.svc.Delete(ctx, "tenant-1", rec.ID.Identifier()), context.Canceled)
+
+	_, err = d.accessKeys.Get(t.Context(), rec.ID)
+	require.NoError(t, err, "the row survives the failed deletion")
+	page, err = d.delegations.ListByAudience(t.Context(), rec.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, page.Results, "so do the delegations")
+	_, err = d.secrets.Read(t.Context(), vault.AccessKeyPath(d.tenantID, rec.ID))
+	require.NoError(t, err, "and the secret")
+
+	require.NoError(t, d.svc.Delete(t.Context(), "tenant-1", rec.ID.Identifier()))
+	_, err = d.accessKeys.Get(t.Context(), rec.ID)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	page, err = d.delegations.ListByAudience(t.Context(), rec.ID)
+	require.NoError(t, err)
+	require.Empty(t, page.Results)
+	_, err = d.secrets.Read(t.Context(), vault.AccessKeyPath(d.tenantID, rec.ID))
+	require.Error(t, err)
 }
