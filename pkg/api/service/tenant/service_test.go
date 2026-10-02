@@ -2,11 +2,13 @@ package tenant_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
@@ -35,6 +37,7 @@ import (
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
@@ -229,8 +232,10 @@ type deleteEnv struct {
 	policies   *bucketpolicymemory.Store
 	principals *principalmemory.Store
 	swarf      *testutil.FakeSwarf
-	bucketID   did.DID
-	tenantID   did.DID
+	// publisher is swarf as the service sees it, recording each publish's deadline.
+	publisher *deadlinePublisher
+	bucketID  did.DID
+	tenantID  did.DID
 	// grants are the delegations the tenant's one access key holds.
 	grants    []cid.Cid
 	directory *plcDirectory
@@ -300,11 +305,28 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	}
 
 	swarf := &testutil.FakeSwarf{}
+	publisher := &deadlinePublisher{FakeSwarf: swarf}
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
-		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, swarf)
+		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, publisher)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
-		principals: principals, swarf: swarf, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
+		principals: principals, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
 		tombstone: tombstoneJSON.Bytes()}
+}
+
+// deadlinePublisher records how long each publish had left on its deadline,
+// zero when it had none.
+type deadlinePublisher struct {
+	*testutil.FakeSwarf
+	remaining []time.Duration
+}
+
+func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
+	var left time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		left = time.Until(deadline)
+	}
+	p.remaining = append(p.remaining, left)
+	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
 }
 
 func TestDelete(t *testing.T) {
@@ -327,6 +349,14 @@ func TestDelete(t *testing.T) {
 		require.Equal(t, 1, env.swarf.Calls())
 		require.ElementsMatch(t, env.grants, env.swarf.Revoked())
 		require.Equal(t, 1, env.directory.deactivations)
+	})
+
+	t.Run("bounds the revocation publish at the batch deadline", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.svc.Delete(context.Background(), "tenant-1"))
+		require.Len(t, env.publisher.remaining, 1)
+		require.Greater(t, env.publisher.remaining[0], time.Duration(0), "a stalled publish must not hold the keys' delegation locks past the batch deadline")
+		require.LessOrEqual(t, env.publisher.remaining[0], grant.BatchTimeout)
 	})
 
 	t.Run("a publish failure leaves the tenant and its DID in place", func(t *testing.T) {
