@@ -63,7 +63,7 @@ func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOptio
 		return getResult(rec, err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -117,7 +117,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 		return "", fmt.Errorf("policy tenant is required: %w", store.ErrInvalidArgument)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return "", fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -151,7 +151,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 		return "", err
 	}
 	if beforeCommit != nil {
-		if err := beforeCommit(ctx, old); err != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx), old); err != nil {
 			return "", fmt.Errorf("before writing policy: %w", err)
 		}
 	}
@@ -194,7 +194,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 
 // Delete runs in one transaction under the same contract as [Store.Put].
 func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old bucketpolicystore.Record) error) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -214,7 +214,7 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
 	}
 	if beforeCommit != nil {
-		if err := beforeCommit(ctx, *old); err != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx), *old); err != nil {
 			return fmt.Errorf("before deleting policy: %w", err)
 		}
 	}
@@ -229,9 +229,9 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 
 // DeleteByBucket removes the bucket's policy unconditionally, under the
 // bucket's advisory lock so it serializes with a Put or Delete in flight the
-// way the memory backend's mutex does.
-func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
-	tx, err := s.pool.Begin(ctx)
+// way the memory backend's mutex does, and runs beforeCommit while holding it.
+func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error {
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -239,6 +239,11 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
 
 	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), false); err != nil {
 		return err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx)); err != nil {
+			return err
+		}
 	}
 	if err := deleteRows(ctx, tx, bucket); err != nil {
 		return err

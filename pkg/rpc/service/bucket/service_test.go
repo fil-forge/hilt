@@ -3,6 +3,7 @@ package bucket_test
 import (
 	"context"
 	"errors"
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -246,11 +247,17 @@ type revocation struct {
 type fakeSwarf struct {
 	err         error
 	revocations []revocation
+	// onPublish, when set, runs once before the first publish is recorded.
+	onPublish func()
 }
 
 func (f *fakeSwarf) Publish(_ context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error {
 	if f.err != nil {
 		return f.err
+	}
+	if f.onPublish != nil {
+		f.onPublish()
+		f.onPublish = nil
 	}
 	f.revocations = append(f.revocations, revocation{revoker: revoker.DID(), revoked: revoked.Link(), options: len(opts)})
 	return nil
@@ -310,7 +317,7 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
 		swarf := &fakeSwarf{}
-		policies := bucketpolicymemory.New()
+		policies := bucketpolicymemory.New(bucketpolicymemory.WithBuckets(buckets.Has))
 		return deleteDeps{
 			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf),
 			buckets:     buckets,
@@ -339,6 +346,27 @@ func TestDelete(t *testing.T) {
 		_, err = d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
 		_, err = d.policies.Get(ctx, d.bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("a policy write during the deletion waits and finds the bucket gone", func(t *testing.T) {
+		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		deleted, written := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				d.swarf.onPublish = func() { close(entered); <-release }
+				_, err := d.svc.Delete(ctx, providerID, del(bucketName))
+				return err
+			},
+			func() error {
+				_, err := d.policies.Put(ctx, bucketpolicystore.Input{
+					Bucket: d.bucketID, Tenant: d.tenantID,
+					Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+				}, nil)
+				return err
+			})
+		require.NoError(t, deleted)
+		require.ErrorIs(t, written, store.ErrRecordNotFound, "the write ran after the deletion and found no bucket")
+		_, err := d.policies.Get(ctx, d.bucketID)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 

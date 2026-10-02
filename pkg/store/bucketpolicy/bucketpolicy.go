@@ -68,11 +68,13 @@ type Store interface {
 	// its index rows, and commits. It returns the new ETag. Unless in is
 	// Unconditional, it returns [store.ErrPreconditionFailed] when IfMatch is
 	// nil and a policy exists, or IfMatch names a tag other than the current
-	// one (including when no policy exists); [store.ErrInvalidArgument] when the bucket or tenant is undef or,
-	// on Postgres, the bucket or a named principal does not exist. An error from
-	// beforeCommit is returned and nothing is written. The referential checks
-	// run after beforeCommit, so a callback that published may still see the
-	// write fail.
+	// one (including when no policy exists); [store.ErrRecordNotFound] when the
+	// bucket does not exist, checked before beforeCommit runs; and
+	// [store.ErrInvalidArgument] when the bucket or tenant is undef or, on
+	// Postgres, a named principal does not exist or the bucket is not the
+	// tenant's. An error from beforeCommit is returned and nothing is written.
+	// The tenant check on Postgres runs after beforeCommit, so a callback that
+	// published may still see the write fail.
 	//
 	// beforeCommit must not read or write this store: on the memory backend it
 	// runs under the store mutex, and on Postgres a locked read of the same row
@@ -85,9 +87,14 @@ type Store interface {
 	// cases beforeCommit does not run. An empty ifMatch is unconditional.
 	Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old Record) error) error
 	// DeleteByBucket removes the bucket's policy and index rows
-	// unconditionally. It is idempotent and is used by bucket and tenant
-	// deletion, which publish nothing.
-	DeleteByBucket(ctx context.Context, bucket did.DID) error
+	// unconditionally, holding the bucket's write lock across beforeCommit
+	// (nil allowed): a policy write in flight finishes first and one arriving
+	// later waits, so nothing the callback revokes or deletes is granted again
+	// behind it. It is idempotent. Bucket deletion revokes the bucket's grants
+	// and deletes the bucket row inside the callback; tenant deletion passes
+	// nil. The callback's error is returned as it came. beforeCommit must not
+	// read or write this store, as for [Store.Put].
+	DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error
 	// ListByPrincipal returns the tenant's policies whose statements name
 	// principal, including those naming every principal with the wildcard,
 	// ordered by bucket. It is answered from the index. With [store.WithShareLock]
