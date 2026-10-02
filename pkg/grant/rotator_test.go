@@ -75,6 +75,22 @@ func setup(t *testing.T, expiresAt *time.Time) deps {
 	return d
 }
 
+// deadlinePublisher records how long each publish had left on its deadline,
+// zero when it had none.
+type deadlinePublisher struct {
+	*htestutil.FakeSwarf
+	remaining []time.Duration
+}
+
+func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
+	var left time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		left = time.Until(deadline)
+	}
+	p.remaining = append(p.remaining, left)
+	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
+}
+
 // deleteOnReplace runs del once the audiences are locked, before the callback.
 type deleteOnReplace struct {
 	delegationstore.Store
@@ -266,4 +282,21 @@ func TestRevoke(t *testing.T) {
 			require.NotEmpty(t, d.held(t, key, d.photos))
 		}
 	})
+}
+
+// The rotator bounds each rotation and revocation at BatchTimeout itself, so a
+// caller without a deadline cannot hold the delegation locks behind a stalled
+// publish.
+func TestRotatorPublishesUnderBatchTimeout(t *testing.T) {
+	d := setup(t, nil)
+	pub := &deadlinePublisher{FakeSwarf: d.swarf}
+	rotator := grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, pub)
+
+	require.NoError(t, rotator.Rotate(context.Background(), d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:ListBucket"}}))
+	require.NoError(t, rotator.Revoke(context.Background(), d.tenant.DID(), "bob"))
+	require.Len(t, pub.remaining, 2)
+	for _, left := range pub.remaining {
+		require.Greater(t, left, time.Duration(0))
+		require.LessOrEqual(t, left, grant.BatchTimeout)
+	}
 }
