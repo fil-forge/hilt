@@ -23,7 +23,8 @@ var timeoutSetting = strconv.FormatInt(store.LockTimeout.Milliseconds(), 10)
 
 // SetTimeout bounds every lock tx goes on to take at [store.LockTimeout].
 // set_config with is_local is SET LOCAL, which SET itself cannot express with
-// a bound parameter. The setting is reverted when tx ends.
+// a bound parameter. The setting lasts until the outermost transaction ends,
+// or until a savepoint tx rolls back.
 func SetTimeout(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, timeoutSetting); err != nil {
 		return fmt.Errorf("setting lock timeout: %w", err)
