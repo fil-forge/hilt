@@ -162,16 +162,16 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	if err := s.buckets.Add(ctx, bucketID, authz.Tenant.ID, authz.BucketName); err != nil {
 		return nil, nil, fmt.Errorf("storing bucket: %w", err)
 	}
-	// Best-effort rollback of the bucket record on a later failure. The root
-	// delegation (if already stored) becomes unreachable — its bucket record is
-	// gone — so it is inert; the delegation store has no delete-by-CID.
+	// Best-effort rollback of the bucket record on a later failure.
 	//
 	// Cleanup runs on a context detached from the request (values retained, but
 	// cancellation/deadline dropped) so a client disconnect — which cancels ctx —
-	// cannot abort the rollback partway and leave an orphaned bucket record. It
-	// gets a deadline of its own, the Swarf batch bound, so a revocation service
-	// that accepts the request and never answers cannot hang the create: the
-	// publish fails and the bucket stays for a DeleteBucket retry.
+	// cannot abort the rollback partway and leave an orphaned bucket record. The
+	// publish gets a deadline of its own, the Swarf batch bound, so a revocation
+	// service that accepts the request and never answers cannot hang the create:
+	// the publish fails and the bucket stays for a DeleteBucket retry. The
+	// deletes after it get a fresh one, so a publish that returns near its
+	// deadline does not leave them an expired context.
 	rollback := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grant.BatchTimeout)
 		defer cancel()
@@ -183,9 +183,11 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		// tenant key is read only when there is a grant to revoke: a policy
 		// write that failed on that same key issued nothing, and a rollback
 		// that needed it would leave a row behind that DeleteBucket, needing
-		// the key too, could never remove. Then the delegations and the
-		// policy: Postgres cascades the policy from the bucket row, the
-		// memory store does not, and nothing cascades the delegations.
+		// the key too, could never remove. Then the delegations, the bucket
+		// row and the policy, as Delete removes them: under the bucket's
+		// policy lock, the first two in one transaction on Postgres, which
+		// cascades the policy from the row, and the policy last on memory, so
+		// a row delete that fails leaves a live bucket with its policy.
 		issued, err := s.tenantIssuedDelegations(cleanupCtx, authz.Tenant.ID, bucketID)
 		if err != nil {
 			log.Error("rollback: listing bucket delegations, bucket left for deletion", zap.Error(err))
@@ -202,14 +204,16 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 				return
 			}
 		}
-		if err := s.delegations.DeleteBySubject(cleanupCtx, bucketID); err != nil {
-			log.Error("rollback: deleting bucket delegations", zap.Error(err))
-		}
-		if err := s.policies.DeleteByBucket(cleanupCtx, bucketID); err != nil {
-			log.Error("rollback: deleting bucket policy", zap.Error(err))
-		}
-		if err := s.buckets.Delete(cleanupCtx, bucketID); err != nil {
-			log.Error("rollback: deleting bucket", zap.Error(err))
+		deleteCtx, cancelDeletes := context.WithTimeout(context.WithoutCancel(ctx), store.LockTimeout)
+		defer cancelDeletes()
+		err = s.policies.DeleteByBucket(deleteCtx, bucketID, func(ctx context.Context) error {
+			if err := s.delegations.DeleteBySubject(ctx, bucketID); err != nil {
+				return fmt.Errorf("deleting bucket delegations: %w", err)
+			}
+			return s.buckets.Delete(ctx, bucketID)
+		})
+		if err != nil {
+			log.Error("rollback: deleting bucket, bucket left for deletion", zap.Error(err))
 		}
 	}
 
@@ -342,7 +346,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 
 // Delete authenticates the request, checks the s3:DeleteBucket permission,
 // resolves the bucket, verifies its space is empty via Sprue (acting as the
-// tenant), publishes revocations for the delegations over the bucket, then
+// tenant) when the bucket holds its root, publishes revocations for the delegations over the bucket, then
 // deletes those delegations and the bucket record, which takes the policy with
 // it. The policy goes without a publication: the gateway refuses a bucket it no longer
 // knows, so nothing cached for it can be used. Revocations are published
@@ -360,17 +364,26 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	}
 
 	// Verify the bucket is empty, listing its blobs via Sprue as the tenant (the
-	// bucket→tenant root delegation authorizes the /blob/list invocation).
+	// bucket→tenant root delegation authorizes the /blob/list invocation). A
+	// bucket whose root is gone, left by a create that failed before storing
+	// it or by a cleanup that removed the delegations but not the row, has no
+	// space a proof can reach: its row stayed only to be removed here.
 	account, err := s.authorizer.TenantIssuer(ctx, authz.Tenant.ID)
 	if err != nil {
 		return nil, err
 	}
-	empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, upload.WithIssuer(account), upload.WithProofs(s.delegations))
+	rooted, err := s.hasRoot(ctx, authz.Bucket.ID)
 	if err != nil {
-		return nil, fmt.Errorf("checking bucket is empty: %w", err)
+		return nil, err
 	}
-	if !empty {
-		return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
+	if rooted {
+		empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, upload.WithIssuer(account), upload.WithProofs(s.delegations))
+		if err != nil {
+			return nil, fmt.Errorf("checking bucket is empty: %w", err)
+		}
+		if !empty {
+			return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
+		}
 	}
 
 	// DeleteByBucket holds the bucket's policy write lock across the callback:
@@ -433,6 +446,24 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
 	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
+}
+
+// hasRoot reports whether the bucket's root delegation, the one the bucket
+// issued over itself, is stored.
+func (s *Service) hasRoot(ctx context.Context, bucketID did.DID) (bool, error) {
+	page, err := s.delegations.ListBySubject(ctx, bucketID)
+	for err == nil {
+		for _, d := range page.Results {
+			if d.Issuer() == bucketID {
+				return true, nil
+			}
+		}
+		if page.Cursor == nil {
+			return false, nil
+		}
+		page, err = s.delegations.ListBySubject(ctx, bucketID, store.WithCursor(*page.Cursor))
+	}
+	return false, fmt.Errorf("listing bucket delegations: %w", err)
 }
 
 // tenantIssuedDelegations lists the delegations over the bucket that the

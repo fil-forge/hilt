@@ -23,6 +23,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
@@ -1083,12 +1084,47 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 type deadlinePublisher struct {
 	*htestutil.FakeSwarf
 	deadlines []bool
+	at        []time.Time
 }
 
 func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
-	_, ok := ctx.Deadline()
+	deadline, ok := ctx.Deadline()
 	p.deadlines = append(p.deadlines, ok)
+	p.at = append(p.at, deadline)
 	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
+}
+
+// failingPutBatch fails the first PutBatch, standing in for a store that is
+// down when the create stores the bucket's root.
+type failingPutBatch struct {
+	delegationstore.Store
+	failed bool
+}
+
+func (f *failingPutBatch) PutBatch(ctx context.Context, dels []ucan.Delegation) error {
+	if !f.failed {
+		f.failed = true
+		return errors.New("delegation store down")
+	}
+	return f.Store.PutBatch(ctx, dels)
+}
+
+// deadlineBuckets records the deadline the bucket delete ran under.
+type deadlineBuckets struct {
+	bucket.Store
+	deleteDeadline time.Time
+}
+
+func (d *deadlineBuckets) Delete(ctx context.Context, id did.DID) error {
+	d.deleteDeadline, _ = ctx.Deadline()
+	return d.Store.Delete(ctx, id)
+}
+
+// failingDeleteBuckets fails every bucket delete.
+type failingDeleteBuckets struct{ bucket.Store }
+
+func (failingDeleteBuckets) Delete(context.Context, did.DID) error {
+	return errors.New("bucket store down")
 }
 
 // TestCreateWithPolicy covers the policy a CreateBucket request carries in the
@@ -1115,11 +1151,20 @@ func TestCreateWithPolicy(t *testing.T) {
 		// member is a key bound to "user-1", which the policy names.
 		member did.DID
 	}
-	setup := func(t *testing.T, sprue bucketsvc.UploadClient) fixture {
+	// stores holds the stores a subtest may wrap through setup's wrap functions.
+	type stores struct {
+		buckets     bucket.Store
+		delegations delegationstore.Store
+	}
+	setup := func(t *testing.T, sprue bucketsvc.UploadClient, wrap ...func(*stores)) fixture {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
-		principals, policies := principalmemory.New(), bucketpolicymemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New(bucketpolicymemory.WithBuckets(buckets.Has))
+		w := stores{buckets: buckets, delegations: delegations}
+		for _, fn := range wrap {
+			fn(&w)
+		}
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
@@ -1127,11 +1172,11 @@ func TestCreateWithPolicy(t *testing.T) {
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		member, principal := testutil.RandomDID(t), "user-1"
 		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: member, Tenant: tenantID, Name: "laptop", Principal: &principal}))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, w.buckets, principals, policies, secrets)
 		swarf := &deadlinePublisher{FakeSwarf: &htestutil.FakeSwarf{}}
-		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
-		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf, member}
+		grants := grant.NewRotator(zap.NewNop(), w.delegations, accessKeys, secrets, swarf)
+		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, w.buckets, principals, policies, grants)
+		return fixture{bucketsvc.New(zap.NewNop(), az, w.buckets, w.delegations, accessKeys, tenants, policies, sprue, swarf, policyWrites), buckets, policies, delegations, secrets, swarf, member}
 	}
 
 	// create presigns a CreateBucket carrying header as x-bucket-policy, covered
@@ -1232,6 +1277,54 @@ func TestCreateWithPolicy(t *testing.T) {
 		// Swarf that accepts the request and never answers must be cut off
 		// by a deadline of the rollback's own.
 		require.Equal(t, []bool{true}, f.swarf.deadlines)
+	})
+
+	t.Run("a bucket kept without its root is deleted on retry and its name freed", func(t *testing.T) {
+		sprue := &fakeSprue{emptyErr: errors.New("no proof chain for the space")}
+		f := setup(t, sprue, func(s *stores) { s.delegations = &failingPutBatch{Store: s.delegations} })
+		f.swarf.Err = errors.New("swarf is down")
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "storing root delegation")
+		_, err = f.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err, "the grants are unrevoked, so the bucket is kept for a DeleteBucket retry")
+
+		// The root was never stored, so no space exists to list: the retry
+		// revokes and deletes without asking Sprue.
+		f.swarf.Err = nil
+		_, err = f.svc.Delete(ctx, providerID, &s3bkt.DeleteArguments{Request: presign(t, akSigner, "DELETE", "https://s3.fil.one/"+bucketName, region)})
+		require.NoError(t, err)
+		require.False(t, sprue.emptyCalled)
+		_, err = f.buckets.GetByName(ctx, bucketName)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		held, err := f.delegations.ListByAudience(ctx, f.member)
+		require.NoError(t, err)
+		require.Empty(t, held.Results)
+		_, _, err = f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.NoError(t, err, "the name is free again")
+	})
+
+	t.Run("the rollback's deletes run under a deadline of their own", func(t *testing.T) {
+		recording := &deadlineBuckets{}
+		f := setup(t, &fakeSprue{provErr: errors.New("sprue unavailable")}, func(s *stores) {
+			recording.Store = s.buckets
+			s.buckets = recording
+		})
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "sprue unavailable")
+		// A publish that returns near its deadline must not leave the deletes
+		// an expired context, so they get a fresh one after it.
+		require.Len(t, f.swarf.at, 1)
+		require.True(t, recording.deleteDeadline.After(f.swarf.at[0]), "the deletes' deadline %s is not after the publish's %s", recording.deleteDeadline, f.swarf.at[0])
+	})
+
+	t.Run("a bucket row the rollback cannot delete keeps its policy", func(t *testing.T) {
+		f := setup(t, &fakeSprue{provErr: errors.New("sprue unavailable")}, func(s *stores) { s.buckets = failingDeleteBuckets{s.buckets} })
+		_, _, err := f.svc.Create(ctx, providerID, create(t, encode(t, valid), false))
+		require.ErrorContains(t, err, "sprue unavailable")
+		rec, err := f.buckets.GetByName(ctx, bucketName)
+		require.NoError(t, err, "the row could not be deleted")
+		_, err = f.policies.Get(ctx, rec.ID)
+		require.NoError(t, err, "a live bucket keeps its policy")
 	})
 
 	t.Run("deletes the bucket when the policy write fails before it issues a grant", func(t *testing.T) {
