@@ -277,6 +277,62 @@ func TestPrincipalStore(t *testing.T) {
 				require.ErrorIs(t, err, boom)
 			})
 
+			t.Run("Lock waits on a principal a removal holds", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+				deleted, locked := htestutil.RequireWaitsForWriter(t,
+					func(entered chan<- struct{}, release <-chan struct{}) error {
+						return s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+							close(entered)
+							<-release
+							return nil
+						})
+					},
+					func() error {
+						return s.Lock(context.Background(), tenantID, []string{"held"}, func(context.Context) error { return nil })
+					})
+				require.NoError(t, deleted)
+				require.NoError(t, locked, "the row is gone when Lock gets its turn, so it is skipped")
+			})
+
+			t.Run("Lock does not wait on principals a removal does not hold", func(t *testing.T) {
+				tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				seed(t, tenantID)
+				seed(t, other)
+				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+				require.NoError(t, s.Add(t.Context(), tenantID, "other"))
+				require.NoError(t, s.Add(t.Context(), other, "other"))
+
+				entered, release := make(chan struct{}), make(chan struct{})
+				removed := make(chan error, 1)
+				go func() {
+					removed <- s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+						close(entered)
+						<-release
+						return nil
+					})
+				}()
+				select {
+				case <-entered:
+				case err := <-removed:
+					t.Fatalf("the removal returned before holding its row: %v", err)
+				case <-time.After(htestutil.WaitTimeout):
+					t.Fatal("the removal did not hold its row")
+				}
+				defer func() { close(release); require.NoError(t, <-removed) }()
+
+				// Another principal of the same tenant, another tenant's, and an
+				// id with no row: none is held by the removal, so none waits.
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				noop := func(context.Context) error { return nil }
+				require.NoError(t, s.Lock(ctx, tenantID, []string{"other"}, noop))
+				require.NoError(t, s.Lock(ctx, other, []string{"other"}, noop))
+				require.NoError(t, s.Lock(ctx, tenantID, []string{"absent"}, noop))
+			})
+
 			t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
@@ -446,8 +502,8 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 // reaches back onto the same row through the bucket_policy_principal foreign
 // key; re-adding the principal and locking it for a policy write take the
 // row itself. Neither edge is visible to Postgres, so the wait is bounded and
-// one side is told to retry. Postgres only: the memory stores hold no lock
-// across calls.
+// one side is told to retry. Postgres only: each case holds the row from a raw
+// transaction. TestPrincipalStoreMemoryLockTimeout covers the memory store.
 func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	principals := principalpostgres.New(pool)
@@ -565,7 +621,13 @@ func TestPrincipalStoreMemoryLockTimeout(t *testing.T) {
 			return nil
 		})
 	}()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-removed:
+		t.Fatalf("the removal returned before holding its row: %v", err)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the removal did not hold its row")
+	}
 
 	// The policy write waits on the row the removal holds and gives up.
 	err := s.Lock(context.Background(), tenantID, []string{"held"}, func(context.Context) error {
