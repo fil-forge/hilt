@@ -61,7 +61,7 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 		e := in.ExpiresAt.UTC()
 		expires = &e
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -110,7 +110,7 @@ func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (
 		return pglock.Found(rec, err, "access key")
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return accesskey.Record{}, fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -158,7 +158,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 // connection indefinitely.
 func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
