@@ -100,6 +100,14 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		return accesskeystore.Record{}, "", fmt.Errorf("looking up tenant: %w", err)
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
+	// A disabled tenant is on its way to deletion, which revokes every key it
+	// holds at that point; a key created after that snapshot would keep its
+	// authority. Refuse it, as the deletion itself refuses a tenant that is not
+	// disabled. This early check only spares the work below; the store's Add
+	// holds the authoritative one, atomic with the insert.
+	if tenantRec.Status == tenant.Disabled {
+		return accesskeystore.Record{}, "", ErrTenantDisabled
+	}
 
 	// Load the tenant signer up front: it is required to issue delegations and its
 	// absence is unrecoverable, so fail before creating any state.
@@ -179,6 +187,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		// fresh random access-key DID colliding is not a realistic case.
 		if errors.Is(err, store.ErrRecordExists) {
 			return accesskeystore.Record{}, "", ErrNameConflict
+		}
+		if errors.Is(err, accesskeystore.ErrTenantDisabled) {
+			return accesskeystore.Record{}, "", ErrTenantDisabled
 		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
 	}

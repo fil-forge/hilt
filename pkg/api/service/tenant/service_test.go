@@ -83,7 +83,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(tenantmemory.New()), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -144,7 +144,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(tenants), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -249,7 +249,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
+		accesskeymemory.New(tenants), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
 	return deleteEnv{svc: svc, tenants: tenants, directory: directory}
 }
 

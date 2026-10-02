@@ -9,18 +9,21 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 )
 
 type Store struct {
-	mutex sync.RWMutex
-	keys  map[did.DID]accesskey.Record
+	mutex   sync.RWMutex
+	keys    map[did.DID]accesskey.Record
+	tenants tenantstore.Store
 }
 
 var _ accesskey.Store = (*Store)(nil)
 
-func New() *Store {
-	return &Store{keys: map[did.DID]accesskey.Record{}}
+// New returns a store that reads tenant status from tenants.
+func New(tenants tenantstore.Store) *Store {
+	return &Store{keys: map[did.DID]accesskey.Record{}, tenants: tenants}
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error {
@@ -42,6 +45,12 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 
 	if _, ok := s.keys[id]; ok {
 		return store.ErrRecordExists
+	}
+	// Checked under the write lock ListByTenant also takes, so a tenant
+	// deletion's snapshot of its keys never misses one added here. An unknown
+	// tenant is allowed: this store does not enforce referential integrity.
+	if rec, err := s.tenants.Get(ctx, tenant); err == nil && rec.Status == tenantstore.Disabled {
+		return accesskey.ErrTenantDisabled
 	}
 	// Names must be unique within a tenant (mirrors the Postgres
 	// UNIQUE (tenant_id, name) constraint).

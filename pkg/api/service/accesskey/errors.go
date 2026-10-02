@@ -6,6 +6,7 @@ import "github.com/fil-forge/ucantone/errors"
 // match on the stable Name() of a serialized failure.
 const (
 	TenantNotFoundErrorName    = "TenantNotFound"
+	TenantDisabledErrorName    = "TenantDisabled"
 	InvalidNameErrorName       = "InvalidAccessKeyName"
 	NoPermissionsErrorName     = "NoPermissions"
 	InvalidPermissionErrorName = "InvalidPermission"
@@ -21,6 +22,10 @@ const (
 var (
 	// ErrTenantNotFound is returned when no tenant exists for the external id.
 	ErrTenantNotFound = errors.New(TenantNotFoundErrorName, "tenant not found")
+	// ErrTenantDisabled is returned when the tenant is disabled: a disabled
+	// tenant is one on its way to deletion, and a key created for it would
+	// escape the deletion's revocation of the tenant's keys.
+	ErrTenantDisabled = errors.New(TenantDisabledErrorName, "tenant is disabled")
 	// ErrInvalidName is returned when the access key name is empty or too long.
 	ErrInvalidName = errors.New(InvalidNameErrorName, "name must be between 1 and 100 characters")
 	// ErrNoPermissions is returned when no permissions are requested.
