@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"net/url"
 
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -38,7 +39,7 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {
-		externalID := c.Param("tenantId")
+		externalID := tenantParam(c)
 		if externalID == "" {
 			return echo.NewHTTPError(http.StatusBadRequest, "missing tenant id")
 		}
@@ -58,12 +59,34 @@ func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) R
 	})
 }
 
+// pathParam returns a route parameter decoded. The management client escapes
+// each path segment, so an id holding "/" or a space arrives escaped; Echo
+// matches on the raw path when the request has one and hands the parameter
+// over as it came, and then it is decoded here. A request with no raw path was
+// routed on the decoded path, and its parameter is already decoded: decoding
+// it again would turn an id holding "%25" into one holding "%".
+func pathParam(c echo.Context, name string) string {
+	raw := c.Param(name)
+	if c.Request().URL.RawPath == "" {
+		return raw
+	}
+	if id, err := url.PathUnescape(raw); err == nil {
+		return id
+	}
+	return raw
+}
+
+// tenantParam returns the tenantId route parameter decoded, see pathParam.
+// Without it an id holding "/" or a space would be looked up, and
+// provisioned, in its escaped form.
+func tenantParam(c echo.Context) string { return pathParam(c, "tenantId") }
+
 // NewGetTenantHandler handles GET /tenants/{tenantId} — retrieve tenant
 // operational state and quotas.
 func NewGetTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "GetTenant"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId", func(c echo.Context) error {
-		rec, err := tenants.Get(c.Request().Context(), c.Param("tenantId"))
+		rec, err := tenants.Get(c.Request().Context(), tenantParam(c))
 		if err != nil {
 			return tenantHTTPError(log, err)
 		}
@@ -80,7 +103,7 @@ func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants *tenantsvc.Service
 		if err := c.Bind(&req); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
-		if err := tenants.SetStatus(c.Request().Context(), c.Param("tenantId"), string(req.Status)); err != nil {
+		if err := tenants.SetStatus(c.Request().Context(), tenantParam(c), string(req.Status)); err != nil {
 			return tenantHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -92,7 +115,7 @@ func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants *tenantsvc.Service
 func NewDeleteTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "DeleteTenant"))
 	return NewRoute(http.MethodDelete, "/tenants/:tenantId", func(c echo.Context) error {
-		if err := tenants.Delete(c.Request().Context(), c.Param("tenantId")); err != nil {
+		if err := tenants.Delete(c.Request().Context(), tenantParam(c)); err != nil {
 			return tenantHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)

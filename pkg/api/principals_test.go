@@ -150,6 +150,13 @@ func TestCreatePrincipalHandler(t *testing.T) {
 		require.Equal(t, "a/b", stored.ExternalID)
 	})
 
+	t.Run("a principalId holding a percent is decoded once", func(t *testing.T) {
+		e, deps := setupPrincipals(t)
+		require.Equal(t, http.StatusCreated, doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/x%2525y", nil).Code)
+		_, err := deps.principals.Get(t.Context(), deps.tenantID, "x%25y")
+		require.NoError(t, err)
+	})
+
 	t.Run("unknown tenant is 404", func(t *testing.T) {
 		e, _ := setupPrincipals(t)
 		rec := doRequest(t, e, http.MethodPut, "/tenants/missing/principals/user-1", nil)

@@ -47,7 +47,7 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
 
-		rec, secret, err := accessKeys.Create(c.Request().Context(), c.Param("tenantId"), req.Name, req.Permissions, req.Buckets, req.PrincipalID, req.ExpiresAt)
+		rec, secret, err := accessKeys.Create(c.Request().Context(), tenantParam(c), req.Name, req.Permissions, req.Buckets, req.PrincipalID, req.ExpiresAt)
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -76,7 +76,7 @@ func NewListAccessKeysHandler(logger *zap.Logger, accessKeys *accesskeysvc.Servi
 		if p := c.QueryParam("principalId"); p != "" {
 			opts = append(opts, accesskey.WithPrincipal(p))
 		}
-		recs, bucketNames, err := accessKeys.List(c.Request().Context(), c.Param("tenantId"), opts...)
+		recs, bucketNames, err := accessKeys.List(c.Request().Context(), tenantParam(c), opts...)
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -93,7 +93,7 @@ func NewListAccessKeysHandler(logger *zap.Logger, accessKeys *accesskeysvc.Servi
 func NewGetAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "GetAccessKey"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/access-keys/:accessKeyId", func(c echo.Context) error {
-		rec, bucketNames, err := accessKeys.Get(c.Request().Context(), c.Param("tenantId"), c.Param("accessKeyId"))
+		rec, bucketNames, err := accessKeys.Get(c.Request().Context(), tenantParam(c), c.Param("accessKeyId"))
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -106,7 +106,7 @@ func NewGetAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service
 func NewDeleteAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "DeleteAccessKey"))
 	return NewRoute(http.MethodDelete, "/tenants/:tenantId/access-keys/:accessKeyId", func(c echo.Context) error {
-		if err := accessKeys.Delete(c.Request().Context(), c.Param("tenantId"), c.Param("accessKeyId")); err != nil {
+		if err := accessKeys.Delete(c.Request().Context(), tenantParam(c), c.Param("accessKeyId")); err != nil {
 			return accessKeyHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)
