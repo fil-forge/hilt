@@ -18,13 +18,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// BatchTimeout bounds every rotation of one write together. A policy write
-// rotates the keys of each principal whose actions changed, the wildcard
-// fanning out to all of the tenant's, and a principal removal revokes each of
-// its keys' delegations; both hold a row lock throughout, while a share-locked
-// reader of that row gives up after [store.LockTimeout]. The batch as a whole
-// gets this deadline, below the reader's bound, so a large batch cannot lock
-// the data path out.
+// BatchTimeout caps one Rotate or Revoke call, which covers every key the
+// write touches. A policy write rotates the keys of each principal whose
+// actions changed, the wildcard fanning out to all of the tenant's, and a
+// principal removal revokes each of its keys' delegations; both hold a row
+// lock throughout, while a share-locked reader of that row gives up after
+// [store.LockTimeout]. Each call shortens its ctx to this deadline, below the
+// reader's bound (an earlier caller deadline still wins), so a large batch or
+// a stalled publish cannot lock the data path out.
 const BatchTimeout = 8 * time.Second
 
 // The batch bound must stay below the reader's; a negative difference fails
@@ -80,6 +81,8 @@ func NewRotator(
 // leaves every key unchanged; a key that held nothing over the bucket costs no
 // revocation. An empty action set leaves the key with nothing over the bucket.
 func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) error {
+	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
+	defer cancel()
 	keys, issuer, err := r.load(ctx, tenant, slices.Sorted(maps.Keys(actions))...)
 	if err != nil || len(keys) == 0 {
 		return err
@@ -124,6 +127,8 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 // Revoke revokes every delegation of every key bound to the principal, in one
 // request, and leaves the keys with none, for a principal being removed.
 func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) error {
+	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
+	defer cancel()
 	keys, issuer, err := r.load(ctx, tenant, principal)
 	if err != nil || len(keys) == 0 {
 		return err
