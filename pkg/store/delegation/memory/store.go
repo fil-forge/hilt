@@ -98,10 +98,8 @@ func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx 
 	if err != nil {
 		return err
 	}
-	for _, aud := range audiences {
-		if slices.Contains(replacement[aud], nil) {
-			return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
-		}
+	if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
+		return err
 	}
 
 	s.mutex.Lock()
