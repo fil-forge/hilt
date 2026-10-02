@@ -375,8 +375,10 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 	}
 
 	// The key's delegations are revoked and removed, and its record deleted,
-	// under the key's delegation lock, so a policy write rotating the key
-	// meanwhile serializes with it. The tenant key is read only when there is
+	// under the key's delegation lock and, on Postgres, in its transaction. A
+	// policy write rotating the key meanwhile serializes with it, and a failure
+	// after the row's delete leaves the record, its delegations and its secret
+	// in place for a retry. The tenant key is read only when there is
 	// something to revoke: a key holding no delegations is deleted without it.
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID), zap.Stringer("access_key", id))
 	err = s.delegations.Replace(ctx, []did.DID{id}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
