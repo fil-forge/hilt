@@ -25,7 +25,9 @@ import (
 // lock throughout, while a share-locked reader of that row gives up after
 // [store.LockTimeout]. Each call shortens its ctx to this deadline, below the
 // reader's bound (an earlier caller deadline still wins), so a large batch or
-// a stalled publish cannot lock the data path out.
+// a stalled publish cannot lock the data path out. [PublishRevocations] applies
+// the same bound, so every publish made under a delegation lock, a key or
+// bucket deletion's and a tenant removal's included, has it.
 const BatchTimeout = 8 * time.Second
 
 // The batch bound must stay below the reader's; a negative difference fails
@@ -175,8 +177,13 @@ func audiences(keys []accesskeystore.Record) []did.DID {
 
 // PublishRevocations publishes a revocation for each unexpired delegation in
 // one request, signed by the tenant that issued them. It is the callback body
-// of a [delegationstore.Store.Replace] that removes or replaces what keys hold.
+// of a [delegationstore.Store.Replace] that removes or replaces what keys hold,
+// so it runs while their delegations are locked, and it shortens its ctx to
+// [BatchTimeout] itself: whoever calls it, a stalled publish releases the locks
+// at the bound. An earlier caller deadline still wins.
 func PublishRevocations(ctx context.Context, log *zap.Logger, publisher RevocationPublisher, issuer ucan.Issuer, dels []ucan.Delegation) error {
+	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
+	defer cancel()
 	now := ucan.UnixTimestamp(time.Now().Unix())
 	live := make([]ucan.Delegation, 0, len(dels))
 	for _, d := range dels {
