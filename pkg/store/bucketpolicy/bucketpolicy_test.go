@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -36,19 +37,34 @@ var storeKinds = []StoreKind{Memory, Postgres}
 
 // fixtures creates the rows the policy tables reference: the bucket
 // (bucket_policy.bucket_id), its tenant, and the principals a document names
-// (bucket_policy_principal's foreign key). The memory store enforces no
-// referential integrity, so its fixtures only hand out identifiers.
+// (bucket_policy_principal's foreign key). The memory store checks only the
+// bucket, through the probe its fixtures hand it, and its fixtures otherwise
+// only hand out identifiers.
 type fixtures interface {
 	tenant(t *testing.T) did.DID
 	bucket(t *testing.T, tenant did.DID) did.DID
 	principal(t *testing.T, tenant did.DID, id string)
 }
 
-type memoryFixtures struct{}
+type memoryFixtures struct {
+	mu      sync.Mutex
+	buckets map[did.DID]bool
+}
 
-func (memoryFixtures) tenant(t *testing.T) did.DID            { return testutil.RandomDID(t) }
-func (memoryFixtures) bucket(t *testing.T, _ did.DID) did.DID { return testutil.RandomDID(t) }
-func (memoryFixtures) principal(*testing.T, did.DID, string)  {}
+func (f *memoryFixtures) tenant(t *testing.T) did.DID { return testutil.RandomDID(t) }
+func (f *memoryFixtures) bucket(t *testing.T, _ did.DID) did.DID {
+	id := testutil.RandomDID(t)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.buckets[id] = true
+	return id
+}
+func (f *memoryFixtures) principal(*testing.T, did.DID, string) {}
+func (f *memoryFixtures) has(id did.DID) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.buckets[id]
+}
 
 type postgresFixtures struct {
 	pool    *pgxpool.Pool
@@ -77,7 +93,8 @@ func (f *postgresFixtures) principal(t *testing.T, tenantID did.DID, id string) 
 func makeStore(t *testing.T, k StoreKind) (bucketpolicystore.Store, fixtures) {
 	switch k {
 	case Memory:
-		return bucketpolicymemory.New(), memoryFixtures{}
+		fx := &memoryFixtures{buckets: map[did.DID]bool{}}
+		return bucketpolicymemory.New(bucketpolicymemory.WithBuckets(fx.has)), fx
 	case Postgres:
 		pool := htestutil.PostgresOrSkip(t)
 		return bucketpolicypostgres.New(pool), &postgresFixtures{pool: pool}
@@ -118,6 +135,53 @@ func TestPolicyStore(t *testing.T) {
 				}
 				return tenantID, fx.bucket(t, tenantID)
 			}
+
+			t.Run("Put rejects a bucket that does not exist before running the callback", func(t *testing.T) {
+				tenantID := fx.tenant(t)
+				called := false
+				_, err := s.Put(t.Context(), bucketpolicystore.Input{
+					Bucket: testutil.RandomDID(t), Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
+				}, func(context.Context, *bucketpolicystore.Record) error { called = true; return nil })
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+				require.False(t, called, "the callback must not run for a missing bucket")
+			})
+
+			t.Run("a Put waits while DeleteByBucket runs its callback", func(t *testing.T) {
+				tenantID, bucketID := newBucket(t)
+				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject"))}, nil)
+				require.NoError(t, err)
+
+				deleted, written := htestutil.RequireWaitsForWriter(t,
+					func(entered chan<- struct{}, release <-chan struct{}) error {
+						return s.DeleteByBucket(context.Background(), bucketID, func(context.Context) error {
+							close(entered)
+							<-release
+							return nil
+						})
+					},
+					func() error {
+						_, err := s.Put(context.Background(), bucketpolicystore.Input{
+							Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:PutObject")), Unconditional: true,
+						}, nil)
+						return err
+					})
+				require.NoError(t, deleted)
+				require.NoError(t, written)
+				rec, err := s.Get(t.Context(), bucketID)
+				require.NoError(t, err)
+				require.Equal(t, doc(allow(everyone, "s3:PutObject")), rec.Policy, "the Put landed after the deletion")
+			})
+
+			t.Run("DeleteByBucket returns its callback's error and keeps the policy", func(t *testing.T) {
+				tenantID, bucketID := newBucket(t)
+				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject"))}, nil)
+				require.NoError(t, err)
+				boom := errors.New("boom")
+				err = s.DeleteByBucket(t.Context(), bucketID, func(context.Context) error { return boom })
+				require.ErrorIs(t, err, boom)
+				_, err = s.Get(t.Context(), bucketID)
+				require.NoError(t, err)
+			})
 
 			t.Run("Put creates a policy and Get returns it with its ETag", func(t *testing.T) {
 				tenantID, bucketID := newBucket(t, "alice")
@@ -449,15 +513,15 @@ func TestPolicyStore(t *testing.T) {
 				}, nil)
 				require.NoError(t, err)
 
-				require.NoError(t, s.DeleteByBucket(t.Context(), bucketID))
+				require.NoError(t, s.DeleteByBucket(t.Context(), bucketID, nil))
 				_, err = s.Get(t.Context(), bucketID)
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
 				require.NoError(t, err)
 				require.Empty(t, recs)
 
-				require.NoError(t, s.DeleteByBucket(t.Context(), bucketID))
-				require.NoError(t, s.DeleteByBucket(t.Context(), testutil.RandomDID(t)))
+				require.NoError(t, s.DeleteByBucket(t.Context(), bucketID, nil))
+				require.NoError(t, s.DeleteByBucket(t.Context(), testutil.RandomDID(t), nil))
 			})
 
 			t.Run("ListByPrincipal returns the policies naming the principal or the wildcard, by bucket", func(t *testing.T) {
@@ -647,17 +711,6 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound, "the failed write leaves no policy row")
 		_, principals := indexRows(t, bucketID)
 		require.Empty(t, principals)
-	})
-
-	// Postgres-only: the memory store has no bucket table and keys policies by bucket DID.
-	t.Run("Put rejects a bucket that does not exist before running the callback", func(t *testing.T) {
-		tenantID := fx.tenant(t)
-		called := false
-		_, err := s.Put(t.Context(), bucketpolicystore.Input{
-			Bucket: testutil.RandomDID(t), Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
-		}, func(context.Context, *bucketpolicystore.Record) error { called = true; return nil })
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
-		require.False(t, called, "the callback must not run for a missing bucket")
 	})
 
 	t.Run("Put rejects a bucket of another tenant", func(t *testing.T) {
@@ -882,7 +935,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 				})
 				return err
 			},
-			func() error { return s.DeleteByBucket(context.Background(), bucketID) })
+			func() error { return s.DeleteByBucket(context.Background(), bucketID, nil) })
 		require.NoError(t, written)
 		require.NoError(t, deleted)
 		_, err = s.Get(t.Context(), bucketID)

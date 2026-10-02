@@ -26,9 +26,13 @@ import (
 var Module = fx.Module("memory-store",
 	fx.Provide(
 		fx.Annotate(memaccesskey.New, fx.As(new(accesskey.Store))),
-		fx.Annotate(membucket.New, fx.As(new(bucket.Store))),
+		fx.Annotate(membucket.New, fx.As(new(bucket.Store)), fx.As(fx.Self())),
 		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
-		fx.Annotate(membucketpolicy.New, fx.As(new(bucketpolicy.Store))),
+		// The policy store refuses a bucket the bucket store does not hold,
+		// as the Postgres backend's bucket lock does.
+		fx.Annotate(func(buckets *membucket.Store) *membucketpolicy.Store {
+			return membucketpolicy.New(membucketpolicy.WithBuckets(buckets.Has))
+		}, fx.As(new(bucketpolicy.Store))),
 		fx.Annotate(memprincipal.New, fx.As(new(principal.Store))),
 		fx.Annotate(memprovider.New, fx.As(new(provider.Store))),
 		fx.Annotate(memtenant.New, fx.As(new(tenant.Store))),

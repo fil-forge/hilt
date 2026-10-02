@@ -359,7 +359,7 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.buckets.Delete(ctx, id); err != nil {
 			return fmt.Errorf("deleting bucket: %w", err)
 		}
-		if err := s.policies.DeleteByBucket(ctx, id); err != nil {
+		if err := s.policies.DeleteByBucket(ctx, id, nil); err != nil {
 			return fmt.Errorf("deleting bucket policy: %w", err)
 		}
 	}

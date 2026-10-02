@@ -276,8 +276,8 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 // Delete authenticates the request, checks the s3:DeleteBucket permission,
 // resolves the bucket, verifies its space is empty via Sprue (acting as the
 // tenant), publishes revocations for the delegations over the bucket, then
-// deletes those delegations, the bucket's policy and the bucket record. The
-// policy goes without a publication: the gateway refuses a bucket it no longer
+// deletes those delegations and the bucket record, which takes the policy with
+// it. The policy goes without a publication: the gateway refuses a bucket it no longer
 // knows, so nothing cached for it can be used. Revocations are published
 // first so that a revocation service failure leaves the bucket intact and the
 // call cleanly retryable — otherwise the delegations would live on with nothing
@@ -306,22 +306,27 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 		return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
 	}
 
-	if err := s.revokeDelegations(ctx, authz.Tenant.ID, authz.Bucket.ID, account); err != nil {
+	// DeleteByBucket holds the bucket's policy write lock across the callback:
+	// a policy write in flight finishes before the grants are listed, and one
+	// arriving later finds the bucket gone. The callback revokes the grants,
+	// removes the bucket's delegations (subject == bucket) and deletes the
+	// bucket record. On Postgres the bucket row's delete cascades to its
+	// policy, so no failure leaves a live bucket without one; the memory store
+	// removes the policy after the callback returns.
+	err = s.policies.DeleteByBucket(ctx, authz.Bucket.ID, func(ctx context.Context) error {
+		if err := s.revokeDelegations(ctx, authz.Tenant.ID, authz.Bucket.ID, account); err != nil {
+			return err
+		}
+		if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
+			return fmt.Errorf("deleting bucket delegations: %w", err)
+		}
+		if err := s.buckets.Delete(ctx, authz.Bucket.ID); err != nil {
+			return fmt.Errorf("deleting bucket: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
-	}
-
-	// Remove the bucket's delegations (subject == bucket), then the record,
-	// then the policy: Postgres cascades the policy with the bucket row, so no
-	// failure leaves a live bucket without its policy; the explicit delete
-	// keeps the memory backend in step.
-	if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
-		return nil, fmt.Errorf("deleting bucket delegations: %w", err)
-	}
-	if err := s.buckets.Delete(ctx, authz.Bucket.ID); err != nil {
-		return nil, fmt.Errorf("deleting bucket: %w", err)
-	}
-	if err := s.policies.DeleteByBucket(ctx, authz.Bucket.ID); err != nil {
-		return nil, fmt.Errorf("deleting bucket policy: %w", err)
 	}
 
 	s.logger.Debug("deleted bucket", zap.Stringer("bucket", authz.Bucket.ID), zap.String("name", authz.BucketName))

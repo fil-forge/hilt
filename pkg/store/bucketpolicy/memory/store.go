@@ -1,6 +1,7 @@
 // Package memory provides an in-memory implementation of the bucket policy
-// store. It does not enforce referential integrity: any bucket, tenant or
-// principal may be named.
+// store. It enforces no referential integrity of its own: any tenant or
+// principal may be named, and a bucket is checked only when the store is
+// built with [WithBuckets].
 package memory
 
 import (
@@ -29,14 +30,29 @@ type entry struct {
 }
 
 type Store struct {
-	mutex    sync.RWMutex
-	policies map[did.DID]entry
+	mutex     sync.RWMutex
+	policies  map[did.DID]entry
+	hasBucket func(did.DID) bool
 }
 
 var _ bucketpolicystore.Store = (*Store)(nil)
 
-func New() *Store {
-	return &Store{policies: map[did.DID]entry{}}
+// Option configures a Store.
+type Option func(*Store)
+
+// WithBuckets makes Put refuse a bucket for which has reports false, with
+// [store.ErrRecordNotFound] and before beforeCommit runs, as the Postgres
+// backend does. Without it any bucket may be named.
+func WithBuckets(has func(did.DID) bool) Option {
+	return func(s *Store) { s.hasBucket = has }
+}
+
+func New(opts ...Option) *Store {
+	s := &Store{policies: map[did.DID]entry{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Get ignores the lock mode: reads and writes are serialized by the store
@@ -65,6 +81,9 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	if s.hasBucket != nil && !s.hasBucket(in.Bucket) {
+		return "", fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrRecordNotFound)
+	}
 	var old *bucketpolicystore.Record
 	if e, ok := s.policies[in.Bucket]; ok {
 		rec := cloneRecord(e.rec)
@@ -124,10 +143,17 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	return nil
 }
 
-func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID) error {
+// DeleteByBucket runs beforeCommit under the store mutex, as Put does, so a
+// policy write waits for it.
+func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
+			return err
+		}
+	}
 	delete(s.policies, bucket)
 	return nil
 }
