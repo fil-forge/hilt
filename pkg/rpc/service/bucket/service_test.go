@@ -358,7 +358,7 @@ func TestDelete(t *testing.T) {
 	})
 
 	t.Run("a policy write during the deletion waits and finds the bucket gone", func(t *testing.T) {
-		d := setup(t, []string{"s3:DeleteBucket"}, &fakeSprue{empty: true})
+		d := setup(t, []string{"s3:DeleteBucket"}, false, &fakeSprue{empty: true})
 		deleted, written := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
 				d.swarf.OnPublish = func() { close(entered); <-release }
