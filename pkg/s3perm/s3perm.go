@@ -16,6 +16,17 @@ import (
 // command identifiers stay in sync with their definitions.
 var (
 	cmdsRetrieve = []ucan.Command{content.Retrieve.Command}
+	// Every operation that changes the catalog owes a ship: the blocks it
+	// writes are sealed into a CAR and sent with /blob/add, and its index
+	// published with /index/add. That the ship happens later, off the request,
+	// does not make it someone else's: an operation is authorized for what it
+	// causes, not only for what it does before it returns. cmdsCatalogWrite is
+	// that floor, and every catalog-changing set below is built on it.
+	//
+	// /content/retrieve rides along because the write reads first, and a
+	// manifest or state block the gateway no longer holds locally comes back
+	// over the network.
+	cmdsCatalogWrite = []ucan.Command{blob.Add.Command, index.Add.Command, content.Retrieve.Command}
 	// An add may not complete: /blob/abort abandons a blob that was allocated and
 	// uploaded but never accepted, so it belongs to the write path.
 	// An add may also supersede: a put (or multipart complete) to a key that
@@ -29,16 +40,45 @@ var (
 	// without the grant an overwrite registers the new version and fails to
 	// retract the old, and the tenant's object count climbs with every
 	// overwrite instead of holding steady.
-	cmdsAdd    = []ucan.Command{blob.Add.Command, index.Add.Command, upload.Add.Command, upload.Remove.Command, content.Retrieve.Command, blob.Abort.Command, blob.Remove.Command}
-	cmdsRemove = []ucan.Command{blob.Remove.Command, upload.Remove.Command}
+	cmdsAdd = append([]ucan.Command{upload.Add.Command, upload.Remove.Command, blob.Abort.Command, blob.Remove.Command},
+		cmdsCatalogWrite...)
+	// The two deletes differ, so they get their own sets.
+	//
+	// A delete with no version id may write a delete marker, and a delete
+	// marker is a version like any other, counted the way AWS counts it — so
+	// registering it is an add, odd as that reads on a delete. Without the
+	// grant the gateway queues a change it can never send, and the object
+	// count drifts for every delete against a versioned bucket.
+	cmdsDeleteObject = append([]ucan.Command{blob.Remove.Command, upload.Add.Command, upload.Remove.Command},
+		cmdsCatalogWrite...)
+	// Deleting one named version only ever removes. It mints no version, so it
+	// has nothing to register and no business holding the grant to.
+	cmdsDeleteObjectVersion = append([]ucan.Command{blob.Remove.Command, upload.Remove.Command},
+		cmdsCatalogWrite...)
+	// Setting retention or a legal hold rewrites one version's lock state and
+	// nothing else: no bytes stored, no version minted or retired, no blob
+	// released. The catalog write is the whole of it.
+	cmdsLockState = cmdsCatalogWrite
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
-	// /blob/remove. Deleting a bucket unwinds the same way, for every blob its
-	// space still holds: in-flight multipart parts, deleted objects' bodies whose
-	// deferred release has not run, and shipped catalog segments. Without the
-	// grant Ingot can release them only with authority left over from some
-	// earlier write, and a bucket that saw none cannot be deleted.
+	// /blob/remove. Without the grant Ingot can release them only with authority
+	// left over from some earlier write. No /upload/remove: an abandoned upload
+	// never committed a version, so it has no content entry to retract.
 	cmdsAbort = []ucan.Command{blob.Abort.Command, blob.Remove.Command}
+	// Deleting a bucket unwinds every blob its space still holds — in-flight
+	// multipart parts, deleted objects' bodies whose deferred release has not
+	// run, and shipped catalog segments — so it needs what an abort needs, and
+	// a bucket that saw no write has no captured authority to fall back on.
+	//
+	// It also needs /upload/remove. Emptying a bucket queues a retraction per
+	// object version, and the gateway applies whatever is still queued before
+	// asking to delete the space, because nothing else ever will: this delete
+	// checks that the space holds no blobs and never touches its content
+	// entries, and the upload service keeps a space's entries and counters
+	// after the space is gone. Those retractions normally travel on authority
+	// the original write left behind; this grant is what lets them go out when
+	// that authority has expired.
+	cmdsDeleteBucket = []ucan.Command{blob.Abort.Command, blob.Remove.Command, upload.Remove.Command}
 )
 
 // permissionCommands maps each supported S3 permission to the Forge commands
@@ -47,6 +87,15 @@ var (
 // and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket-level
 // actions only s3:DeleteBucket needs commands, since it releases the space's
 // blobs.
+//
+// Several permissions name a narrower shape of another: s3:PutObjectRetention
+// and s3:PutObjectLegalHold against s3:PutObject, s3:DeleteObjectVersion
+// against s3:DeleteObject, the version-scoped reads against s3:GetObject and
+// s3:ListBucket. auth.classifyRequest gives each shape its own operation, but
+// a request that misses the narrower branch falls back to the broader one — a
+// lock parameter on a method the gateway does not route it on, a versionId
+// naming no version. So each broad set has to grant what its narrower
+// counterparts do, which TestClassifiedPermissionsCoverTheirShapes pins.
 var permissionCommands = map[string][]ucan.Command{
 	"s3:GetObject":           cmdsRetrieve,
 	"s3:GetObjectVersion":    cmdsRetrieve,
@@ -55,13 +104,13 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:ListBucket":          cmdsRetrieve,
 	"s3:ListBucketVersions":  cmdsRetrieve,
 	"s3:PutObject":           cmdsAdd,
-	"s3:PutObjectRetention":  cmdsAdd,
-	"s3:PutObjectLegalHold":  cmdsAdd,
-	"s3:DeleteObject":        cmdsRemove,
-	"s3:DeleteObjectVersion": cmdsRemove,
+	"s3:PutObjectRetention":  cmdsLockState,
+	"s3:PutObjectLegalHold":  cmdsLockState,
+	"s3:DeleteObject":        cmdsDeleteObject,
+	"s3:DeleteObjectVersion": cmdsDeleteObjectVersion,
 	"s3:CreateBucket":        nil,
 	"s3:ListAllMyBuckets":    nil,
-	"s3:DeleteBucket":        cmdsAbort,
+	"s3:DeleteBucket":        cmdsDeleteBucket,
 
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.
