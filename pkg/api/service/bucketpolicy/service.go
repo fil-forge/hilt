@@ -1,4 +1,4 @@
-// Package policy provides the business logic for bucket policies: the
+// Package bucketpolicy provides the business logic for bucket policies: the
 // compare-and-set reads and writes of a bucket's policy document, and the two
 // principal reads computed from it, the policies naming a principal and its
 // effective actions per bucket.

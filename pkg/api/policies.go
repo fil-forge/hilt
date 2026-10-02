@@ -42,7 +42,7 @@ func policyHTTPError(log *zap.Logger, err error) error {
 func NewListPrincipalPoliciesHandler(logger *zap.Logger, policies *bucketpolicysvc.Service) Route {
 	log := logger.With(zap.String("handler", "ListPrincipalPolicies"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/principals/:principalId/policies", func(c echo.Context) error {
-		recs, err := policies.ListByPrincipal(c.Request().Context(), c.Param("tenantId"), principalParam(c))
+		recs, err := policies.ListByPrincipal(c.Request().Context(), tenantParam(c), principalParam(c))
 		if err != nil {
 			return policyHTTPError(log, err)
 		}
@@ -57,7 +57,7 @@ func NewListPrincipalPoliciesHandler(logger *zap.Logger, policies *bucketpolicys
 func NewGetPrincipalAccessHandler(logger *zap.Logger, policies *bucketpolicysvc.Service) Route {
 	log := logger.With(zap.String("handler", "GetPrincipalAccess"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/principals/:principalId/access", func(c echo.Context) error {
-		access, err := policies.Access(c.Request().Context(), c.Param("tenantId"), principalParam(c))
+		access, err := policies.Access(c.Request().Context(), tenantParam(c), principalParam(c))
 		if err != nil {
 			return policyHTTPError(log, err)
 		}
