@@ -72,6 +72,19 @@ type Service struct {
 	now         func() time.Time
 }
 
+// Option configures the service.
+type Option func(*Service)
+
+// WithClock replaces the service's reading of the present, which bounds every
+// range it answers. Tests use it to pin the instant a range is clamped against.
+func WithClock(now func() time.Time) Option {
+	return func(s *Service) {
+		if now != nil {
+			s.now = now
+		}
+	}
+}
+
 // New constructs the metrics service.
 func New(
 	logger *zap.Logger,
@@ -80,8 +93,9 @@ func New(
 	secrets vault.Vault,
 	uploads UsageSampler,
 	delegations delegationstore.Store,
+	opts ...Option,
 ) *Service {
-	return &Service{
+	s := &Service{
 		logger:      logger,
 		tenants:     tenants,
 		buckets:     buckets,
@@ -90,11 +104,21 @@ func New(
 		delegations: delegations,
 		now:         time.Now,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ParseRange validates the query as the API states it: RFC 3339 bounds with the
 // end after the start, and a window of whole hours. It may return
 // [ErrInvalidRange] or [ErrInvalidWindow].
+//
+// Bounds are resolved to whole seconds, which is the precision the upload
+// service's range carries, and the ordering check runs on the resolved values.
+// An interval finer than a second therefore reads as empty and is rejected here,
+// with a reason the caller can act on, rather than being accepted and then
+// collapsing to an inverted or empty range on the wire.
 func ParseRange(from, to, window string) (time.Time, time.Time, time.Duration, error) {
 	start, err := time.Parse(time.RFC3339, from)
 	if err != nil {
@@ -104,6 +128,7 @@ func ParseRange(from, to, window string) (time.Time, time.Time, time.Duration, e
 	if err != nil {
 		return time.Time{}, time.Time{}, 0, ErrInvalidRange
 	}
+	start, end = start.UTC().Truncate(time.Second), end.UTC().Truncate(time.Second)
 	if !end.After(start) {
 		return time.Time{}, time.Time{}, 0, ErrInvalidRange
 	}
@@ -121,7 +146,7 @@ func ParseRange(from, to, window string) (time.Time, time.Time, time.Duration, e
 	if hours > math.MaxInt64/int64(time.Hour) {
 		return time.Time{}, time.Time{}, 0, ErrInvalidWindow
 	}
-	return start.UTC(), end.UTC(), time.Duration(hours) * time.Hour, nil
+	return start, end, time.Duration(hours) * time.Hour, nil
 }
 
 // Bucket returns the usage series for one of the tenant's buckets. It may return
@@ -166,6 +191,18 @@ func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.T
 		return nil, err
 	}
 
+	// Clamped once, before the fan out. The upload service shortens a range
+	// running past its own clock, so sampling each bucket against its own
+	// reading of "now" would end their last buckets at different instants and
+	// leave the sum carrying two nearly identical trailing samples.
+	//
+	// An emptied range is answered before the buckets are paged in, since the
+	// answer is the same however many there are.
+	end := s.clamp(to)
+	if !end.After(from) {
+		return []Sample{}, nil
+	}
+
 	buckets, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
 		var listOpts []bucket.ListOption
 		if opts.Cursor != nil {
@@ -177,15 +214,6 @@ func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.T
 		return nil, fmt.Errorf("listing buckets: %w", err)
 	}
 	if len(buckets) == 0 {
-		return []Sample{}, nil
-	}
-
-	// Clamped once, before the fan out. The upload service shortens a range
-	// running past its own clock, so sampling each bucket against its own
-	// reading of "now" would end their last buckets at different instants and
-	// leave the sum carrying two nearly identical trailing samples.
-	end := s.clamp(to)
-	if !end.After(from) {
 		return []Sample{}, nil
 	}
 
@@ -286,7 +314,10 @@ func sum(runs [][]Sample) []Sample {
 // return an empty series rather than asking the upload service, which would
 // reject the inverted range as invalid.
 func (s *Service) clamp(to time.Time) time.Time {
-	if now := s.now(); to.After(now) {
+	// Truncated for the same reason the bounds are: the present carries
+	// sub-second precision the wire does not, and an untruncated end could put
+	// From and To in the same second.
+	if now := s.now().UTC().Truncate(time.Second); to.After(now) {
 		return now
 	}
 	return to
