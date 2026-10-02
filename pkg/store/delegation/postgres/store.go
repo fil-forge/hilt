@@ -47,7 +47,7 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) (er
 		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
 	}
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -136,7 +136,7 @@ func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 // [store.ErrLockTimeout].
 func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) (err error) {
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -174,14 +174,12 @@ func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx 
 		return fmt.Errorf("iterating delegations: %w", err)
 	}
 
-	replacement, err := next(ctx, current)
+	replacement, err := next(pglock.WithTx(ctx, tx), current)
 	if err != nil {
 		return err
 	}
-	for _, aud := range audiences {
-		if slices.Contains(replacement[aud], nil) {
-			return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
-		}
+	if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
+		return err
 	}
 
 	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE audience = ANY($1)`, strs); err != nil {
@@ -293,7 +291,7 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 // reinsert what this call deleted.
 func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) (err error) {
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -320,7 +318,7 @@ func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) (err error
 		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
 	}
 	defer func() { err = pglock.MapError(err) }()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}

@@ -271,6 +271,21 @@ func TestDelegationStore(t *testing.T) {
 				require.Len(t, page.Results, 1, "the current set is kept")
 			})
 
+			t.Run("Replace returns ErrInvalidArgument for a delegation filed under another audience", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				locked, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				stray := makeDelegation(t, issuer, other, issuer.DID(), command.MustParse("/test/run"))
+
+				err := replaceOne(t.Context(), s, locked, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					return []ucan.Delegation{stray}, nil
+				})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+				page, err := s.ListByAudience(t.Context(), other)
+				require.NoError(t, err)
+				require.Empty(t, page.Results, "nothing is written under an audience the call did not lock")
+			})
+
 			t.Run("DeleteBySubject removes only that subject's delegations", func(t *testing.T) {
 				subjectA, subjectB := testutil.RandomDID(t), testutil.RandomDID(t)
 				audA1, audA2 := testutil.RandomDID(t), testutil.RandomDID(t)
