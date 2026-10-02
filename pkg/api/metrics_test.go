@@ -14,6 +14,7 @@ import (
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -43,25 +44,27 @@ func (f *fakeSampler) SampleUsage(_ context.Context, space did.DID, _, _ time.Ti
 }
 
 type metricsDeps struct {
-	tenants *tenantmemory.Store
-	buckets *bucketmemory.Store
-	vault   *vaultmemory.Store
-	sampler *fakeSampler
+	tenants     *tenantmemory.Store
+	buckets     *bucketmemory.Store
+	vault       *vaultmemory.Store
+	sampler     *fakeSampler
+	delegations *delegationmemory.Store
 }
 
 func newMetricsDeps(t *testing.T) *metricsDeps {
 	t.Helper()
 	return &metricsDeps{
-		tenants: tenantmemory.New(),
-		buckets: bucketmemory.New(),
-		vault:   vaultmemory.New(),
-		sampler: &fakeSampler{series: map[did.DID][]metricscmds.SampleItem{}},
+		tenants:     tenantmemory.New(),
+		buckets:     bucketmemory.New(),
+		vault:       vaultmemory.New(),
+		sampler:     &fakeSampler{series: map[did.DID][]metricscmds.SampleItem{}},
+		delegations: delegationmemory.New(),
 	}
 }
 
 func (d *metricsDeps) service(t *testing.T) *metricssvc.Service {
 	t.Helper()
-	return metricssvc.New(zap.NewNop(), d.tenants, d.buckets, d.vault, d.sampler)
+	return metricssvc.New(zap.NewNop(), d.tenants, d.buckets, d.vault, d.sampler, d.delegations)
 }
 
 // addMetricsTenant records a tenant with its signing key and the given buckets,

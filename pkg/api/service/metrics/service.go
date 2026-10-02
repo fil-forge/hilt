@@ -23,6 +23,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/vault"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
@@ -62,12 +63,13 @@ type Sample struct {
 }
 
 type Service struct {
-	logger  *zap.Logger
-	tenants tenantstore.Store
-	buckets bucket.Store
-	secrets vault.Vault
-	uploads UsageSampler
-	now     func() time.Time
+	logger      *zap.Logger
+	tenants     tenantstore.Store
+	buckets     bucket.Store
+	secrets     vault.Vault
+	uploads     UsageSampler
+	delegations delegationstore.Store
+	now         func() time.Time
 }
 
 // New constructs the metrics service.
@@ -77,14 +79,16 @@ func New(
 	buckets bucket.Store,
 	secrets vault.Vault,
 	uploads UsageSampler,
+	delegations delegationstore.Store,
 ) *Service {
 	return &Service{
-		logger:  logger,
-		tenants: tenants,
-		buckets: buckets,
-		secrets: secrets,
-		uploads: uploads,
-		now:     time.Now,
+		logger:      logger,
+		tenants:     tenants,
+		buckets:     buckets,
+		secrets:     secrets,
+		uploads:     uploads,
+		delegations: delegations,
+		now:         time.Now,
 	}
 }
 
@@ -207,8 +211,14 @@ func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.T
 }
 
 // sample reads one space's series, signing as the tenant that owns it.
+//
+// The proof chain runs from the tenant to the bucket through the root the bucket
+// issued when it was created, which lives in the delegation store. The client's
+// own proofs are the static set loaded from configuration and hold nothing about
+// a bucket, so the store has to be named per call.
 func (s *Service) sample(ctx context.Context, issuer ucan.Issuer, space did.DID, from, to time.Time, window time.Duration) ([]Sample, error) {
-	ok, err := s.uploads.SampleUsage(ctx, space, from, to, window, upload.WithIssuer(issuer))
+	ok, err := s.uploads.SampleUsage(ctx, space, from, to, window,
+		upload.WithIssuer(issuer), upload.WithProofs(s.delegations))
 	if err != nil {
 		return nil, err
 	}
