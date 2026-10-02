@@ -191,6 +191,46 @@ func TestClientDeleteBucket(t *testing.T) {
 	})
 }
 
+func TestClientPolicy(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		hilt := testutil.RandomIssuer(t)
+		ingot := testutil.RandomIssuer(t)
+		body := []byte(`{"Statement":[]}`)
+
+		var gotArgs *s3bkt.PolicyArguments
+		srv := server.NewHTTP(hilt)
+		srv.Handle(s3bkt.Policy.Command, s3bkt.Policy.Handler(
+			func(req *binding.Request[*s3bkt.PolicyArguments], res *binding.Response[*s3bkt.PolicyOK]) error {
+				gotArgs = req.Task().Arguments()
+				return res.SetSuccess(&s3bkt.PolicyOK{ETag: `"e1"`, Policy: gotArgs.Body})
+			}))
+
+		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Policy, hilt, ingot.DID()))
+		ok, err := c.Policy(t.Context(), s3.Request{Method: "PUT", URL: "https://s3.fil.one/bucket?policy"}, body)
+		require.NoError(t, err)
+		require.NotNil(t, gotArgs)
+		require.Equal(t, "PUT", gotArgs.Request.Method)
+		require.Equal(t, body, gotArgs.Body)
+		require.Equal(t, `"e1"`, ok.ETag)
+		require.Equal(t, body, ok.Policy)
+	})
+
+	t.Run("failure receipt", func(t *testing.T) {
+		hilt := testutil.RandomIssuer(t)
+		ingot := testutil.RandomIssuer(t)
+
+		srv := server.NewHTTP(hilt)
+		srv.Handle(s3bkt.Policy.Command, s3bkt.Policy.Handler(
+			func(req *binding.Request[*s3bkt.PolicyArguments], res *binding.Response[*s3bkt.PolicyOK]) error {
+				return res.SetFailure(errors.New("no such bucket policy"))
+			}))
+
+		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Policy, hilt, ingot.DID()))
+		_, err := c.Policy(t.Context(), s3.Request{Method: "GET", URL: "https://s3.fil.one/bucket?policy"}, nil)
+		require.Error(t, err)
+	})
+}
+
 func TestClientErrors(t *testing.T) {
 	hilt := testutil.RandomIssuer(t)
 	ingot := testutil.RandomIssuer(t)

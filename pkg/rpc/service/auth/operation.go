@@ -272,7 +272,7 @@ func classifyRequest(req s3.Request) (classification, error) {
 		switch {
 		case c.bucket == "":
 			return classify(OpListBuckets)
-		case c.key == "" && policy:
+		case c.key == "" && policy && method == http.MethodGet:
 			return classify(OpGetBucketPolicy)
 		case c.key == "" && uploads:
 			return classify(OpListBucketMultipartUploads)
