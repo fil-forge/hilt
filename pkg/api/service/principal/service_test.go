@@ -3,6 +3,7 @@ package principal_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -67,11 +68,12 @@ func setup(t *testing.T) deps {
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
 	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", testutil.RandomDID(t), tenant.Active))
 
+	principals := principalmemory.New()
 	d := deps{
 		tenants:     tenants,
-		principals:  principalmemory.New(),
+		principals:  principals,
 		policies:    bucketpolicymemory.New(),
-		accessKeys:  accesskeymemory.New(),
+		accessKeys:  accesskeymemory.New(accesskeymemory.WithPrincipals(principals.WithLive)),
 		secrets:     vaultmemory.New(),
 		delegations: delegationmemory.New(),
 		swarf:       &testutil.FakeSwarf{},
@@ -156,6 +158,13 @@ func TestCreate(t *testing.T) {
 		require.Equal(t, d.otherTenant, rec.Tenant)
 	})
 
+	t.Run("a lock timeout recording the principal is a retryable conflict", func(t *testing.T) {
+		d := setup(t)
+		svc := principalsvc.New(zap.NewNop(), d.tenants, &lockTimeoutPrincipals{Store: d.principals}, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
+		_, _, err := svc.Create(ctx, "tenant-1", "user-1")
+		require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
+	})
+
 	t.Run("rejects an unknown tenant", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "missing", "user-1")
@@ -168,6 +177,10 @@ func TestCreate(t *testing.T) {
 		require.ErrorIs(t, err, principalsvc.ErrInvalidPrincipalID)
 		_, _, err = d.svc.Create(ctx, "tenant-1", strings.Repeat("u", 256))
 		require.ErrorIs(t, err, principalsvc.ErrInvalidPrincipalID)
+		// The limit is bytes, and the refusal says so.
+		_, _, err = d.svc.Create(ctx, "tenant-1", strings.Repeat("é", 128))
+		require.ErrorIs(t, err, principalsvc.ErrInvalidPrincipalID)
+		require.Contains(t, err.Error(), "255 bytes")
 	})
 
 	t.Run("rejects a principalId that is not valid UTF-8 or holds a NUL", func(t *testing.T) {
@@ -430,6 +443,15 @@ func (l *lockedPrincipals) Delete(ctx context.Context, tenant did.DID, externalI
 	return l.err
 }
 
+// lockTimeoutPrincipals answers Add with the store's lock timeout.
+type lockTimeoutPrincipals struct {
+	principalstore.Store
+}
+
+func (l *lockTimeoutPrincipals) Add(context.Context, did.DID, string) error {
+	return fmt.Errorf("adding principal: %w", store.ErrLockTimeout)
+}
+
 // renamingPrincipals runs write before Delete locks the row, standing in for a
 // policy write that names the principal between the strip and the lock.
 type renamingPrincipals struct {
@@ -532,6 +554,23 @@ func (r *racingKeys) Add(ctx context.Context, in accesskeystore.Input) error {
 	return err
 }
 
+// removeBeforeAdd runs remove once, before the first Add, standing in for a
+// removal that lists the principal's keys after the creation's principal
+// lookup and before its key row is stored.
+type removeBeforeAdd struct {
+	accesskeystore.Store
+	remove func()
+}
+
+func (r *removeBeforeAdd) Add(ctx context.Context, in accesskeystore.Input) error {
+	if r.remove != nil {
+		remove := r.remove
+		r.remove = nil
+		remove()
+	}
+	return r.Store.Add(ctx, in)
+}
+
 // pausingDelegations closes revoked once the first Replace made while armed
 // returns, and parks there until released: a removal that has revoked under
 // the principal's row lock and has not yet deleted the key rows.
@@ -586,6 +625,26 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		_, err = d.accessKeys.Get(ctx, keys.added)
 		require.ErrorIs(t, err, store.ErrRecordNotFound, "the key row is gone")
 		require.Empty(t, d.held(t, keys.added), "no delegation outlives the key")
+	})
+
+	t.Run("a key stored after the removal listed the principal's keys is refused", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+
+		keys := &removeBeforeAdd{Store: d.accessKeys, remove: func() {
+			require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
+		}}
+		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketmemory.New(), d.policies, d.delegations, d.secrets, d.swarf)
+		_, _, err = creator.Create(ctx, "tenant-1", "laptop", nil, nil, "user-1", nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
+
+		// The revived principal has no keys.
+		_, _, err = d.svc.Create(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+		recs, err := d.accessKeys.ListByTenant(ctx, d.tenantID, accesskeystore.WithPrincipal("user-1"))
+		require.NoError(t, err)
+		require.Empty(t, recs)
 	})
 }
 

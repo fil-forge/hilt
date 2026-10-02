@@ -120,6 +120,8 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		_, err := s.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock())
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		} else if errors.Is(err, store.ErrLockTimeout) {
+			return accesskeystore.Record{}, "", ErrConcurrentChange
 		} else if err != nil {
 			return accesskeystore.Record{}, "", fmt.Errorf("looking up principal: %w", err)
 		}
@@ -222,9 +224,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if principalRef != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
-		// The principal row is referenced by the new key; a removal holding it
-		// past the store's lock timeout means nothing was written and the
-		// call can be repeated.
+		// A removal or a policy write holding the principal row past the
+		// store's lock timeout leaves nothing written, and the call can be
+		// repeated.
 		if errors.Is(err, store.ErrLockTimeout) {
 			return accesskeystore.Record{}, "", ErrConcurrentChange
 		}
@@ -244,6 +246,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, principalID, store.WithShareLock())
 		if err != nil {
 			rollback()
+			if errors.Is(err, store.ErrLockTimeout) {
+				return accesskeystore.Record{}, "", ErrConcurrentChange
+			}
 			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
 		}
 		for _, p := range policies {
@@ -280,6 +285,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			return map[did.DID][]ucan.Delegation{accessKeyID: dels}, nil
 		}); err != nil {
 			rollback()
+			if errors.Is(err, store.ErrLockTimeout) {
+				return accesskeystore.Record{}, "", ErrConcurrentChange
+			}
 			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)
 		}
 	}

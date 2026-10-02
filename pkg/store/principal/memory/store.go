@@ -2,10 +2,11 @@
 //
 // The store holds two kinds of lock. mutex guards the map and is held for one
 // read or one write at a time, never across a caller's callback. Each row has
-// a slot: Add, a share-locked Get, Delete and Lock take the slots of the rows
-// they touch, so those calls on one row run one at a time, as the Postgres row
-// locks order them. Delete holds its slot while beforeCommit runs and Lock
-// holds its slots while fn runs; a row none of them holds waits on nothing.
+// a slot: Add, a share-locked Get, Delete, Lock and WithLive take the slots of
+// the rows they touch, so those calls on one row run one at a time, as the
+// Postgres row locks order them. Delete holds its slot while beforeCommit runs
+// and Lock and WithLive hold theirs while fn runs; a row none of them holds
+// waits on nothing.
 // slotsMutex guards only the slots map.
 //
 // The split mirrors Postgres. A removal there holds the principal row FOR
@@ -106,6 +107,27 @@ func (s *Store) hold(ctx context.Context, rows ...row) (release func(), err erro
 		}
 	}
 	return release, nil
+}
+
+// WithLive holds the principal's row while fn runs, as the Postgres key insert
+// holds it FOR SHARE, and refuses with [store.ErrInvalidArgument] when the row
+// is not live. The wait is bounded at [LockWait], past which it returns
+// [store.ErrLockTimeout] with nothing run. The memory access-key store takes it
+// through its WithPrincipals option so a key cannot be added to a principal a
+// removal has tombstoned.
+func (s *Store) WithLive(ctx context.Context, tenant did.DID, externalID string, fn func() error) error {
+	release, err := s.hold(ctx, row{tenant, externalID})
+	if err != nil {
+		return err
+	}
+	defer release()
+	s.mutex.RLock()
+	e, ok := s.principals[tenant][externalID]
+	s.mutex.RUnlock()
+	if !ok || e.deleted {
+		return fmt.Errorf("principal %s does not exist: %w", externalID, store.ErrInvalidArgument)
+	}
+	return fn()
 }
 
 // live returns the rows of the tenant's live principals among ids.
