@@ -15,6 +15,7 @@ import (
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -83,7 +84,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -144,7 +145,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(), principalmemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -215,9 +216,11 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type deleteEnv struct {
-	svc       *tenantsvc.Service
-	tenants   *tenantmemory.Store
-	directory *plcDirectory
+	svc        *tenantsvc.Service
+	tenants    *tenantmemory.Store
+	principals *principalmemory.Store
+	tenantID   did.DID
+	directory  *plcDirectory
 }
 
 func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
@@ -245,12 +248,14 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	tenants := tenantmemory.New()
 	secrets := vaultmemory.New()
+	principals := principalmemory.New()
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), status))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
-	return deleteEnv{svc: svc, tenants: tenants, directory: directory}
+		accesskeymemory.New(), principals, delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
+	return deleteEnv{svc: svc, tenants: tenants, principals: principals, tenantID: tenantID, directory: directory}
 }
 
 func TestDelete(t *testing.T) {
@@ -261,6 +266,9 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
 		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		ps, err := env.principals.ListByTenant(ctx, env.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, ps)
 		require.Equal(t, 1, env.directory.deactivations)
 	})
 
