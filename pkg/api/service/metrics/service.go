@@ -244,7 +244,7 @@ func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.T
 		return nil, err
 	}
 
-	return sum(runs), nil
+	return s.sum(runs), nil
 }
 
 // sample reads one space's series, signing as the tenant that owns it.
@@ -277,27 +277,46 @@ func (s *Service) sample(ctx context.Context, issuer ucan.Issuer, space did.DID,
 // The runs share a grid, having been asked for the same range and window, but
 // they are keyed by timestamp rather than by position so a short run cannot
 // shift the ones beside it.
-func sum(runs [][]Sample) []Sample {
+//
+// Only instants every run reached are reported. The upload service ends a range
+// at its own clock, and every bucket but the last falls on the shared grid, so a
+// run that was shortened differs from its siblings only in its tail. Summing
+// those tails anyway would publish a timestamp carrying some of the tenant's
+// buckets and call it the tenant's total, which reads as a drop in usage rather
+// than as the missing reading it is.
+func (s *Service) sum(runs [][]Sample) []Sample {
 	totals := map[int64]Sample{}
+	seen := map[int64]int{}
 	for _, run := range runs {
-		for _, s := range run {
-			at := s.End.Unix()
+		for _, smp := range run {
+			at := smp.End.Unix()
 			acc, ok := totals[at]
 			if !ok {
-				acc = Sample{End: s.End}
+				acc = Sample{End: smp.End}
 			}
-			acc.BytesStored += s.BytesStored
-			acc.BytesIngested += s.BytesIngested
-			acc.ObjectCount += s.ObjectCount
+			acc.BytesStored += smp.BytesStored
+			acc.BytesIngested += smp.BytesIngested
+			acc.ObjectCount += smp.ObjectCount
 			totals[at] = acc
+			seen[at]++
 		}
 	}
 
 	ends := make([]int64, 0, len(totals))
-	for at := range totals {
-		ends = append(ends, at)
+	for at, count := range seen {
+		if count == len(runs) {
+			ends = append(ends, at)
+		}
 	}
 	slices.Sort(ends)
+
+	if dropped := len(totals) - len(ends); dropped > 0 {
+		// Reaching here means the upload service clamped some calls and not
+		// others, which happens when this service's clock runs ahead of its.
+		s.logger.Warn("tenant usage series trimmed to the instants every bucket reported",
+			zap.Int("buckets", len(runs)),
+			zap.Int("dropped", dropped))
+	}
 
 	samples := make([]Sample, 0, len(ends))
 	for _, at := range ends {
