@@ -2,6 +2,7 @@ package delegation
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
@@ -10,7 +11,8 @@ import (
 )
 
 type Store interface {
-	// DeleteByAudience removes all delegation records for a given audience.
+	// DeleteByAudience removes all delegation records for a given audience,
+	// under that audience's lock.
 	DeleteByAudience(ctx context.Context, audience did.DID) error
 	// DeleteBySubject removes all delegation records for a given subject.
 	// The undefined DID (powerline) is not removed by this method: it returns
@@ -31,7 +33,40 @@ type Store interface {
 	// of the next Delegation. It returns [store.ErrInvalidArgument] for an undef
 	// subject.
 	ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error)
-	// PutBatch stores a batch of delegation records. It returns
-	// [store.ErrInvalidArgument] if the batch contains a nil delegation.
+	// PutBatch stores a batch of delegation records. It takes the lock of
+	// every audience the batch touches, so it does not interleave with a
+	// Replace of any of them. It returns [store.ErrInvalidArgument] if the
+	// batch contains a nil delegation.
 	PutBatch(ctx context.Context, delegation []ucan.Delegation) error
+	// Replace atomically swaps the delegations of every listed audience in one
+	// transaction: it locks the audiences, hands next the current set of each,
+	// deletes them, stores what next returns, and commits. An audience missing
+	// from next's result, or mapped to nil, is left with none; an error from
+	// next rolls everything back and is returned. An audience holding nothing
+	// is handed a nil set, so Replace also stores a first delegation. next runs
+	// while the audiences are locked and must not call back into the store. It
+	// returns [store.ErrInvalidArgument] if next returns a nil delegation or
+	// one whose audience is not the audience it is filed under; entries for
+	// audiences not listed are ignored. On Postgres next's
+	// ctx carries the transaction, so a store that opens with pglock.Begin
+	// writes inside it. The lock wait is bounded at [store.LockTimeout] and
+	// returns [store.ErrLockTimeout] when it runs out.
+	Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
+}
+
+// CheckReplacement refuses a replacement that holds a nil delegation or one
+// filed under an audience other than its own, which would be written under an
+// audience the call did not lock. Both backends call it after next returns.
+func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delegation) error {
+	for _, aud := range audiences {
+		for _, d := range replacement[aud] {
+			if d == nil {
+				return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
+			}
+			if d.Audience() != aud {
+				return fmt.Errorf("delegation %s is for %s, filed under %s: %w", d.Link(), d.Audience(), aud, store.ErrInvalidArgument)
+			}
+		}
+	}
+	return nil
 }

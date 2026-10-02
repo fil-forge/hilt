@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	dlgstore "github.com/fil-forge/hilt/pkg/store/delegation"
@@ -18,17 +19,45 @@ import (
 
 const defaultListLimit = 1000
 
+// Store holds two locks. mutex guards the map and is held for one read or one
+// write at a time, never across Replace's callback. writes serializes the
+// writers, as the per-audience advisory locks do on Postgres, and is the lock
+// Replace holds while next runs; it is a one-slot channel rather than a mutex
+// so [Store.hold] can bound its wait.
 type Store struct {
-	mutex sync.RWMutex
+	mutex  sync.RWMutex
+	writes chan struct{}
 	// audience DID -> delegations (sorted by link string)
 	byAudience map[did.DID][]ucan.Delegation
 }
 
+// LockWait bounds how long a writer waits for a write in flight before giving
+// up with [store.ErrLockTimeout], as lock_timeout bounds the wait a Postgres
+// advisory lock gives. It is a variable so a test can shorten it.
+var LockWait = store.LockTimeout
+
 var _ dlgstore.Store = (*Store)(nil)
 
 func New() *Store {
-	return &Store{byAudience: map[did.DID][]ucan.Delegation{}}
+	return &Store{writes: make(chan struct{}, 1), byAudience: map[did.DID][]ucan.Delegation{}}
 }
+
+// hold takes the write lock, waiting at most [LockWait] or until ctx is done,
+// and release gives it back.
+func (s *Store) hold(ctx context.Context) error {
+	timer := time.NewTimer(LockWait)
+	defer timer.Stop()
+	select {
+	case s.writes <- struct{}{}:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("waited %s for an audience a write holds: %w", LockWait, store.ErrLockTimeout)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Store) release() { <-s.writes }
 
 func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) error {
 	// Validate the whole batch before storing anything.
@@ -36,9 +65,55 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
 	}
 
+	if err := s.hold(ctx); err != nil {
+		return err
+	}
+	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	s.put(delegations)
+	return nil
+}
+
+// Replace swaps the audiences' delegations holding the write lock for the
+// whole call, which serializes it against every other write: next sees the
+// settled current sets and its result is in place before the lock is
+// released. Another writer waits at most [LockWait] for it. Reads take the
+// map alone and are answered while next runs, as on Postgres.
+func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	if err := s.hold(ctx); err != nil {
+		return err
+	}
+	defer s.release()
+
+	s.mutex.RLock()
+	current := make(map[did.DID][]ucan.Delegation, len(audiences))
+	for _, aud := range audiences {
+		current[aud] = slices.Clone(s.byAudience[aud])
+	}
+	s.mutex.RUnlock()
+
+	replacement, err := next(ctx, current)
+	if err != nil {
+		return err
+	}
+	if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
+		return err
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	for _, aud := range audiences {
+		delete(s.byAudience, aud)
+		s.put(replacement[aud])
+	}
+	return nil
+}
+
+// put stores the delegations, skipping any already held. The caller holds
+// both locks.
+func (s *Store) put(delegations []ucan.Delegation) {
 	for _, d := range delegations {
 		aud := d.Audience()
 		existing := s.byAudience[aud]
@@ -53,7 +128,6 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 		})
 		s.byAudience[aud] = existing
 	}
-	return nil
 }
 
 func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
@@ -126,6 +200,10 @@ func page(dlgs []ucan.Delegation, opts []store.PaginationOption) store.Page[ucan
 }
 
 func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
+	if err := s.hold(ctx); err != nil {
+		return err
+	}
+	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -138,6 +216,10 @@ func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
 		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
 	}
 
+	if err := s.hold(ctx); err != nil {
+		return err
+	}
+	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
