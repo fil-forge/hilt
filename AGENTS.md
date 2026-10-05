@@ -123,7 +123,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   and cover it in that suite.
 - **Locking and callbacks**: a write that another service must learn about runs
   in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
-  caller-supplied `beforeCommit` callback, commit. The callback's ctx carries
+  caller-supplied callback (`fn`, which runs inside the write before it takes
+  effect), commit. The callback's ctx carries
   the transaction (`pglock.WithTx`), and a store that opens its own through
   `pglock.Begin` joins it, so what the callback writes commits with the
   caller's write or not at all. A policy write's callback rewrites the
