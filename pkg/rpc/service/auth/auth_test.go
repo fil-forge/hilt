@@ -504,7 +504,7 @@ func TestAuthorize(t *testing.T) {
 		seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
 		principals := principalmemory.New()
 		require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
-		require.NoError(t, principals.Delete(ctx, tenantID, "user-1", nil))
+		require.NoError(t, principals.Tombstone(ctx, tenantID, "user-1", nil))
 		gone := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets,
 			principals, bucketpolicymemory.New(), secrets)
 
@@ -731,7 +731,7 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
 				close(entered)
 				<-release
-				return principals.Lock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
+				return principals.WithLock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
 			})
 			return err
 		},
