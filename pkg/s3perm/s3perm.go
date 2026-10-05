@@ -124,17 +124,28 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:ListBucketMultipartUploads": cmdsRetrieve,
 }
 
-// bucketLevel are the permissions excluded from bucket policies: a key holding
-// CreateBucket or DeleteBucket acts outside the policy that granted it, a key
-// holding a policy action could rewrite the policy that granted it, and every
-// principal holds ListAllMyBuckets.
-var bucketLevel = map[string]bool{
-	"s3:CreateBucket":       true,
-	"s3:DeleteBucket":       true,
-	"s3:ListAllMyBuckets":   true,
-	"s3:GetBucketPolicy":    true,
-	"s3:PutBucketPolicy":    true,
-	"s3:DeleteBucketPolicy": true,
+// policyActions is the allowlist of permissions a bucket policy statement may
+// carry, sorted. The rest of the vocabulary stays out on purpose: a key holding
+// s3:CreateBucket or s3:DeleteBucket acts outside the policy that granted it, a
+// key holding a policy operation could rewrite the policy that granted it, and
+// every principal holds s3:ListAllMyBuckets. A new permission is not a policy
+// action until it is added here, which TestEveryPermissionIsClassified
+// enforces.
+var policyActions = []string{
+	"s3:AbortMultipartUpload",
+	"s3:DeleteObject",
+	"s3:DeleteObjectVersion",
+	"s3:GetObject",
+	"s3:GetObjectLegalHold",
+	"s3:GetObjectRetention",
+	"s3:GetObjectVersion",
+	"s3:ListBucket",
+	"s3:ListBucketMultipartUploads",
+	"s3:ListBucketVersions",
+	"s3:ListMultipartUploadParts",
+	"s3:PutObject",
+	"s3:PutObjectLegalHold",
+	"s3:PutObjectRetention",
 }
 
 // Valid reports whether p is a recognized S3 permission.
@@ -143,12 +154,12 @@ func Valid(p string) bool {
 	return ok
 }
 
-// PolicyAction reports whether p may appear in a bucket policy statement: a
-// recognized permission other than the bucket-level ones (bucket creation and
-// deletion, the policy operations, and s3:ListAllMyBuckets). The wildcard PolicyWildcard is not a permission and is
-// expanded by the policy package; it is not a PolicyAction.
+// PolicyAction reports whether p may appear in a bucket policy statement: one
+// of the allowlisted policyActions. The wildcard PolicyWildcard is not a
+// permission and is expanded by the policy package; it is not a PolicyAction.
 func PolicyAction(p string) bool {
-	return Valid(p) && !bucketLevel[p]
+	_, ok := slices.BinarySearch(policyActions, p)
+	return ok
 }
 
 // PolicyWildcard is the action wildcard a bucket policy statement may carry in
@@ -156,17 +167,10 @@ func PolicyAction(p string) bool {
 // and never for a bucket-level action.
 const PolicyWildcard = "s3:*"
 
-// PolicyActions returns every permission a bucket policy may grant, sorted, so
-// that expanding PolicyWildcard is deterministic.
+// PolicyActions returns a copy of the allowlist: every permission a bucket
+// policy may grant, sorted, so that expanding PolicyWildcard is deterministic.
 func PolicyActions() []string {
-	actions := make([]string, 0, len(permissionCommands))
-	for p := range permissionCommands {
-		if !bucketLevel[p] {
-			actions = append(actions, p)
-		}
-	}
-	slices.Sort(actions)
-	return actions
+	return slices.Clone(policyActions)
 }
 
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the
