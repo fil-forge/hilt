@@ -75,10 +75,10 @@ type parkedPolicies struct {
 	resume  chan struct{}
 }
 
-func (p *parkedPolicies) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(context.Context, *bucketpolicystore.Record) error) (string, error) {
+func (p *parkedPolicies) Put(ctx context.Context, in bucketpolicystore.Input, fn func(context.Context, *bucketpolicystore.Record) error) (string, error) {
 	close(p.reached)
 	<-p.resume
-	return p.Store.Put(ctx, in, beforeCommit)
+	return p.Store.Put(ctx, in, fn)
 }
 
 // growingPrincipals records a new principal for the tenant right after the
@@ -830,7 +830,7 @@ func (p postgresDeps) over(t *testing.T, key, bucket did.DID) []string {
 	return out
 }
 
-// afterLock calls after once, when the first Lock returns: under a policy
+// afterLock calls after once, when the first WithLock returns: under a policy
 // write that is after the rotation and before the document is written, with
 // the write's transaction still open.
 type afterLock struct {
@@ -838,8 +838,8 @@ type afterLock struct {
 	after func()
 }
 
-func (a *afterLock) Lock(ctx context.Context, tenant did.DID, ids []string, fn func(context.Context) error) error {
-	err := a.Store.Lock(ctx, tenant, ids, fn)
+func (a *afterLock) WithLock(ctx context.Context, tenant did.DID, ids []string, fn func(context.Context) error) error {
+	err := a.Store.WithLock(ctx, tenant, ids, fn)
 	if a.after != nil {
 		after := a.after
 		a.after = nil
