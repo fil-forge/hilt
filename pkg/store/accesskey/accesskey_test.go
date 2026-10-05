@@ -324,7 +324,7 @@ func TestAccessKeyStoreMemoryGuard(t *testing.T) {
 
 	require.NoError(t, principals.Add(t.Context(), tenantID, "user-1"))
 	require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "laptop")))
-	require.NoError(t, principals.Delete(t.Context(), tenantID, "user-1", nil))
+	require.NoError(t, principals.Tombstone(t.Context(), tenantID, "user-1", nil))
 	err = s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "phone"))
 	require.ErrorIs(t, err, store.ErrInvalidArgument)
 }
@@ -347,7 +347,7 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed.tenant(t, tenantID)
 		seed.principal(t, tenantID, "user-1")
-		require.NoError(t, principalpostgres.New(pool).Delete(t.Context(), tenantID, "user-1", nil))
+		require.NoError(t, principalpostgres.New(pool).Tombstone(t.Context(), tenantID, "user-1", nil))
 		err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "laptop"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 		require.ErrorContains(t, err, "was removed")
