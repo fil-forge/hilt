@@ -1,8 +1,9 @@
 package bucketpolicy_test
 
 import (
-	"encoding/hex"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -38,7 +39,7 @@ func TestDecode(t *testing.T) {
 		}`))
 		require.NoError(t, err)
 		// Lists are sets: sorted and deduplicated, statements ordered by their
-		// encoding (a statement without a sid sorts before one with).
+		// CID (see TestETag for the encoding).
 		require.Equal(t, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
 			{Effect: bucketpolicy.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}},
 			{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}},
@@ -61,7 +62,9 @@ func TestDecode(t *testing.T) {
 		d := *doc(allow(only("alice"), "s3:GetObject"), deny(everyone, "s3:ListBucket"))
 		back, err := bucketpolicy.Decode(bucketpolicy.Canonical(d))
 		require.NoError(t, err)
-		require.Equal(t, d, back)
+		require.Equal(t, bucketpolicy.Canonical(d), bucketpolicy.Canonical(back))
+		require.Equal(t, bucketpolicy.ETag(d), bucketpolicy.ETag(back))
+		require.ElementsMatch(t, d.Statements, back.Statements)
 	})
 
 	rejects := []struct {
@@ -184,8 +187,10 @@ func TestCanonical(t *testing.T) {
 			bucketpolicy.Statement{Sid: "rw", Effect: bucketpolicy.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:PutObject", "s3:GetObject"}},
 			deny(everyone, "s3:DeleteObject"),
 		)
+		// Statements are ordered by their CID: the rw statement's
+		// (baguqeerajqbl...) sorts before the deny's (baguqeerawxoz...).
 		require.Equal(t,
-			`{"Statement":[{"Effect":"Deny","Principal":"*","Action":["s3:DeleteObject"]},{"Sid":"rw","Effect":"Allow","Principal":["alice","bob"],"Action":["s3:GetObject","s3:PutObject"]}]}`,
+			`{"Statement":[{"Sid":"rw","Effect":"Allow","Principal":["alice","bob"],"Action":["s3:GetObject","s3:PutObject"]},{"Effect":"Deny","Principal":"*","Action":["s3:DeleteObject"]}]}`,
 			string(bucketpolicy.Canonical(d)))
 	})
 
@@ -228,26 +233,82 @@ func TestCanonical(t *testing.T) {
 	})
 }
 
+// dagJSONCID is the CID the ETag is built from: CIDv1, dag-json, sha2-256
+// over raw, which the tests assemble by hand so that the pins do not depend
+// on the generated encoder.
+func dagJSONCID(t *testing.T, raw string) cid.Cid {
+	t.Helper()
+	sum, err := mh.Sum([]byte(raw), mh.SHA2_256, -1)
+	require.NoError(t, err)
+	return cid.NewCidV1(cid.DagJSON, sum)
+}
+
+// dagJSONSet is the DAG-JSON encoding of a set: an object whose keys are the
+// members, sorted, each mapped to {}.
+func dagJSONSet(members ...string) string {
+	members = slices.Clone(members)
+	slices.Sort(members)
+	for i, m := range members {
+		members[i] = `"` + m + `":{}`
+	}
+	return "{" + strings.Join(members, ",") + "}"
+}
+
+// dagJSONStatement is the DAG-JSON encoding of a statement: keys in sorted
+// order, Sid omitted when empty, principals and actions as sets, the wildcard
+// principal as the set {"*"}.
+func dagJSONStatement(sid string, effect bucketpolicy.Effect, principals []string, actions []string) string {
+	raw := `{"Action":` + dagJSONSet(actions...) + `,"Effect":"` + string(effect) + `","Principal":` + dagJSONSet(principals...)
+	if sid != "" {
+		raw += `,"Sid":"` + sid + `"`
+	}
+	return raw + "}"
+}
+
+// dagJSONPolicy is the DAG-JSON encoding of a policy: the set of its
+// statements' CIDs.
+func dagJSONPolicy(t *testing.T, statements ...string) string {
+	t.Helper()
+	keys := make([]string, len(statements))
+	for i, st := range statements {
+		keys[i] = dagJSONCID(t, st).String()
+	}
+	return `{"Statement":` + dagJSONSet(keys...) + `}`
+}
+
 func TestETag(t *testing.T) {
 	d := *doc(allow(only("alice"), "s3:GetObject"))
 
-	t.Run("is a quoted dag-cbor CID of the canonical form", func(t *testing.T) {
+	t.Run("is the quoted dag-json CID of the set-encoded document", func(t *testing.T) {
 		tag := bucketpolicy.ETag(d)
-		require.Regexp(t, `^"bafy[a-z2-7]+"$`, tag)
+		require.Regexp(t, `^"bagu[a-z2-7]+"$`, tag)
 		c, err := cid.Decode(tag[1 : len(tag)-1])
 		require.NoError(t, err)
-		require.EqualValues(t, cid.DagCBOR, c.Type())
-		// The DAG-CBOR bytes of {"Statement":[{"Action":["s3:GetObject"],"Effect":"Allow","Principal":["alice"]}]}:
-		// keys in canonical order, every string a text string, definite lengths.
-		encoded := "a1" + "69" + hex.EncodeToString([]byte("Statement")) + "81" + "a3" +
-			"66" + hex.EncodeToString([]byte("Action")) + "81" + "6c" + hex.EncodeToString([]byte("s3:GetObject")) +
-			"66" + hex.EncodeToString([]byte("Effect")) + "65" + hex.EncodeToString([]byte("Allow")) +
-			"69" + hex.EncodeToString([]byte("Principal")) + "81" + "65" + hex.EncodeToString([]byte("alice"))
-		raw, err := hex.DecodeString(encoded)
-		require.NoError(t, err)
-		sum, err := mh.Sum(raw, mh.SHA2_256, -1)
-		require.NoError(t, err)
-		require.Equal(t, cid.NewCidV1(cid.DagCBOR, sum), c)
+		require.EqualValues(t, cid.DagJSON, c.Type())
+		statement := `{"Action":{"s3:GetObject":{}},"Effect":"Allow","Principal":{"alice":{}}}`
+		require.Equal(t, dagJSONCID(t, dagJSONPolicy(t, statement)), c)
+	})
+
+	t.Run("encodes a sid, a wildcard principal and several statements", func(t *testing.T) {
+		d := *doc(
+			bucketpolicy.Statement{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:ListBucket", "s3:GetObject"}},
+			deny(everyone, "s3:PutObjectRetention"),
+		)
+		want := dagJSONPolicy(t,
+			dagJSONStatement("owners", bucketpolicy.Allow, []string{"alice", "bob"}, []string{"s3:GetObject", "s3:ListBucket"}),
+			dagJSONStatement("", bucketpolicy.Deny, []string{"*"}, []string{"s3:PutObjectRetention"}),
+		)
+		require.Equal(t, `"`+dagJSONCID(t, want).String()+`"`, bucketpolicy.ETag(d))
+	})
+
+	t.Run("order and duplicates are not significant", func(t *testing.T) {
+		a := *doc(allow(only("alice", "bob"), "s3:GetObject", "s3:PutObject"), deny(everyone, "s3:DeleteObject"))
+		b := *doc(
+			deny(everyone, "s3:DeleteObject"),
+			allow(only("bob", "alice", "bob"), "s3:PutObject", "s3:GetObject", "s3:PutObject"),
+			deny(everyone, "s3:DeleteObject"),
+		)
+		require.Equal(t, bucketpolicy.ETag(a), bucketpolicy.ETag(b))
 	})
 
 	t.Run("is stable and changes with the document", func(t *testing.T) {
@@ -261,10 +322,13 @@ func TestETag(t *testing.T) {
 
 	t.Run("pins the canonical hashes", func(t *testing.T) {
 		// Stored tags are compared against freshly computed ones for If-Match, so
-		// these values must never change without a deliberate decision.
-		require.Equal(t, `"bafyreib3k3addq67vv3t72l5iqd4rhjn6drnfo2yuycll43hsc7pxyvfzq"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
-		require.Equal(t, `"bafyreid7nm24tclvjxrkcmehw2s4jisst2yz4se6vzfmgcoke3vwl3h2he"`, bucketpolicy.ETag(d))
+		// these values must never change without a deliberate decision. Both
+		// were computed from hand-assembled DAG-JSON bytes:
+		// {"Statement":{}} and {"Statement":{"<CID of the statement above>":{}}}.
+		require.Equal(t, `"baguqeerav5vnkqj6kdp6fajzf4hl6nrb2yf576axft6oda5i7mcv2hopel2q"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
+		require.Equal(t, `"baguqeeraacmqmu4j6omaaq3rchrfho2vytgdruhm35kfdtlihmpkzqcpbixa"`, bucketpolicy.ETag(d))
 		require.Equal(t, bucketpolicy.ETag(bucketpolicy.Policy{}), bucketpolicy.ETag(bucketpolicy.Policy{Statements: []bucketpolicy.Statement{}}))
+		require.Equal(t, `"`+dagJSONCID(t, `{"Statement":{}}`).String()+`"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
 	})
 }
 

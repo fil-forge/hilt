@@ -32,9 +32,6 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/ucantone/errors"
-	"github.com/ipfs/go-cid"
-	mh "github.com/multiformats/go-multihash"
-	cbg "github.com/whyrusleeping/cbor-gen"
 )
 
 // Effect is whether a statement grants or withholds its actions.
@@ -214,15 +211,23 @@ func strictKeys(data []byte) error {
 	return nil
 }
 
+// maxSetSize bounds the statements of a policy and the principals of a
+// statement. It is the generated DAG-JSON encoder's map limit, so a document
+// within it always encodes; a real policy is far smaller.
+const maxSetSize = 4096
+
 // wellFormed is the structural check every decoded document passes: at least
-// one statement, each with a recognized effect, naming [Wildcard] or at least
-// one principal (and never [Wildcard] inside the list), and holding at least
-// one action, each in the policy vocabulary (see [s3perm.PolicyAction]) or
-// [s3perm.PolicyWildcard]. It returns an error wrapping [ErrInvalidPolicy]
-// otherwise.
+// one statement and at most maxSetSize, each with a recognized effect, naming
+// [Wildcard] or at least one principal and at most maxSetSize (and never
+// [Wildcard] inside the list), and holding at least one action, each in the
+// policy vocabulary (see [s3perm.PolicyAction]) or [s3perm.PolicyWildcard].
+// It returns an error wrapping [ErrInvalidPolicy] otherwise.
 func wellFormed(d Policy) error {
 	if len(d.Statements) == 0 {
 		return fmt.Errorf("Statement must not be empty: %w", ErrInvalidPolicy)
+	}
+	if len(d.Statements) > maxSetSize {
+		return fmt.Errorf("Statement holds %d statements, at most %d are allowed: %w", len(d.Statements), maxSetSize, ErrInvalidPolicy)
 	}
 	for i, st := range d.Statements {
 		if st.Effect != Allow && st.Effect != Deny {
@@ -231,6 +236,9 @@ func wellFormed(d Policy) error {
 		if !st.Principal.All {
 			if len(st.Principal.IDs) == 0 {
 				return fmt.Errorf("statement %d: Principal must not be empty: %w", i, ErrInvalidPolicy)
+			}
+			if len(st.Principal.IDs) > maxSetSize {
+				return fmt.Errorf("statement %d: Principal names %d principals, at most %d are allowed: %w", i, len(st.Principal.IDs), maxSetSize, ErrInvalidPolicy)
 			}
 			if slices.Contains(st.Principal.IDs, Wildcard) {
 				return fmt.Errorf("statement %d: Principal %q must be the bare string, not a list entry: %w", i, Wildcard, ErrInvalidPolicy)
@@ -269,107 +277,12 @@ func Validate(d Policy, principalExists func(string) bool) error {
 	return nil
 }
 
-// normalize returns a copy of d in canonical form. The statement, principal
-// and action lists are sets: each is deduplicated and sorted, a wildcard
-// principal drops any stray ids, nil lists become empty lists, and the
-// statements are ordered by their JSON encoding. Two policies that differ
-// only in order or in duplicates normalize to the same value.
-func normalize(d Policy) Policy {
-	statements := make([]Statement, len(d.Statements))
-	for i, st := range d.Statements {
-		st.Actions = sortedSet(st.Actions)
-		if st.Principal.All {
-			st.Principal.IDs = nil
-		} else {
-			st.Principal.IDs = sortedSet(st.Principal.IDs)
-		}
-		statements[i] = st
-	}
-	slices.SortStableFunc(statements, func(a, b Statement) int {
-		return bytes.Compare(encodeJSON(a), encodeJSON(b))
-	})
-	statements = slices.CompactFunc(statements, func(a, b Statement) bool {
-		return bytes.Equal(encodeJSON(a), encodeJSON(b))
-	})
-	return Policy{Statements: statements}
-}
-
-// sortedSet returns s deduplicated and sorted, never nil.
-func sortedSet(s []string) []string {
-	out := slices.Clone(nonNil(s))
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
 // encodeJSON is json.Marshal for the types here, whose encoding cannot fail:
 // struct fields are written in declaration order without whitespace, so the
 // struct definitions above fix the layout.
 func encodeJSON(v any) []byte {
 	out, _ := json.Marshal(v)
 	return out
-}
-
-// Canonical returns the canonical JSON encoding of d: the [normalize]d
-// document, compact, with the fields of each statement in the order Sid
-// (omitted when empty), Effect, Principal, Action. It is what Hilt stores and
-// returns.
-func Canonical(d Policy) []byte {
-	return encodeJSON(normalize(d))
-}
-
-// ETag returns the entity tag of d: the CID of the DAG-CBOR encoding of the
-// [normalize]d document (CIDv1, dag-cbor, sha2-256), in double quotes as HTTP
-// carries it. Callers treat it as opaque.
-func ETag(d Policy) string {
-	sum, err := mh.Sum(encodeCBOR(normalize(d)), mh.SHA2_256, -1)
-	if err != nil {
-		panic(err) // sha2-256 with the default length cannot fail
-	}
-	return `"` + cid.NewCidV1(cid.DagCBOR, sum).String() + `"`
-}
-
-// encodeCBOR is the DAG-CBOR encoding of d, which must be normalized: a map
-// {"Statement": [...]} of statement maps whose keys are in canonical order
-// (shorter first, then bytewise): Sid (omitted when empty), Action, Effect,
-// Principal. A wildcard principal is the text string "*", otherwise the array
-// of ids. Every string is a text string and every container definite-length.
-func encodeCBOR(d Policy) []byte {
-	var buf bytes.Buffer
-	text := func(s string) {
-		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajTextString, uint64(len(s)))
-		buf.WriteString(s)
-	}
-	strings := func(ss []string) {
-		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajArray, uint64(len(ss)))
-		for _, s := range ss {
-			text(s)
-		}
-	}
-	_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajMap, 1)
-	text("Statement")
-	_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajArray, uint64(len(d.Statements)))
-	for _, st := range d.Statements {
-		keys := uint64(3)
-		if st.Sid != "" {
-			keys = 4
-		}
-		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajMap, keys)
-		if st.Sid != "" {
-			text("Sid")
-			text(st.Sid)
-		}
-		text("Action")
-		strings(st.Actions)
-		text("Effect")
-		text(string(st.Effect))
-		text("Principal")
-		if st.Principal.All {
-			text(Wildcard)
-		} else {
-			strings(st.Principal.IDs)
-		}
-	}
-	return buf.Bytes()
 }
 
 // Effective returns the actions principal p holds under d: the actions of the
