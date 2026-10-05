@@ -75,12 +75,25 @@ func TestDecode(t *testing.T) {
 		{"old field names", `{"statements": [{"effect": "allow", "principals": ["alice"], "actions": ["s3:GetObject"]}]}`, `unknown field "statements"`},
 		{"a string principal other than the wildcard", `{"Statement": [{"Effect": "Allow", "Principal": "alice", "Action": ["s3:GetObject"]}]}`, `a string principal must be "*"`},
 		{"an object principal", `{"Statement": [{"Effect": "Allow", "Principal": {"filone": ["alice"]}, "Action": ["s3:GetObject"]}]}`, `must be "*" or a list of principal ids`},
-		{"trailing data", `{"Statement": []} {}`, `trailing data`},
+		{"trailing data", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]} {}`, `trailing data`},
 		{"not JSON", `not json`, `decoding policy`},
 		{"a lowercase top-level field", `{"statement": []}`, `unknown field "statement"`},
 		{"a lowercase statement field", `{"Statement": [{"effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `unknown field "effect"`},
 		{"an upper-case statement field", `{"Statement": [{"Effect": "Allow", "Principal": "*", "ACTION": ["s3:GetObject"]}]}`, `unknown field "ACTION"`},
 		{"a null sid", `{"Statement": [{"Sid": null, "Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `Sid must be a string`},
+		// The structure is checked while parsing, so an invalid policy never
+		// comes into existence.
+		{"empty statements", `{"Statement": []}`, `Statement must not be empty`},
+		{"an unknown effect", `{"Statement": [{"Effect": "Permit", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `Effect "Permit"`},
+		{"a lowercase effect", `{"Statement": [{"Effect": "allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `Effect "allow"`},
+		{"an empty principal list", `{"Statement": [{"Effect": "Allow", "Principal": [], "Action": ["s3:GetObject"]}]}`, `Principal must not be empty`},
+		{"a missing principal", `{"Statement": [{"Effect": "Allow", "Action": ["s3:GetObject"]}]}`, `Principal must not be empty`},
+		{"the wildcard inside the principal list", `{"Statement": [{"Effect": "Allow", "Principal": ["alice", "*"], "Action": ["s3:GetObject"]}]}`, `Principal "*" must be the bare string`},
+		{"empty actions", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": []}]}`, `Action must not be empty`},
+		{"a bucket-level action", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["s3:CreateBucket"]}]}`, `Action "s3:CreateBucket"`},
+		{"an unknown action", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["s3:Frobnicate"]}]}`, `Action "s3:Frobnicate"`},
+		{"a bare star action", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["*"]}]}`, `Action "*"`},
+		{"an invalid action in a later statement", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}, {"Effect": "Deny", "Principal": ["alice"], "Action": ["s3:ListAllMyBuckets"]}]}`, `statement 1: Action "s3:ListAllMyBuckets"`},
 	}
 	for _, tt := range rejects {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
@@ -89,6 +102,21 @@ func TestDecode(t *testing.T) {
 			require.ErrorContains(t, err, tt.want)
 		})
 	}
+
+	t.Run("json.Unmarshal applies the same checks", func(t *testing.T) {
+		// The stores read documents back with encoding/json.
+		var d bucketpolicy.Policy
+		err := json.Unmarshal([]byte(`{"Statement": [{"Effect": "Allow", "Principal": [], "Action": ["s3:GetObject"]}]}`), &d)
+		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorContains(t, err, `Principal must not be empty`)
+
+		err = json.Unmarshal([]byte(`{"statement": []}`), &d)
+		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorContains(t, err, `unknown field "statement"`)
+
+		require.NoError(t, json.Unmarshal([]byte(`{"Statement": [{"Effect": "Allow", "Principal": ["bob", "alice"], "Action": ["s3:GetObject"]}]}`), &d))
+		require.Equal(t, *doc(allow(only("alice", "bob"), "s3:GetObject")), d, "and normalizes")
+	})
 }
 
 func TestValidate(t *testing.T) {

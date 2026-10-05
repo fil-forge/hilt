@@ -131,16 +131,12 @@ const InvalidPolicyErrorName = "InvalidBucketPolicy"
 // rejects with 422. The returned error wraps it with the reason.
 var ErrInvalidPolicy = errors.New(InvalidPolicyErrorName, "invalid bucket policy")
 
-// Decode parses a policy document strictly: a field the schema does not
-// define, a property name that differs from the schema in case, a malformed
-// principal, or trailing data is an error wrapping [ErrInvalidPolicy]. Decode
-// does not validate the content; see [Validate].
+// Decode parses a policy document: [Policy.UnmarshalJSON]'s checks, plus
+// trailing data after the document is an error wrapping [ErrInvalidPolicy].
+// The result is in canonical form. Whether its principals exist is left to
+// [Validate].
 func Decode(data []byte) (Policy, error) {
-	if err := strictKeys(data); err != nil {
-		return Policy{}, err
-	}
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
 	var d Policy
 	if err := dec.Decode(&d); err != nil {
 		if errors.Is(err, ErrInvalidPolicy) {
@@ -151,7 +147,34 @@ func Decode(data []byte) (Policy, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return Policy{}, fmt.Errorf("decoding policy: trailing data after the document: %w", ErrInvalidPolicy)
 	}
-	return normalize(d), nil
+	return d, nil
+}
+
+// UnmarshalJSON parses a policy document strictly and refuses one that is not
+// well formed, so an invalid policy never comes into existence: a field the
+// schema does not define, a property name that differs from the schema in
+// case, a malformed principal, or a document [wellFormed] rejects is an error
+// wrapping [ErrInvalidPolicy]. The result is in canonical form.
+func (p *Policy) UnmarshalJSON(data []byte) error {
+	if err := strictKeys(data); err != nil {
+		return err
+	}
+	// The alias has no UnmarshalJSON of its own, so the decode does not recurse.
+	type plain Policy
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var d plain
+	if err := dec.Decode(&d); err != nil {
+		if errors.Is(err, ErrInvalidPolicy) {
+			return err
+		}
+		return fmt.Errorf("decoding policy: %v: %w", err, ErrInvalidPolicy)
+	}
+	if err := wellFormed(Policy(d)); err != nil {
+		return err
+	}
+	*p = normalize(Policy(d))
+	return nil
 }
 
 // strictKeys rejects any property name that is not spelled exactly as the
@@ -191,13 +214,13 @@ func strictKeys(data []byte) error {
 	return nil
 }
 
-// Validate checks that d may be stored: it has at least one statement, every
-// statement has a recognized effect, names [Wildcard] or at least one
-// principal, and holds at least one action, every action is in the policy
-// vocabulary (see [s3perm.PolicyAction]) or is [s3perm.PolicyWildcard], and
-// every named principal exists per principalExists. It returns an error
-// wrapping [ErrInvalidPolicy] otherwise.
-func Validate(d Policy, principalExists func(string) bool) error {
+// wellFormed is the structural check every decoded document passes: at least
+// one statement, each with a recognized effect, naming [Wildcard] or at least
+// one principal (and never [Wildcard] inside the list), and holding at least
+// one action, each in the policy vocabulary (see [s3perm.PolicyAction]) or
+// [s3perm.PolicyWildcard]. It returns an error wrapping [ErrInvalidPolicy]
+// otherwise.
+func wellFormed(d Policy) error {
 	if len(d.Statements) == 0 {
 		return fmt.Errorf("Statement must not be empty: %w", ErrInvalidPolicy)
 	}
@@ -209,13 +232,8 @@ func Validate(d Policy, principalExists func(string) bool) error {
 			if len(st.Principal.IDs) == 0 {
 				return fmt.Errorf("statement %d: Principal must not be empty: %w", i, ErrInvalidPolicy)
 			}
-			for _, p := range st.Principal.IDs {
-				if p == Wildcard {
-					return fmt.Errorf("statement %d: Principal %q must be the bare string, not a list entry: %w", i, Wildcard, ErrInvalidPolicy)
-				}
-				if p == "" || !principalExists(p) {
-					return fmt.Errorf("statement %d: unknown principal %q: %w", i, p, ErrInvalidPolicy)
-				}
+			if slices.Contains(st.Principal.IDs, Wildcard) {
+				return fmt.Errorf("statement %d: Principal %q must be the bare string, not a list entry: %w", i, Wildcard, ErrInvalidPolicy)
 			}
 		}
 		if len(st.Actions) == 0 {
@@ -224,6 +242,27 @@ func Validate(d Policy, principalExists func(string) bool) error {
 		for _, a := range st.Actions {
 			if a != s3perm.PolicyWildcard && !s3perm.PolicyAction(a) {
 				return fmt.Errorf("statement %d: Action %q is not a policy action: %w", i, a, ErrInvalidPolicy)
+			}
+		}
+	}
+	return nil
+}
+
+// Validate checks that d may be stored: it is [wellFormed] and every named
+// principal exists per principalExists. A document that came through [Decode]
+// is well formed already; the check is repeated here for documents built in
+// code. It returns an error wrapping [ErrInvalidPolicy] otherwise.
+func Validate(d Policy, principalExists func(string) bool) error {
+	if err := wellFormed(d); err != nil {
+		return err
+	}
+	for i, st := range d.Statements {
+		if st.Principal.All {
+			continue
+		}
+		for _, p := range st.Principal.IDs {
+			if p == "" || !principalExists(p) {
+				return fmt.Errorf("statement %d: unknown principal %q: %w", i, p, ErrInvalidPolicy)
 			}
 		}
 	}
