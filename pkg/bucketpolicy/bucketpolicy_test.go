@@ -31,9 +31,9 @@ func doc(statements ...bucketpolicy.Statement) *bucketpolicy.Policy {
 func TestDecode(t *testing.T) {
 	t.Run("decodes the documented shape in canonical form", func(t *testing.T) {
 		d, err := bucketpolicy.Decode([]byte(`{
-			"statement": [
-				{"sid": "owners", "effect": "allow", "principal": ["bob", "alice"], "action": ["s3:ListBucket", "s3:GetObject"]},
-				{"effect": "deny", "principal": "*", "action": ["s3:PutObjectRetention"]}
+			"Statement": [
+				{"Sid": "owners", "Effect": "Allow", "Principal": ["bob", "alice"], "Action": ["s3:ListBucket", "s3:GetObject"]},
+				{"Effect": "Deny", "Principal": "*", "Action": ["s3:PutObjectRetention"]}
 			]
 		}`))
 		require.NoError(t, err)
@@ -46,13 +46,13 @@ func TestDecode(t *testing.T) {
 	})
 
 	t.Run("keeps each principal and action once, sorted", func(t *testing.T) {
-		d, err := bucketpolicy.Decode([]byte(`{"statement": [{"effect": "allow", "principal": ["bob", "alice", "bob", "alice"], "action": ["s3:PutObject", "s3:GetObject", "s3:PutObject"]}]}`))
+		d, err := bucketpolicy.Decode([]byte(`{"Statement": [{"Effect": "Allow", "Principal": ["bob", "alice", "bob", "alice"], "Action": ["s3:PutObject", "s3:GetObject", "s3:PutObject"]}]}`))
 		require.NoError(t, err)
 		require.Equal(t, *doc(allow(only("alice", "bob"), "s3:GetObject", "s3:PutObject")), d)
 	})
 
 	t.Run("drops a duplicate statement", func(t *testing.T) {
-		d, err := bucketpolicy.Decode([]byte(`{"statement": [{"effect": "allow", "principal": "*", "action": ["s3:GetObject"]}, {"effect": "allow", "principal": "*", "action": ["s3:GetObject"]}]}`))
+		d, err := bucketpolicy.Decode([]byte(`{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}, {"Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`))
 		require.NoError(t, err)
 		require.Equal(t, *doc(allow(everyone, "s3:GetObject")), d)
 	})
@@ -69,17 +69,18 @@ func TestDecode(t *testing.T) {
 		body string
 		want string
 	}{
-		{"unknown top-level field", `{"statement": [], "version": "2012-10-17"}`, `unknown field "version"`},
-		{"resource field", `{"statement": [{"effect": "allow", "principal": "*", "action": ["s3:GetObject"], "resource": "photos"}]}`, `unknown field "resource"`},
+		{"unknown top-level field", `{"Statement": [], "Version": "2012-10-17"}`, `unknown field "Version"`},
+		{"an AWS document with a Version", `{"Version": "2012-10-17", "Statement": [{"Sid": "read", "Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `unknown field "Version"`},
+		{"resource field", `{"Statement": [{"Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"], "Resource": "photos"}]}`, `unknown field "Resource"`},
 		{"old field names", `{"statements": [{"effect": "allow", "principals": ["alice"], "actions": ["s3:GetObject"]}]}`, `unknown field "statements"`},
-		{"a string principal other than the wildcard", `{"statement": [{"effect": "allow", "principal": "alice", "action": ["s3:GetObject"]}]}`, `a string principal must be "*"`},
-		{"an object principal", `{"statement": [{"effect": "allow", "principal": {"filone": ["alice"]}, "action": ["s3:GetObject"]}]}`, `must be "*" or a list of principal ids`},
-		{"trailing data", `{"statement": []} {}`, `trailing data`},
+		{"a string principal other than the wildcard", `{"Statement": [{"Effect": "Allow", "Principal": "alice", "Action": ["s3:GetObject"]}]}`, `a string principal must be "*"`},
+		{"an object principal", `{"Statement": [{"Effect": "Allow", "Principal": {"filone": ["alice"]}, "Action": ["s3:GetObject"]}]}`, `must be "*" or a list of principal ids`},
+		{"trailing data", `{"Statement": []} {}`, `trailing data`},
 		{"not JSON", `not json`, `decoding policy`},
-		{"a capitalized top-level field", `{"Statement": []}`, `unknown field "Statement"`},
-		{"a capitalized statement field", `{"statement": [{"Effect": "allow", "principal": "*", "action": ["s3:GetObject"]}]}`, `unknown field "Effect"`},
-		{"an upper-case statement field", `{"statement": [{"effect": "allow", "principal": "*", "ACTION": ["s3:GetObject"]}]}`, `unknown field "ACTION"`},
-		{"a null sid", `{"statement": [{"sid": null, "effect": "allow", "principal": "*", "action": ["s3:GetObject"]}]}`, `sid must be a string`},
+		{"a lowercase top-level field", `{"statement": []}`, `unknown field "statement"`},
+		{"a lowercase statement field", `{"Statement": [{"effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `unknown field "effect"`},
+		{"an upper-case statement field", `{"Statement": [{"Effect": "Allow", "Principal": "*", "ACTION": ["s3:GetObject"]}]}`, `unknown field "ACTION"`},
+		{"a null sid", `{"Statement": [{"Sid": null, "Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"]}]}`, `Sid must be a string`},
 	}
 	for _, tt := range rejects {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
@@ -121,24 +122,24 @@ func TestValidate(t *testing.T) {
 		doc  bucketpolicy.Policy
 		want string
 	}{
-		{"empty statements", bucketpolicy.Policy{}, "statement must not be empty"},
-		{"nil statements slice", bucketpolicy.Policy{Statements: nil}, "statement must not be empty"},
-		{"unknown effect", *doc(bucketpolicy.Statement{Effect: "Permit", Principal: only("alice"), Actions: []string{"s3:GetObject"}}), `effect "Permit"`},
-		{"capitalized effect", *doc(bucketpolicy.Statement{Effect: "Allow", Principal: only("alice"), Actions: []string{"s3:GetObject"}}), `effect "Allow"`},
-		{"empty principal", *doc(allow(only(), "s3:GetObject")), "principal must not be empty"},
-		{"wildcard inside the principal list", *doc(allow(only("alice", "*"), "s3:GetObject")), `principal "*" must be the bare string`},
-		{"empty actions", *doc(allow(only("alice"))), "action must not be empty"},
+		{"empty statements", bucketpolicy.Policy{}, "Statement must not be empty"},
+		{"nil statements slice", bucketpolicy.Policy{Statements: nil}, "Statement must not be empty"},
+		{"unknown effect", *doc(bucketpolicy.Statement{Effect: "Permit", Principal: only("alice"), Actions: []string{"s3:GetObject"}}), `Effect "Permit"`},
+		{"lowercase effect", *doc(bucketpolicy.Statement{Effect: "allow", Principal: only("alice"), Actions: []string{"s3:GetObject"}}), `Effect "allow"`},
+		{"empty principal", *doc(allow(only(), "s3:GetObject")), "Principal must not be empty"},
+		{"wildcard inside the principal list", *doc(allow(only("alice", "*"), "s3:GetObject")), `Principal "*" must be the bare string`},
+		{"empty actions", *doc(allow(only("alice"))), "Action must not be empty"},
 		{"unknown principal", *doc(allow(only("alice", "mallory"), "s3:GetObject")), `unknown principal "mallory"`},
 		{"empty principal id", *doc(allow(only(""), "s3:GetObject")), `unknown principal ""`},
-		{"create bucket", *doc(allow(only("alice"), "s3:CreateBucket")), `action "s3:CreateBucket"`},
-		{"delete bucket", *doc(allow(only("alice"), "s3:DeleteBucket")), `action "s3:DeleteBucket"`},
-		{"list all my buckets", *doc(allow(only("alice"), "s3:ListAllMyBuckets")), `action "s3:ListAllMyBuckets"`},
-		{"unknown action", *doc(allow(only("alice"), "s3:Frobnicate")), `action "s3:Frobnicate"`},
-		{"a bare star action", *doc(allow(only("alice"), "*")), `action "*"`},
+		{"create bucket", *doc(allow(only("alice"), "s3:CreateBucket")), `Action "s3:CreateBucket"`},
+		{"delete bucket", *doc(allow(only("alice"), "s3:DeleteBucket")), `Action "s3:DeleteBucket"`},
+		{"list all my buckets", *doc(allow(only("alice"), "s3:ListAllMyBuckets")), `Action "s3:ListAllMyBuckets"`},
+		{"unknown action", *doc(allow(only("alice"), "s3:Frobnicate")), `Action "s3:Frobnicate"`},
+		{"a bare star action", *doc(allow(only("alice"), "*")), `Action "*"`},
 		{"invalid action in a later statement", *doc(
 			allow(only("alice"), "s3:GetObject"),
 			deny(everyone, "s3:ListAllMyBuckets"),
-		), `statement 1: action "s3:ListAllMyBuckets"`},
+		), `statement 1: Action "s3:ListAllMyBuckets"`},
 	}
 	for _, tt := range invalid {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
@@ -156,7 +157,7 @@ func TestCanonical(t *testing.T) {
 			deny(everyone, "s3:DeleteObject"),
 		)
 		require.Equal(t,
-			`{"statement":[{"effect":"deny","principal":"*","action":["s3:DeleteObject"]},{"sid":"rw","effect":"allow","principal":["alice","bob"],"action":["s3:GetObject","s3:PutObject"]}]}`,
+			`{"Statement":[{"Effect":"Deny","Principal":"*","Action":["s3:DeleteObject"]},{"Sid":"rw","Effect":"Allow","Principal":["alice","bob"],"Action":["s3:GetObject","s3:PutObject"]}]}`,
 			string(bucketpolicy.Canonical(d)))
 	})
 
@@ -170,18 +171,18 @@ func TestCanonical(t *testing.T) {
 	t.Run("nil and empty lists canonicalize the same", func(t *testing.T) {
 		withNil := bucketpolicy.Policy{Statements: nil}
 		withEmpty := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{}}
-		require.Equal(t, `{"statement":[]}`, string(bucketpolicy.Canonical(withNil)))
+		require.Equal(t, `{"Statement":[]}`, string(bucketpolicy.Canonical(withNil)))
 		require.Equal(t, bucketpolicy.Canonical(withNil), bucketpolicy.Canonical(withEmpty))
 
 		stNil := *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow})
 		stEmpty := *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: only(), Actions: []string{}})
-		require.Equal(t, `{"statement":[{"effect":"allow","principal":[],"action":[]}]}`, string(bucketpolicy.Canonical(stNil)))
+		require.Equal(t, `{"Statement":[{"Effect":"Allow","Principal":[],"Action":[]}]}`, string(bucketpolicy.Canonical(stNil)))
 		require.Equal(t, bucketpolicy.Canonical(stNil), bucketpolicy.Canonical(stEmpty))
 	})
 
 	t.Run("a wildcard principal ignores stray ids", func(t *testing.T) {
 		d := *doc(allow(bucketpolicy.Principal{All: true, IDs: []string{"alice"}}, "s3:GetObject"))
-		require.Equal(t, `{"statement":[{"effect":"allow","principal":"*","action":["s3:GetObject"]}]}`, string(bucketpolicy.Canonical(d)))
+		require.Equal(t, `{"Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"]}]}`, string(bucketpolicy.Canonical(d)))
 	})
 
 	t.Run("order and duplicates are not significant", func(t *testing.T) {
@@ -208,12 +209,12 @@ func TestETag(t *testing.T) {
 		c, err := cid.Decode(tag[1 : len(tag)-1])
 		require.NoError(t, err)
 		require.EqualValues(t, cid.DagCBOR, c.Type())
-		// The DAG-CBOR bytes of {"statement":[{"action":["s3:GetObject"],"effect":"allow","principal":["alice"]}]}:
+		// The DAG-CBOR bytes of {"Statement":[{"Action":["s3:GetObject"],"Effect":"Allow","Principal":["alice"]}]}:
 		// keys in canonical order, every string a text string, definite lengths.
-		encoded := "a1" + "69" + hex.EncodeToString([]byte("statement")) + "81" + "a3" +
-			"66" + hex.EncodeToString([]byte("action")) + "81" + "6c" + hex.EncodeToString([]byte("s3:GetObject")) +
-			"66" + hex.EncodeToString([]byte("effect")) + "65" + hex.EncodeToString([]byte("allow")) +
-			"69" + hex.EncodeToString([]byte("principal")) + "81" + "65" + hex.EncodeToString([]byte("alice"))
+		encoded := "a1" + "69" + hex.EncodeToString([]byte("Statement")) + "81" + "a3" +
+			"66" + hex.EncodeToString([]byte("Action")) + "81" + "6c" + hex.EncodeToString([]byte("s3:GetObject")) +
+			"66" + hex.EncodeToString([]byte("Effect")) + "65" + hex.EncodeToString([]byte("Allow")) +
+			"69" + hex.EncodeToString([]byte("Principal")) + "81" + "65" + hex.EncodeToString([]byte("alice"))
 		raw, err := hex.DecodeString(encoded)
 		require.NoError(t, err)
 		sum, err := mh.Sum(raw, mh.SHA2_256, -1)
@@ -233,8 +234,8 @@ func TestETag(t *testing.T) {
 	t.Run("pins the canonical hashes", func(t *testing.T) {
 		// Stored tags are compared against freshly computed ones for If-Match, so
 		// these values must never change without a deliberate decision.
-		require.Equal(t, `"bafyreiedzxytox7hvs65sh5dylxereq3szlo64rvgpwevv43wydnjo5beq"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
-		require.Equal(t, `"bafyreiavi3i43kuahhwgpmlnzf7m6rwqvqxgiawj4eon66bowco44o4b64"`, bucketpolicy.ETag(d))
+		require.Equal(t, `"bafyreib3k3addq67vv3t72l5iqd4rhjn6drnfo2yuycll43hsc7pxyvfzq"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
+		require.Equal(t, `"bafyreid7nm24tclvjxrkcmehw2s4jisst2yz4se6vzfmgcoke3vwl3h2he"`, bucketpolicy.ETag(d))
 		require.Equal(t, bucketpolicy.ETag(bucketpolicy.Policy{}), bucketpolicy.ETag(bucketpolicy.Policy{Statements: []bucketpolicy.Statement{}}))
 	})
 }

@@ -9,15 +9,18 @@
 // Forge evaluates:
 //
 //	{
-//	  "statement": [
+//	  "Statement": [
 //	    {
-//	      "sid": "owners",                             // optional label, never evaluated
-//	      "effect": "allow",                           // "allow" | "deny"
-//	      "principal": ["8f2c...", "a91e..."],         // principal ids, or the string "*"
-//	      "action": ["s3:GetObject", "s3:ListBucket"]  // policy actions, or ["s3:*"]
+//	      "Sid": "owners",                             // optional label, never evaluated
+//	      "Effect": "Allow",                           // "Allow" | "Deny"
+//	      "Principal": ["8f2c...", "a91e..."],         // principal ids, or the string "*"
+//	      "Action": ["s3:GetObject", "s3:ListBucket"]  // policy actions, or ["s3:*"]
 //	    }
 //	  ]
 //	}
+//
+// The field names and effects are spelled as AWS spells them; "Version" and
+// "Resource" are not part of the document and are refused.
 package bucketpolicy
 
 import (
@@ -38,8 +41,8 @@ import (
 type Effect string
 
 const (
-	Allow Effect = "allow"
-	Deny  Effect = "deny"
+	Allow Effect = "Allow"
+	Deny  Effect = "Deny"
 )
 
 // Wildcard is the principal value that names every principal of the tenant.
@@ -77,17 +80,17 @@ func (p *Principal) UnmarshalJSON(data []byte) error {
 	if len(data) > 0 && data[0] == '"' {
 		var s string
 		if err := json.Unmarshal(data, &s); err != nil {
-			return fmt.Errorf("principal: %v: %w", err, ErrInvalidPolicy)
+			return fmt.Errorf("Principal: %v: %w", err, ErrInvalidPolicy)
 		}
 		if s != Wildcard {
-			return fmt.Errorf("principal %q: a string principal must be %q: %w", s, Wildcard, ErrInvalidPolicy)
+			return fmt.Errorf("Principal %q: a string principal must be %q: %w", s, Wildcard, ErrInvalidPolicy)
 		}
 		*p = Principal{All: true}
 		return nil
 	}
 	var ids []string
 	if err := json.Unmarshal(data, &ids); err != nil {
-		return fmt.Errorf("principal: must be %q or a list of principal ids: %w", Wildcard, ErrInvalidPolicy)
+		return fmt.Errorf("Principal: must be %q or a list of principal ids: %w", Wildcard, ErrInvalidPolicy)
 	}
 	*p = Principal{IDs: dedupe(ids)}
 	return nil
@@ -106,19 +109,19 @@ func dedupe(ids []string) []string {
 	return out
 }
 
-// Statement grants (allow) or withholds (deny) actions to principals. Sid is
+// Statement grants (Allow) or withholds (Deny) actions to principals. Sid is
 // an optional label the caller chooses; Hilt stores and returns it and never
 // reads it.
 type Statement struct {
-	Sid       string    `json:"sid,omitempty"`
-	Effect    Effect    `json:"effect"`
-	Principal Principal `json:"principal"`
-	Actions   []string  `json:"action"`
+	Sid       string    `json:"Sid,omitempty"`
+	Effect    Effect    `json:"Effect"`
+	Principal Principal `json:"Principal"`
+	Actions   []string  `json:"Action"`
 }
 
 // Policy is a bucket policy.
 type Policy struct {
-	Statements []Statement `json:"statement"`
+	Statements []Statement `json:"Statement"`
 }
 
 // InvalidPolicyErrorName is the name of [ErrInvalidPolicy].
@@ -152,9 +155,9 @@ func Decode(data []byte) (Policy, error) {
 }
 
 // strictKeys rejects any property name that is not spelled exactly as the
-// schema defines it, and a null sid. encoding/json matches field names
-// case-insensitively, so DisallowUnknownFields alone would accept "Statement",
-// "Effect" or "ACTION".
+// schema defines it, and a null Sid. encoding/json matches field names
+// case-insensitively, so DisallowUnknownFields alone would accept "statement",
+// "effect" or "ACTION".
 // A document this cannot parse is left to the decoder, which reports it.
 func strictKeys(data []byte) error {
 	var top map[string]json.RawMessage
@@ -162,24 +165,24 @@ func strictKeys(data []byte) error {
 		return nil
 	}
 	for k := range top {
-		if k != "statement" {
+		if k != "Statement" {
 			return fmt.Errorf("decoding policy: unknown field %q: %w", k, ErrInvalidPolicy)
 		}
 	}
 	var statements []map[string]json.RawMessage
-	if err := json.Unmarshal(top["statement"], &statements); err != nil {
+	if err := json.Unmarshal(top["Statement"], &statements); err != nil {
 		return nil
 	}
 	for _, st := range statements {
 		for k, v := range st {
 			switch k {
-			case "sid":
+			case "Sid":
 				// encoding/json decodes null into "" without error, which would
-				// read as an absent sid.
+				// read as an absent Sid.
 				if string(bytes.TrimSpace(v)) == "null" {
-					return fmt.Errorf("decoding policy: sid must be a string: %w", ErrInvalidPolicy)
+					return fmt.Errorf("decoding policy: Sid must be a string: %w", ErrInvalidPolicy)
 				}
-			case "effect", "principal", "action":
+			case "Effect", "Principal", "Action":
 			default:
 				return fmt.Errorf("decoding policy: unknown field %q: %w", k, ErrInvalidPolicy)
 			}
@@ -196,19 +199,19 @@ func strictKeys(data []byte) error {
 // wrapping [ErrInvalidPolicy] otherwise.
 func Validate(d Policy, principalExists func(string) bool) error {
 	if len(d.Statements) == 0 {
-		return fmt.Errorf("statement must not be empty: %w", ErrInvalidPolicy)
+		return fmt.Errorf("Statement must not be empty: %w", ErrInvalidPolicy)
 	}
 	for i, st := range d.Statements {
 		if st.Effect != Allow && st.Effect != Deny {
-			return fmt.Errorf("statement %d: effect %q must be %q or %q: %w", i, st.Effect, Allow, Deny, ErrInvalidPolicy)
+			return fmt.Errorf("statement %d: Effect %q must be %q or %q: %w", i, st.Effect, Allow, Deny, ErrInvalidPolicy)
 		}
 		if !st.Principal.All {
 			if len(st.Principal.IDs) == 0 {
-				return fmt.Errorf("statement %d: principal must not be empty: %w", i, ErrInvalidPolicy)
+				return fmt.Errorf("statement %d: Principal must not be empty: %w", i, ErrInvalidPolicy)
 			}
 			for _, p := range st.Principal.IDs {
 				if p == Wildcard {
-					return fmt.Errorf("statement %d: principal %q must be the bare string, not a list entry: %w", i, Wildcard, ErrInvalidPolicy)
+					return fmt.Errorf("statement %d: Principal %q must be the bare string, not a list entry: %w", i, Wildcard, ErrInvalidPolicy)
 				}
 				if p == "" || !principalExists(p) {
 					return fmt.Errorf("statement %d: unknown principal %q: %w", i, p, ErrInvalidPolicy)
@@ -216,11 +219,11 @@ func Validate(d Policy, principalExists func(string) bool) error {
 			}
 		}
 		if len(st.Actions) == 0 {
-			return fmt.Errorf("statement %d: action must not be empty: %w", i, ErrInvalidPolicy)
+			return fmt.Errorf("statement %d: Action must not be empty: %w", i, ErrInvalidPolicy)
 		}
 		for _, a := range st.Actions {
 			if a != s3perm.PolicyWildcard && !s3perm.PolicyAction(a) {
-				return fmt.Errorf("statement %d: action %q is not a policy action: %w", i, a, ErrInvalidPolicy)
+				return fmt.Errorf("statement %d: Action %q is not a policy action: %w", i, a, ErrInvalidPolicy)
 			}
 		}
 	}
@@ -268,8 +271,8 @@ func encodeJSON(v any) []byte {
 }
 
 // Canonical returns the canonical JSON encoding of d: the [normalize]d
-// document, compact, with the fields of each statement in the order sid
-// (omitted when empty), effect, principal, action. It is what Hilt stores and
+// document, compact, with the fields of each statement in the order Sid
+// (omitted when empty), Effect, Principal, Action. It is what Hilt stores and
 // returns.
 func Canonical(d Policy) []byte {
 	return encodeJSON(normalize(d))
@@ -287,9 +290,9 @@ func ETag(d Policy) string {
 }
 
 // encodeCBOR is the DAG-CBOR encoding of d, which must be normalized: a map
-// {"statement": [...]} of statement maps whose keys are in canonical order
-// (shorter first, then bytewise): sid (omitted when empty), action, effect,
-// principal. A wildcard principal is the text string "*", otherwise the array
+// {"Statement": [...]} of statement maps whose keys are in canonical order
+// (shorter first, then bytewise): Sid (omitted when empty), Action, Effect,
+// Principal. A wildcard principal is the text string "*", otherwise the array
 // of ids. Every string is a text string and every container definite-length.
 func encodeCBOR(d Policy) []byte {
 	var buf bytes.Buffer
@@ -304,7 +307,7 @@ func encodeCBOR(d Policy) []byte {
 		}
 	}
 	_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajMap, 1)
-	text("statement")
+	text("Statement")
 	_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajArray, uint64(len(d.Statements)))
 	for _, st := range d.Statements {
 		keys := uint64(3)
@@ -313,14 +316,14 @@ func encodeCBOR(d Policy) []byte {
 		}
 		_ = cbg.WriteMajorTypeHeader(&buf, cbg.MajMap, keys)
 		if st.Sid != "" {
-			text("sid")
+			text("Sid")
 			text(st.Sid)
 		}
-		text("action")
+		text("Action")
 		strings(st.Actions)
-		text("effect")
+		text("Effect")
 		text(string(st.Effect))
-		text("principal")
+		text("Principal")
 		if st.Principal.All {
 			text(Wildcard)
 		} else {
