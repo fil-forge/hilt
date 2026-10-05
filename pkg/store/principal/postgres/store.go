@@ -101,10 +101,10 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 	return recs, nil
 }
 
-// Tombstone runs in one transaction: it locks the row FOR UPDATE, runs fn
+// Tombstone runs in one transaction: it locks the row FOR UPDATE, runs beforeCommit
 // while holding the lock, sets deleted_at and commits. A locked
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
-func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(ctx context.Context) error) error {
+func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -125,8 +125,8 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 		return fmt.Errorf("locking principal: %w", err)
 	}
 
-	if fn != nil {
-		if err := fn(ctx); err != nil {
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
 			return fmt.Errorf("before tombstoning principal: %w", err)
 		}
 	}
