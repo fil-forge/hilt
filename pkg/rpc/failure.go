@@ -72,8 +72,8 @@ func bucketFailure(res failer, err error) error {
 		errors.Is(err, bucketsvc.ErrUnknownBucket),
 		errors.Is(err, bucketsvc.ErrUnknownAccessKey),
 		errors.Is(err, bucketsvc.ErrInvalidArgument),
-		// A policy document, on a create's header or a PutBucketPolicy:
-		// unsigned, undecodable or invalid, all under InvalidBucketPolicy.
+		// A PutBucketPolicy body that does not decode or may not be stored,
+		// under InvalidBucketPolicy.
 		errors.Is(err, bucketpolicy.ErrInvalidPolicy),
 		// The policy operations' own rejections.
 		errors.Is(err, bucketpolicysvc.ErrPolicyNotFound),
