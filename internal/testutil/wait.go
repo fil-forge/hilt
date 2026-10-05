@@ -12,8 +12,8 @@ const MinBlock = 300 * time.Millisecond
 const WaitTimeout = 10 * time.Second
 
 // RequireWaitsForWriter runs write in the background; write must close
-// entered once it holds its lock and park on release before finishing. It
-// then starts wait, requires that wait has not returned within [MinBlock],
+// entered once it holds its lock, then block until release is closed before
+// finishing. It then starts wait, requires that wait has not returned within [MinBlock],
 // releases the writer, and returns the writer's and wait's errors.
 func RequireWaitsForWriter(t *testing.T, write func(entered chan<- struct{}, release <-chan struct{}) error, wait func() error) (writeErr, waitErr error) {
 	t.Helper()
