@@ -277,27 +277,27 @@ func TestPrincipalStore(t *testing.T) {
 				require.ErrorIs(t, err, boom)
 			})
 
-			t.Run("Lock waits on a principal a removal holds", func(t *testing.T) {
+			t.Run("WithLock waits on a principal a removal holds", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
 
 				deleted, locked := htestutil.RequireWaitsForWriter(t,
 					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+						return s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
 							close(entered)
 							<-release
 							return nil
 						})
 					},
 					func() error {
-						return s.Lock(context.Background(), tenantID, []string{"held"}, func(context.Context) error { return nil })
+						return s.WithLock(context.Background(), tenantID, []string{"held"}, func(context.Context) error { return nil })
 					})
 				require.NoError(t, deleted)
 				require.NoError(t, locked, "the row is gone when Lock gets its turn, so it is skipped")
 			})
 
-			t.Run("Lock does not wait on principals a removal does not hold", func(t *testing.T) {
+			t.Run("WithLock does not wait on principals a removal does not hold", func(t *testing.T) {
 				tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
 				seed(t, tenantID)
 				seed(t, other)
@@ -308,7 +308,7 @@ func TestPrincipalStore(t *testing.T) {
 				entered, release := make(chan struct{}), make(chan struct{})
 				removed := make(chan error, 1)
 				go func() {
-					removed <- s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+					removed <- s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
 						close(entered)
 						<-release
 						return nil
@@ -328,9 +328,9 @@ func TestPrincipalStore(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 				defer cancel()
 				noop := func(context.Context) error { return nil }
-				require.NoError(t, s.Lock(ctx, tenantID, []string{"other"}, noop))
-				require.NoError(t, s.Lock(ctx, other, []string{"other"}, noop))
-				require.NoError(t, s.Lock(ctx, tenantID, []string{"absent"}, noop))
+				require.NoError(t, s.WithLock(ctx, tenantID, []string{"other"}, noop))
+				require.NoError(t, s.WithLock(ctx, other, []string{"other"}, noop))
+				require.NoError(t, s.WithLock(ctx, tenantID, []string{"absent"}, noop))
 			})
 
 			t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
@@ -340,7 +340,7 @@ func TestPrincipalStore(t *testing.T) {
 
 				locked, got := htestutil.RequireWaitsForWriter(t,
 					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.Lock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
+						return s.WithLock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
 							close(entered)
 							<-release
 							return nil
@@ -554,7 +554,7 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 		{
 			name: "locking the principal for a policy write",
 			op: func(ctx context.Context, tenantID did.DID) error {
-				return principals.Lock(ctx, tenantID, []string{"held"}, func(context.Context) error {
+				return principals.WithLock(ctx, tenantID, []string{"held"}, func(context.Context) error {
 					return errors.New("the callback must not run while the row is held")
 				})
 			},
@@ -615,7 +615,7 @@ func TestPrincipalStoreMemoryLockTimeout(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	removed := make(chan error, 1)
 	go func() {
-		removed <- s.Delete(context.Background(), tenantID, "held", func(context.Context) error {
+		removed <- s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
 			close(entered)
 			<-release
 			return nil
@@ -630,7 +630,7 @@ func TestPrincipalStoreMemoryLockTimeout(t *testing.T) {
 	}
 
 	// The policy write waits on the row the removal holds and gives up.
-	err := s.Lock(context.Background(), tenantID, []string{"held"}, func(context.Context) error {
+	err := s.WithLock(context.Background(), tenantID, []string{"held"}, func(context.Context) error {
 		return errors.New("the callback must not run while the removal holds the principal")
 	})
 	require.ErrorIs(t, err, store.ErrLockTimeout)
