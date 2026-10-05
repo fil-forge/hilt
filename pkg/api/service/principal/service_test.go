@@ -407,13 +407,13 @@ type flakyPolicies struct {
 	err error
 }
 
-func (f *flakyPolicies) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(context.Context, *bucketpolicystore.Record) error) (string, error) {
+func (f *flakyPolicies) Put(ctx context.Context, in bucketpolicystore.Input, fn func(context.Context, *bucketpolicystore.Record) error) (string, error) {
 	if f.err != nil {
 		err := f.err
 		f.err = nil
 		return "", err
 	}
-	return f.Store.Put(ctx, in, beforeCommit)
+	return f.Store.Put(ctx, in, fn)
 }
 
 // vanishingPrincipals runs remove before the first Get, standing in for a
@@ -439,7 +439,7 @@ type lockedPrincipals struct {
 	err error
 }
 
-func (l *lockedPrincipals) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(context.Context) error) error {
+func (l *lockedPrincipals) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(context.Context) error) error {
 	return l.err
 }
 
@@ -452,16 +452,16 @@ func (l *lockTimeoutPrincipals) Add(context.Context, did.DID, string) error {
 	return fmt.Errorf("adding principal: %w", store.ErrLockTimeout)
 }
 
-// renamingPrincipals runs write before Delete locks the row, standing in for a
+// renamingPrincipals runs write before Tombstone locks the row, standing in for a
 // policy write that names the principal between the strip and the lock.
 type renamingPrincipals struct {
 	principalstore.Store
 	write func()
 }
 
-func (r *renamingPrincipals) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(context.Context) error) error {
+func (r *renamingPrincipals) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(context.Context) error) error {
 	r.write()
-	return r.Store.Delete(ctx, tenant, externalID, beforeCommit)
+	return r.Store.Tombstone(ctx, tenant, externalID, fn)
 }
 
 func TestDeleteConcurrentChange(t *testing.T) {
@@ -690,7 +690,7 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 				close(entered)
 				<-release
 				released = time.Now()
-				return principals.Lock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
+				return principals.WithLock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
 			})
 			return err
 		},

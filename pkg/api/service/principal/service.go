@@ -167,7 +167,7 @@ func (s *Service) Delete(ctx context.Context, externalID, principalID string) er
 		err = s.stripFromPolicies(ctx, tenantID, principalID)
 	}
 	if err == nil {
-		err = s.principals.Delete(ctx, tenantID, principalID, func(ctx context.Context) error {
+		err = s.principals.Tombstone(ctx, tenantID, principalID, func(ctx context.Context) error {
 			return s.remove(ctx, tenantID, principalID)
 		})
 	}
