@@ -273,7 +273,7 @@ func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc
 	}
 	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
 	defer cancel()
-	return s.principals.Lock(ctx, tenantID, affected, func(ctx context.Context) error {
+	return s.principals.WithLock(ctx, tenantID, affected, func(ctx context.Context) error {
 		actions := make(map[string][]string, len(affected))
 		for _, p := range affected {
 			actions[p] = bucketpolicy.Effective(newDoc, p)
