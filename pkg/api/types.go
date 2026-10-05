@@ -32,12 +32,20 @@ type UpdateTenantStatusRequest struct {
 	Status TenantStatus `json:"status"`
 }
 
+// The two kinds of access key, as the type field names them.
+const (
+	AccessKeyTypeService   = "service"
+	AccessKeyTypePrincipal = "principal"
+)
+
 // AccessKey is the metadata for an S3 access key (never includes the secret).
-// A service key carries its permissions and buckets; a principal-bound key
-// carries the principal it is bound to in their place.
+// Type says which kind it is. A service key carries its permissions and
+// buckets; a principal-bound key carries the principal it is bound to in their
+// place.
 type AccessKey struct {
 	AccessKeyID string     `json:"accessKeyId"`
 	Name        string     `json:"name"`
+	Type        string     `json:"type"`
 	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
 	Principal   string     `json:"principal,omitempty"`
