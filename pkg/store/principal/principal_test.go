@@ -155,7 +155,7 @@ func TestPrincipalStore(t *testing.T) {
 				require.NoError(t, s.Add(t.Context(), tenantID, "again"))
 				first, err := s.Get(t.Context(), tenantID, "again")
 				require.NoError(t, err)
-				require.NoError(t, s.Delete(t.Context(), tenantID, "again", nil))
+				require.NoError(t, s.Tombstone(t.Context(), tenantID, "again", nil))
 
 				recs, err := s.ListByTenant(t.Context(), tenantID)
 				require.NoError(t, err)
@@ -169,13 +169,13 @@ func TestPrincipalStore(t *testing.T) {
 				require.ErrorIs(t, s.Add(t.Context(), tenantID, "again"), store.ErrRecordExists)
 			})
 
-			t.Run("Delete runs the callback once, removes the row and is idempotent", func(t *testing.T) {
+			t.Run("Tombstone runs the callback once, removes the row and is idempotent", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), tenantID, "del"))
 
 				calls := 0
-				require.NoError(t, s.Delete(t.Context(), tenantID, "del", func(context.Context) error {
+				require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
 					calls++
 					return nil
 				}))
@@ -185,14 +185,14 @@ func TestPrincipalStore(t *testing.T) {
 
 				// Deleting an absent principal is a no-op: nothing to publish, so the
 				// callback does not run.
-				require.NoError(t, s.Delete(t.Context(), tenantID, "del", func(context.Context) error {
+				require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
 					calls++
 					return nil
 				}))
 				require.Equal(t, 1, calls)
 			})
 
-			t.Run("Delete holds only the removal: ListByTenant answers, a share-locked Get waits", func(t *testing.T) {
+			t.Run("Tombstone holds only the removal: ListByTenant answers, a share-locked Get waits", func(t *testing.T) {
 				// The locking both backends owe the two writers that cross here:
 				// a policy write lists the tenant's principals from inside its own
 				// lock while a removal's callback rewrites that tenant's policies.
@@ -204,7 +204,7 @@ func TestPrincipalStore(t *testing.T) {
 
 				deleted, got := htestutil.RequireWaitsForWriter(t,
 					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.Delete(context.Background(), tenantID, "held", func(ctx context.Context) error {
+						return s.Tombstone(context.Background(), tenantID, "held", func(ctx context.Context) error {
 							recs, err := s.ListByTenant(ctx, tenantID)
 							if err != nil {
 								return err
@@ -225,22 +225,22 @@ func TestPrincipalStore(t *testing.T) {
 				require.ErrorIs(t, got, store.ErrRecordNotFound, "the tombstone is visible once the removal commits")
 			})
 
-			t.Run("Delete accepts a nil callback", func(t *testing.T) {
+			t.Run("Tombstone accepts a nil callback", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), tenantID, "nil-cb"))
-				require.NoError(t, s.Delete(t.Context(), tenantID, "nil-cb", nil))
+				require.NoError(t, s.Tombstone(t.Context(), tenantID, "nil-cb", nil))
 				_, err := s.Get(t.Context(), tenantID, "nil-cb")
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
-			t.Run("Delete returns the callback error and leaves the row", func(t *testing.T) {
+			t.Run("Tombstone returns the callback error and leaves the row", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), tenantID, "keep"))
 
 				publishFailed := errors.New("publish failed")
-				err := s.Delete(t.Context(), tenantID, "keep", func(context.Context) error {
+				err := s.Tombstone(t.Context(), tenantID, "keep", func(context.Context) error {
 					return publishFailed
 				})
 				require.ErrorIs(t, err, publishFailed)
@@ -250,7 +250,7 @@ func TestPrincipalStore(t *testing.T) {
 				require.Equal(t, "keep", rec.ExternalID)
 
 				// A retry after the failure completes the removal.
-				require.NoError(t, s.Delete(t.Context(), tenantID, "keep", nil))
+				require.NoError(t, s.Tombstone(t.Context(), tenantID, "keep", nil))
 				_, err = s.Get(t.Context(), tenantID, "keep")
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
@@ -361,7 +361,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.NoError(t, got)
 	})
 
-	t.Run("a share-locked Get during Delete sees the row once the callback fails", func(t *testing.T) {
+	t.Run("a share-locked Get during Tombstone sees the row once the callback fails", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		require.NoError(t, s.Add(t.Context(), tenantID, "rollback"))
@@ -369,7 +369,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		var rec principal.Record
 		deleted, got := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Delete(context.Background(), tenantID, "rollback", func(context.Context) error {
+				return s.Tombstone(context.Background(), tenantID, "rollback", func(context.Context) error {
 					close(entered)
 					<-release
 					return errors.New("publish failed")
@@ -385,14 +385,14 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.Equal(t, "rollback", rec.ExternalID)
 	})
 
-	t.Run("a share-locked Get during Delete reports the row gone once it commits", func(t *testing.T) {
+	t.Run("a share-locked Get during Tombstone reports the row gone once it commits", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		require.NoError(t, s.Add(t.Context(), tenantID, "gone"))
 
 		deleted, got := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Delete(context.Background(), tenantID, "gone", func(context.Context) error {
+				return s.Tombstone(context.Background(), tenantID, "gone", func(context.Context) error {
 					close(entered)
 					<-release
 					return nil

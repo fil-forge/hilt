@@ -37,7 +37,7 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	}
 	// The upsert revives a tombstone under the same id; it touches nothing when
 	// the row is live, and the zero row count reports the duplicate. The row
-	// lock it takes waits for an in-flight Delete of the same principal.
+	// lock it takes waits for an in-flight Tombstone of the same principal.
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO principal (tenant_id, external_id)
 		VALUES ($1, $2)
@@ -55,7 +55,7 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 }
 
 // Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
-// read waits on a Delete that holds the row FOR UPDATE.
+// read waits on a Tombstone that holds the row FOR UPDATE.
 func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principal.Record, error) {
 	query := `
 		SELECT tenant_id, external_id, created_at
@@ -101,10 +101,10 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 	return recs, nil
 }
 
-// Delete runs in one transaction: it locks the row FOR UPDATE, runs
-// beforeCommit while holding the lock, sets deleted_at and commits. A locked
+// Tombstone runs in one transaction: it locks the row FOR UPDATE, runs fn
+// while holding the lock, sets deleted_at and commits. A locked
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
-func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error {
+func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(ctx context.Context) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -125,9 +125,9 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 		return fmt.Errorf("locking principal: %w", err)
 	}
 
-	if beforeCommit != nil {
-		if err := beforeCommit(ctx); err != nil {
-			return fmt.Errorf("before deleting principal: %w", err)
+	if fn != nil {
+		if err := fn(ctx); err != nil {
+			return fmt.Errorf("before tombstoning principal: %w", err)
 		}
 	}
 
@@ -136,7 +136,7 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 		SET deleted_at = NOW()
 		WHERE tenant_id = $1 AND external_id = $2
 	`, tenant.String(), externalID); err != nil {
-		return fmt.Errorf("deleting principal: %w", err)
+		return fmt.Errorf("tombstoning principal: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)

@@ -3,7 +3,7 @@
 // The store holds two locks. mutex guards the map and is held for one read or
 // one write at a time, never across a caller's callback. removals serializes a
 // removal with the writes that must not interleave with it, and is the lock
-// Delete holds while beforeCommit runs.
+// Tombstone holds while fn runs.
 //
 // The split mirrors Postgres. A removal there holds the principal row FOR
 // UPDATE across its callback while ListByTenant still reads the table without
@@ -76,7 +76,7 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	return nil
 }
 
-// Get with [store.WithShareLock] waits for an in-flight Delete of any principal
+// Get with [store.WithShareLock] waits for an in-flight Tombstone of any principal
 // to finish, the way the Postgres read waits on the row held FOR UPDATE. An
 // unlocked read takes the map alone and may be answered while a removal's
 // callback is still running, as the unlocked Postgres read is answered from
@@ -113,13 +113,13 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 	return recs, nil
 }
 
-// Delete holds removals for the whole call and takes the map mutex only to
-// read the entry and, at the end, to write the tombstone. beforeCommit runs
-// with the map unlocked, so it may write the policy store whose own writes
+// Tombstone holds removals for the whole call and takes the map mutex only to
+// read the entry and, at the end, to write the tombstone. fn runs with the map
+// unlocked, so it may write the policy store whose own writes
 // read this one. A share-locked Get waits on removals and so observes either
 // the principal or its tombstone, never a state in between; ListByTenant reads
 // the map and never waits, as on Postgres.
-func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error {
+func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(ctx context.Context) error) error {
 	s.removals.Lock()
 	defer s.removals.Unlock()
 
@@ -130,9 +130,9 @@ func (s *Store) Delete(ctx context.Context, tenant did.DID, externalID string, b
 		return nil // idempotent: nothing to publish and nothing to remove
 	}
 
-	if beforeCommit != nil {
-		if err := beforeCommit(ctx); err != nil {
-			return fmt.Errorf("before deleting principal: %w", err)
+	if fn != nil {
+		if err := fn(ctx); err != nil {
+			return fmt.Errorf("before tombstoning principal: %w", err)
 		}
 	}
 
