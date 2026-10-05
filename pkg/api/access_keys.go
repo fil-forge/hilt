@@ -55,6 +55,7 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 			AccessKey: AccessKey{
 				AccessKeyID: rec.ID.Identifier(),
 				Name:        rec.Name,
+				Type:        accessKeyType(rec),
 				Permissions: rec.Permissions,
 				Buckets:     req.Buckets,
 				PrincipalID: rec.Principal,
@@ -129,10 +130,20 @@ func accessKeyResponse(rec accesskey.Record, bucketNames map[did.DID]string) Acc
 	return AccessKey{
 		AccessKeyID: rec.ID.Identifier(),
 		Name:        rec.Name,
+		Type:        accessKeyType(rec),
 		Permissions: rec.Permissions,
 		Buckets:     bucketList,
 		PrincipalID: rec.Principal,
 		ExpiresAt:   rec.ExpiresAt,
 		CreatedAt:   rec.CreatedAt,
 	}
+}
+
+// accessKeyType is the API type of a key: principal when it is bound to one,
+// service otherwise.
+func accessKeyType(rec accesskey.Record) string {
+	if rec.Principal == nil {
+		return AccessKeyTypeService
+	}
+	return AccessKeyTypePrincipal
 }

@@ -113,6 +113,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 		require.NotEmpty(t, created.AccessKeyID)
 		require.True(t, strings.HasPrefix(created.SecretAccessKey, "u"), "secret is multibase base64url")
+		require.Equal(t, api.AccessKeyTypeService, created.Type)
 		require.Equal(t, []string{"bucket-a"}, created.Buckets)
 		require.Nil(t, created.ExpiresAt)
 
@@ -339,6 +340,7 @@ func TestCreatePrincipalBoundAccessKeyHandler(t *testing.T) {
 		require.NotEmpty(t, created.AccessKeyID)
 		require.True(t, strings.HasPrefix(created.SecretAccessKey, "u"), "secret is multibase base64url")
 		require.Equal(t, "laptop", created.Name)
+		require.Equal(t, api.AccessKeyTypePrincipal, created.Type)
 		require.Equal(t, new("alice"), created.PrincipalID)
 		require.Nil(t, created.ExpiresAt)
 
@@ -406,9 +408,12 @@ func TestListAccessKeysHandler(t *testing.T) {
 		}
 		require.Equal(t, []string{"bucket-a"}, byName["a"].Buckets) // bucket DID resolved back to name
 		require.Equal(t, []string{"s3:GetObject"}, byName["a"].Permissions)
+		require.Equal(t, api.AccessKeyTypeService, byName["a"].Type)
 		require.Nil(t, byName["a"].PrincipalID)
 		require.Empty(t, byName["b"].Buckets)
+		require.Equal(t, api.AccessKeyTypeService, byName["b"].Type)
 		require.Nil(t, byName["b"].PrincipalID)
+		require.Equal(t, api.AccessKeyTypePrincipal, byName["laptop"].Type)
 		require.Equal(t, new("alice"), byName["laptop"].PrincipalID)
 		require.Empty(t, byName["laptop"].Permissions)
 		require.Empty(t, byName["laptop"].Buckets)
@@ -449,6 +454,7 @@ func TestGetAccessKeyHandler(t *testing.T) {
 		var ak api.AccessKey
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ak))
 		require.Equal(t, ck.AccessKeyID, ak.AccessKeyID)
+		require.Equal(t, api.AccessKeyTypeService, ak.Type)
 		require.Equal(t, []string{"bucket-a"}, ak.Buckets)
 	})
 
@@ -478,6 +484,7 @@ func TestGetAccessKeyHandler(t *testing.T) {
 		var ak api.AccessKey
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ak))
 		require.Equal(t, bound.AccessKeyID, ak.AccessKeyID)
+		require.Equal(t, api.AccessKeyTypePrincipal, ak.Type)
 		require.Equal(t, new("alice"), ak.PrincipalID)
 	})
 }
