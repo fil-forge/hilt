@@ -761,7 +761,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 		}, nil)
 		require.NoError(t, err)
 
-		require.NoError(t, principalpostgres.New(pool).Delete(t.Context(), tenantID, "alice", nil))
+		require.NoError(t, principalpostgres.New(pool).Tombstone(t.Context(), tenantID, "alice", nil))
 		_, principals := indexRows(t, bucketID)
 		require.Len(t, principals, 2, "the named row and the wildcard row both remain")
 		_, err = s.Get(t.Context(), bucketID)
@@ -775,7 +775,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 		tenantID := fx.tenant(t)
 		fx.principal(t, tenantID, "alice")
 		bucketID := fx.bucket(t, tenantID)
-		require.NoError(t, principalpostgres.New(pool).Delete(t.Context(), tenantID, "alice", nil))
+		require.NoError(t, principalpostgres.New(pool).Tombstone(t.Context(), tenantID, "alice", nil))
 
 		_, err := s.Put(t.Context(), bucketpolicystore.Input{
 			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")),
@@ -998,7 +998,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 			},
 			func() error {
 				// The principal service strips alice from the policies naming her.
-				return principalpostgres.New(pool).Delete(context.Background(), tenantID, "alice", func(ctx context.Context) error {
+				return principalpostgres.New(pool).Tombstone(context.Background(), tenantID, "alice", func(ctx context.Context) error {
 					recs, err := s.ListByPrincipal(ctx, tenantID, "alice")
 					if err != nil {
 						return err

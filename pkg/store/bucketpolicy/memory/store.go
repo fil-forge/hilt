@@ -41,7 +41,7 @@ var _ bucketpolicystore.Store = (*Store)(nil)
 type Option func(*Store)
 
 // WithBuckets makes Put refuse a bucket for which has reports false, with
-// [store.ErrRecordNotFound] and before beforeCommit runs, as the Postgres
+// [store.ErrRecordNotFound] and before fn runs, as the Postgres
 // backend does. Without it any bucket may be named.
 func WithBuckets(has func(did.DID) bool) Option {
 	return func(s *Store) { s.hasBucket = has }
@@ -68,9 +68,9 @@ func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOptio
 	return cloneRecord(e.rec), nil
 }
 
-// Put runs beforeCommit under the store mutex, so a concurrent Get waits for
+// Put runs fn under the store mutex, so a concurrent Get waits for
 // the callback to finish and observes either the old policy or the new one.
-func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(ctx context.Context, old *bucketpolicystore.Record) error) (string, error) {
+func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx context.Context, old *bucketpolicystore.Record) error) (string, error) {
 	if in.Bucket == did.Undef {
 		return "", fmt.Errorf("policy bucket is required: %w", store.ErrInvalidArgument)
 	}
@@ -92,8 +92,8 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	if err := bucketpolicystore.CheckInputPrecondition(in, old); err != nil {
 		return "", err
 	}
-	if beforeCommit != nil {
-		if err := beforeCommit(ctx, old); err != nil {
+	if fn != nil {
+		if err := fn(ctx, old); err != nil {
 			return "", fmt.Errorf("before writing policy: %w", err)
 		}
 	}
@@ -123,7 +123,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	return etag, nil
 }
 
-func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old bucketpolicystore.Record) error) error {
+func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, fn func(ctx context.Context, old bucketpolicystore.Record) error) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -134,8 +134,8 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	if ifMatch != "" && e.rec.ETag != ifMatch {
 		return fmt.Errorf("policy ETag is %s: %w", e.rec.ETag, store.ErrPreconditionFailed)
 	}
-	if beforeCommit != nil {
-		if err := beforeCommit(ctx, cloneRecord(e.rec)); err != nil {
+	if fn != nil {
+		if err := fn(ctx, cloneRecord(e.rec)); err != nil {
 			return fmt.Errorf("before deleting policy: %w", err)
 		}
 	}
@@ -143,14 +143,14 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	return nil
 }
 
-// DeleteByBucket runs beforeCommit under the store mutex, as Put does, so a
+// DeleteByBucket runs fn under the store mutex, as Put does, so a
 // policy write waits for it.
-func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error {
+func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, fn func(ctx context.Context) error) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if beforeCommit != nil {
-		if err := beforeCommit(ctx); err != nil {
+	if fn != nil {
+		if err := fn(ctx); err != nil {
 			return err
 		}
 	}

@@ -3,7 +3,8 @@
 // writes are conditioned on, and an index from principal to the buckets whose
 // statements name it.
 //
-// Every write that changes a principal's access takes a beforeCommit callback.
+// Every write that changes a principal's access takes a callback, fn, that
+// runs inside the write, before it takes effect.
 // The Postgres backend runs it inside the write's transaction, after taking a
 // bucket-keyed advisory lock (and the row lock, when a row exists) and before
 // committing, so a caller can publish an invalidation with the guarantee that
@@ -63,38 +64,38 @@ type Store interface {
 	// returned when it runs out.
 	Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (Record, error)
 	// Put creates or replaces the bucket's policy in one transaction: it locks
-	// the current row, checks in.IfMatch against it, runs beforeCommit (nil
+	// the current row, checks in.IfMatch against it, runs fn (nil
 	// allowed) with the current record (nil when creating), writes the row and
 	// its index rows, and commits. It returns the new ETag. Unless in is
 	// Unconditional, it returns [store.ErrPreconditionFailed] when IfMatch is
 	// nil and a policy exists, or IfMatch names a tag other than the current
 	// one (including when no policy exists); [store.ErrRecordNotFound] when the
-	// bucket does not exist, checked before beforeCommit runs; and
+	// bucket does not exist, checked before fn runs; and
 	// [store.ErrInvalidArgument] when the bucket or tenant is undef or, on
 	// Postgres, a named principal does not exist or the bucket is not the
-	// tenant's. An error from beforeCommit is returned and nothing is written.
-	// The tenant check on Postgres runs after beforeCommit, so a callback that
+	// tenant's. An error from fn is returned and nothing is written.
+	// The tenant check on Postgres runs after fn, so a callback that
 	// published may still see the write fail.
 	//
-	// beforeCommit must not read or write this store: on the memory backend it
+	// fn must not read or write this store: on the memory backend it
 	// runs under the store mutex, and on Postgres a locked read of the same row
 	// would wait on the lock the call itself holds.
-	Put(ctx context.Context, in Input, beforeCommit func(ctx context.Context, old *Record) error) (string, error)
+	Put(ctx context.Context, in Input, fn func(ctx context.Context, old *Record) error) (string, error)
 	// Delete removes the bucket's policy in one transaction, under the same
 	// locking and callback contract as [Store.Put]. It returns
 	// [store.ErrRecordNotFound] if the bucket has no policy and
 	// [store.ErrPreconditionFailed] if ifMatch is not the current ETag; in both
-	// cases beforeCommit does not run. An empty ifMatch is unconditional.
-	Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old Record) error) error
+	// cases fn does not run. An empty ifMatch is unconditional.
+	Delete(ctx context.Context, bucket did.DID, ifMatch string, fn func(ctx context.Context, old Record) error) error
 	// DeleteByBucket removes the bucket's policy and index rows
-	// unconditionally, holding the bucket's write lock across beforeCommit
+	// unconditionally, holding the bucket's write lock across fn
 	// (nil allowed): a policy write in flight finishes first and one arriving
 	// later waits, so nothing the callback revokes or deletes is granted again
 	// behind it. It is idempotent. Bucket deletion revokes the bucket's grants
 	// and deletes the bucket row inside the callback; tenant deletion passes
-	// nil. The callback's error is returned as it came. beforeCommit must not
+	// nil. The callback's error is returned as it came. fn must not
 	// read or write this store, as for [Store.Put].
-	DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error
+	DeleteByBucket(ctx context.Context, bucket did.DID, fn func(ctx context.Context) error) error
 	// ListByPrincipal returns the tenant's policies whose statements name
 	// principal, including those naming every principal with the wildcard,
 	// ordered by bucket. It is answered from the index. With [store.WithShareLock]
