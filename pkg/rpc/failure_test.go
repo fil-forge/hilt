@@ -51,9 +51,9 @@ func TestBucketFailure(t *testing.T) {
 		requireName(t, f.got, bucketsvc.BucketAlreadyOwnedErrorName)
 	})
 
-	t.Run("a rejected create-request policy is set as failure under the policy name", func(t *testing.T) {
+	t.Run("a rejected policy document is set as failure under the policy name", func(t *testing.T) {
 		f := &recordingFailer{}
-		err := fmt.Errorf("x-bucket-policy is not covered by the request signature: %w", bucketpolicy.ErrInvalidPolicy)
+		err := fmt.Errorf("decoding policy: unknown field %q: %w", "Version", bucketpolicy.ErrInvalidPolicy)
 		require.NoError(t, bucketFailure(f, err))
 		require.True(t, f.called)
 		requireName(t, f.got, bucketpolicy.InvalidPolicyErrorName)

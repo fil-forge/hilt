@@ -1,27 +1,22 @@
 // Package bucket provides the S3 bucket business logic for the UCAN RPC API:
-// create (authenticate + create the bucket, its bucket→tenant root delegation,
-// the policy the request carries in [PolicyHeader], and Sprue space, returning
-// the access key's proof chains), delete (verify empty via Sprue, then tear
-// down), list, and info (a lookup returning proof chains, authorized by the
-// invocation issuer rather than by a signed request). It returns the known
-// errors in errors.go, plus [bucketpolicy.ErrInvalidPolicy] for a refused
-// create-request policy, so handlers surface stable failure names; unexpected
-// failures are returned wrapped.
+// create (authenticate + create the bucket, its bucket→tenant root delegation, and
+// Sprue space, returning the access key's proof chains), delete (verify empty via
+// Sprue, then tear down), list, and info (a lookup returning proof chains,
+// authorized by the invocation issuer rather than by a signed request). It
+// returns the known errors in errors.go so handlers surface stable failure names;
+// unexpected failures are returned wrapped.
 package bucket
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -58,11 +53,6 @@ type UploadClient interface {
 	UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error
 }
 
-// PolicyHeader is the S3 CreateBucket request header that carries the new
-// bucket's policy: the policy document as JSON, base64-encoded. It MUST be
-// among the request's signed headers, or the create is refused.
-const PolicyHeader = "x-bucket-policy"
-
 // Service implements the S3 bucket operations shared by the UCAN command handlers.
 type Service struct {
 	logger      *zap.Logger
@@ -74,8 +64,7 @@ type Service struct {
 	policies    bucketpolicystore.Store
 	uploads     UploadClient
 	revocations grant.RevocationPublisher
-	// policyWrites stores the policy a CreateBucket request carries, as the
-	// management API stores a policy PUT.
+	// policyWrites stores a policy as the management API stores a policy PUT.
 	policyWrites *bucketpolicysvc.Service
 }
 
@@ -106,14 +95,9 @@ func New(
 	}
 }
 
-// Create authenticates the request, checks the s3:CreateBucket permission
-// (which no policy grants, so a principal-bound key is refused by the
-// authorizer before this runs), decodes the policy carried in the
-// [PolicyHeader] when there is one, creates the bucket (an ephemeral bucket
-// key signs a bucket→tenant "top" root delegation and is then discarded),
-// stores the policy as the management API stores a policy PUT, which issues
-// every key of each principal it names that key's delegations over the new
-// bucket, provisions the bucket's space with Sprue as the tenant,
+// Create authenticates the request, checks the s3:CreateBucket permission, creates
+// the bucket (an ephemeral bucket key signs a bucket→tenant "top" root delegation
+// and is then discarded), provisions the bucket's space with Sprue as the tenant,
 // points the space at the provider's routing policy so its writes land on the
 // provider's storage nodes, and returns the AuthorizeOK: the new bucket DID, the
 // access key's permissions and derived verification key, and the proof chains for
@@ -141,14 +125,6 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		return nil, nil, fmt.Errorf("looking up bucket: %w", err)
 	}
 
-	// The header is decoded before anything is written; the document is
-	// validated as it is stored, and a refused document takes the bucket row
-	// with it.
-	policy, err := policyFromHeader(authz, args.Request.Headers)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// Generate an ephemeral bucket key; its DID is the bucket DID. The key signs
 	// the root delegation below and is then discarded (the space is managed by
 	// Sprue).
@@ -162,69 +138,17 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	if err := s.buckets.Add(ctx, bucketID, authz.Tenant.ID, authz.BucketName); err != nil {
 		return nil, nil, fmt.Errorf("storing bucket: %w", err)
 	}
-	// Best-effort rollback of the bucket record on a later failure.
+	// Best-effort rollback of the bucket record on a later failure. The root
+	// delegation (if already stored) becomes unreachable — its bucket record is
+	// gone — so it is inert; the delegation store has no delete-by-CID.
 	//
 	// Cleanup runs on a context detached from the request (values retained, but
 	// cancellation/deadline dropped) so a client disconnect — which cancels ctx —
-	// cannot abort the rollback partway and leave an orphaned bucket record. The
-	// publish gets a deadline of its own, the Swarf batch bound, so a revocation
-	// service that accepts the request and never answers cannot hang the create:
-	// the publish fails and the bucket stays for a DeleteBucket retry. The
-	// deletes after it get a fresh one, so a publish that returns near its
-	// deadline does not leave them an expired context.
+	// cannot abort the rollback partway and leave an orphaned bucket record.
 	rollback := func() {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grant.BatchTimeout)
-		defer cancel()
-		// The grants the policy write issued over the bucket are revoked before
-		// they are deleted, as a bucket deletion revokes them: a chain the
-		// gateway fetched meanwhile must not outlive the bucket. A publish
-		// that fails deletes nothing, as Delete does: the bucket row, policy
-		// and grants stay for a DeleteBucket retry, which revokes first. The
-		// tenant key is read only when there is a grant to revoke: a policy
-		// write that failed on that same key issued nothing, and a rollback
-		// that needed it would leave a row behind that DeleteBucket, needing
-		// the key too, could never remove. Then the delegations, the bucket
-		// row and the policy, as Delete removes them: under the bucket's
-		// policy lock, the first two in one transaction on Postgres, which
-		// cascades the policy from the row, and the policy last on memory, so
-		// a row delete that fails leaves a live bucket with its policy.
-		issued, err := s.tenantIssuedDelegations(cleanupCtx, authz.Tenant.ID, bucketID)
-		if err != nil {
-			log.Error("rollback: listing bucket delegations, bucket left for deletion", zap.Error(err))
-			return
-		}
-		if len(issued) > 0 {
-			revoker, err := s.authorizer.TenantIssuer(cleanupCtx, authz.Tenant.ID)
-			if err != nil {
-				log.Error("rollback: loading tenant issuer, bucket left for deletion", zap.Error(err))
-				return
-			}
-			if err := grant.PublishRevocations(cleanupCtx, log, s.revocations, revoker, issued); err != nil {
-				log.Error("rollback: revoking bucket delegations, bucket left for deletion", zap.Error(err))
-				return
-			}
-		}
-		deleteCtx, cancelDeletes := context.WithTimeout(context.WithoutCancel(ctx), store.LockTimeout)
-		defer cancelDeletes()
-		err = s.policies.DeleteByBucket(deleteCtx, bucketID, func(ctx context.Context) error {
-			if err := s.delegations.DeleteBySubject(ctx, bucketID); err != nil {
-				return fmt.Errorf("deleting bucket delegations: %w", err)
-			}
-			return s.buckets.Delete(ctx, bucketID)
-		})
-		if err != nil {
-			log.Error("rollback: deleting bucket, bucket left for deletion", zap.Error(err))
-		}
-	}
-
-	// The policy is written right after the bucket row, validated and rotated
-	// as a management-API PUT is; the bucket row goes with it if the write
-	// fails, so no bucket outlives a refused or failed write of the policy its
-	// create request carried.
-	if policy != nil {
-		if _, _, err := s.policyWrites.Write(ctx, authz.Tenant.ID, bucketID, authz.BucketName, *policy, nil); err != nil {
-			rollback()
-			return nil, nil, fmt.Errorf("storing bucket policy: %w", err)
+		cleanupCtx := context.WithoutCancel(ctx)
+		if err := s.buckets.Delete(cleanupCtx, bucketID); err != nil {
+			log.Error("rollback: deleting bucket", zap.Error(err))
 		}
 	}
 
@@ -346,7 +270,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 
 // Delete authenticates the request, checks the s3:DeleteBucket permission,
 // resolves the bucket, verifies its space is empty via Sprue (acting as the
-// tenant) when the bucket holds its root, publishes revocations for the delegations over the bucket, then
+// tenant), publishes revocations for the delegations over the bucket, then
 // deletes those delegations and the bucket record, which takes the policy with
 // it. The policy goes without a publication: the gateway refuses a bucket it no longer
 // knows, so nothing cached for it can be used. Revocations are published
@@ -364,26 +288,17 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	}
 
 	// Verify the bucket is empty, listing its blobs via Sprue as the tenant (the
-	// bucket→tenant root delegation authorizes the /blob/list invocation). A
-	// bucket whose root is gone, left by a create that failed before storing
-	// it or by a cleanup that removed the delegations but not the row, has no
-	// space a proof can reach: its row stayed only to be removed here.
+	// bucket→tenant root delegation authorizes the /blob/list invocation).
 	account, err := s.authorizer.TenantIssuer(ctx, authz.Tenant.ID)
 	if err != nil {
 		return nil, err
 	}
-	rooted, err := s.hasRoot(ctx, authz.Bucket.ID)
+	empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, upload.WithIssuer(account), upload.WithProofs(s.delegations))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("checking bucket is empty: %w", err)
 	}
-	if rooted {
-		empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, upload.WithIssuer(account), upload.WithProofs(s.delegations))
-		if err != nil {
-			return nil, fmt.Errorf("checking bucket is empty: %w", err)
-		}
-		if !empty {
-			return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
-		}
+	if !empty {
+		return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
 	}
 
 	// DeleteByBucket holds the bucket's policy write lock across the callback:
@@ -440,35 +355,6 @@ func sameLinks(a, b []ucan.Delegation) bool {
 // access to every bucket the tenant owns, so deleting one bucket must not revoke
 // them.
 func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.DID, revoker ucan.Issuer) error {
-	issued, err := s.tenantIssuedDelegations(ctx, tenantID, bucketID)
-	if err != nil {
-		return err
-	}
-	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
-	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
-}
-
-// hasRoot reports whether the bucket's root delegation, the one the bucket
-// issued over itself, is stored.
-func (s *Service) hasRoot(ctx context.Context, bucketID did.DID) (bool, error) {
-	page, err := s.delegations.ListBySubject(ctx, bucketID)
-	for err == nil {
-		for _, d := range page.Results {
-			if d.Issuer() == bucketID {
-				return true, nil
-			}
-		}
-		if page.Cursor == nil {
-			return false, nil
-		}
-		page, err = s.delegations.ListBySubject(ctx, bucketID, store.WithCursor(*page.Cursor))
-	}
-	return false, fmt.Errorf("listing bucket delegations: %w", err)
-}
-
-// tenantIssuedDelegations lists the delegations over the bucket that the
-// tenant issued: the ones revokeDelegations publishes revocations for.
-func (s *Service) tenantIssuedDelegations(ctx context.Context, tenantID, bucketID did.DID) ([]ucan.Delegation, error) {
 	dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
 		var listOpts []store.PaginationOption
 		if opts.Cursor != nil {
@@ -477,7 +363,7 @@ func (s *Service) tenantIssuedDelegations(ctx context.Context, tenantID, bucketI
 		return s.delegations.ListBySubject(ctx, bucketID, listOpts...)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing bucket delegations: %w", err)
+		return fmt.Errorf("listing bucket delegations: %w", err)
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
 
@@ -494,7 +380,7 @@ func (s *Service) tenantIssuedDelegations(ctx context.Context, tenantID, bucketI
 		}
 		issued = append(issued, d)
 	}
-	return issued, nil
+	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
 }
 
 // List authorizes the request (which also verifies the access key holds the
@@ -733,36 +619,4 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil
-}
-
-// policyFromHeader reads the policy a CreateBucket request carries in
-// [PolicyHeader]. It returns nil when the header is absent. The header must be
-// non-blank, covered by the request signature and decode as base64 JSON;
-// otherwise the error wraps [bucketpolicy.ErrInvalidPolicy], which the caller
-// records as the InvalidBucketPolicy failure. The document's content is
-// validated when it is stored.
-func policyFromHeader(authz *auth.AuthorizedRequest, headers map[string]string) (*bucketpolicy.Policy, error) {
-	// HeaderValue reads an empty value as absent; a header that is present
-	// but blank is a refusal, not a bucket without a policy.
-	for k, v := range headers {
-		if strings.EqualFold(k, PolicyHeader) && strings.TrimSpace(v) == "" {
-			return nil, fmt.Errorf("%s is empty: %w", PolicyHeader, bucketpolicy.ErrInvalidPolicy)
-		}
-	}
-	encoded, ok := auth.HeaderValue(headers, PolicyHeader)
-	if !ok {
-		return nil, nil
-	}
-	if !authz.Signed.HeaderSigned(PolicyHeader) {
-		return nil, fmt.Errorf("%s is not covered by the request signature: %w", PolicyHeader, bucketpolicy.ErrInvalidPolicy)
-	}
-	raw, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("%s is not base64: %v: %w", PolicyHeader, err, bucketpolicy.ErrInvalidPolicy)
-	}
-	doc, err := bucketpolicy.Decode(raw)
-	if err != nil {
-		return nil, err
-	}
-	return &doc, nil
 }

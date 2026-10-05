@@ -133,8 +133,7 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 // the bucket, for a caller that already holds both: it validates doc against
 // the tenant's principals, creates or replaces the bucket's policy under the
 // same compare-and-set rule, and rotates the affected principals' keys inside
-// the store's transaction. Bucket creation stores the policy a CreateBucket
-// request carries this way. bucketName names the bucket in errors. It returns
+// the store's transaction. bucketName names the bucket in errors. It returns
 // the new ETag and whether the bucket had no policy before.
 func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc bucketpolicy.Policy, ifMatch *string, opts ...WriteOption) (string, bool, error) {
 	tenantPrincipals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
