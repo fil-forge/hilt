@@ -152,12 +152,12 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	return nil
 }
 
-// Lock runs fn without holding anything, and a removal of one of the named
+// WithLock runs fn without holding anything, and a removal of one of the named
 // principals may commit while it runs. Holding removals across fn deadlocks:
-// the policy write that calls Lock holds the bucket's policy, and a removal
+// the policy write that calls WithLock holds the bucket's policy, and a removal
 // holds removals while its callback rewrites that same policy, so each waits
 // on what the other holds.
-func (s *Store) Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
+func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
 	return fn(ctx)
 }
 

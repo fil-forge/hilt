@@ -144,10 +144,10 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	return nil
 }
 
-// Lock runs in one transaction: it locks the live rows FOR UPDATE in external
-// ID order, runs fn while holding them and commits. Sorting keeps two Lock
-// calls over overlapping principals from deadlocking.
-func (s *Store) Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
+// WithLock runs in one transaction: it locks the live rows FOR UPDATE in
+// external ID order, runs fn while holding them and commits. Sorting keeps two
+// WithLock calls over overlapping principals from deadlocking.
+func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
 	if len(externalIDs) == 0 {
 		return fn(ctx)
 	}

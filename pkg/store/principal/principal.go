@@ -54,13 +54,13 @@ type Store interface {
 	// stores, including ones whose own writes read this one: no lock on this
 	// store's records is held while it runs.
 	Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(ctx context.Context) error) error
-	// Lock holds the tenant's live principals with the given external IDs
-	// against concurrent removals, revives and share-locked reads while fn runs,
-	// then releases them. A policy write uses it so that a key created for one
+	// WithLock runs fn while holding the tenant's live principals with the
+	// given external IDs against concurrent removals, revives and share-locked
+	// reads, and releases them when fn returns. A policy write uses it so that a key created for one
 	// of the principals meanwhile is either included in the write's rotation or
 	// created from the committed policy. IDs with no live row are skipped. fn
 	// follows the contract of [Store.Tombstone]'s fn.
-	Lock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error
+	WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error
 	// DeleteByTenant deletes the rows of every principal of the tenant,
 	// tombstones included. It is idempotent.
 	DeleteByTenant(ctx context.Context, tenant did.DID) error

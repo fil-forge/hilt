@@ -255,20 +255,20 @@ func TestPrincipalStore(t *testing.T) {
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
-			t.Run("Lock runs the callback once and returns its error", func(t *testing.T) {
+			t.Run("WithLock runs the callback once and returns its error", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
 
 				calls := 0
-				require.NoError(t, s.Lock(t.Context(), tenantID, []string{"held", "absent"}, func(ctx context.Context) error {
+				require.NoError(t, s.WithLock(t.Context(), tenantID, []string{"held", "absent"}, func(ctx context.Context) error {
 					calls++
 					return nil
 				}))
 				require.Equal(t, 1, calls)
 
 				boom := errors.New("boom")
-				err := s.Lock(t.Context(), tenantID, []string{"held"}, func(ctx context.Context) error { return boom })
+				err := s.WithLock(t.Context(), tenantID, []string{"held"}, func(ctx context.Context) error { return boom })
 				require.ErrorIs(t, err, boom)
 			})
 
@@ -340,14 +340,14 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.Equal(t, "locked", rec.ExternalID)
 	})
 
-	t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
+	t.Run("a share-locked Get waits for WithLock's callback", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
 
 		locked, got := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Lock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
+				return s.WithLock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
 					close(entered)
 					<-release
 					return nil
