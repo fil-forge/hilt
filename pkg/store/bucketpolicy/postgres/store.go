@@ -38,7 +38,7 @@ const selectColumns = `SELECT bucket_id, document, etag, updated_at FROM bucket_
 // lockNamespace is the first of the two 32-bit keys of the advisory lock this
 // store takes per bucket with [pglock.Advisory]; the second is the bucket DID.
 // A writer holds it, exclusive, across its row lock, precondition check,
-// fn callback and writes; a share-locked reader takes it shared.
+// beforeCommit callback and writes; a share-locked reader takes it shared.
 //
 // The lock exists because a row lock cannot cover a create: there is no row
 // to lock until the INSERT commits, and an uncommitted INSERT is invisible to
@@ -92,24 +92,24 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 // ([pglock.TenantNamespace]), checks the named principals (see
 // [requireLivePrincipals]), takes the bucket's advisory lock, locks the
 // current row FOR UPDATE when there is one, checks the precondition, runs
-// fn while holding the locks, writes the row and rewrites its index
+// beforeCommit while holding the locks, writes the row and rewrites its index
 // rows, and commits. A share-locked read of the bucket (see [Store.Get])
 // waits for the commit or the rollback, on a create as much as on a replace.
 // Two concurrent creates serialize on the bucket's advisory lock; the second
 // finds the first's row and fails its precondition. The tenant lock holds off
 // a principal add for the whole transaction, so the tenant's principals do not
-// change between what fn lists and what is committed; concurrent
+// change between what beforeCommit lists and what is committed; concurrent
 // writes under one tenant share it and do not wait on each other.
 //
-// A bucket with no row fails with store.ErrRecordNotFound before fn
-// runs. fn runs before the row and index writes, so a callback that
+// A bucket with no row fails with store.ErrRecordNotFound before beforeCommit
+// runs. beforeCommit runs before the row and index writes, so a callback that
 // has published can still see a later write fail; the RFC treats such a record
 // as harmless.
 //
 // Every index row write takes a FOR KEY SHARE lock on the bucket row, which its
 // foreign key onto (id, tenant_id) requires: the write waits on an in-flight
 // change to that pair and is refused when the bucket is not the tenant's.
-func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx context.Context, old *bucketpolicystore.Record) error) (string, error) {
+func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(ctx context.Context, old *bucketpolicystore.Record) error) (string, error) {
 	if in.Bucket == did.Undef {
 		return "", fmt.Errorf("policy bucket is required: %w", store.ErrInvalidArgument)
 	}
@@ -150,8 +150,8 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx
 	if err := bucketpolicystore.CheckInputPrecondition(in, old); err != nil {
 		return "", err
 	}
-	if fn != nil {
-		if err := fn(pglock.WithTx(ctx, tx), old); err != nil {
+	if beforeCommit != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx), old); err != nil {
 			return "", fmt.Errorf("before writing policy: %w", err)
 		}
 	}
@@ -193,7 +193,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx
 }
 
 // Delete runs in one transaction under the same contract as [Store.Put].
-func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, fn func(ctx context.Context, old bucketpolicystore.Record) error) error {
+func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old bucketpolicystore.Record) error) error {
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -213,8 +213,8 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, fn f
 	if ifMatch != "" && old.ETag != ifMatch {
 		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
 	}
-	if fn != nil {
-		if err := fn(pglock.WithTx(ctx, tx), *old); err != nil {
+	if beforeCommit != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx), *old); err != nil {
 			return fmt.Errorf("before deleting policy: %w", err)
 		}
 	}
@@ -229,8 +229,8 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, fn f
 
 // DeleteByBucket removes the bucket's policy unconditionally, under the
 // bucket's advisory lock so it serializes with a Put or Delete in flight the
-// way the memory backend's mutex does, and runs fn while holding it.
-func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, fn func(ctx context.Context) error) error {
+// way the memory backend's mutex does, and runs beforeCommit while holding it.
+func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error {
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -240,8 +240,8 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, fn func(ctx 
 	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), false); err != nil {
 		return err
 	}
-	if fn != nil {
-		if err := fn(pglock.WithTx(ctx, tx)); err != nil {
+	if beforeCommit != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx)); err != nil {
 			return err
 		}
 	}
@@ -386,7 +386,7 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 // Put takes it before any other lock, so a removal whose callback rewrites
 // this bucket's policy never waits on a Put that waits on the removal. FOR KEY
 // SHARE conflicts only with FOR UPDATE, so it does not block the FOR NO KEY
-// UPDATE the principal store's WithLock takes from inside fn.
+// UPDATE the principal store's WithLock takes from inside beforeCommit.
 func requireLivePrincipals(ctx context.Context, tx pgx.Tx, tenant did.DID, named []string) error {
 	if len(named) == 0 {
 		return nil
