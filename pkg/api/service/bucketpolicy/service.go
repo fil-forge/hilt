@@ -32,18 +32,18 @@ import (
 	"go.uber.org/zap"
 )
 
-// Record is a bucket's policy as the API reports it: the policy, its strong
+// Record is a bucket's policy as the service reports it: the policy, its strong
 // ETag, and the name the bucket is addressed by.
 type Record struct {
-	BucketName string              `json:"bucketName"`
-	ETag       string              `json:"etag"`
-	Policy     bucketpolicy.Policy `json:"policy"`
+	BucketName string
+	ETag       string
+	Policy     bucketpolicy.Policy
 }
 
 // Access is a principal's effective actions on one bucket.
 type Access struct {
-	Name    string   `json:"name"`
-	Actions []string `json:"actions"`
+	Name    string
+	Actions []string
 }
 
 // Service implements the bucket policy operations shared by the REST handlers.

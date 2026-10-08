@@ -3,7 +3,7 @@ package api
 import (
 	"time"
 
-	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 )
 
 // TenantStatus is the access mode of a tenant.
@@ -145,7 +145,11 @@ type PrincipalList struct {
 
 // PrincipalPolicy is one of the policies naming a principal, addressed by the
 // bucket it applies to.
-type PrincipalPolicy = bucketpolicysvc.Record
+type PrincipalPolicy struct {
+	BucketName string              `json:"bucketName"`
+	ETag       string              `json:"etag"`
+	Policy     bucketpolicy.Policy `json:"policy"`
+}
 
 // PrincipalPolicyList is the body of
 // GET /tenants/{tenantId}/principals/{principalId}/policies.
@@ -154,7 +158,10 @@ type PrincipalPolicyList struct {
 }
 
 // BucketAccess is a principal's effective actions on one bucket.
-type BucketAccess = bucketpolicysvc.Access
+type BucketAccess struct {
+	Name    string   `json:"name"`
+	Actions []string `json:"actions"`
+}
 
 // PrincipalAccess is the body of
 // GET /tenants/{tenantId}/principals/{principalId}/access. Buckets the principal

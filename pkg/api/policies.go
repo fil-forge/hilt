@@ -46,7 +46,11 @@ func NewListPrincipalPoliciesHandler(logger *zap.Logger, policies *bucketpolicys
 		if err != nil {
 			return policyHTTPError(log, err)
 		}
-		return c.JSON(http.StatusOK, PrincipalPolicyList{Items: recs})
+		items := make([]PrincipalPolicy, len(recs))
+		for i, r := range recs {
+			items[i] = PrincipalPolicy{BucketName: r.BucketName, ETag: r.ETag, Policy: r.Policy}
+		}
+		return c.JSON(http.StatusOK, PrincipalPolicyList{Items: items})
 	})
 }
 
@@ -61,6 +65,10 @@ func NewGetPrincipalAccessHandler(logger *zap.Logger, policies *bucketpolicysvc.
 		if err != nil {
 			return policyHTTPError(log, err)
 		}
-		return c.JSON(http.StatusOK, PrincipalAccess{Buckets: access})
+		buckets := make([]BucketAccess, len(access))
+		for i, a := range access {
+			buckets[i] = BucketAccess{Name: a.Name, Actions: a.Actions}
+		}
+		return c.JSON(http.StatusOK, PrincipalAccess{Buckets: buckets})
 	})
 }
