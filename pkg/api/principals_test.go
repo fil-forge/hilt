@@ -132,29 +132,54 @@ func TestCreatePrincipalHandler(t *testing.T) {
 		require.Equal(t, http.StatusCreated, doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/user-1", nil).Code)
 	})
 
-	t.Run("a principalId holding a slash arrives escaped and is decoded", func(t *testing.T) {
+	t.Run("a principalId holding a slash is refused", func(t *testing.T) {
 		e, deps := setupPrincipals(t)
 		rec := doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/a%2Fb", nil)
-		require.Equal(t, http.StatusCreated, rec.Code)
-		var p api.Principal
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &p))
-		require.Equal(t, "a/b", p.PrincipalID)
-
-		get := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb", nil)
-		require.Equal(t, http.StatusOK, get.Code)
-		require.NoError(t, json.Unmarshal(get.Body.Bytes(), &p))
-		require.Equal(t, "a/b", p.PrincipalID)
-
-		stored, err := deps.principals.Get(t.Context(), deps.tenantID, "a/b")
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		require.Equal(t, "InvalidPrincipalID", decodeError(t, rec).Code)
+		recs, err := deps.principals.ListByTenant(t.Context(), deps.tenantID)
 		require.NoError(t, err)
-		require.Equal(t, "a/b", stored.ExternalID)
+		require.Empty(t, recs)
 	})
 
-	t.Run("a principalId holding a percent is decoded once", func(t *testing.T) {
+	t.Run("a principalId holding a percent is refused", func(t *testing.T) {
 		e, deps := setupPrincipals(t)
-		require.Equal(t, http.StatusCreated, doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/x%2525y", nil).Code)
-		_, err := deps.principals.Get(t.Context(), deps.tenantID, "x%25y")
+		rec := doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/x%2525y", nil)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		require.Equal(t, "InvalidPrincipalID", decodeError(t, rec).Code)
+		recs, err := deps.principals.ListByTenant(t.Context(), deps.tenantID)
 		require.NoError(t, err)
+		require.Empty(t, recs)
+	})
+
+	t.Run("refuses a principalId holding a path delimiter or naming a dot segment", func(t *testing.T) {
+		e, deps := setupPrincipals(t)
+		for _, wire := range []string{"a;b", "a,b", "a%3Fb", "a%25b", ".", "..", "%2E", "%2E%2E"} {
+			for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodDelete} {
+				rec := doRequest(t, e, method, "/tenants/tenant-1/principals/"+wire, nil)
+				require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "%s %s", method, wire)
+				require.Equal(t, "InvalidPrincipalID", decodeError(t, rec).Code, "%s %s", method, wire)
+			}
+		}
+		recs, err := deps.principals.ListByTenant(t.Context(), deps.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, recs)
+	})
+
+	t.Run("a principalId holding a space or unicode is recorded decoded", func(t *testing.T) {
+		e, deps := setupPrincipals(t)
+		for wire, id := range map[string]string{"a%20b": "a b", "%C3%BCnicode": "\u00fcnicode"} {
+			require.Equal(t, http.StatusCreated, doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/"+wire, nil).Code, wire)
+			_, err := deps.principals.Get(t.Context(), deps.tenantID, id)
+			require.NoError(t, err, id)
+		}
+	})
+
+	t.Run("a tenantId holding a slash is refused", func(t *testing.T) {
+		e, _ := setupPrincipals(t)
+		rec := doRequest(t, e, http.MethodPut, "/tenants/a%2Fb/principals/user-1", nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, "InvalidTenantID", decodeError(t, rec).Code)
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {

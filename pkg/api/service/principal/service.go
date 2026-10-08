@@ -80,17 +80,25 @@ func New(
 	}
 }
 
+// ValidID reports whether id can be a principalId. bucketpolicy.Wildcard is the
+// policy language's "every principal", so a principal of that name would
+// collide with it: deleting the principal would strip the wildcard from every
+// policy the tenant has. Postgres refuses invalid UTF-8 and NUL in text. The id
+// travels as one path segment of the Tenant API, so it must not hold a
+// character that delimits or escapes a segment, nor be a dot segment a client
+// could resolve away.
+func ValidID(id string) bool {
+	return id != "" && len(id) <= maxPrincipalIDLength && id != bucketpolicy.Wildcard &&
+		utf8.ValidString(id) && !strings.ContainsRune(id, 0) &&
+		!strings.ContainsAny(id, "/;,?%") && id != "." && id != ".."
+}
+
 // Create records the principal and nothing else. It is idempotent: the second
 // report is false when the principal already existed. A removed principal
 // under the same id is revived and reported as created; it starts with no keys
 // and named in no statement.
 func (s *Service) Create(ctx context.Context, externalID, principalID string) (principalstore.Record, bool, error) {
-	// bucketpolicy.Wildcard is the policy language's "every principal", so a
-	// principal of that name would collide with it: deleting the principal would
-	// strip the wildcard from every policy the tenant has. Postgres refuses
-	// invalid UTF-8 and NUL in text, so those are rejected here too.
-	if principalID == "" || len(principalID) > maxPrincipalIDLength || principalID == bucketpolicy.Wildcard ||
-		!utf8.ValidString(principalID) || strings.ContainsRune(principalID, 0) {
+	if !ValidID(principalID) {
 		return principalstore.Record{}, false, ErrInvalidPrincipalID
 	}
 	tenantID, err := s.tenant(ctx, externalID)

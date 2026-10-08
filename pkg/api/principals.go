@@ -28,9 +28,9 @@ func principalHTTPError(log *zap.Logger, err error) error {
 	}
 }
 
-// principalParam returns the principalId route parameter decoded, see
-// pathParam.
-func principalParam(c echo.Context) string { return pathParam(c, "principalId") }
+// principalParam returns the principalId route parameter. [NewRoute] has
+// refused an id holding a character the route would see escaped.
+func principalParam(c echo.Context) string { return c.Param("principalId") }
 
 // NewCreatePrincipalHandler handles PUT /tenants/{tenantId}/principals/{principalId}
 // — record a principal of the tenant. It is idempotent: 201 when the call

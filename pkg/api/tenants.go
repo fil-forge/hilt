@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"net/url"
 
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -18,7 +17,8 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, tenantsvc.ErrTenantNotFound):
 		return httpError(http.StatusNotFound, err)
-	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
+	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion),
+		errors.Is(err, tenantsvc.ErrInvalidTenantID):
 		return httpError(http.StatusBadRequest, err)
 	case errors.Is(err, tenantsvc.ErrInvalidStatus):
 		return httpError(http.StatusUnprocessableEntity, err)
@@ -59,27 +59,9 @@ func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) R
 	})
 }
 
-// pathParam returns a route parameter decoded. The management client escapes
-// each path segment, so an id holding "/" or a space arrives escaped; Echo
-// matches on the raw path when the request has one and hands the parameter
-// over as it came, and then it is decoded here. A request with no raw path was
-// routed on the decoded path, and its parameter is already decoded: decoding
-// it again would turn an id holding "%25" into one holding "%".
-func pathParam(c echo.Context, name string) string {
-	raw := c.Param(name)
-	if c.Request().URL.RawPath == "" {
-		return raw
-	}
-	if id, err := url.PathUnescape(raw); err == nil {
-		return id
-	}
-	return raw
-}
-
-// tenantParam returns the tenantId route parameter decoded, see pathParam.
-// Without it an id holding "/" or a space would be looked up, and
-// provisioned, in its escaped form.
-func tenantParam(c echo.Context) string { return pathParam(c, "tenantId") }
+// tenantParam returns the tenantId route parameter. [NewRoute] has refused an
+// id holding a character the route would see escaped.
+func tenantParam(c echo.Context) string { return c.Param("tenantId") }
 
 // NewGetTenantHandler handles GET /tenants/{tenantId} — retrieve tenant
 // operational state and quotas.
