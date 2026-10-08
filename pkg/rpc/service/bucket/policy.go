@@ -65,7 +65,9 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 			opts = append(opts, bucketpolicysvc.Unconditional())
 		}
 		etag, _, err := s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, ifMatch, opts...)
-		if err != nil {
+		if errors.Is(err, bucketpolicysvc.ErrBucketNotFound) {
+			return nil, fmt.Errorf("%w: %q", ErrUnknownBucket, name)
+		} else if err != nil {
 			return nil, err
 		}
 		log.Info("wrote bucket policy over S3")

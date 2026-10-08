@@ -51,9 +51,10 @@ func TestPolicy(t *testing.T) {
 	providerID := testutil.RandomDID(t)
 
 	type fixture struct {
-		svc      *bucketsvc.Service
-		policies *bucketpolicymemory.Store
-		bucketID did.DID
+		svc        *bucketsvc.Service
+		policies   *bucketpolicymemory.Store
+		bucketID   did.DID
+		bucketGone *bool // the policy store's view of the bucket, for a delete racing a write
 	}
 	// setup seeds the tenant, the photos bucket, principal user-1 with one
 	// key, and akSigner as a service key holding perms (or bound to user-1).
@@ -61,7 +62,9 @@ func TestPolicy(t *testing.T) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets, delegations := providermemory.New(), vaultmemory.New(), delegationmemory.New()
-		principals, policies := principalmemory.New(), bucketpolicymemory.New()
+		bucketGone := new(bool)
+		principals := principalmemory.New()
+		policies := bucketpolicymemory.New(bucketpolicymemory.WithBuckets(func(did.DID) bool { return !*bucketGone }))
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		if !principalBound { // seedKey adds user-1 itself for a bound key
@@ -75,7 +78,7 @@ func TestPolicy(t *testing.T) {
 		swarf := &htestutil.FakeSwarf{}
 		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, swarf, policyWrites), policies, bucketID}
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone}
 	}
 
 	type reqOpts struct {
@@ -261,5 +264,10 @@ func TestPolicy(t *testing.T) {
 		f := setup(t, policyPerms, false)
 		_, err := f.svc.Policy(ctx, providerID, request(t, "GET", reqOpts{bucket: "nowhere"}))
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+
+		f = setup(t, policyPerms, false)
+		*f.bucketGone = true
+		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
+		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket, "a bucket deleted between Authorize and the write")
 	})
 }
