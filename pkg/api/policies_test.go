@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/fil-forge/hilt/internal/testutil"
@@ -77,15 +79,22 @@ func createPolicy(t *testing.T, deps *policyDeps, statements ...bucketpolicy.Sta
 func TestPrincipalPolicyReadHandlers(t *testing.T) {
 	t.Run("lists the policies naming the principal", func(t *testing.T) {
 		e, deps := setupPolicies(t)
-		etag := createPolicy(t, deps, allowUser1("s3:GetObject"))
+		createPolicy(t, deps, allowUser1("s3:GetObject"))
 
 		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/user-1/policies", nil)
 		require.Equal(t, http.StatusOK, rec.Code)
+		var raw struct {
+			Items []map[string]json.RawMessage `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+		require.Len(t, raw.Items, 1)
+		require.ElementsMatch(t, []string{"bucketName", "policy"}, slices.Collect(maps.Keys(raw.Items[0])))
+
 		var list api.PrincipalPolicyList
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
-		require.Len(t, list.Items, 1)
-		require.Equal(t, "photos", list.Items[0].BucketName)
-		require.Equal(t, etag, list.Items[0].ETag)
+		require.Equal(t, []api.PrincipalPolicy{
+			{BucketName: "photos", Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{allowUser1("s3:GetObject")}}},
+		}, list.Items)
 	})
 
 	t.Run("reports the principal's effective actions per bucket", func(t *testing.T) {
