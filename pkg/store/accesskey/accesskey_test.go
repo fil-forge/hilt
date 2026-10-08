@@ -1,6 +1,7 @@
 package accesskey_test
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
@@ -29,15 +31,21 @@ const (
 
 var storeKinds = []StoreKind{Memory, Postgres}
 
-// seedFunc ensures the parent tenant (and its provider) exist so the
-// access_key.tenant_id foreign key is satisfied. It is a no-op for the memory
-// store, which does not enforce referential integrity.
+// seedFunc ensures the parent tenant (and, for Postgres, its provider) exists so
+// the access_key.tenant_id foreign key is satisfied and Add can check the
+// tenant's status.
 type seedFunc func(t *testing.T, tenantID did.DID)
 
-func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seedFunc) {
+// makeStore returns the store, a seed for its tenants, the tenant store it reads
+// status from, and the Postgres pool (nil for memory).
+func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seedFunc, tenant.Store, *pgxpool.Pool) {
 	switch k {
 	case Memory:
-		return accesskeymemory.New(), func(*testing.T, did.DID) {}
+		tenants := tenantmemory.New()
+		seed := func(t *testing.T, tenantID did.DID) {
+			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), testutil.RandomDID(t), tenant.Active))
+		}
+		return accesskeymemory.New(tenants), seed, tenants, nil
 	case Postgres:
 		pool := createPostgresPool(t)
 		providers := providerpostgres.New(pool)
@@ -47,7 +55,7 @@ func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seedFunc) {
 			require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
 			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
 		}
-		return accesskeypostgres.New(pool), seed
+		return accesskeypostgres.New(pool), seed, tenants, pool
 	}
 	panic("unknown store kind")
 }
@@ -67,7 +75,7 @@ func createPostgresPool(t *testing.T) *pgxpool.Pool {
 func TestAccessKeyStore(t *testing.T) {
 	for _, k := range storeKinds {
 		t.Run(string(k), func(t *testing.T) {
-			s, seed := makeStore(t, k)
+			s, seed, tenants, pool := makeStore(t, k)
 
 			t.Run("adds and retrieves an access key with buckets and permissions", func(t *testing.T) {
 				id := testutil.RandomDID(t)
@@ -197,6 +205,46 @@ func TestAccessKeyStore(t *testing.T) {
 				require.ErrorIs(t, err, store.ErrRecordNotFound)
 
 				require.NoError(t, s.Delete(t.Context(), id))
+			})
+
+			t.Run("Add returns ErrTenantDisabled for a disabled tenant", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				require.NoError(t, tenants.SetStatus(t.Context(), tenantID, tenant.Disabled))
+
+				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, "k", nil, []string{"s3:GetObject"}, nil)
+				require.ErrorIs(t, err, accesskey.ErrTenantDisabled)
+				recs, err := s.ListByTenant(t.Context(), tenantID)
+				require.NoError(t, err)
+				require.Empty(t, recs)
+			})
+
+			if pool == nil {
+				return
+			}
+			t.Run("Add waits for a concurrent disable and refuses the key", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+
+				// An uncommitted disable holds the tenant row; Add must wait for it
+				// and see the committed status, or a tenant deletion's key snapshot
+				// could miss the key.
+				tx, err := pool.Begin(t.Context())
+				require.NoError(t, err)
+				defer tx.Rollback(context.Background())
+				_, err = tx.Exec(t.Context(), `UPDATE tenant SET status = 'disabled' WHERE id = $1`, tenantID.String())
+				require.NoError(t, err)
+
+				done := make(chan error, 1)
+				go func() {
+					done <- s.Add(t.Context(), testutil.RandomDID(t), tenantID, "k", nil, []string{"s3:GetObject"}, nil)
+				}()
+				// ponytail: sleep only lets Add reach the lock; a miss makes the test
+				// pass vacuously, never flake red.
+				time.Sleep(200 * time.Millisecond)
+				require.NoError(t, tx.Commit(t.Context()))
+
+				require.ErrorIs(t, <-done, accesskey.ErrTenantDisabled)
 			})
 		})
 	}

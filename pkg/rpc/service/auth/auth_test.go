@@ -91,15 +91,12 @@ func TestAuthorize(t *testing.T) {
 	// them (plus the provider handle and tenant DID subtests still use).
 	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID) {
 		t.Helper()
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+		tenants := tenantmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
-		tenantStatus := tenant.Active
-		if setupConfig != nil && setupConfig.tenantStatus != "" {
-			tenantStatus = setupConfig.tenantStatus
-		}
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenantStatus))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		// The bucket the happy-path request addresses (GET /bucket/object-key), a
 		// second bucket of the same tenant (copy destination), and another tenant's.
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
@@ -119,6 +116,11 @@ func TestAuthorize(t *testing.T) {
 		}
 		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, permissions, accessKeyExpires))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
+		// The status is set after the key is added, as a disabled tenant accepts
+		// no new keys.
+		if setupConfig != nil && setupConfig.tenantStatus != "" {
+			require.NoError(t, tenants.SetStatus(ctx, tenantID, setupConfig.tenantStatus))
+		}
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), providers, tenantID
 	}
 
@@ -239,7 +241,8 @@ func TestAuthorize(t *testing.T) {
 		// the one that signed the request, so the recomputed signature won't match.
 		other, err := ed25519.GenerateIssuer()
 		require.NoError(t, err)
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+		tenants := tenantmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
@@ -259,7 +262,7 @@ func TestAuthorize(t *testing.T) {
 	})
 
 	t.Run("rejects an unknown access key", func(t *testing.T) {
-		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
+		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(tenantmemory.New()), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
 	})
@@ -267,7 +270,8 @@ func TestAuthorize(t *testing.T) {
 	t.Run("rejects when the access key secret is missing from the vault", func(t *testing.T) {
 		// The access key record exists but its private key was never written to the
 		// vault — a store/vault inconsistency the signer load must reject.
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+		tenants := tenantmemory.New()
+		accessKeys := accesskeymemory.New(tenants)
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
@@ -328,7 +332,7 @@ func TestAuthorize(t *testing.T) {
 func TestTenantIssuer(t *testing.T) {
 	ctx := t.Context()
 	buckets, secrets := bucketmemory.New(), vaultmemory.New()
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), buckets, secrets)
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(tenantmemory.New()), tenantmemory.New(), providermemory.New(), buckets, secrets)
 
 	tenantSigner, err := secp256k1.Generate()
 	require.NoError(t, err)
