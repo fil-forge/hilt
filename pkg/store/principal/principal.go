@@ -45,6 +45,10 @@ type Store interface {
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
 	ListByTenant(ctx context.Context, tenant did.DID) ([]Record, error)
+	// ListIDsByTenant returns the external IDs of the tenant's live
+	// principals, in the order ListByTenant returns them. It is the list a
+	// caller checks a policy document's principals against.
+	ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error)
 	// Tombstone marks a principal's row removed; the row stays, so that Add
 	// can revive it. It excludes concurrent removals and revives of the same
 	// row for the whole call, runs fn (nil allowed) inside the write, before
@@ -75,19 +79,4 @@ type Store interface {
 	// of the tenant's principals, bounded at [store.LockTimeout], and returns
 	// [store.ErrLockTimeout] when the wait runs out.
 	DeleteByTenant(ctx context.Context, tenant did.DID) error
-}
-
-// ExternalIDs returns the external IDs of the tenant's live principals, in
-// the order [Store.ListByTenant] returns them. It is the list a caller checks
-// a policy document's principals against.
-func ExternalIDs(ctx context.Context, s Store, tenant did.DID) ([]string, error) {
-	recs, err := s.ListByTenant(ctx, tenant)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(recs))
-	for _, rec := range recs {
-		ids = append(ids, rec.ExternalID)
-	}
-	return ids, nil
 }

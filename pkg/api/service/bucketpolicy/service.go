@@ -120,7 +120,7 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 	if err != nil {
 		return "", false, err
 	}
-	tenantPrincipals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
+	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
 		return "", false, err
 	}
@@ -149,7 +149,7 @@ func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bu
 		// created after this list commits after the write does, since the add
 		// waits on the tenant lock the write holds, and its keys are created
 		// from the committed policy.
-		principals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
+		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 		if err != nil {
 			return err
 		}
@@ -185,7 +185,7 @@ func (s *Service) Delete(ctx context.Context, externalID, bucketName, ifMatch st
 	}
 	err = s.policies.Delete(ctx, b.ID, ifMatch, func(ctx context.Context, old bucketpolicystore.Record) error {
 		// Re-list under the bucket lock, as Put does.
-		principals, err := principalstore.ExternalIDs(ctx, s.principals, tenantID)
+		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 		if err != nil {
 			return err
 		}

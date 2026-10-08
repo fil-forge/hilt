@@ -82,7 +82,7 @@ func (p *parkedPolicies) Put(ctx context.Context, in bucketpolicystore.Input, fn
 }
 
 // growingPrincipals records a new principal for the tenant right after the
-// first ListByTenant answers, so the list a write takes before the bucket lock
+// first ListIDsByTenant answers, so the list a write takes before the bucket lock
 // and the one its store callback takes differ: it stands in for a principal
 // created in that gap.
 type growingPrincipals struct {
@@ -91,19 +91,19 @@ type growingPrincipals struct {
 	listed bool
 }
 
-func (g *growingPrincipals) ListByTenant(ctx context.Context, tenant did.DID) ([]principalstore.Record, error) {
-	recs, err := g.Store.ListByTenant(ctx, tenant)
+func (g *growingPrincipals) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
+	ids, err := g.Store.ListIDsByTenant(ctx, tenant)
 	if err != nil || g.listed {
-		return recs, err
+		return ids, err
 	}
 	g.listed = true
 	if err := g.Store.Add(ctx, tenant, g.late); err != nil {
 		return nil, err
 	}
-	return recs, nil
+	return ids, nil
 }
 
-// gatedPrincipals holds the nth ListByTenant until resume is closed, closing
+// gatedPrincipals holds the nth ListIDsByTenant until resume is closed, closing
 // reached when it gets there; with after set it holds once that call has
 // returned. A policy write makes that call from inside the policy store's
 // write, so the gate parks the write holding one store and about to read the
@@ -118,7 +118,7 @@ type gatedPrincipals struct {
 	resume  chan struct{}
 }
 
-func (g *gatedPrincipals) ListByTenant(ctx context.Context, tenant did.DID) ([]principalstore.Record, error) {
+func (g *gatedPrincipals) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
 	g.mu.Lock()
 	hold := false
 	g.calls++
@@ -130,12 +130,12 @@ func (g *gatedPrincipals) ListByTenant(ctx context.Context, tenant did.DID) ([]p
 		close(g.reached)
 		<-g.resume
 	}
-	recs, err := g.Store.ListByTenant(ctx, tenant)
+	ids, err := g.Store.ListIDsByTenant(ctx, tenant)
 	if hold && g.after {
 		close(g.reached)
 		<-g.resume
 	}
-	return recs, err
+	return ids, err
 }
 
 type deps struct {

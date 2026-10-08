@@ -156,6 +156,26 @@ func TestPrincipalStore(t *testing.T) {
 				require.Empty(t, recs)
 			})
 
+			t.Run("ListIDsByTenant lists live external IDs by tenant in order", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				other := testutil.RandomDID(t)
+				seed(t, tenantID)
+				seed(t, other)
+				for _, id := range []string{"c", "a", "gone", "b"} {
+					require.NoError(t, s.Add(t.Context(), tenantID, id))
+				}
+				require.NoError(t, s.Tombstone(t.Context(), tenantID, "gone", nil))
+				require.NoError(t, s.Add(t.Context(), other, "z"))
+
+				ids, err := s.ListIDsByTenant(t.Context(), tenantID)
+				require.NoError(t, err)
+				require.Equal(t, []string{"a", "b", "c"}, ids)
+
+				ids, err = s.ListIDsByTenant(t.Context(), testutil.RandomDID(t))
+				require.NoError(t, err)
+				require.Empty(t, ids)
+			})
+
 			t.Run("Add revives a removed principal with a fresh CreatedAt", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)

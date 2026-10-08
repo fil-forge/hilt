@@ -132,6 +132,23 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 	return recs, nil
 }
 
+func (s *Store) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT external_id
+		FROM principal
+		WHERE tenant_id = $1 AND deleted_at IS NULL
+		ORDER BY external_id ASC
+	`, tenant.String())
+	if err != nil {
+		return nil, fmt.Errorf("listing principal ids by tenant: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("scanning principal ids: %w", err)
+	}
+	return ids, nil
+}
+
 // Tombstone runs in one transaction: it locks the row FOR UPDATE, runs beforeCommit
 // while holding the lock, sets deleted_at and commits. A locked
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
