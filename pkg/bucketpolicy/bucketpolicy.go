@@ -340,10 +340,10 @@ func Named(d Policy) (principals []string, wildcard bool) {
 	return principals, wildcard
 }
 
-// WithoutPrincipal returns d with principalID removed from every statement
+// RemovePrincipal returns d with principalID removed from every statement
 // naming it, dropping statements left with no principal, and reports whether
 // anything changed. A wildcard statement names no principal and is kept as is.
-func WithoutPrincipal(d Policy, principalID string) (Policy, bool) {
+func RemovePrincipal(d Policy, principalID string) (Policy, bool) {
 	var statements []Statement
 	changed := false
 	for _, st := range d.Statements {

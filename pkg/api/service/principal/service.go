@@ -221,7 +221,7 @@ func (s *Service) remove(ctx context.Context, tenantID did.DID, principalID stri
 		return fmt.Errorf("listing the principal's policies: %w", err)
 	}
 	for _, rec := range recs {
-		if _, named := bucketpolicy.WithoutPrincipal(rec.Policy, principalID); named {
+		if _, named := bucketpolicy.RemovePrincipal(rec.Policy, principalID); named {
 			return fmt.Errorf("bucket %s: %w", rec.Bucket, errNamedAgain)
 		}
 	}
@@ -284,7 +284,7 @@ func (s *Service) stripFromPolicies(ctx context.Context, tenantID did.DID, princ
 		return fmt.Errorf("listing the principal's policies: %w", err)
 	}
 	for _, rec := range recs {
-		doc, changed := bucketpolicy.WithoutPrincipal(rec.Policy, principalID)
+		doc, changed := bucketpolicy.RemovePrincipal(rec.Policy, principalID)
 		if !changed {
 			continue
 		}
