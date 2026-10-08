@@ -40,7 +40,7 @@ type AccessKey struct {
 	Name        string     `json:"name"`
 	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
-	Principal   string     `json:"principal,omitempty"`
+	PrincipalID *string    `json:"principalId,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt"`
 	CreatedAt   time.Time  `json:"createdAt"`
 }
@@ -65,7 +65,7 @@ type CreateAccessKeyRequest struct {
 	Name        string     `json:"name"`
 	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
-	PrincipalID string     `json:"principalId,omitempty"`
+	PrincipalID *string    `json:"principalId,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
 

@@ -96,11 +96,14 @@ func New(
 // within the principal.
 // It returns the stored record and the secret access key (the one time it is
 // exposed).
-func (s *Service) Create(ctx context.Context, externalID, name string, permissions, bucketNames []string, principalID string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
+func (s *Service) Create(ctx context.Context, externalID, name string, permissions, bucketNames []string, principalID *string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
 	if name == "" || len(name) > maxNameLength {
 		return accesskeystore.Record{}, "", ErrInvalidName
 	}
-	if principalID != "" {
+	if principalID != nil {
+		if *principalID == "" {
+			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		}
 		if len(permissions) > 0 || len(bucketNames) > 0 {
 			return accesskeystore.Record{}, "", ErrPrincipalScoped
 		}
@@ -124,21 +127,19 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
 
-	var principalRef *string
-	if principalID != "" {
+	if principalID != nil {
 		// The share lock waits for an in-flight removal of the principal, or a
 		// policy write holding the principal's row while it rotates its keys.
 		// A principal added while a policy is being written is ordered by the
 		// tenant lock its add took: it is committed before the write rotates
 		// or after the write commits, so the policies read below are settled.
-		_, err := s.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock())
+		_, err := s.principals.Get(ctx, tenantRec.ID, *principalID, store.WithShareLock())
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		} else if err != nil {
 			return accesskeystore.Record{}, "", fmt.Errorf("looking up principal: %w", err)
 		}
-		principalRef = &principalID
-		log = log.With(zap.String("principal", principalID))
+		log = log.With(zap.String("principal", *principalID))
 	}
 
 	// Load the tenant signer up front: it is required to issue the key's
@@ -221,7 +222,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		Name:        name,
 		Buckets:     bucketIDs,
 		Permissions: permissions,
-		Principal:   principalRef,
+		Principal:   principalID,
 		ExpiresAt:   expiresAt,
 	}); err != nil {
 		rollback()
@@ -233,7 +234,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		}
 		// The principal was looked up above, so a rejected reference means it was
 		// removed in between.
-		if principalRef != nil && errors.Is(err, store.ErrInvalidArgument) {
+		if principalID != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
@@ -248,14 +249,14 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	// principal's add took is what keeps the key behind it. A write that
 	// starts after the key row exists rotates the key like any other.
 	var dels []ucan.Delegation
-	if principalRef != nil {
-		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, principalID, store.WithShareLock())
+	if principalID != nil {
+		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID, store.WithShareLock())
 		if err != nil {
 			rollback()
 			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
 		}
 		for _, p := range policies {
-			eff := bucketpolicy.Effective(&p.Policy, principalID)
+			eff := bucketpolicy.Effective(&p.Policy, *principalID)
 			if len(eff) == 0 {
 				continue
 			}

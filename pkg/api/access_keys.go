@@ -56,7 +56,7 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 				Name:        rec.Name,
 				Permissions: rec.Permissions,
 				Buckets:     req.Buckets,
-				Principal:   principalOf(rec),
+				PrincipalID: rec.Principal,
 				ExpiresAt:   rec.ExpiresAt,
 				CreatedAt:   rec.CreatedAt,
 			},
@@ -125,16 +125,8 @@ func accessKeyResponse(rec accesskey.Record, bucketNames map[did.DID]string) Acc
 		Name:        rec.Name,
 		Permissions: rec.Permissions,
 		Buckets:     bucketList,
-		Principal:   principalOf(rec),
+		PrincipalID: rec.Principal,
 		ExpiresAt:   rec.ExpiresAt,
 		CreatedAt:   rec.CreatedAt,
 	}
-}
-
-// principalOf returns the principal a key is bound to, or "" for a service key.
-func principalOf(rec accesskey.Record) string {
-	if rec.Principal == nil {
-		return ""
-	}
-	return *rec.Principal
 }
