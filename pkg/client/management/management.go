@@ -231,25 +231,18 @@ func (c *Client) doQuery(ctx context.Context, method string, segments []string, 
 }
 
 // resolve appends the segments to the base URL, one escaped path element each.
-// Tenant and principal ids are opaque (a tenant id need only be non-empty; a
-// principal id is refused when empty, over 255 bytes, not valid UTF-8, holding
-// a NUL, or "*"), so a segment can hold "/", "%", a space or "..",
-// and each must stay a single element. Neither url.URL.JoinPath nor path.Join
-// can be used for that: both split a segment on "/" and clean away "." and
-// ".." elements, so DeletePrincipal(t, "..") would issue DELETE /tenants/t (a
-// real route), and a segment holding "%" makes JoinPath fail silently and keep
-// the base path. Escaping first and joining the escaped forms avoids both.
-func (c *Client) resolve(segments []string) url.URL {
-	u := c.baseURL
-	// RawPath is honoured only while it is a valid encoding of Path, so build
-	// both: Path holds the decoded form, RawPath the form that goes on the wire.
-	u.RawPath = strings.TrimSuffix(u.EscapedPath(), "/")
-	u.Path = strings.TrimSuffix(u.Path, "/")
-	for _, segment := range segments {
-		u.Path += "/" + segment
-		u.RawPath += "/" + url.PathEscape(segment)
+// JoinPath cleans away "." and ".." elements, so DeletePrincipal(t, "..") would
+// issue DELETE /tenants/t; a dot segment is sent with its dots escaped instead,
+// for the server to refuse.
+func (c *Client) resolve(segments []string) *url.URL {
+	escaped := make([]string, len(segments))
+	for i, segment := range segments {
+		escaped[i] = url.PathEscape(segment)
+		if segment == "." || segment == ".." {
+			escaped[i] = strings.ReplaceAll(segment, ".", "%2E")
+		}
 	}
-	return u
+	return c.baseURL.JoinPath(escaped...)
 }
 
 // apiErrorFromResponse builds an [APIError] from a non-2xx response, reading the

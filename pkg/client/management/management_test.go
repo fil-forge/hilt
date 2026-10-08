@@ -13,7 +13,9 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/client/management"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 const testPartnerKey = "secret-partner-key"
@@ -222,10 +224,6 @@ func TestManagementClient(t *testing.T) {
 
 	t.Run("an opaque principal id stays one escaped path segment", func(t *testing.T) {
 		for _, tc := range []struct{ id, escaped string }{
-			{"a/b", "a%2Fb"},
-			{"..", ".."},
-			{".", "."},
-			{"a%b", "a%25b"},
 			{"a b", "a%20b"},
 			{"\u00fcnicode", "%C3%BCnicode"},
 		} {
@@ -259,6 +257,42 @@ func TestManagementClient(t *testing.T) {
 				require.Equal(t, tc.id, id)
 			})
 		}
+	})
+
+	t.Run("the server refuses a principal id that is not one plain path segment", func(t *testing.T) {
+		// Refused ids never reach the principal service, so the routes need none.
+		e := echo.New()
+		for _, r := range []api.Route{
+			api.NewGetPrincipalHandler(zap.NewNop(), nil),
+			api.NewDeletePrincipalHandler(zap.NewNop(), nil),
+		} {
+			e.Add(r.Method, r.Path, r.Handler)
+		}
+		var requests []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests = append(requests, r.Method+" "+r.URL.EscapedPath())
+			e.ServeHTTP(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		u, err := url.Parse(srv.URL)
+		require.NoError(t, err)
+		c := management.NewClient(*u, testPartnerKey, management.WithHTTPClient(srv.Client()))
+
+		for _, id := range []string{"a/b", "..", ".", "a%b"} {
+			t.Run(id, func(t *testing.T) {
+				var apiErr *management.APIError
+				_, err := c.GetPrincipal(ctx, "acme", id)
+				require.ErrorAs(t, err, &apiErr)
+				require.Equal(t, http.StatusUnprocessableEntity, apiErr.StatusCode)
+
+				err = c.DeletePrincipal(ctx, "acme", id)
+				require.ErrorAs(t, err, &apiErr)
+				require.Equal(t, http.StatusUnprocessableEntity, apiErr.StatusCode)
+			})
+		}
+		// A traversal segment must not reach the tenant's own routes.
+		require.NotContains(t, requests, "DELETE /tenants/acme")
+		require.NotContains(t, requests, "GET /tenants/acme/principals")
 	})
 
 	t.Run("non-2xx returns an APIError carrying status and message", func(t *testing.T) {
