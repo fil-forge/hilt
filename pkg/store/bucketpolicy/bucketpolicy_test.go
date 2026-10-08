@@ -1035,7 +1035,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					if err := pglock.Advisory(ctx, tx, pglock.TenantNamespace, tenantID.String(), true); err != nil {
+					if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, tenantID.String(), true); err != nil {
 						return fmt.Errorf("shared request during the Put: %w", err)
 					}
 					if err := tx.Rollback(ctx); err != nil { // released before the exclusive request starts
@@ -1053,7 +1053,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 					return err
 				}
 				defer tx.Rollback(context.Background())
-				return pglock.Advisory(context.Background(), tx, pglock.TenantNamespace, tenantID.String(), false)
+				return pglock.Advisory(context.Background(), tx, tenant.LockNamespace, tenantID.String(), false)
 			})
 		require.NoError(t, written)
 		require.NoError(t, added)

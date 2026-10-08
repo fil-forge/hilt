@@ -13,6 +13,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/pglock"
+	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -89,7 +90,7 @@ func getResult(rec bucketpolicystore.Record, err error) (bucketpolicystore.Recor
 }
 
 // Put runs in one transaction: it takes the tenant's advisory lock shared
-// ([pglock.TenantNamespace]), checks the named principals (see
+// ([tenant.LockNamespace]), checks the named principals (see
 // [requireLivePrincipals]), takes the bucket's advisory lock, locks the
 // current row FOR UPDATE when there is one, checks the precondition, runs
 // beforeCommit while holding the locks, writes the row and rewrites its index
@@ -123,7 +124,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if err := pglock.Advisory(ctx, tx, pglock.TenantNamespace, in.Tenant.String(), true); err != nil {
+	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, in.Tenant.String(), true); err != nil {
 		return "", err
 	}
 	named, _ := bucketpolicy.Named(in.Policy)
