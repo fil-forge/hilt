@@ -71,13 +71,19 @@ func postgresSeeder(pool *pgxpool.Pool) seeder {
 
 // service builds the input of a service key with the given permissions and
 // bucket scope.
-func service(id, tenantID did.DID, name string, buckets []did.DID, perms ...string) accesskey.Input {
-	return accesskey.Input{ID: id, Tenant: tenantID, Name: name, Buckets: buckets, Permissions: perms}
+func service(t *testing.T, id, tenantID did.DID, name string, buckets []did.DID, perms ...string) accesskey.Input {
+	t.Helper()
+	in, err := accesskey.NewServiceKey(id, tenantID, name, buckets, perms, nil)
+	require.NoError(t, err)
+	return in
 }
 
 // bound builds the input of a key bound to a principal.
-func bound(id, tenantID did.DID, principal, name string) accesskey.Input {
-	return accesskey.Input{ID: id, Tenant: tenantID, Name: name, Principal: &principal}
+func bound(t *testing.T, id, tenantID did.DID, principal, name string) accesskey.Input {
+	t.Helper()
+	in, err := accesskey.NewPrincipalKey(id, tenantID, name, principal, nil)
+	require.NoError(t, err)
+	return in
 }
 
 func ids(recs []accesskey.Record) []did.DID {
@@ -98,7 +104,7 @@ func TestAccessKeyStore(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
 				buckets := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}
-				require.NoError(t, s.Add(t.Context(), service(id, tenantID, "ci-key", buckets, "s3:GetObject", "s3:PutObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "ci-key", buckets, "s3:GetObject", "s3:PutObject")))
 
 				rec, err := s.Get(t.Context(), id)
 				require.NoError(t, err)
@@ -116,7 +122,7 @@ func TestAccessKeyStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), service(id, tenantID, "all", nil, "s3:ListAllMyBuckets")))
+				require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "all", nil, "s3:ListAllMyBuckets")))
 
 				rec, err := s.Get(t.Context(), id)
 				require.NoError(t, err)
@@ -129,7 +135,7 @@ func TestAccessKeyStore(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
 				seed.principal(t, tenantID, "user-1")
-				require.NoError(t, s.Add(t.Context(), bound(id, tenantID, "user-1", "laptop")))
+				require.NoError(t, s.Add(t.Context(), bound(t, id, tenantID, "user-1", "laptop")))
 
 				rec, err := s.Get(t.Context(), id)
 				require.NoError(t, err)
@@ -159,7 +165,7 @@ func TestAccessKeyStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), service(id, tenantID, "locked", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "locked", nil, "s3:GetObject")))
 
 				rec, err := s.Get(t.Context(), id, store.WithShareLock())
 				require.NoError(t, err)
@@ -174,7 +180,7 @@ func TestAccessKeyStore(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
 				expires := time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)
-				in := service(id, tenantID, "exp", nil, "s3:GetObject")
+				in := service(t, id, tenantID, "exp", nil, "s3:GetObject")
 				in.ExpiresAt = &expires
 				require.NoError(t, s.Add(t.Context(), in))
 
@@ -193,8 +199,8 @@ func TestAccessKeyStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), service(id, tenantID, "dup", nil, "s3:GetObject")))
-				err := s.Add(t.Context(), service(id, tenantID, "dup-2", nil, "s3:GetObject"))
+				require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "dup", nil, "s3:GetObject")))
+				err := s.Add(t.Context(), service(t, id, tenantID, "dup-2", nil, "s3:GetObject"))
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
@@ -203,12 +209,12 @@ func TestAccessKeyStore(t *testing.T) {
 				otherTenant := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
 				seed.tenant(t, otherTenant)
-				require.NoError(t, s.Add(t.Context(), service(testutil.RandomDID(t), tenantID, "name-dup", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "name-dup", nil, "s3:GetObject")))
 				// Same tenant + name but a different id must be rejected.
-				err := s.Add(t.Context(), service(testutil.RandomDID(t), tenantID, "name-dup", nil, "s3:GetObject"))
+				err := s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "name-dup", nil, "s3:GetObject"))
 				require.ErrorIs(t, err, store.ErrRecordExists)
 				// The same name under a different tenant is allowed.
-				require.NoError(t, s.Add(t.Context(), service(testutil.RandomDID(t), otherTenant, "name-dup", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), otherTenant, "name-dup", nil, "s3:GetObject")))
 			})
 
 			t.Run("a principal-bound key's name is unique within its principal", func(t *testing.T) {
@@ -219,19 +225,19 @@ func TestAccessKeyStore(t *testing.T) {
 				seed.principal(t, tenantID, "alice")
 				seed.principal(t, tenantID, "bob")
 				seed.principal(t, otherTenant, "alice")
-				require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "alice", "laptop")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "alice", "laptop")))
 				// The same principal cannot hold two keys of the name.
-				err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "alice", "laptop"))
+				err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "alice", "laptop"))
 				require.ErrorIs(t, err, store.ErrRecordExists)
 				// Another principal of the tenant may hold the name.
-				require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "bob", "laptop")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "bob", "laptop")))
 				// So may the same principal id under another tenant.
-				require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), otherTenant, "alice", "laptop")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), otherTenant, "alice", "laptop")))
 				// A service key of the tenant may hold the name too: the two
 				// uniqueness rules are independent.
-				require.NoError(t, s.Add(t.Context(), service(testutil.RandomDID(t), tenantID, "laptop", nil, "s3:GetObject")))
-				require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "alice", "ci-key")))
-				require.NoError(t, s.Add(t.Context(), service(testutil.RandomDID(t), tenantID, "ci-key", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "laptop", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "alice", "ci-key")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "ci-key", nil, "s3:GetObject")))
 			})
 
 			t.Run("Add returns ErrInvalidArgument for an inconsistent input", func(t *testing.T) {
@@ -241,10 +247,10 @@ func TestAccessKeyStore(t *testing.T) {
 				user := "user-1"
 				empty := ""
 				cases := map[string]accesskey.Input{
-					"undef id":                         service(did.Undef, tenantID, "k", nil, "s3:GetObject"),
-					"undef tenant":                     service(testutil.RandomDID(t), did.Undef, "k", nil, "s3:GetObject"),
-					"empty name":                       service(testutil.RandomDID(t), tenantID, "", nil, "s3:GetObject"),
-					"undef bucket DID":                 service(testutil.RandomDID(t), tenantID, "k", []did.DID{testutil.RandomDID(t), did.Undef}, "s3:GetObject"),
+					"undef id":                         {Tenant: tenantID, Name: "k", Permissions: []string{"s3:GetObject"}},
+					"undef tenant":                     {ID: testutil.RandomDID(t), Name: "k", Permissions: []string{"s3:GetObject"}},
+					"empty name":                       {ID: testutil.RandomDID(t), Tenant: tenantID, Permissions: []string{"s3:GetObject"}},
+					"undef bucket DID":                 {ID: testutil.RandomDID(t), Tenant: tenantID, Name: "k", Buckets: []did.DID{testutil.RandomDID(t), did.Undef}, Permissions: []string{"s3:GetObject"}},
 					"empty principal":                  {ID: testutil.RandomDID(t), Tenant: tenantID, Name: "k", Principal: &empty},
 					"principal-bound with permissions": {ID: testutil.RandomDID(t), Tenant: tenantID, Name: "k", Principal: &user, Permissions: []string{"s3:GetObject"}},
 					"principal-bound with buckets":     {ID: testutil.RandomDID(t), Tenant: tenantID, Name: "k", Principal: &user, Buckets: []did.DID{testutil.RandomDID(t)}},
@@ -266,17 +272,17 @@ func TestAccessKeyStore(t *testing.T) {
 				seed.principal(t, other, "alice")
 
 				svc := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), service(svc, tenantID, "svc", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, svc, tenantID, "svc", nil, "s3:GetObject")))
 				var alice []did.DID
 				for i := range 2 {
 					id := testutil.RandomDID(t)
 					alice = append(alice, id)
-					require.NoError(t, s.Add(t.Context(), bound(id, tenantID, "alice", fmt.Sprintf("alice-%d", i))))
+					require.NoError(t, s.Add(t.Context(), bound(t, id, tenantID, "alice", fmt.Sprintf("alice-%d", i))))
 				}
 				bob := testutil.RandomDID(t)
-				require.NoError(t, s.Add(t.Context(), bound(bob, tenantID, "bob", "bob-0")))
-				require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), other, "alice", "alice-0")))
-				require.NoError(t, s.Add(t.Context(), service(testutil.RandomDID(t), other, "svc", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), bound(t, bob, tenantID, "bob", "bob-0")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), other, "alice", "alice-0")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), other, "svc", nil, "s3:GetObject")))
 
 				all, err := s.ListByTenant(t.Context(), tenantID)
 				require.NoError(t, err)
@@ -298,7 +304,7 @@ func TestAccessKeyStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed.tenant(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), service(id, tenantID, "del", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "del", nil, "s3:GetObject")))
 
 				require.NoError(t, s.Delete(t.Context(), id))
 				_, err := s.Get(t.Context(), id)
@@ -319,7 +325,7 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 	t.Run("a key bound to an unknown principal is rejected", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed.tenant(t, tenantID)
-		err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "ghost", "k"))
+		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "ghost", "k"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
@@ -328,7 +334,7 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		seed.tenant(t, tenantID)
 		seed.tenant(t, other)
 		seed.principal(t, other, "user-1")
-		err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "k"))
+		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "k"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 }
@@ -345,7 +351,7 @@ func TestAccessKeyStorePostgresLocking(t *testing.T) {
 	id := testutil.RandomDID(t)
 	tenantID := testutil.RandomDID(t)
 	seed.tenant(t, tenantID)
-	require.NoError(t, s.Add(t.Context(), service(id, tenantID, "k", nil, "s3:GetObject")))
+	require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "k", nil, "s3:GetObject")))
 
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -374,4 +380,14 @@ func TestAccessKeyStorePostgresLocking(t *testing.T) {
 	require.NoError(t, committed)
 	require.NoError(t, got)
 	require.Equal(t, id, rec.ID)
+}
+
+func TestNewServiceKey(t *testing.T) {
+	_, err := accesskey.NewServiceKey(testutil.RandomDID(t), testutil.RandomDID(t), "", nil, []string{"s3:GetObject"}, nil)
+	require.ErrorIs(t, err, store.ErrInvalidArgument)
+}
+
+func TestNewPrincipalKey(t *testing.T) {
+	_, err := accesskey.NewPrincipalKey(testutil.RandomDID(t), testutil.RandomDID(t), "laptop", "", nil)
+	require.ErrorIs(t, err, store.ErrInvalidArgument)
 }

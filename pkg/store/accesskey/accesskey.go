@@ -60,6 +60,22 @@ type Input struct {
 	ExpiresAt *time.Time
 }
 
+// NewServiceKey builds the input of a service key, which carries its own
+// permissions and bucket scope (empty buckets means every bucket of the
+// tenant). It returns the [Input.Validate] error for an inconsistent input.
+func NewServiceKey(id, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) (Input, error) {
+	in := Input{ID: id, Tenant: tenant, Name: name, Buckets: buckets, Permissions: permissions, ExpiresAt: expiresAt}
+	return in, in.Validate()
+}
+
+// NewPrincipalKey builds the input of a key bound to the principal, which
+// carries no permissions or buckets of its own. It returns the
+// [Input.Validate] error for an inconsistent input.
+func NewPrincipalKey(id, tenant did.DID, name, principal string, expiresAt *time.Time) (Input, error) {
+	in := Input{ID: id, Tenant: tenant, Name: name, Principal: &principal, ExpiresAt: expiresAt}
+	return in, in.Validate()
+}
+
 // Validate checks the input's own consistency (not its referential integrity),
 // returning [store.ErrInvalidArgument] wrapped with the reason. Both backends
 // apply it before writing.

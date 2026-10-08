@@ -107,7 +107,6 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if len(permissions) > 0 || len(bucketNames) > 0 {
 			return accesskeystore.Record{}, "", ErrPrincipalScoped
 		}
-		permissions = nil // stored as NULL: the key holds no authority of its own
 	} else {
 		if len(permissions) == 0 {
 			return accesskeystore.Record{}, "", ErrNoPermissions
@@ -193,6 +192,16 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	}
 	log = log.With(zap.Stringer("access_key", accessKeyID))
 
+	var in accesskeystore.Input
+	if principalID != nil {
+		in, err = accesskeystore.NewPrincipalKey(accessKeyID, tenantRec.ID, name, *principalID, expiresAt)
+	} else {
+		in, err = accesskeystore.NewServiceKey(accessKeyID, tenantRec.ID, name, bucketIDs, permissions, expiresAt)
+	}
+	if err != nil {
+		return accesskeystore.Record{}, "", fmt.Errorf("building access key record: %w", err)
+	}
+
 	vaultPath := vault.AccessKeyPath(tenantRec.ID, accessKeyID)
 	if err := s.secrets.Write(ctx, vaultPath, signer.Bytes()); err != nil {
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key: %w", err)
@@ -216,15 +225,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		}
 	}
 
-	if err := s.accessKeys.Add(ctx, accesskeystore.Input{
-		ID:          accessKeyID,
-		Tenant:      tenantRec.ID,
-		Name:        name,
-		Buckets:     bucketIDs,
-		Permissions: permissions,
-		Principal:   principalID,
-		ExpiresAt:   expiresAt,
-	}); err != nil {
+	if err := s.accessKeys.Add(ctx, in); err != nil {
 		rollback()
 		// Name uniqueness is enforced by the store: per tenant for a service key,
 		// per principal for a principal-bound key. A fresh random access-key DID
