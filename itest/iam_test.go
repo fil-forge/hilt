@@ -72,7 +72,7 @@ func newMember(t *testing.T, net *forgeNet, tenantID, principal string, buckets 
 		Permissions: allPermissions,
 	})
 	require.NoError(t, err)
-	require.Empty(t, cred.Principal, "a key created without principalId is a service key")
+	require.Nil(t, cred.PrincipalID, "a key created without principalId is a service key")
 	service := net.s3Client(t, cred.AccessKeyID, cred.SecretAccessKey)
 
 	for _, bucket := range buckets {
@@ -84,10 +84,10 @@ func newMember(t *testing.T, net *forgeNet, tenantID, principal string, buckets 
 	require.NoError(t, err)
 	key, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
 		Name:        principal + "-key",
-		PrincipalID: principal,
+		PrincipalID: new(principal),
 	})
 	require.NoError(t, err)
-	require.Equal(t, principal, key.Principal)
+	require.Equal(t, new(principal), key.PrincipalID)
 	require.Empty(t, key.Permissions, "a principal-bound key carries none")
 	require.Empty(t, key.Buckets, "a principal-bound key carries none")
 
@@ -184,7 +184,7 @@ func testPrincipalKeyCreateRejectsBadRequests(t *testing.T, net *forgeNet) {
 	// A principal-bound key's access comes from the bucket policies alone.
 	_, err = net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
 		Name:        "scoped",
-		PrincipalID: principal,
+		PrincipalID: new(principal),
 		Permissions: []string{"s3:GetObject"},
 	})
 	var apiErr *management.APIError
@@ -193,7 +193,7 @@ func testPrincipalKeyCreateRejectsBadRequests(t *testing.T, net *forgeNet) {
 
 	_, err = net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
 		Name:        "unknown",
-		PrincipalID: "no-such-member",
+		PrincipalID: new("no-such-member"),
 	})
 	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, http.StatusUnprocessableEntity, apiErr.StatusCode)
