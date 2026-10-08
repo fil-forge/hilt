@@ -124,21 +124,12 @@ func TestPrincipalPolicyReadHandlers(t *testing.T) {
 		}
 	})
 
-	t.Run("a principalId holding a slash arrives escaped and is decoded", func(t *testing.T) {
-		e, deps := setupPolicies(t)
-		require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "a/b"))
-		createPolicy(t, deps, bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("a/b"), Actions: []string{"s3:GetObject"}})
-
-		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb/access", nil)
-		require.Equal(t, http.StatusOK, rec.Code)
-		var access api.PrincipalAccess
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &access))
-		require.Equal(t, []api.BucketAccess{{Name: "photos", Actions: []string{"s3:GetObject"}}}, access.Buckets)
-
-		rec = doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb/policies", nil)
-		require.Equal(t, http.StatusOK, rec.Code)
-		var list api.PrincipalPolicyList
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
-		require.Len(t, list.Items, 1)
+	t.Run("a principalId holding a slash is refused", func(t *testing.T) {
+		e, _ := setupPolicies(t)
+		for _, route := range []string{"access", "policies"} {
+			rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/a%2Fb/"+route, nil)
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, route)
+			require.Equal(t, "InvalidPrincipalID", decodeError(t, rec).Code, route)
+		}
 	})
 }
