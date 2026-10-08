@@ -15,6 +15,7 @@ import (
 	"slices"
 	"time"
 
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
@@ -87,8 +88,8 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		return accesskeystore.Record{}, "", ErrInvalidName
 	}
 	if principalID != nil {
-		if *principalID == "" {
-			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		if !principalsvc.ValidID(*principalID) {
+			return accesskeystore.Record{}, "", principalsvc.ErrInvalidPrincipalID
 		}
 		if len(permissions) > 0 || len(bucketNames) > 0 {
 			return accesskeystore.Record{}, "", ErrPrincipalScoped

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/labstack/echo/v4"
@@ -23,7 +24,8 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 		errors.Is(err, accesskeysvc.ErrInvalidPermission),
 		errors.Is(err, accesskeysvc.ErrUnknownBucket),
 		errors.Is(err, accesskeysvc.ErrPrincipalScoped),
-		errors.Is(err, accesskeysvc.ErrUnknownPrincipal):
+		errors.Is(err, accesskeysvc.ErrUnknownPrincipal),
+		errors.Is(err, principalsvc.ErrInvalidPrincipalID):
 		return httpError(http.StatusUnprocessableEntity, err)
 	case errors.Is(err, accesskeysvc.ErrNameConflict),
 		errors.Is(err, accesskeysvc.ErrConcurrentChange):

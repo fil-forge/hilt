@@ -11,6 +11,7 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -237,7 +238,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		}, decodeError(t, rec))
 	})
 
-	t.Run("an empty principalId is an unknown principal", func(t *testing.T) {
+	t.Run("an empty principalId is an invalid principal id", func(t *testing.T) {
 		e, deps := setupAccessKeys(t)
 		for name, body := range map[string]string{
 			"without permissions": `{"name":"k","principalId":""}`,
@@ -246,7 +247,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				rec := doRequest(t, e, http.MethodPost, "/tenants/tenant-1/access-keys", []byte(body))
 				require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-				require.Equal(t, api.Error{Code: "UnknownPrincipal", Message: "unknown principal"}, decodeError(t, rec))
+				require.Equal(t, api.Error{Code: "InvalidPrincipalID", Message: principalsvc.ErrInvalidPrincipalID.Error()}, decodeError(t, rec))
 			})
 		}
 		keys, err := deps.accessKeys.ListByTenant(ctx, deps.tenantID)
