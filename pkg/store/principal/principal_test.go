@@ -477,7 +477,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 
 		released, added := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
-				if err := pglock.Advisory(t.Context(), tx, pglock.TenantNamespace, tenantID.String(), true); err != nil {
+				if err := pglock.Advisory(t.Context(), tx, tenant.LockNamespace, tenantID.String(), true); err != nil {
 					return err
 				}
 				close(entered)
