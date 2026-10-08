@@ -426,7 +426,7 @@ func TestListAccessKeysHandler(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 		require.Len(t, list.Items, 1)
 		require.Equal(t, "laptop", list.Items[0].Name)
-		require.Equal(t, "alice", list.Items[0].Principal)
+		require.Equal(t, new("alice"), list.Items[0].PrincipalID)
 
 		rec = doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys?principalId=nobody", nil)
 		require.Equal(t, http.StatusOK, rec.Code)

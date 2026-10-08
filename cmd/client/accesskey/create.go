@@ -33,7 +33,9 @@ var createCmd = &cobra.Command{
 			Name:        args[1],
 			Permissions: createPermissions,
 			Buckets:     createBuckets,
-			PrincipalID: createPrincipal,
+		}
+		if createPrincipal != "" {
+			req.PrincipalID = &createPrincipal
 		}
 		if createExpiresAt != "" {
 			expires, err := time.Parse(time.RFC3339, createExpiresAt)

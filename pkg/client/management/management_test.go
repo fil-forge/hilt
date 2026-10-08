@@ -212,12 +212,12 @@ func TestManagementClient(t *testing.T) {
 			assertAuth(t, r)
 			require.Equal(t, "/tenants/acme/access-keys", r.URL.Path)
 			require.Equal(t, "user-1", r.URL.Query().Get("principalId"))
-			_ = json.NewEncoder(w).Encode(api.AccessKeyList{Items: []api.AccessKey{{AccessKeyID: "AKID", Principal: "user-1"}}})
+			_ = json.NewEncoder(w).Encode(api.AccessKeyList{Items: []api.AccessKey{{AccessKeyID: "AKID", PrincipalID: new("user-1")}}})
 		})
 		got, err := c.ListPrincipalAccessKeys(ctx, "acme", "user-1")
 		require.NoError(t, err)
 		require.Len(t, got, 1)
-		require.Equal(t, "user-1", got[0].Principal)
+		require.Equal(t, new("user-1"), got[0].PrincipalID)
 	})
 
 	t.Run("an opaque principal id stays one escaped path segment", func(t *testing.T) {

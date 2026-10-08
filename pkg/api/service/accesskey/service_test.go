@@ -648,7 +648,7 @@ func TestCreateLockTimeoutsAreConcurrentChanges(t *testing.T) {
 			b := memoryBackend(t)
 			wrap(&b)
 			d := setupWith(t, b)
-			_, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, "alice", nil)
+			_, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, new("alice"), nil)
 			require.ErrorIs(t, err, accesskeysvc.ErrConcurrentChange)
 		})
 	}

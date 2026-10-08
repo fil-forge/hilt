@@ -618,7 +618,7 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		}}
 		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketmemory.New(), d.policies, delegations, d.secrets, d.swarf)
 
-		_, _, _ = creator.Create(ctx, "tenant-1", "laptop", nil, nil, "user-1", nil)
+		_, _, _ = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
 		close(delegations.released)
 		require.NoError(t, <-removed)
 
@@ -636,7 +636,7 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 			require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
 		}}
 		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketmemory.New(), d.policies, d.delegations, d.secrets, d.swarf)
-		_, _, err = creator.Create(ctx, "tenant-1", "laptop", nil, nil, "user-1", nil)
+		_, _, err = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
 
 		// The revived principal has no keys.

@@ -325,13 +325,13 @@ func TestAccessKeyStoreMemoryGuard(t *testing.T) {
 	s := accesskeymemory.New(accesskeymemory.WithPrincipals(principals.WithLive))
 	tenantID := testutil.RandomDID(t)
 
-	err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "ghost", "k"))
+	err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "ghost", "k"))
 	require.ErrorIs(t, err, store.ErrInvalidArgument)
 
 	require.NoError(t, principals.Add(t.Context(), tenantID, "user-1"))
-	require.NoError(t, s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "laptop")))
+	require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "laptop")))
 	require.NoError(t, principals.Tombstone(t.Context(), tenantID, "user-1", nil))
-	err = s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "phone"))
+	err = s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "phone"))
 	require.ErrorIs(t, err, store.ErrInvalidArgument)
 }
 
@@ -354,7 +354,7 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		seed.tenant(t, tenantID)
 		seed.principal(t, tenantID, "user-1")
 		require.NoError(t, principalpostgres.New(pool).Tombstone(t.Context(), tenantID, "user-1", nil))
-		err := s.Add(t.Context(), bound(testutil.RandomDID(t), tenantID, "user-1", "laptop"))
+		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "laptop"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 		require.ErrorContains(t, err, "was removed")
 	})
