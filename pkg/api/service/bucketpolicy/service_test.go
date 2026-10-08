@@ -780,7 +780,7 @@ func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
 	require.NoError(t, written)
 	require.NoError(t, added)
 
-	rec, _, err := keys.Create(ctx, "tenant-1", "key", nil, nil, "user-2", nil)
+	rec, _, err := keys.Create(ctx, "tenant-1", "key", nil, nil, new("user-2"), nil)
 	require.NoError(t, err)
 	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, rec.ID, d.photos), "the key is created from the committed policy")
 }
@@ -910,7 +910,7 @@ func TestKeyCreatedDuringPolicyCreatePostgres(t *testing.T) {
 		},
 		func() error {
 			var err error
-			created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, "user-1", nil)
+			created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, new("user-1"), nil)
 			return err
 		})
 	require.NoError(t, written)
