@@ -295,6 +295,23 @@ func TestManagementClient(t *testing.T) {
 		require.NotContains(t, requests, "GET /tenants/acme/principals")
 	})
 
+	t.Run("an empty tenant or principal id is refused before sending", func(t *testing.T) {
+		var requests []string
+		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			requests = append(requests, r.Method+" "+r.URL.EscapedPath())
+		})
+
+		_, err := c.GetPrincipal(ctx, "acme", "")
+		require.Error(t, err)
+		err = c.DeletePrincipal(ctx, "acme", "")
+		require.Error(t, err)
+		_, err = c.GetTenant(ctx, "")
+		require.Error(t, err)
+		_, err = c.ListPrincipals(ctx, "")
+		require.Error(t, err)
+		require.Empty(t, requests)
+	})
+
 	t.Run("non-2xx returns an APIError carrying status and message", func(t *testing.T) {
 		c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)

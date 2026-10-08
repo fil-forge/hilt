@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -190,7 +191,10 @@ func (c *Client) do(ctx context.Context, method string, segments []string, body,
 
 // doQuery is [Client.do] with a query string.
 func (c *Client) doQuery(ctx context.Context, method string, segments []string, query url.Values, body, out any, wantStatus ...int) error {
-	u := c.resolve(segments)
+	u, err := c.resolve(segments)
+	if err != nil {
+		return err
+	}
 	u.RawQuery = query.Encode()
 
 	var reqBody io.Reader
@@ -233,16 +237,21 @@ func (c *Client) doQuery(ctx context.Context, method string, segments []string, 
 // resolve appends the segments to the base URL, one escaped path element each.
 // JoinPath cleans away "." and ".." elements, so DeletePrincipal(t, "..") would
 // issue DELETE /tenants/t; a dot segment is sent with its dots escaped instead,
-// for the server to refuse.
-func (c *Client) resolve(segments []string) *url.URL {
+// for the server to refuse. JoinPath also drops an empty element, so
+// GetPrincipal(t, "") would issue GET /tenants/t/principals; an empty segment
+// is refused before sending.
+func (c *Client) resolve(segments []string) (*url.URL, error) {
 	escaped := make([]string, len(segments))
 	for i, segment := range segments {
+		if segment == "" {
+			return nil, errors.New("empty path segment: an id must not be empty")
+		}
 		escaped[i] = url.PathEscape(segment)
 		if segment == "." || segment == ".." {
 			escaped[i] = strings.ReplaceAll(segment, ".", "%2E")
 		}
 	}
-	return c.baseURL.JoinPath(escaped...)
+	return c.baseURL.JoinPath(escaped...), nil
 }
 
 // apiErrorFromResponse builds an [APIError] from a non-2xx response, reading the
