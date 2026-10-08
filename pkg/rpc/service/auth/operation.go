@@ -26,6 +26,19 @@ const (
 	OpDeleteObject Operation = "DeleteObject" // DELETE, bucket + key
 	OpDeleteBucket Operation = "DeleteBucket" // DELETE, bucket, no key
 
+	// Object-lock and version-scoped operations, distinguished from their
+	// plain-object counterparts by the query parameters on the signed URL.
+	// S3 gives each its own permission, so an access key granted plain reads,
+	// writes or deletes does not thereby get to read version history, delete a
+	// named version, or place a retention period or legal hold.
+	OpGetObjectVersion    Operation = "GetObjectVersion"    // GET, bucket + key, ?versionId
+	OpGetObjectRetention  Operation = "GetObjectRetention"  // GET, bucket + key, ?retention
+	OpGetObjectLegalHold  Operation = "GetObjectLegalHold"  // GET, bucket + key, ?legal-hold
+	OpPutObjectRetention  Operation = "PutObjectRetention"  // PUT, bucket + key, ?retention
+	OpPutObjectLegalHold  Operation = "PutObjectLegalHold"  // PUT, bucket + key, ?legal-hold
+	OpDeleteObjectVersion Operation = "DeleteObjectVersion" // DELETE, bucket + key, ?versionId
+	OpListBucketVersions  Operation = "ListBucketVersions"  // GET, bucket, no key, ?versions
+
 	// Multipart upload operations, distinguished from their plain-object
 	// counterparts by the query parameters on the signed URL.
 	OpCreateMultipartUpload      Operation = "CreateMultipartUpload"      // POST, bucket + key, ?uploads
@@ -50,6 +63,14 @@ var operationPermission = map[Operation]string{
 	OpCreateBucket: "s3:CreateBucket",
 	OpDeleteObject: "s3:DeleteObject",
 	OpDeleteBucket: "s3:DeleteBucket",
+
+	OpGetObjectVersion:    "s3:GetObjectVersion",
+	OpGetObjectRetention:  "s3:GetObjectRetention",
+	OpGetObjectLegalHold:  "s3:GetObjectLegalHold",
+	OpPutObjectRetention:  "s3:PutObjectRetention",
+	OpPutObjectLegalHold:  "s3:PutObjectLegalHold",
+	OpDeleteObjectVersion: "s3:DeleteObjectVersion",
+	OpListBucketVersions:  "s3:ListBucketVersions",
 
 	OpCreateMultipartUpload:      "s3:PutObject",
 	OpUploadPart:                 "s3:PutObject",
@@ -87,6 +108,8 @@ func (o Operation) String() string { return string(o) }
 func (o Operation) addressesExistingBucket() bool {
 	switch o {
 	case OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpDeleteObject, OpDeleteBucket,
+		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
+		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads:
 		return true
@@ -162,6 +185,22 @@ type classification struct {
 // does not match is not a multipart request and falls back to its plain-object
 // classification, which requires the same permission.
 //
+// Object-lock and version-scoped operations are distinguished the same way,
+// by the query parameters the gateway routes on: `retention`, `legal-hold`,
+// `versions` and `versionId`. Each carries its own S3 permission, so an access
+// key granted s3:PutObject cannot thereby set a retention period or a legal
+// hold, and one granted s3:DeleteObject cannot delete a named version.
+//
+// A lock parameter decides the operation on its own, ahead of `versionId`:
+// hilt's permission vocabulary has no version-scoped variant of the lock
+// actions, so `?retention&versionId=` is a retention write. The lock branches
+// are reached only by the method S3 defines for them, and a PUT with the
+// parameter is a lock write rather than a copy, as it is in the gateway's
+// router. Every shape whose method does not match falls back to its
+// plain-object classification, which needs the broader permission of the two
+// (pkg/s3perm's TestClassifiedPermissionsCoverTheirShapes pins that the
+// broader permission grants everything the narrower one does).
+//
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
 // and key. Headers are signed only when listed in the signature's SignedHeaders,
@@ -188,6 +227,10 @@ func classifyRequest(req s3.Request) (classification, error) {
 	query := u.Query()
 	uploads := query.Has("uploads") // valueless flag: `?uploads`
 	uploadID := query.Get("uploadId")
+	versions := query.Has("versions")    // valueless flag: `?versions`
+	retention := query.Has("retention")  // valueless flag: `?retention`
+	legalHold := query.Has("legal-hold") // valueless flag: `?legal-hold`
+	versionID := query.Get("versionId")
 
 	// A plain-object or part PUT with a parseable copy source is a copy.
 	copy := func(plain, copied Operation) Operation {
@@ -219,10 +262,18 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(OpListBuckets)
 		case c.key == "" && uploads:
 			return classify(OpListBucketMultipartUploads)
+		case c.key == "" && versions:
+			return classify(OpListBucketVersions)
 		case c.key == "":
 			return classify(OpListBucket)
 		case uploadID != "":
 			return classify(OpListMultipartUploadParts)
+		case retention:
+			return classify(OpGetObjectRetention)
+		case legalHold:
+			return classify(OpGetObjectLegalHold)
+		case versionID != "":
+			return classify(OpGetObjectVersion)
 		default:
 			return classify(OpGetObject)
 		}
@@ -239,6 +290,10 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(copy(OpUploadPart, OpUploadPartCopy))
 		case method == http.MethodPost && uploadID != "" && !query.Has("partNumber"):
 			return classify(OpCompleteMultipartUpload)
+		case method == http.MethodPut && retention:
+			return classify(OpPutObjectRetention)
+		case method == http.MethodPut && legalHold:
+			return classify(OpPutObjectLegalHold)
 		default:
 			return classify(copy(OpPutObject, OpCopyObject))
 		}
@@ -251,6 +306,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(OpDeleteBucket)
 		case uploadID != "":
 			return classify(OpAbortMultipartUpload)
+		case versionID != "":
+			return classify(OpDeleteObjectVersion)
 		default:
 			return classify(OpDeleteObject)
 		}

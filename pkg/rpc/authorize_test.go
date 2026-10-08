@@ -41,6 +41,18 @@ func signedGetArgs(t *testing.T, signer ed25519.Signer, bucketName, region strin
 	return &s3req.AuthorizeArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL}}
 }
 
+// signedArgs builds AuthorizeArguments for a presigned request of any method
+// and URL, for the shapes whose query parameters name the operation.
+func signedArgs(t *testing.T, signer ed25519.Signer, method, url, region string) *s3req.AuthorizeArguments {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	signed, err := sigv4.Presign(sigv4.Request{Method: method, URL: url},
+		signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+	require.NoError(t, err)
+	return &s3req.AuthorizeArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL}}
+}
+
 // signedCopyArgs builds AuthorizeArguments for a CopyObject of object-key from
 // srcBucket into bucketName, with the copy-source header covered by the signature.
 func signedCopyArgs(t *testing.T, signer ed25519.Signer, bucketName, srcBucket, region string) *s3req.AuthorizeArguments {
@@ -193,6 +205,31 @@ func TestAuthorizeRequest(t *testing.T) {
 		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
 		_, _, err := call(t, az, providerID, args)
 		require.Error(t, err)
+	})
+
+	t.Run("the object-lock and version permissions are required for their shapes", func(t *testing.T) {
+		// The query parameter names the operation, so holding the plain write
+		// or delete is not enough: placing a retention period or a legal hold,
+		// and deleting a named version, each need their own permission.
+		lock := "https://s3.fil.one/" + bucketName + "/object-key?retention"
+		version := "https://s3.fil.one/" + bucketName + "/object-key?versionId=v"
+
+		az := setup(t, []string{"s3:PutObject", "s3:DeleteObject"}, akSigner)
+		_, _, err := call(t, az, providerID, signedArgs(t, akSigner, "PUT", lock, region))
+		require.Error(t, err, "s3:PutObject alone must not authorize a retention write")
+		_, _, err = call(t, az, providerID, signedArgs(t, akSigner, "DELETE", version, region))
+		require.Error(t, err, "s3:DeleteObject alone must not authorize a version delete")
+
+		// Granted, the retention write is delegated its own narrower set: it
+		// ships the catalog change it makes and nothing more.
+		az = setup(t, []string{"s3:PutObjectRetention"}, akSigner)
+		_, blocks, err := call(t, az, providerID, signedArgs(t, akSigner, "PUT", lock, region))
+		require.NoError(t, err)
+		var cmds []string
+		for _, d := range blocks {
+			cmds = append(cmds, d.Command().String())
+		}
+		require.ElementsMatch(t, []string{"/blob/add", "/index/add", "/content/retrieve"}, cmds)
 	})
 
 	t.Run("rejects an unknown bucket", func(t *testing.T) {

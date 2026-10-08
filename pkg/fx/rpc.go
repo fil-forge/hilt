@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
@@ -33,6 +34,7 @@ var RPCModule = fx.Module("rpc",
 			fx.As(fx.Self()),
 			fx.As(new(bucketsvc.UploadClient)),
 			fx.As(new(rpc.RoutingClient)),
+			fx.As(new(metricssvc.UsageSampler)),
 		),
 		bucketsvc.New,
 		NewUCANServer,

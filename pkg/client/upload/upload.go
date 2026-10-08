@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/fil-forge/hilt/pkg/lib/zapucan"
 	blobcmds "github.com/fil-forge/libforge/commands/blob"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
+	metricscmds "github.com/fil-forge/libforge/commands/metrics"
 	providercmds "github.com/fil-forge/libforge/commands/provider"
 	routingcmds "github.com/fil-forge/libforge/commands/routing"
 	ucanlib "github.com/fil-forge/libforge/ucan"
@@ -216,6 +218,53 @@ func (c *Client) ProvisionSpace(ctx context.Context, account ucan.Issuer, space 
 		return "", fmt.Errorf("unpacking provision result: %w", err)
 	}
 	return addOK.ID, nil
+}
+
+// SampleUsage returns the space's usage over [from, to) in buckets of window:
+// one sample per bucket, ordered by ascending timestamp, with no gaps.
+//
+// The service shortens a range running past its own clock, so the returned
+// series can cover less than was asked for; SampleOK restates the range it
+// actually covers.
+func (c *Client) SampleUsage(ctx context.Context, space did.DID, from, to time.Time, window time.Duration, opts ...MethodOption) (*metricscmds.SampleOK, error) {
+	cfg := &methodConfig{issuer: c.Issuer, proofs: c.Proofs}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	proofs, proofLinks, err := cfg.proofs.ProofChain(ctx, cfg.issuer.DID(), metricscmds.Sample.Command, space)
+	if err != nil {
+		return nil, fmt.Errorf("getting proof chain: %w", err)
+	}
+	inv, err := metricscmds.Sample.Invoke(
+		cfg.issuer,
+		space,
+		&metricscmds.SampleArguments{
+			From:   from.Unix(),
+			To:     to.Unix(),
+			Window: int64(window / time.Second),
+		},
+		invocation.WithAudience(c.ServiceID),
+		invocation.WithProofs(proofLinks...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("invoking sample metrics: %w", err)
+	}
+	log := zapucan.WithInvocation(c.Logger, inv)
+	log.Debug("executing invocation")
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv, execution.WithDelegations(proofs...)))
+	if err != nil {
+		log.Error("failed to execute sample metrics invocation", zap.Error(err))
+		return nil, fmt.Errorf("executing sample metrics invocation: %w", err)
+	}
+	sampleOK, err := metricscmds.Sample.Unpack(res.Receipt())
+	if err != nil {
+		// A named failure is the service reporting the request itself is
+		// unusable, and the caller maps it to a status. Returning it whole
+		// keeps that name intact.
+		log.Debug("sample metrics failed", zap.Error(err))
+		return nil, err
+	}
+	return sampleOK, nil
 }
 
 // SpaceEmpty checks whether the given space is empty (contains no blobs).
