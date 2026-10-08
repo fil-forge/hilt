@@ -515,7 +515,7 @@ func TestDeleteRevokes(t *testing.T) {
 	t.Run("deletes a key holding no delegations without the tenant key", func(t *testing.T) {
 		d := setup(t)
 		require.NoError(t, d.principals.Add(ctx, d.tenantID, "bob"))
-		created, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, "bob", nil)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, new("bob"), nil)
 		require.NoError(t, err)
 		// With nothing to revoke, the tenant's signing key is never needed.
 		require.NoError(t, d.secrets.Delete(ctx, vault.TenantKeyPath(d.tenantID)))
@@ -568,7 +568,7 @@ func TestDeletePostgresRollsBackAfterRowDelete(t *testing.T) {
 	defer cancel()
 	wrap := &cancelAfterDelete{cancel: cancel}
 	d := setupPostgres(t, func(s accesskeystore.Store) accesskeystore.Store { wrap.Store = s; return wrap })
-	rec, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, "alice", nil)
+	rec, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, new("alice"), nil)
 	require.NoError(t, err)
 	page, err := d.delegations.ListByAudience(t.Context(), rec.ID)
 	require.NoError(t, err)
