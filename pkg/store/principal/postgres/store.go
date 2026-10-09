@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/principal"
+	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,17 +30,36 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) error {
+// Add runs the upsert in a short transaction so its wait is bounded at
+// [store.LockTimeout]: the row lock it takes waits for an in-flight Delete of
+// the same principal, and a longer wait returns [store.ErrLockTimeout]. It
+// first takes the tenant's advisory lock exclusive ([tenantstore.LockNamespace]),
+// which a policy write holds shared for its transaction, so the new principal
+// is committed either before the write's callback lists the tenant's
+// principals or after the write itself; that wait is bounded the same way.
+func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err error) {
 	if tenant == did.Undef {
 		return fmt.Errorf("principal tenant is required: %w", store.ErrInvalidArgument)
 	}
 	if externalID == "" {
 		return fmt.Errorf("principal external ID is required: %w", store.ErrInvalidArgument)
 	}
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	if err := pglock.Advisory(ctx, tx, tenantstore.LockNamespace, tenant.String(), false); err != nil {
+		return err
+	}
 	// The upsert revives a tombstone under the same id; it touches nothing when
-	// the row is live, and the zero row count reports the duplicate. The row
-	// lock it takes waits for an in-flight Tombstone of the same principal.
-	tag, err := s.pool.Exec(ctx, `
+	// the row is live, and the zero row count reports the duplicate.
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO principal (tenant_id, external_id)
 		VALUES ($1, $2)
 		ON CONFLICT (tenant_id, external_id) DO UPDATE
@@ -51,28 +72,38 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 	if tag.RowsAffected() == 0 {
 		return store.ErrRecordExists
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
 	return nil
 }
 
 // Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
-// read waits on a Tombstone that holds the row FOR UPDATE.
-func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principal.Record, error) {
-	query := `
+// read waits on a Tombstone that holds the row FOR UPDATE. The share-locked read
+// runs in a short transaction of its own so its wait is bounded at
+// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
+func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (rec principal.Record, err error) {
+	defer func() { err = pglock.MapError(err) }()
+	const query = `
 		SELECT tenant_id, external_id, created_at
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
 	`
-	if store.NewReadConfig(opts...).Share {
-		query += ` FOR SHARE`
+	if !store.NewReadConfig(opts...).Share {
+		rec, err = scanRecord(s.pool.QueryRow(ctx, query, tenant.String(), externalID))
+		return pglock.Found(rec, err, "principal")
 	}
-	rec, err := scanRecord(s.pool.QueryRow(ctx, query, tenant.String(), externalID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return principal.Record{}, store.ErrRecordNotFound
-	}
+
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
-		return principal.Record{}, fmt.Errorf("getting principal: %w", err)
+		return principal.Record{}, fmt.Errorf("beginning transaction: %w", err)
 	}
-	return rec, nil
+	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the lock
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return principal.Record{}, err
+	}
+	rec, err = scanRecord(tx.QueryRow(ctx, query+` FOR SHARE`, tenant.String(), externalID))
+	return pglock.Found(rec, err, "principal")
 }
 
 func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.Record, error) {
@@ -104,13 +135,26 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 // Tombstone runs in one transaction: it locks the row FOR UPDATE, runs beforeCommit
 // while holding the lock, sets deleted_at and commits. A locked
 // read of the row (see [Store.Get]) waits for the commit or the rollback.
-func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) error {
-	tx, err := s.pool.Begin(ctx)
+//
+// The lock is held across beforeCommit, which checks that no policy names the
+// principal, revokes what its keys hold and deletes their rows. It receives
+// this transaction through [pglock.WithTx], so a store that opens with
+// [pglock.Begin] writes inside it and commits or rolls back with the removal;
+// the caller strips the principal from its policies before locking. A policy write naming the principal meanwhile key-share
+// locks this row and waits for the outcome, so the wait here and the wait
+// there are bounded at [store.LockTimeout] and one of the two callers is given
+// [store.ErrLockTimeout] to retry instead of both hanging.
+func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) (err error) {
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
 	var deleted bool
 	err = tx.QueryRow(ctx, `
 		SELECT deleted_at IS NOT NULL
@@ -126,7 +170,7 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	}
 
 	if beforeCommit != nil {
-		if err := beforeCommit(ctx); err != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx)); err != nil {
 			return fmt.Errorf("before tombstoning principal: %w", err)
 		}
 	}
@@ -144,22 +188,29 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	return nil
 }
 
-// WithLock runs in one transaction: it locks the live rows FOR NO KEY UPDATE
-// in external ID order, runs fn while holding them and commits. Sorting keeps
-// two WithLock calls over overlapping principals from deadlocking. The mode
-// blocks a share-locked Get and a Tombstone, and leaves alone the FOR KEY SHARE
-// a policy write holds on the principals it names, since fn may run inside
-// that write.
-func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
+// WithLock runs in one transaction: it locks the live rows FOR NO KEY UPDATE in
+// external ID order, runs fn while holding them and commits. Sorting keeps two
+// WithLock calls over overlapping principals from deadlocking; the wait for a row a
+// removal holds is bounded at [store.LockTimeout] and a longer one returns
+// [store.ErrLockTimeout]. The mode blocks a share-locked Get and a Tombstone, and
+// leaves alone the FOR KEY SHARE a policy write holds on the principals it
+// names, since fn may run inside that write. fn receives this transaction
+// through [pglock.WithTx], so a store that opens with [pglock.Begin] writes
+// inside it.
+func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) (err error) {
 	if len(externalIDs) == 0 {
 		return fn(ctx)
 	}
-	tx, err := s.pool.Begin(ctx)
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		SELECT 1
 		FROM principal
@@ -169,7 +220,7 @@ func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []stri
 	`, tenant.String(), externalIDs); err != nil {
 		return fmt.Errorf("locking principals: %w", err)
 	}
-	if err := fn(ctx); err != nil {
+	if err := fn(pglock.WithTx(ctx, tx)); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -178,9 +229,26 @@ func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []stri
 	return nil
 }
 
-func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM principal WHERE tenant_id = $1`, tenant.String()); err != nil {
+// DeleteByTenant removes every principal of the tenant in a short transaction
+// so its wait is bounded at [store.LockTimeout]: a row held FOR UPDATE by a
+// removal in progress blocks the delete, and a longer wait returns
+// [store.ErrLockTimeout] with nothing written.
+func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) {
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM principal WHERE tenant_id = $1`, tenant.String()); err != nil {
 		return fmt.Errorf("deleting principals by tenant: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
