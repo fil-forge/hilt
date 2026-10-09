@@ -218,6 +218,20 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 	return recs, nil
 }
 
+func (s *Store) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	var ids []string
+	for id, e := range s.principals[tenant] {
+		if !e.deleted {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
 // Tombstone holds the row's slot for the whole call and takes the map mutex only
 // to read the entry and, at the end, to write the tombstone. fn runs
 // with the map unlocked, so it may write the policy store whose own writes
