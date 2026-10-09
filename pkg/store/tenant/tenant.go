@@ -7,6 +7,18 @@ import (
 	"github.com/fil-forge/ucantone/did"
 )
 
+// LockNamespace is the first key of the per-tenant advisory lock; the
+// second is the tenant DID. A policy write holds it shared for its
+// transaction; a principal add holds it exclusive for its upsert. Row locks
+// cannot order the two, because the add's row does not exist until it
+// commits: without the lock a principal added after the write's callback
+// listed the tenant's principals, and before the write committed, could
+// create an access key that finds no policy to grant from and is never
+// rotated. Under it the add commits either before the listing, so the write
+// rotates the new principal's keys, or after the commit, so the key's
+// creation reads the committed policy.
+const LockNamespace int32 = 0x54454e54 // "TENT"
+
 type Status string
 
 const (
