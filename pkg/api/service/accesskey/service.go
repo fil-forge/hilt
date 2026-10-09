@@ -15,6 +15,7 @@ import (
 	"slices"
 	"time"
 
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
@@ -87,8 +88,8 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		return accesskeystore.Record{}, "", ErrInvalidName
 	}
 	if principalID != nil {
-		if *principalID == "" {
-			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		if !principalsvc.ValidID(*principalID) {
+			return accesskeystore.Record{}, "", principalsvc.ErrInvalidPrincipalID
 		}
 		if len(permissions) > 0 || len(bucketNames) > 0 {
 			return accesskeystore.Record{}, "", ErrPrincipalScoped
@@ -121,6 +122,8 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		_, err := s.principals.Get(ctx, tenantRec.ID, *principalID, store.WithShareLock())
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
+		} else if errors.Is(err, store.ErrLockTimeout) {
+			return accesskeystore.Record{}, "", ErrConcurrentChange
 		} else if err != nil {
 			return accesskeystore.Record{}, "", fmt.Errorf("looking up principal: %w", err)
 		}
@@ -224,6 +227,12 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if principalID != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
+		// A removal or a policy write holding the principal row past the
+		// store's lock timeout leaves nothing written, and the call can be
+		// repeated.
+		if errors.Is(err, store.ErrLockTimeout) {
+			return accesskeystore.Record{}, "", ErrConcurrentChange
+		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
 	}
 
@@ -240,6 +249,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID, store.WithShareLock())
 		if err != nil {
 			rollback()
+			if errors.Is(err, store.ErrLockTimeout) {
+				return accesskeystore.Record{}, "", ErrConcurrentChange
+			}
 			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
 		}
 		for _, p := range policies {
@@ -276,6 +288,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			return map[did.DID][]ucan.Delegation{accessKeyID: dels}, nil
 		}); err != nil {
 			rollback()
+			if errors.Is(err, store.ErrLockTimeout) {
+				return accesskeystore.Record{}, "", ErrConcurrentChange
+			}
 			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)
 		}
 	}
@@ -291,7 +306,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 
 // List returns the tenant's access keys and a DID→name map for the buckets they
 // reference (for rendering).
-func (s *Service) List(ctx context.Context, externalID string) ([]accesskeystore.Record, map[did.DID]string, error) {
+func (s *Service) List(ctx context.Context, externalID string, opts ...accesskeystore.ListOption) ([]accesskeystore.Record, map[did.DID]string, error) {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, ErrTenantNotFound
@@ -299,7 +314,7 @@ func (s *Service) List(ctx context.Context, externalID string) ([]accesskeystore
 		return nil, nil, fmt.Errorf("looking up tenant: %w", err)
 	}
 
-	recs, err := s.accessKeys.ListByTenant(ctx, tenantRec.ID)
+	recs, err := s.accessKeys.ListByTenant(ctx, tenantRec.ID, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing access keys: %w", err)
 	}
@@ -346,15 +361,16 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 	return rec, names, nil
 }
 
-// Delete revokes an access key belonging to the tenant: publishing UCAN
-// revocations for its delegations, then removing its record and those
-// delegations under the key's delegation lock, and its vault key. Revocations
-// are published first so that a revocation service failure leaves the key
-// intact and the call cleanly retryable — otherwise the delegations would live
-// on with nothing for a verifier to check. The record goes under the lock so a
-// policy rotation that listed the key and is waiting on the lock finds it gone
+// Delete removes an access key belonging to the tenant. Its delegations are
+// revoked first, in one request and under the key's delegation lock, so a
+// rotation of the same key in flight waits for the outcome: publishing before
+// anything is removed leaves the key intact when the revocation service fails,
+// so the call is cleanly retryable — otherwise the delegations would live on
+// with nothing for a verifier to check. The record goes under the same lock,
+// so a rotation that listed the key and is waiting on the lock finds it gone
 // rather than issuing it fresh delegations. Both kinds of key are deleted the
-// same way.
+// same way. A row another write holds past the store's lock timeout is
+// [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -391,17 +407,29 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 				return nil, err
 			}
 		}
+		// A lock the delete waited on means another writer holds the row;
+		// nothing is committed and the caller repeats the call.
 		if err := s.accessKeys.Delete(ctx, id); err != nil {
 			return nil, fmt.Errorf("deleting access key: %w", err)
 		}
 		return nil, nil
 	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		log.Info("access key removal lost a race with a concurrent write", zap.Error(err))
+		return ErrConcurrentChange
+	}
 	if err != nil {
 		return fmt.Errorf("revoking access key: %w", err)
 	}
+	// The row went first, so a key whose vault entry outlives it is unreachable
+	// rather than present but unusable.
 	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
+	s.logger.Info("deleted access key",
+		zap.Stringer("tenant", tenantRec.ID),
+		zap.Stringer("access_key", id),
+	)
 	return nil
 }
 

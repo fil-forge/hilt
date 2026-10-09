@@ -32,12 +32,20 @@ type UpdateTenantStatusRequest struct {
 	Status TenantStatus `json:"status"`
 }
 
+// The two kinds of access key, as the type field names them.
+const (
+	AccessKeyTypeService   = "service"
+	AccessKeyTypePrincipal = "principal"
+)
+
 // AccessKey is the metadata for an S3 access key (never includes the secret).
-// A service key carries its permissions and buckets; a principal-bound key
-// carries the principal it is bound to in their place.
+// Type says which kind it is. A service key carries its permissions and
+// buckets; a principal-bound key carries the principal it is bound to in their
+// place.
 type AccessKey struct {
 	AccessKeyID string     `json:"accessKeyId"`
 	Name        string     `json:"name"`
+	Type        string     `json:"type"`
 	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
 	PrincipalID *string    `json:"principalId,omitempty"`
@@ -116,4 +124,17 @@ type Metrics struct {
 	Storage StorageMetrics `json:"storage"`
 	Egress  EgressMetrics  `json:"egress"`
 	Ingress IngressMetrics `json:"ingress"`
+}
+
+// Principal is a console user of a tenant, identified by the console's principalId.
+// It holds no key material and no delegation: its access to the tenant's
+// buckets is computed from the bucket policies naming it.
+type Principal struct {
+	PrincipalID string    `json:"principalId"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// PrincipalList is the body of GET /tenants/{tenantId}/principals.
+type PrincipalList struct {
+	Items []Principal `json:"items"`
 }

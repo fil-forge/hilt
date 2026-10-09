@@ -11,6 +11,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -315,6 +316,25 @@ func TestAccessKeyStore(t *testing.T) {
 	}
 }
 
+// TestAccessKeyStoreMemoryGuard pins the memory store's counterpart of the
+// Postgres principal check: built with WithPrincipals over the memory
+// principal store, it refuses a key bound to a principal that is missing or
+// removed.
+func TestAccessKeyStoreMemoryGuard(t *testing.T) {
+	principals := principalmemory.New()
+	s := accesskeymemory.New(accesskeymemory.WithPrincipals(principals.WithLive))
+	tenantID := testutil.RandomDID(t)
+
+	err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "ghost", "k"))
+	require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+	require.NoError(t, principals.Add(t.Context(), tenantID, "user-1"))
+	require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "laptop")))
+	require.NoError(t, principals.Tombstone(t.Context(), tenantID, "user-1", nil))
+	err = s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "phone"))
+	require.ErrorIs(t, err, store.ErrInvalidArgument)
+}
+
 // TestAccessKeyStorePostgresIntegrity pins what only the Postgres schema
 // enforces: a principal-bound key must name a principal of its tenant.
 func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
@@ -327,6 +347,16 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		seed.tenant(t, tenantID)
 		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "ghost", "k"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
+	})
+
+	t.Run("a key bound to a removed principal is rejected inside the transaction", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed.tenant(t, tenantID)
+		seed.principal(t, tenantID, "user-1")
+		require.NoError(t, principalpostgres.New(pool).Tombstone(t.Context(), tenantID, "user-1", nil))
+		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "laptop"))
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+		require.ErrorContains(t, err, "was removed")
 	})
 
 	t.Run("a key bound to another tenant's principal is rejected", func(t *testing.T) {

@@ -321,6 +321,48 @@ func TestProvisionTenantHandler(t *testing.T) {
 		require.Equal(t, "did:key:"+wrapRec.KID, wrapVM.String())
 	})
 
+	t.Run("a tenantId holding a slash is refused", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+
+		rec := provisionRequest(t, e, "a%2Fb", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, "InvalidTenantID", decodeError(t, rec).Code)
+		_, err := deps.tenants.GetByExternalID(ctx, "a/b")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("a tenantId holding a percent is refused", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+
+		rec := provisionRequest(t, e, "x%2525y", api.ProvisionTenantRequest{Region: "us-east-1"})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, "InvalidTenantID", decodeError(t, rec).Code)
+		_, err := deps.tenants.GetByExternalID(ctx, "x%25y")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("refuses a tenantId holding a path delimiter or naming a dot segment", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		for _, wire := range []string{"a;b", "a,b", "a%3Fb", "a%25b", "a%2Fb", ".", "..", "%2E", "%2E%2E"} {
+			rec := provisionRequest(t, e, wire, api.ProvisionTenantRequest{Region: "us-east-1"})
+			require.Equal(t, http.StatusBadRequest, rec.Code, wire)
+			require.Equal(t, "InvalidTenantID", decodeError(t, rec).Code, wire)
+		}
+	})
+
+	t.Run("a tenantId holding a space or unicode is provisioned decoded", func(t *testing.T) {
+		e, deps := setupProvision(t, nil)
+		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
+		for wire, id := range map[string]string{"a%20b": "a b", "%C3%BCnicode": "\u00fcnicode"} {
+			require.Equal(t, http.StatusCreated, provisionRequest(t, e, wire, api.ProvisionTenantRequest{Region: "us-east-1"}).Code, wire)
+			_, err := deps.tenants.GetByExternalID(ctx, id)
+			require.NoError(t, err, id)
+		}
+	})
+
 	t.Run("is idempotent on the external id", func(t *testing.T) {
 		e, deps := setupProvision(t, nil)
 		require.NoError(t, deps.providers.Add(ctx, testutil.RandomDID(t), "us-east-1", nil))
@@ -485,6 +527,12 @@ func TestGetTenantHandler(t *testing.T) {
 		rec := doRequest(t, e, http.MethodGet, "/tenants/missing", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
 		require.Equal(t, api.Error{Code: "TenantNotFound", Message: "tenant not found"}, decodeError(t, rec))
+	})
+
+	t.Run("a tenantId the server refuses is refused on the route too", func(t *testing.T) {
+		rec := doRequest(t, e, http.MethodGet, "/tenants/a%2Fb", nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, "InvalidTenantID", decodeError(t, rec).Code)
 	})
 }
 
