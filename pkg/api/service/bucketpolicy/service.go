@@ -1,5 +1,5 @@
 // Package bucketpolicy provides the business logic for bucket policies: the
-// compare-and-set reads and writes of a bucket's policy document, and the two
+// compare-and-set writes of a bucket's policy document, and the two
 // principal reads computed from it, the policies naming a principal and its
 // effective actions per bucket.
 //
@@ -46,7 +46,8 @@ type Access struct {
 	Actions []string
 }
 
-// Service implements the bucket policy operations shared by the REST handlers.
+// Service implements the bucket policy writes the /s3/bucket/policy handler
+// makes and the principal reads the REST handlers serve.
 type Service struct {
 	logger     *zap.Logger
 	tenants    tenantstore.Store
@@ -75,26 +76,7 @@ func New(
 	}
 }
 
-// Get returns the bucket's policy with the ETag its next write conditions on.
-func (s *Service) Get(ctx context.Context, externalID, bucketName string) (Record, error) {
-	tenantID, err := s.tenant(ctx, externalID)
-	if err != nil {
-		return Record{}, err
-	}
-	b, err := s.bucket(ctx, tenantID, bucketName)
-	if err != nil {
-		return Record{}, err
-	}
-	rec, err := s.policies.Get(ctx, b.ID)
-	if errors.Is(err, store.ErrRecordNotFound) {
-		return Record{}, ErrPolicyNotFound
-	} else if err != nil {
-		return Record{}, fmt.Errorf("reading the policy of bucket %q: %w", bucketName, err)
-	}
-	return Record{BucketName: bucketName, Policy: rec.Policy, ETag: rec.ETag}, nil
-}
-
-// WriteOption adjusts a [Service.Put].
+// WriteOption adjusts a [Service.Write].
 type WriteOption func(*bucketpolicystore.Input)
 
 // Unconditional makes the write ignore its precondition and replace whatever
@@ -104,37 +86,15 @@ func Unconditional() WriteOption {
 	return func(in *bucketpolicystore.Input) { in.Unconditional = true }
 }
 
-// Put creates or replaces the bucket's policy. A nil ifMatch is the create
-// (If-None-Match: *) and requires the bucket to have no policy; a non-nil one
-// must equal the current ETag; [Unconditional] waives both. It returns the new
-// ETag and whether the call created the first policy for the bucket.
+// Write creates or replaces the bucket's policy, for a caller that has
+// resolved the tenant and the bucket. It validates doc against the tenant's
+// principals. A nil ifMatch is the create (If-None-Match: *) and requires the
+// bucket to have no policy; a non-nil one must equal the current ETag;
+// [Unconditional] waives both. bucketName names the bucket in errors. It
+// returns the new ETag and whether the bucket had no policy before.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
-func (s *Service) Put(ctx context.Context, externalID, bucketName string, doc bucketpolicy.Policy, ifMatch *string, opts ...WriteOption) (string, bool, error) {
-	tenantID, err := s.tenant(ctx, externalID)
-	if err != nil {
-		return "", false, err
-	}
-	b, err := s.bucket(ctx, tenantID, bucketName)
-	if err != nil {
-		return "", false, err
-	}
-	etag, created, err := s.Write(ctx, tenantID, b.ID, bucketName, doc, ifMatch, opts...)
-	if err != nil {
-		return "", false, err
-	}
-	s.logger.Info("wrote bucket policy",
-		zap.Stringer("tenant", tenantID), zap.String("bucket", bucketName), zap.Bool("created", created))
-	return etag, created, nil
-}
-
-// Write is the write [Service.Put] makes once it has resolved the tenant and
-// the bucket, for a caller that already holds both: it validates doc against
-// the tenant's principals, creates or replaces the bucket's policy under the
-// same compare-and-set rule, and rotates the affected principals' keys inside
-// the store's transaction. bucketName names the bucket in errors. It returns
-// the new ETag and whether the bucket had no policy before.
 func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc bucketpolicy.Policy, ifMatch *string, opts ...WriteOption) (string, bool, error) {
 	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
@@ -184,27 +144,14 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 	return etag, created, nil
 }
 
-// Delete removes the bucket's policy. ifMatch must equal the current ETag.
-// Every principal the policy reached loses its access, so each one's keys lose
-// their delegations over the bucket inside the store's transaction.
-func (s *Service) Delete(ctx context.Context, externalID, bucketName, ifMatch string) error {
-	tenantID, err := s.tenant(ctx, externalID)
-	if err != nil {
-		return err
-	}
-	b, err := s.bucket(ctx, tenantID, bucketName)
-	if err != nil {
-		return err
-	}
-	return s.Remove(ctx, tenantID, b.ID, bucketName, ifMatch)
-}
-
-// Remove is the delete [Service.Delete] makes once it has resolved the tenant
-// and the bucket, for a caller that already holds both, as [Service.Write] is
-// for a write. bucketName names the bucket in errors and logs.
+// Remove removes the bucket's policy, for a caller that has resolved the
+// tenant and the bucket. ifMatch must equal the current ETag. Every principal
+// the policy reached loses its access, so each one's keys lose their
+// delegations over the bucket inside the store's transaction. bucketName names
+// the bucket in errors and logs.
 func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName, ifMatch string) error {
 	err := s.policies.Delete(ctx, bucketID, ifMatch, func(ctx context.Context, old bucketpolicystore.Record) error {
-		// Re-list under the bucket lock, as Put does.
+		// Re-list under the bucket lock, as Write does.
 		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 		if err != nil {
 			return err
@@ -337,19 +284,6 @@ func (s *Service) tenant(ctx context.Context, externalID string) (did.DID, error
 		return did.Undef, fmt.Errorf("looking up tenant: %w", err)
 	}
 	return rec.ID, nil
-}
-
-// bucket resolves a bucket name within the tenant. A bucket another tenant
-// owns is reported as missing, so a policy read tells a caller nothing about
-// another tenant's names.
-func (s *Service) bucket(ctx context.Context, tenantID did.DID, name string) (bucketstore.Record, error) {
-	rec, err := s.buckets.GetByName(ctx, name)
-	if errors.Is(err, store.ErrRecordNotFound) || (err == nil && rec.Tenant != tenantID) {
-		return bucketstore.Record{}, ErrBucketNotFound
-	} else if err != nil {
-		return bucketstore.Record{}, fmt.Errorf("looking up bucket %q: %w", name, err)
-	}
-	return rec, nil
 }
 
 // bucketNames resolves the bucket DIDs the records carry to the names the API

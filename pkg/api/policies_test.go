@@ -31,6 +31,7 @@ type policyDeps struct {
 	principals *principalmemory.Store
 	policies   *bucketpolicysvc.Service
 	tenantID   did.DID // "tenant-1"
+	photos     did.DID
 }
 
 // setupPolicies serves every policy route over memory stores, with two tenants
@@ -42,10 +43,11 @@ func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 		buckets:    bucketmemory.New(),
 		principals: principalmemory.New(),
 		tenantID:   testutil.RandomDID(t),
+		photos:     testutil.RandomDID(t),
 	}
 	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
 	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", testutil.RandomDID(t), tenant.Active))
-	require.NoError(t, deps.buckets.Add(t.Context(), testutil.RandomDID(t), deps.tenantID, "photos"))
+	require.NoError(t, deps.buckets.Add(t.Context(), deps.photos, deps.tenantID, "photos"))
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "user-1"))
 
 	// No principal holds a key here, so the grant rotator has nothing to
@@ -71,7 +73,7 @@ func allowUser1(actions ...string) bucketpolicy.Statement {
 // as the S3 PutBucketPolicy path does, and returns its ETag.
 func createPolicy(t *testing.T, deps *policyDeps, statements ...bucketpolicy.Statement) string {
 	t.Helper()
-	etag, _, err := deps.policies.Put(t.Context(), "tenant-1", "photos", bucketpolicy.Policy{Statements: statements}, nil)
+	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", bucketpolicy.Policy{Statements: statements}, nil)
 	require.NoError(t, err)
 	return etag
 }
