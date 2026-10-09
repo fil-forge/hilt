@@ -76,26 +76,32 @@ func New(
 	}
 }
 
-// WriteOption adjusts a [Service.Write].
+// WriteOption sets the precondition of a [Service.Write]. Without one the
+// write is unconditional, as a PutBucketPolicy without If-Match or
+// If-None-Match is.
 type WriteOption func(*bucketpolicystore.Input)
 
-// Unconditional makes the write ignore its precondition and replace whatever
-// the bucket holds, as a PutBucketPolicy without If-Match or If-None-Match
-// does.
-func Unconditional() WriteOption {
-	return func(in *bucketpolicystore.Input) { in.Unconditional = true }
+// IfMatch makes the write replace the bucket's policy only if its current ETag
+// is etag.
+func IfMatch(etag string) WriteOption {
+	return func(in *bucketpolicystore.Input) { in.IfMatch, in.Unconditional = &etag, false }
+}
+
+// IfNoneMatch makes the write create the bucket's policy only if the bucket
+// has none (If-None-Match: *).
+func IfNoneMatch() WriteOption {
+	return func(in *bucketpolicystore.Input) { in.IfMatch, in.Unconditional = nil, false }
 }
 
 // Write creates or replaces the bucket's policy, for a caller that has
 // resolved the tenant and the bucket. It validates doc against the tenant's
-// principals. A nil ifMatch is the create (If-None-Match: *) and requires the
-// bucket to have no policy; a non-nil one must equal the current ETag;
-// [Unconditional] waives both. bucketName names the bucket in errors. It
-// returns the new ETag and whether the bucket had no policy before.
+// principals, and checks the precondition [IfMatch] or [IfNoneMatch] sets.
+// bucketName names the bucket in errors. It returns the new ETag and whether
+// the bucket had no policy before.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
-func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc bucketpolicy.Policy, ifMatch *string, opts ...WriteOption) (string, bool, error) {
+func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc bucketpolicy.Policy, opts ...WriteOption) (string, bool, error) {
 	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
 		return "", false, err
@@ -104,10 +110,10 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 		return "", false, err
 	}
 	in := bucketpolicystore.Input{
-		Bucket:  bucketID,
-		Tenant:  tenantID,
-		Policy:  doc,
-		IfMatch: ifMatch,
+		Bucket:        bucketID,
+		Tenant:        tenantID,
+		Policy:        doc,
+		Unconditional: true,
 	}
 	for _, opt := range opts {
 		opt(&in)

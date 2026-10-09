@@ -73,7 +73,7 @@ func allowUser1(actions ...string) bucketpolicy.Statement {
 // as the S3 PutBucketPolicy path does, and returns its ETag.
 func createPolicy(t *testing.T, deps *policyDeps, statements ...bucketpolicy.Statement) string {
 	t.Helper()
-	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", bucketpolicy.Policy{Statements: statements}, nil)
+	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", bucketpolicy.Policy{Statements: statements}, bucketpolicysvc.IfNoneMatch())
 	require.NoError(t, err)
 	return etag
 }

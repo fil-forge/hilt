@@ -56,15 +56,17 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		if err != nil {
 			return nil, err
 		}
-		ifMatch, unconditional, err := precondition(authz, args.Request.Headers)
+		ifMatch, ifNoneMatch, err := precondition(authz, args.Request.Headers)
 		if err != nil {
 			return nil, err
 		}
 		var opts []bucketpolicysvc.WriteOption
-		if unconditional {
-			opts = append(opts, bucketpolicysvc.Unconditional())
+		if ifMatch != "" {
+			opts = append(opts, bucketpolicysvc.IfMatch(ifMatch))
+		} else if ifNoneMatch {
+			opts = append(opts, bucketpolicysvc.IfNoneMatch())
 		}
-		etag, _, err := s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, ifMatch, opts...)
+		etag, _, err := s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, opts...)
 		if errors.Is(err, bucketpolicysvc.ErrBucketNotFound) {
 			return nil, fmt.Errorf("%w: %q", ErrUnknownBucket, name)
 		} else if err != nil {
@@ -74,20 +76,16 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		return &s3bkt.PolicyOK{ETag: etag}, nil
 
 	case auth.OpDeleteBucketPolicy:
-		ifMatch, unconditional, err := precondition(authz, args.Request.Headers)
+		ifMatch, ifNoneMatch, err := precondition(authz, args.Request.Headers)
 		if err != nil {
 			return nil, err
 		}
-		tag := ""
-		switch {
-		case unconditional:
-		case ifMatch == nil:
+		if ifNoneMatch {
 			// If-None-Match: * conditions a create; a delete has nothing to create.
 			return nil, fmt.Errorf("a DeleteBucketPolicy cannot carry If-None-Match: %w", bucketpolicysvc.ErrInvalidPrecondition)
-		default:
-			tag = *ifMatch
 		}
-		if err := s.policyWrites.Remove(ctx, tenantID, bucketID, name, tag); err != nil {
+		// An empty ifMatch is the unconditional delete.
+		if err := s.policyWrites.Remove(ctx, tenantID, bucketID, name, ifMatch); err != nil {
 			return nil, err
 		}
 		log.Info("deleted bucket policy over S3")
@@ -114,38 +112,38 @@ func bodyMatchesSignature(authz *auth.AuthorizedRequest, body []byte) error {
 	return nil
 }
 
-// precondition reads a policy write's conditional headers. Neither header is
-// the unconditional write AWS defines for these operations. If-Match with the
-// current ETag replaces or deletes, and If-None-Match: * creates (a nil tag).
+// precondition reads a policy write's conditional headers: the If-Match tag,
+// and whether If-None-Match: * was sent. Neither header (an empty tag and
+// false) is the unconditional write AWS defines for these operations. If-Match
+// with the current ETag replaces or deletes, and If-None-Match: * creates.
 // Both headers, an If-None-Match other than *, or a header the signature does
 // not cover is [bucketpolicysvc.ErrInvalidPrecondition].
-func precondition(authz *auth.AuthorizedRequest, headers map[string]string) (ifMatch *string, unconditional bool, err error) {
+func precondition(authz *auth.AuthorizedRequest, headers map[string]string) (ifMatch string, ifNoneMatch bool, err error) {
 	// HeaderValue reads an empty value as absent, which would turn a malformed
 	// precondition into an unconditional write; only a header that is not sent
 	// at all means unconditional.
 	for k, v := range headers {
 		if (strings.EqualFold(k, "If-Match") || strings.EqualFold(k, "If-None-Match")) && strings.TrimSpace(v) == "" {
-			return nil, false, fmt.Errorf("%s is empty: %w", k, bucketpolicysvc.ErrInvalidPrecondition)
+			return "", false, fmt.Errorf("%s is empty: %w", k, bucketpolicysvc.ErrInvalidPrecondition)
 		}
 	}
 	match, hasMatch := auth.HeaderValue(headers, "If-Match")
 	noneMatch, hasNoneMatch := auth.HeaderValue(headers, "If-None-Match")
 	for name, present := range map[string]bool{"If-Match": hasMatch, "If-None-Match": hasNoneMatch} {
 		if present && !authz.Signed.HeaderSigned(name) {
-			return nil, false, fmt.Errorf("%s is not covered by the request signature: %w", name, bucketpolicysvc.ErrInvalidPrecondition)
+			return "", false, fmt.Errorf("%s is not covered by the request signature: %w", name, bucketpolicysvc.ErrInvalidPrecondition)
 		}
 	}
 	switch {
 	case !hasMatch && !hasNoneMatch:
-		return nil, true, nil
+		return "", false, nil
 	case hasMatch && hasNoneMatch:
-		return nil, false, fmt.Errorf("If-Match and If-None-Match together: %w", bucketpolicysvc.ErrInvalidPrecondition)
+		return "", false, fmt.Errorf("If-Match and If-None-Match together: %w", bucketpolicysvc.ErrInvalidPrecondition)
 	case hasNoneMatch && strings.TrimSpace(noneMatch) != "*":
-		return nil, false, fmt.Errorf("If-None-Match must be *: %w", bucketpolicysvc.ErrInvalidPrecondition)
+		return "", false, fmt.Errorf("If-None-Match must be *: %w", bucketpolicysvc.ErrInvalidPrecondition)
 	case hasNoneMatch:
-		return nil, false, nil
+		return "", true, nil
 	default:
-		match = strings.TrimSpace(match)
-		return &match, false, nil
+		return strings.TrimSpace(match), false, nil
 	}
 }

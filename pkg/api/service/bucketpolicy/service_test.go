@@ -307,7 +307,7 @@ func TestPutAndGet(t *testing.T) {
 		d.principal(t, "user-1")
 		document := doc(allow(only("user-1"), "s3:GetObject"))
 
-		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", document, nil)
+		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", document, bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		require.True(t, created)
 		require.Equal(t, bucketpolicy.ETag(document), etag)
@@ -318,19 +318,18 @@ func TestPutAndGet(t *testing.T) {
 		require.Equal(t, document, rec.Policy)
 	})
 
-	t.Run("an unconditional put creates or replaces without a tag", func(t *testing.T) {
+	t.Run("a write without a precondition creates or replaces", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
 		first := doc(allow(only("user-1"), "s3:GetObject"))
-		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, nil, bucketpolicysvc.Unconditional())
+		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first)
 		require.NoError(t, err)
 		require.True(t, created)
 		require.Equal(t, bucketpolicy.ETag(first), etag)
 
 		second := doc(allow(only("user-1"), "s3:PutObject"))
-		stale := `"stale"`
-		etag, created, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", second, &stale, bucketpolicysvc.Unconditional())
-		require.NoError(t, err, "the tag is ignored")
+		etag, created, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", second)
+		require.NoError(t, err)
 		require.False(t, created)
 		require.Equal(t, bucketpolicy.ETag(second), etag)
 		rec, err := d.policies.Get(ctx, d.photos)
@@ -342,10 +341,10 @@ func TestPutAndGet(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
 		first := doc(allow(only("user-1"), "s3:GetObject"))
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), nil)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.IfNoneMatch())
 		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
 
 		rec, err := d.policies.Get(ctx, d.photos)
@@ -356,11 +355,11 @@ func TestPutAndGet(t *testing.T) {
 	t.Run("a replace with a stale ETag fails and writes nothing", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 
 		stale := `"deadbeef"`
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), &stale)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.IfMatch(stale))
 		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
 
 		rec, err := d.policies.Get(ctx, d.photos)
@@ -371,11 +370,11 @@ func TestPutAndGet(t *testing.T) {
 	t.Run("a replace with the current ETag replaces the document", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 
 		next := doc(allow(only("user-1"), "s3:GetObject", "s3:PutObject"))
-		newETag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", next, &etag)
+		newETag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", next, bucketpolicysvc.IfMatch(etag))
 		require.NoError(t, err)
 		require.False(t, created)
 		require.NotEqual(t, etag, newETag)
@@ -389,13 +388,13 @@ func TestPutAndGet(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
 
-		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("ghost"), "s3:GetObject")), nil)
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("ghost"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:CreateBucket")), nil)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:CreateBucket")), bucketpolicysvc.IfNoneMatch())
 		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", bucketpolicy.Policy{}, nil)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", bucketpolicy.Policy{}, bucketpolicysvc.IfNoneMatch())
 		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
 
 		_, err = d.policies.Get(ctx, d.photos)
@@ -411,7 +410,7 @@ func TestRotations(t *testing.T) {
 		d.principal(t, "user-1", "user-2", "user-3")
 
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1", "user-2"), "s3:GetObject")), nil)
+			doc(allow(only("user-1", "user-2"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		require.Empty(t, d.swarf.Revocations(), "a first grant over the bucket revokes nothing")
 		require.Equal(t, []string{"user-1", "user-2"}, d.granted(t))
@@ -431,11 +430,11 @@ func TestRotations(t *testing.T) {
 		d.principal(t, "user-1", "user-2")
 		second := d.key(t, "user-1")
 
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		require.Equal(t, commandsFor("s3:GetObject"), d.over(t, second, d.photos))
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), &etag)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.IfMatch(etag))
 		require.NoError(t, err)
 		require.Len(t, d.swarf.Revocations(), 2, "one revocation per key over the bucket")
 		require.Equal(t, 1, d.swarf.Calls(), "every revocation of one write goes in one request")
@@ -447,7 +446,7 @@ func TestRotations(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2", "user-3")
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1", "user-2"), "s3:GetObject")), nil)
+			doc(allow(only("user-1", "user-2"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		d.swarf.Reset()
 
@@ -455,7 +454,7 @@ func TestRotations(t *testing.T) {
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(
 			allow(only("user-1"), "s3:GetObject"),
 			allow(only("user-2"), "s3:GetObject", "s3:PutObject"),
-		), &etag)
+		), bucketpolicysvc.IfMatch(etag))
 		require.NoError(t, err)
 		require.Equal(t, []string{"user-2"}, d.rotated())
 		for key, principal := range d.keys {
@@ -475,7 +474,7 @@ func TestRotations(t *testing.T) {
 		d.principal(t, "user-1", "user-2", "user-3")
 
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(everyone, "s3:ListBucket")), nil)
+			doc(allow(everyone, "s3:ListBucket")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		require.Equal(t, []string{"user-1", "user-2", "user-3"}, d.granted(t))
 	})
@@ -492,7 +491,7 @@ func TestRotations(t *testing.T) {
 		d.key(t, "user-2")
 
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(everyone, "s3:ListBucket")), nil)
+			doc(allow(everyone, "s3:ListBucket")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		require.Equal(t, []string{"user-1", "user-2"}, d.granted(t))
 	})
@@ -501,14 +500,14 @@ func TestRotations(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2", "user-3")
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(everyone, "s3:ListBucket")), nil)
+			doc(allow(everyone, "s3:ListBucket")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		d.swarf.Reset()
 
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(
 			allow(everyone, "s3:ListBucket"),
 			deny(only("user-2"), "s3:ListBucket"),
-		), &etag)
+		), bucketpolicysvc.IfMatch(etag))
 		require.NoError(t, err)
 		require.Equal(t, []string{"user-2"}, d.rotated())
 		require.Equal(t, []string{"user-1", "user-3"}, d.granted(t))
@@ -518,7 +517,7 @@ func TestRotations(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2")
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1", "user-2"), "s3:GetObject")), nil)
+			doc(allow(only("user-1", "user-2"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		d.swarf.Reset()
 
@@ -534,7 +533,7 @@ func TestRotations(t *testing.T) {
 	t.Run("a delete with a stale ETag fails, publishes nothing and keeps the policy", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		d.swarf.Reset()
 
@@ -549,7 +548,7 @@ func TestRotations(t *testing.T) {
 	t.Run("a publish failure leaves the old document and the delegations in place", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		before := map[did.DID][]string{}
 		for key := range d.keys {
@@ -558,7 +557,7 @@ func TestRotations(t *testing.T) {
 		d.swarf.Err = errors.New("swarf unreachable")
 
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1", "user-2"), "s3:GetObject", "s3:PutObject")), &etag)
+			doc(allow(only("user-1", "user-2"), "s3:GetObject", "s3:PutObject")), bucketpolicysvc.IfMatch(etag))
 		require.ErrorContains(t, err, "swarf unreachable")
 
 		rec, err := d.policies.Get(ctx, d.photos)
@@ -578,7 +577,7 @@ func TestRotations(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2", "user-3")
 		old := doc(allow(only("user-1"), "s3:GetObject"))
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 
 		tenants := tenantmemory.New()
@@ -587,7 +586,7 @@ func TestRotations(t *testing.T) {
 
 		start := time.Now()
 		// user-1's actions change, so the write has revocations to publish.
-		_, _, err = svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:PutObject")), &etag)
+		_, _, err = svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:PutObject")), bucketpolicysvc.IfMatch(etag))
 		elapsed := time.Since(start)
 		// The batch deadline is reported as the retryable conflict the lock
 		// timeout it runs under would be.
@@ -612,7 +611,7 @@ func TestRotations(t *testing.T) {
 		policies := &rejectingPolicies{Store: d.policies, err: store.ErrInvalidArgument}
 		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
 
-		_, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		_, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
 	})
 
@@ -620,11 +619,11 @@ func TestRotations(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
 		old := doc(allow(only("user-1"), "s3:GetObject"))
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, nil)
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		d.swarf.Err = errors.New("swarf unreachable")
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), &etag)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.IfMatch(etag))
 		require.ErrorContains(t, err, "swarf unreachable")
 
 		rec, err := d.policies.Get(ctx, d.photos)
@@ -662,7 +661,7 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	put := make(chan error, 1)
 	go func() {
 		_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1"), "s3:GetObject")), nil)
+			doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		put <- err
 	}()
 	<-reached // the write holds the policy store and is about to read the principals
@@ -709,7 +708,7 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	put := make(chan error, 1)
 	go func() {
 		_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1"), "s3:GetObject")), nil)
+			doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		put <- err
 	}()
 	<-policies.reached
@@ -754,7 +753,7 @@ func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
 		func(entered chan<- struct{}, release <-chan struct{}) error {
 			go func() { <-reached; close(entered) }()
 			go func() { <-release; close(resume) }()
-			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:GetObject")), nil)
+			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 			return err
 		},
 		func() error {
@@ -848,7 +847,7 @@ func TestPolicyWriteCancelledAfterRotationPostgres(t *testing.T) {
 
 	rotator := grant.NewRotator(zap.NewNop(), pg.delegations, pg.accessKeys, d.secrets, d.swarf)
 	svc := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, pg.principals, pg.policies, rotator)
-	etagA, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:ListBucket")), nil)
+	etagA, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:ListBucket")), bucketpolicysvc.IfNoneMatch())
 	require.NoError(t, err)
 	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), pg.over(t, key, d.photos))
 
@@ -856,7 +855,7 @@ func TestPolicyWriteCancelledAfterRotationPostgres(t *testing.T) {
 	defer cancel()
 	principals := &afterLock{Store: pg.principals, after: cancel}
 	cancelling := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, principals, pg.policies, rotator)
-	_, _, err = cancelling.Write(writeCtx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:ListBucket")), &etagA)
+	_, _, err = cancelling.Write(writeCtx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:ListBucket")), bucketpolicysvc.IfMatch(etagA))
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, principals.after, "the rotation ran")
 
@@ -888,7 +887,7 @@ func TestKeyCreatedDuringPolicyCreatePostgres(t *testing.T) {
 			principals := &afterLock{Store: pg.principals, after: func() { close(entered); <-release }}
 			svc := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, principals, pg.policies,
 				grant.NewRotator(zap.NewNop(), pg.delegations, pg.accessKeys, d.secrets, d.swarf))
-			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 			return err
 		},
 		func() error {
@@ -913,7 +912,7 @@ func TestPolicyWriteToMissingBucketPostgres(t *testing.T) {
 	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals,
 		bucketpolicypostgres.New(pool), d.rotator(d.swarf))
 
-	_, _, err := svc.Write(t.Context(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:ListBucket")), nil)
+	_, _, err := svc.Write(t.Context(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:ListBucket")), bucketpolicysvc.IfNoneMatch())
 	require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound)
 }
 
@@ -927,12 +926,12 @@ func TestPrincipalReads(t *testing.T) {
 		d.principal(t, "user-1", "user-2")
 		backups := testutil.RandomDID(t)
 		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, "backups"))
-		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), nil)
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		_, _, err = d.svc.Write(ctx, d.tenantID, backups, "backups", doc(
 			allow(everyone, "s3:ListBucket"),
 			deny(only("user-2"), "s3:ListBucket"),
-		), nil)
+		), bucketpolicysvc.IfNoneMatch())
 		require.NoError(t, err)
 		return d
 	}
