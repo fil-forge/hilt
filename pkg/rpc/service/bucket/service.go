@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -322,6 +323,23 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	return &s3bkt.DeleteOK{}, nil
 }
 
+// sameLinks reports whether the two sets of delegations hold the same CIDs.
+func sameLinks(a, b []ucan.Delegation) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	links := make(map[cid.Cid]bool, len(a))
+	for _, d := range a {
+		links[d.Link()] = true
+	}
+	for _, d := range b {
+		if !links[d.Link()] {
+			return false
+		}
+	}
+	return true
+}
+
 // revokeDelegations publishes, in one request, a UCAN revocation for every
 // delegation over the bucket that the tenant issued — the grants held by its
 // access keys, service and principal-bound alike — signed by the tenant. No
@@ -426,6 +444,24 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	return out, nil
 }
 
+// policyETag reads the bucket policy's entity tag share-locked, so a policy
+// write in flight is waited out and its ETag read once it commits. A bucket
+// with no policy reports "", as [auth.Authorizer.EffectiveActions] does. A
+// wait the store gave up on is [auth.ErrTemporarilyUnavailable].
+func (s *Service) policyETag(ctx context.Context, bucketID did.DID) (string, error) {
+	rec, err := s.policies.Get(ctx, bucketID, store.WithShareLock())
+	if errors.Is(err, store.ErrRecordNotFound) {
+		return "", nil
+	}
+	if errors.Is(err, store.ErrLockTimeout) {
+		return "", fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("looking up bucket policy: %w", err)
+	}
+	return rec.ETag, nil
+}
+
 // Info resolves the named bucket and returns its DID, the access key's permissions,
 // and the proof chains for the access key's delegations that reach the bucket.
 // It carries no signed S3 request, so there is no signature to authenticate:
@@ -469,27 +505,53 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, auth.ErrForeignBucket
 	}
 
+	// A service key carries its own permission set; a principal-bound key its
+	// principal's effective actions on the bucket, whose stored grants over the
+	// bucket are the commands those actions map to. The authorizer reads the
+	// principal and the policy share-locked, so Info observes the same settled
+	// state as authorize: a removed principal is an unknown key, and a bucket
+	// the principal cannot reach is unknown.
+	permissions, etag := akRec.Permissions, ""
+	if akRec.Principal != nil {
+		eff, tag, err := s.authorizer.EffectiveActions(ctx, b.Tenant, *akRec.Principal, b.ID)
+		if errors.Is(err, auth.ErrUnknownAccessKey) {
+			return nil, nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
+		} else if err != nil {
+			return nil, nil, err
+		}
+		if len(eff) == 0 {
+			return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+		}
+		permissions, etag = eff, tag
+	}
+
 	// Build the proof chains from the bucket to the access key: for each grant to
 	// the access key that reaches this bucket (scoped to it or powerline), resolve
 	// its chain up to the bucket→tenant root.
-	stored, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
-		var o []store.PaginationOption
-		if opts.Cursor != nil {
-			o = append(o, store.WithCursor(*opts.Cursor))
+	// listGrants lists the key's grants that reach this bucket: scoped to it or
+	// powerline.
+	listGrants := func() ([]ucan.Delegation, error) {
+		dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+			var o []store.PaginationOption
+			if opts.Cursor != nil {
+				o = append(o, store.WithCursor(*opts.Cursor))
+			}
+			return s.delegations.ListByAudience(ctx, args.AccessKey, o...)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing delegations: %w", err)
 		}
-		return s.delegations.ListByAudience(ctx, args.AccessKey, o...)
-	})
+		return slices.DeleteFunc(dels, func(d ucan.Delegation) bool { return d.Subject().Defined() && d.Subject() != b.ID }), nil
+	}
+	stored, err := listGrants()
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing delegations: %w", err)
+		return nil, nil, err
 	}
 
 	proofSet := map[cid.Cid][]cid.Cid{}
 	var blocks []ucan.Delegation
 	seen := map[string]bool{}
 	for _, d := range stored {
-		if d.Subject().Defined() && d.Subject() != b.ID {
-			continue // grant scoped to a different bucket
-		}
 		proofs, links, err := s.delegations.ProofChain(ctx, args.AccessKey, d.Command(), b.ID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("building proof chain for %s: %w", d.Command(), err)
@@ -506,6 +568,40 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		}
 	}
 
+	// The effective actions and the delegation reads above are not tied
+	// together: a policy write rotates the grants and commits them before the
+	// policy row it belongs to becomes visible, so one landing between them
+	// pairs the old actions with the new grants. ProofChain reads by command
+	// and subject, so it too can return a chain the write just stored. Both
+	// s3:GetObject and s3:ListBucket map to /content/retrieve, so that pairing
+	// can report an action the write removed over a chain that still serves it.
+	// The ETag reread comes after the chain reads and waits on a write still in
+	// flight, whose grants may already have been read, and a policy that moved
+	// meanwhile says the caller should ask again.
+	if akRec.Principal != nil {
+		settled, err := s.policyETag(ctx, b.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if settled != etag {
+			return nil, nil, fmt.Errorf("%w: the bucket policy is being rewritten", auth.ErrTemporarilyUnavailable)
+		}
+		// The ETag is the document's content, so a write and a write back
+		// between the reads leave it where it started while the grants, and
+		// the chains built from them, are the first write's, which the second
+		// revoked. The grants are listed again after the reread, which waited
+		// out any write in flight, so a write that rotated what Info read has
+		// committed its grants by now: a set that moved says the caller should
+		// ask again.
+		current, err := listGrants()
+		if err != nil {
+			return nil, nil, err
+		}
+		if !sameLinks(stored, current) {
+			return nil, nil, fmt.Errorf("%w: the access key's grants were rewritten", auth.ErrTemporarilyUnavailable)
+		}
+	}
+
 	s.logger.Debug("bucket info",
 		zap.Stringer("bucket", b.ID),
 		zap.String("name", args.Name),
@@ -514,7 +610,7 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 	return &s3bkt.InfoOK{
 		ID: b.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			args.AccessKey: akRec.Permissions,
+			args.AccessKey: permissions,
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil
