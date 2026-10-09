@@ -355,7 +355,7 @@ func TestManagementClientPolicies(t *testing.T) {
 			switch r.URL.Path {
 			case "/tenants/acme/principals/user-1/policies":
 				_ = json.NewEncoder(w).Encode(api.PrincipalPolicyList{Items: []api.PrincipalPolicy{
-					{BucketName: "photos", ETag: `"abc"`, Policy: document},
+					{BucketName: "photos", Policy: document},
 				}})
 			case "/tenants/acme/principals/user-1/access":
 				_ = json.NewEncoder(w).Encode(api.PrincipalAccess{Buckets: []api.BucketAccess{
@@ -367,7 +367,7 @@ func TestManagementClientPolicies(t *testing.T) {
 		})
 		policies, err := c.ListPrincipalPolicies(ctx, "acme", "user-1")
 		require.NoError(t, err)
-		require.Equal(t, []api.PrincipalPolicy{{BucketName: "photos", ETag: `"abc"`, Policy: document}}, policies)
+		require.Equal(t, []api.PrincipalPolicy{{BucketName: "photos", Policy: document}}, policies)
 
 		access, err := c.GetPrincipalAccess(ctx, "acme", "user-1")
 		require.NoError(t, err)
