@@ -139,10 +139,10 @@ func (c *Client) CreateBucket(ctx context.Context, req s3.Request, opts ...Metho
 	return invoke(ctx, c, s3bkt.Create, &s3bkt.CreateArguments{Request: req}, opts...)
 }
 
-// Policy invokes /s3/bucket/policy with a forwarded GetBucketPolicy,
+// BucketPolicy invokes /s3/bucket/policy with a forwarded GetBucketPolicy,
 // PutBucketPolicy or DeleteBucketPolicy request; body is the policy document
 // on a PUT. It returns no delegations.
-func (c *Client) Policy(ctx context.Context, req s3.Request, body []byte, opts ...MethodOption) (*s3bkt.PolicyOK, error) {
+func (c *Client) BucketPolicy(ctx context.Context, req s3.Request, body []byte, opts ...MethodOption) (*s3bkt.PolicyOK, error) {
 	ok, _, err := invoke(ctx, c, s3bkt.Policy, &s3bkt.PolicyArguments{Request: req, Body: body}, opts...)
 	return ok, err
 }

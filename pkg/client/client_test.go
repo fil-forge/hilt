@@ -206,7 +206,7 @@ func TestClientPolicy(t *testing.T) {
 			}))
 
 		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Policy, hilt, ingot.DID()))
-		ok, err := c.Policy(t.Context(), s3.Request{Method: "PUT", URL: "https://s3.fil.one/bucket?policy"}, body)
+		ok, err := c.BucketPolicy(t.Context(), s3.Request{Method: "PUT", URL: "https://s3.fil.one/bucket?policy"}, body)
 		require.NoError(t, err)
 		require.NotNil(t, gotArgs)
 		require.Equal(t, "PUT", gotArgs.Request.Method)
@@ -226,7 +226,7 @@ func TestClientPolicy(t *testing.T) {
 			}))
 
 		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Policy, hilt, ingot.DID()))
-		_, err := c.Policy(t.Context(), s3.Request{Method: "GET", URL: "https://s3.fil.one/bucket?policy"}, nil)
+		_, err := c.BucketPolicy(t.Context(), s3.Request{Method: "GET", URL: "https://s3.fil.one/bucket?policy"}, nil)
 		require.Error(t, err)
 	})
 }
