@@ -331,7 +331,7 @@ const maxSetSize = 4096
 // otherwise.
 func wellFormed(d Policy) error {
 	if d.Version != Version2012 && d.Version != Version2008 {
-		return fmt.Errorf("Version %q must be %q or %q: %w", d.Version, Version2012, Version2008, ErrInvalidPolicy)
+		return fmt.Errorf("policy Version %q must be %q or %q: %w", d.Version, Version2012, Version2008, ErrInvalidPolicy)
 	}
 	if len(d.Statements) == 0 {
 		return fmt.Errorf("Statement must not be empty: %w", ErrInvalidPolicy)
@@ -586,11 +586,4 @@ func expand(actions []string) []string {
 		}
 	}
 	return out
-}
-
-func nonNil(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }
