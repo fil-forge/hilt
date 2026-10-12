@@ -1,6 +1,6 @@
 // Package dagjson is the DAG-JSON form of a bucket policy, which the ETag is
 // computed over and the canonical order derived from. It follows the schema
-// from the IAM RFC: the statement, principal and action lists are sets, a set
+// from the IAM RFC: the statement, principal, action and resource lists are sets, a set
 // being a map from its members to Empty, and a policy's statements are the set
 // of their CIDs. The generated encoder (json_gen.go, from gen/main.go) writes
 // map keys and struct fields in sorted order, so neither the order the caller
@@ -22,9 +22,12 @@ type Statement struct {
 	Effect    string
 	Principal map[string]Empty
 	Action    map[string]Empty
+	Resource  map[string]Empty
 }
 
-// Policy is the DAG-JSON form of a policy: the set of its statements' CIDs.
+// Policy is the DAG-JSON form of a policy: its version and the set of its
+// statements' CIDs.
 type Policy struct {
+	Version   string
 	Statement map[string]Empty
 }

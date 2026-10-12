@@ -177,7 +177,7 @@ func TestAuthorize(t *testing.T) {
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket:      bucketID,
 			Tenant:      tenantID,
-			Policy:      bucketpolicy.Policy{Statements: statements},
+			Policy:      bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements},
 			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
@@ -326,6 +326,7 @@ func TestAuthorize(t *testing.T) {
 			Effect:    bucketpolicy.Allow,
 			Principal: bucketpolicy.Only("user-1"),
 			Actions:   []string{"s3:GetObject", "s3:ListBucket"},
+			Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 		})
 
 		authz, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
@@ -338,8 +339,8 @@ func TestAuthorize(t *testing.T) {
 	t.Run("a Deny wins over an Allow naming the same action", func(t *testing.T) {
 		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 		grant(t, policies, bucketID, tenantID,
-			bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject", "s3:ListBucket"}},
-			bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+			bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject", "s3:ListBucket"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
+			bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		)
 
 		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
@@ -356,8 +357,8 @@ func TestAuthorize(t *testing.T) {
 
 		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 		grant(t, policies, bucketID, tenantID,
-			bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
-			bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+			bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
+			bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		)
 		_, err = az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
@@ -369,6 +370,7 @@ func TestAuthorize(t *testing.T) {
 			Effect:    bucketpolicy.Allow,
 			Principal: bucketpolicy.Only("user-1"),
 			Actions:   []string{"s3:GetObject"},
+			Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 		})
 		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
 		require.NoError(t, err)
@@ -405,7 +407,7 @@ func TestAuthorize(t *testing.T) {
 		// the write on the destination and the read on the source, each against
 		// the effective set the bucket's own policy gives the principal.
 		allow := func(actions ...string) bucketpolicy.Statement {
-			return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions}
+			return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
 		}
 
 		t.Run("the source's policy grants the read", func(t *testing.T) {
@@ -655,7 +657,7 @@ func TestAuthorizeLockTimeout(t *testing.T) {
 	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 	seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
 	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: bucketpolicy.Policy{
-		Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}}},
+		Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}},
 	}, Conditional: true}, nil)
 	require.NoError(t, err)
 
@@ -719,7 +721,7 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "effective-actions"))
 	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
 	statement := func(actions ...string) bucketpolicy.Policy {
-		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("alice"), Actions: actions}}}
+		return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("alice"), Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}}}
 	}
 	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
 	require.NoError(t, err)

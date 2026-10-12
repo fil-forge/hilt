@@ -272,15 +272,15 @@ func TestDelete(t *testing.T) {
 
 		// A policy the principal shares, one it holds alone, and one that reaches
 		// it only through the wildcard.
-		shared, _ := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1", "user-2"), Actions: []string{"s3:GetObject"}},
-			{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:DeleteObject"}},
+		shared, _ := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1", "user-2"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
+			{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:DeleteObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
-		alone, _ := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:PutObject"}},
+		alone, _ := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:PutObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
-		everyone, everyoneETag := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:ListBucket"}},
+		everyone, everyoneETag := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:ListBucket"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
@@ -305,8 +305,8 @@ func TestDelete(t *testing.T) {
 		// removed one held alone.
 		rec, err := d.policies.Get(ctx, shared)
 		require.NoError(t, err)
-		require.Equal(t, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-2"), Actions: []string{"s3:GetObject"}},
+		require.Equal(t, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-2"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}}, rec.Policy)
 
 		// The policy naming it alone is deleted with its last statement.
@@ -325,8 +325,8 @@ func TestDelete(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		d.addKey(t, d.tenantID, "user-1", "laptop")
-		alone, _ := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+		alone, _ := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
 
@@ -353,8 +353,8 @@ func TestDelete(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		key := d.addKey(t, d.tenantID, "user-1", "laptop")
-		bucket, etag := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+		bucket, etag := d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
 		d.swarf.Err = errors.New("swarf unreachable")
 
@@ -475,8 +475,8 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		// deleting it.
 		_, _, err = d.svc.Create(ctx, "tenant-1", "user-2")
 		require.NoError(t, err)
-		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1", "user-2"), Actions: []string{"s3:GetObject"}},
+		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1", "user-2"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
 
 		policies := &flakyPolicies{Store: d.policies, err: store.ErrPreconditionFailed}
@@ -494,8 +494,8 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		require.NoError(t, err)
 		_, _, err = d.svc.Create(ctx, "tenant-1", "user-2")
 		require.NoError(t, err)
-		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1", "user-2"), Actions: []string{"s3:GetObject"}},
+		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1", "user-2"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
 
 		// The removal's deadline is below the stores' lock timeout, so a wait
@@ -514,8 +514,8 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		principals := &renamingPrincipals{Store: d.principals, write: func() {
-			d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-				{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+			d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+				{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 			}})
 		}}
 		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
@@ -600,8 +600,8 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		require.NoError(t, err)
 		// The wildcard policy survives the removal, so the creation has grants
 		// to store.
-		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}},
+		d.putPolicy(t, d.tenantID, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}})
 
 		// The removal starts once the key row is committed, and the creation
@@ -676,7 +676,7 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 	_, _, err = svc.Create(ctx, "tenant-pg", "bob")
 	require.NoError(t, err)
 	statement := func(ids ...string) bucketpolicy.Policy {
-		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(ids...), Actions: []string{"s3:GetObject"}}}}
+		return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(ids...), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}}}
 	}
 	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("alice", "bob"), Conditional: true}, nil)
 	require.NoError(t, err)

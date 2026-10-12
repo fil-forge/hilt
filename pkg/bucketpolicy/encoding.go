@@ -17,6 +17,7 @@ func encode(st Statement) dagjson.Statement {
 		Effect:    string(st.Effect),
 		Principal: make(map[string]dagjson.Empty, len(st.Principal.IDs)),
 		Action:    make(map[string]dagjson.Empty, len(st.Actions)),
+		Resource:  make(map[string]dagjson.Empty, len(st.Resources)),
 	}
 	if st.Principal.All {
 		e.Principal[Wildcard] = dagjson.Empty{}
@@ -28,13 +29,16 @@ func encode(st Statement) dagjson.Statement {
 	for _, a := range st.Actions {
 		e.Action[a] = dagjson.Empty{}
 	}
+	for _, r := range st.Resources {
+		e.Resource[r] = dagjson.Empty{}
+	}
 	return e
 }
 
-// decode returns the AWS-shaped statement of e: principals and actions in
-// sorted order, never nil.
+// decode returns the AWS-shaped statement of e: principals, actions and
+// resources in sorted order, never nil.
 func decode(e dagjson.Statement) Statement {
-	st := Statement{Sid: e.Sid, Effect: Effect(e.Effect), Actions: members(e.Action)}
+	st := Statement{Sid: e.Sid, Effect: Effect(e.Effect), Actions: members(e.Action), Resources: members(e.Resource)}
 	if _, all := e.Principal[Wildcard]; all {
 		st.Principal = Everyone()
 	} else {
@@ -71,10 +75,10 @@ func dagJSONCID(raw []byte) cid.Cid {
 	return cid.NewCidV1(cid.DagJSON, sum)
 }
 
-// normalize returns a copy of d in canonical form. The statement, principal
-// and action lists are sets: each is deduplicated and sorted, a wildcard
-// principal drops any stray ids, nil lists become empty lists, and the
-// statements are ordered by their CID. Two policies that differ only in order
+// normalize returns a copy of d in canonical form, its Version kept. The
+// statement, principal, action and resource lists are sets: each is
+// deduplicated and sorted, a wildcard principal drops any stray ids, nil
+// lists become empty lists, and the statements are ordered by their CID. Two policies that differ only in order
 // or in duplicates normalize to the same value.
 func normalize(d Policy) Policy {
 	type keyed struct {
@@ -92,23 +96,23 @@ func normalize(d Policy) Policy {
 	for i, k := range keyedStatements {
 		statements[i] = k.st
 	}
-	return Policy{Statements: statements}
+	return Policy{Version: d.Version, Statements: statements}
 }
 
 // Canonical returns the canonical JSON encoding of d: the [normalize]d
-// document in the AWS shape, compact, with the fields of each statement in
-// the order Sid (omitted when empty), Effect, Principal, Action. It is what
-// Hilt stores and returns.
+// document in the AWS shape, compact, Version before Statement and the fields
+// of each statement in the order Sid (omitted when empty), Effect, Principal,
+// Action, Resource. It is what Hilt stores and returns.
 func Canonical(d Policy) []byte {
 	return encodeJSON(normalize(d))
 }
 
 // ETag returns the entity tag of d: the CID of the DAG-JSON encoding of the
-// policy as sets (CIDv1, dag-json, sha2-256; each statement by the CID of its
-// own encoding), in double quotes as HTTP carries it. Callers treat it as
-// opaque.
+// policy as sets (CIDv1, dag-json, sha2-256; the version, and each statement
+// by the CID of its own encoding), in double quotes as HTTP carries it.
+// Callers treat it as opaque.
 func ETag(d Policy) string {
-	p := dagjson.Policy{Statement: make(map[string]dagjson.Empty, len(d.Statements))}
+	p := dagjson.Policy{Version: d.Version, Statement: make(map[string]dagjson.Empty, len(d.Statements))}
 	for _, st := range d.Statements {
 		p.Statement[statementCID(encode(st)).String()] = dagjson.Empty{}
 	}

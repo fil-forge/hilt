@@ -108,15 +108,15 @@ var everyone = bucketpolicy.Everyone()
 func only(ids ...string) bucketpolicy.Principal { return bucketpolicy.Only(ids...) }
 
 func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions}
+	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
 }
 
 func deny(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions}
+	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
 }
 
 func doc(statements ...bucketpolicy.Statement) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Statements: statements}
+	return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements}
 }
 
 func ptr(s string) *string { return &s }

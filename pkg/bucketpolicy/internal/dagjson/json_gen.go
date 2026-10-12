@@ -231,6 +231,63 @@ func (t *Statement) MarshalDagJSON(w io.Writer) error {
 	}
 
 	written = true
+	if written {
+		if err := jw.WriteComma(); err != nil {
+			return err
+		}
+	}
+
+	// t.Resource (map[string]dagjson.Empty) (map)
+	if len("Resource") > 8192 {
+		return fmt.Errorf("string in field \"Resource\" was too long")
+	}
+	if err := jw.WriteString(string("Resource")); err != nil {
+		return fmt.Errorf("writing string for field \"Resource\": %w", err)
+	}
+	if err := jw.WriteObjectColon(); err != nil {
+		return err
+	}
+	{
+		if len(t.Resource) > 4096 {
+			return fmt.Errorf("cannot marshal t.Resource map too large")
+		}
+
+		if err := jw.WriteObjectOpen(); err != nil {
+			return fmt.Errorf("writing object open for field t.Resource: %w", err)
+		}
+
+		keys := make([]string, 0, len(t.Resource))
+		for k := range t.Resource {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			if i > 0 {
+				if err := jw.WriteComma(); err != nil {
+					return fmt.Errorf("writing comma for field t.Resource: %w", err)
+				}
+			}
+			v := t.Resource[k]
+			if len(k) > 8192 {
+				return fmt.Errorf("string in field k was too long")
+			}
+			if err := jw.WriteString(string(k)); err != nil {
+				return fmt.Errorf("writing string for field k: %w", err)
+			}
+			if err := jw.WriteObjectColon(); err != nil {
+				return fmt.Errorf("writing colon for field t.Resource: %w", err)
+			}
+
+			if err := v.MarshalDagJSON(jw); err != nil {
+				return fmt.Errorf("marshaling field v: %w", err)
+			}
+		}
+		if err := jw.WriteObjectClose(); err != nil {
+			return fmt.Errorf("writing object close for field t.Resource: %w", err)
+		}
+	}
+
+	written = true
 	if t.Sid != "" {
 		if written {
 			if err := jw.WriteComma(); err != nil {
@@ -407,6 +464,55 @@ func (t *Statement) UnmarshalDagJSON(r io.Reader) (err error) {
 					}
 				}
 
+				// t.Resource (map[string]dagjson.Empty) (map)
+			case "Resource":
+				if err := jr.ReadObjectOpen(); err != nil {
+					return fmt.Errorf("reading object open for field t.Resource: %w", err)
+				}
+
+				t.Resource = map[string]Empty{}
+
+				close, err := jr.PeekObjectClose()
+				if err != nil {
+					return fmt.Errorf("peeking object close for field t.Resource: %w", err)
+				}
+				if close {
+					if err := jr.ReadObjectClose(); err != nil {
+						return fmt.Errorf("reading object close for field t.Resource: %w", err)
+					}
+				} else {
+					for i, l := 0, 8192; i < l; i++ {
+						var k string
+						{
+							sval, err := jr.ReadString(8192)
+							if err != nil {
+								if errors.Is(err, jsg.ErrLimitExceeded) {
+									return fmt.Errorf("reading string for field k: string too long")
+								}
+								return fmt.Errorf("reading string for field k: %w", err)
+							}
+							k = string(sval)
+						}
+						if err := jr.ReadObjectColon(); err != nil {
+							return fmt.Errorf("reading object colon for field t.Resource: %w", err)
+						}
+						var v Empty
+
+						if err := v.UnmarshalDagJSON(jr); err != nil {
+							return fmt.Errorf("unmarshaling v: %w", err)
+						}
+
+						t.Resource[k] = v
+						close, err := jr.ReadObjectCloseOrComma()
+						if err != nil {
+							return fmt.Errorf("reading object close or comma for field t.Resource: %w", err)
+						}
+						if close {
+							break
+						}
+					}
+				}
+
 				// t.Sid (string) (string)
 			case "Sid":
 				{
@@ -450,6 +556,7 @@ func (t *Policy) MarshalDagJSON(w io.Writer) error {
 	if err := jw.WriteObjectOpen(); err != nil {
 		return err
 	}
+	written := false
 
 	// t.Statement (map[string]dagjson.Empty) (map)
 	if len("Statement") > 8192 {
@@ -501,6 +608,29 @@ func (t *Policy) MarshalDagJSON(w io.Writer) error {
 		}
 	}
 
+	written = true
+	if written {
+		if err := jw.WriteComma(); err != nil {
+			return err
+		}
+	}
+
+	// t.Version (string) (string)
+	if len("Version") > 8192 {
+		return fmt.Errorf("string in field \"Version\" was too long")
+	}
+	if err := jw.WriteString(string("Version")); err != nil {
+		return fmt.Errorf("writing string for field \"Version\": %w", err)
+	}
+	if err := jw.WriteObjectColon(); err != nil {
+		return err
+	}
+	if len(t.Version) > 8192 {
+		return fmt.Errorf("string in field t.Version was too long")
+	}
+	if err := jw.WriteString(string(t.Version)); err != nil {
+		return fmt.Errorf("writing string for field t.Version: %w", err)
+	}
 	if err := jw.WriteObjectClose(); err != nil {
 		return err
 	}
@@ -587,6 +717,19 @@ func (t *Policy) UnmarshalDagJSON(r io.Reader) (err error) {
 							break
 						}
 					}
+				}
+
+				// t.Version (string) (string)
+			case "Version":
+				{
+					sval, err := jr.ReadString(8192)
+					if err != nil {
+						if errors.Is(err, jsg.ErrLimitExceeded) {
+							return fmt.Errorf("reading string for field t.Version: string too long")
+						}
+						return fmt.Errorf("reading string for field t.Version: %w", err)
+					}
+					t.Version = string(sval)
 				}
 			default:
 				// Field doesn't exist on this type, so ignore it

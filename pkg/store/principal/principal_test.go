@@ -549,10 +549,11 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 				_, err := bucketpolicypostgres.New(pool).Put(ctx, bucketpolicystore.Input{
 					Bucket: bucketID,
 					Tenant: tenantID,
-					Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+					Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 						Effect:    bucketpolicy.Allow,
 						Principal: bucketpolicy.Only("held"),
 						Actions:   []string{"s3:GetObject"},
+						Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 					}}},
 					Conditional: true,
 				}, nil)

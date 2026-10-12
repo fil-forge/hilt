@@ -344,10 +344,11 @@ func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 func TestManagementClientPolicies(t *testing.T) {
 	ctx := context.Background()
-	document := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+	document := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 		Effect:    bucketpolicy.Allow,
 		Principal: bucketpolicy.Only("user-1"),
 		Actions:   []string{"s3:GetObject"},
+		Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 	}}}
 
 	t.Run("the principal reads unwrap their list", func(t *testing.T) {

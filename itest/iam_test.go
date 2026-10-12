@@ -101,10 +101,17 @@ func newMember(t *testing.T, net *forgeNet, tenantID, principal string, buckets 
 	}
 }
 
-// allow builds a one-statement document granting actions to a principal set.
-func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: p, Actions: actions},
+// resources is the bucket's ARN and its objects' ARN, which together cover
+// every policy action.
+func resources(bucket string) []string {
+	return []string{bucketpolicy.BucketARN(bucket), bucketpolicy.ObjectsARN(bucket)}
+}
+
+// allow builds a one-statement document granting actions on bucket to a
+// principal set.
+func allow(bucket string, p bucketpolicy.Principal, actions ...string) bucketpolicy.Policy {
+	return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+		{Effect: bucketpolicy.Allow, Principal: p, Actions: actions, Resources: resources(bucket)},
 	}}
 }
 
@@ -214,7 +221,7 @@ func testPrincipalPolicyScopesToOneBucket(t *testing.T, net *forgeNet) {
 	const granted, ungranted = "iamscope-granted", "iamscope-other"
 	m := newMember(t, net, tenantID, principal, granted, ungranted)
 
-	putPolicy(t, ctx, m.service, granted, allow(bucketpolicy.Only(principal), writeActions...))
+	putPolicy(t, ctx, m.service, granted, allow(granted, bucketpolicy.Only(principal), writeActions...))
 
 	payload := []byte("written by the member")
 	_, err := m.s3.PutObject(ctx, &s3.PutObjectInput{
@@ -256,9 +263,9 @@ func testDenyBeatsAllow(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
-	doc := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(principal), Actions: writeActions},
-		{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only(principal), Actions: []string{"s3:PutObject"}},
+	doc := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(principal), Actions: writeActions, Resources: resources(bucket)},
+		{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only(principal), Actions: []string{"s3:PutObject"}, Resources: resources(bucket)},
 	}}
 	putPolicy(t, ctx, m.service, bucket, doc)
 
@@ -285,7 +292,7 @@ func testNarrowingRevokesGrants(t *testing.T, net *forgeNet) {
 	_, err := net.console.CreatePrincipal(ctx, tenantID, keeper)
 	require.NoError(t, err)
 
-	putPolicy(t, ctx, m.service, bucket, allow(bucketpolicy.Only(principal, keeper), writeActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(principal, keeper), writeActions...))
 
 	payload := []byte("readable while the policy names the member")
 	_, err = m.s3.PutObject(ctx, &s3.PutObjectInput{
@@ -300,7 +307,7 @@ func testNarrowingRevokesGrants(t *testing.T, net *forgeNet) {
 	// nothing, since the key held nothing over the bucket; the narrowing
 	// revokes every delegation the create issued it, one per command the
 	// granted actions map to.
-	putPolicy(t, ctx, m.service, bucket, allow(bucketpolicy.Only(keeper), writeActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(keeper), writeActions...))
 
 	want := s3perm.CommandsFor(writeActions...)
 	records := net.awaitRevocations(t, ctx, len(want), "did:key:"+m.key.AccessKeyID)
@@ -343,7 +350,7 @@ func testDeletePrincipalRemovesKeysAndPolicies(t *testing.T, net *forgeNet) {
 	_, err := net.console.CreatePrincipal(ctx, tenantID, keeper)
 	require.NoError(t, err)
 
-	putPolicy(t, ctx, m.service, bucket, allow(bucketpolicy.Only(principal, keeper), readActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(principal, keeper), readActions...))
 
 	keys, err := net.console.ListPrincipalAccessKeys(ctx, tenantID, principal)
 	require.NoError(t, err)
@@ -421,7 +428,7 @@ func testPresignedGetFollowsPolicy(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
-	putPolicy(t, ctx, m.service, bucket, allow(bucketpolicy.Only(principal), readActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(principal), readActions...))
 
 	presign := s3.NewPresignClient(m.s3)
 	client := &http.Client{Timeout: 10 * time.Second}

@@ -66,14 +66,14 @@ func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 }
 
 func allowUser1(actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions}
+	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
 }
 
 // createPolicy writes the photos bucket's first policy through the service,
 // as the S3 PutBucketPolicy path does, and returns its ETag.
 func createPolicy(t *testing.T, deps *policyDeps, statements ...bucketpolicy.Statement) string {
 	t.Helper()
-	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", bucketpolicy.Policy{Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
+	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
 	require.NoError(t, err)
 	return etag
 }
@@ -91,11 +91,17 @@ func TestPrincipalPolicyReadHandlers(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
 		require.Len(t, raw.Items, 1)
 		require.ElementsMatch(t, []string{"bucketName", "policy"}, slices.Collect(maps.Keys(raw.Items[0])))
+		require.JSONEq(t, `{"Version": "2012-10-17", "Statement": [{
+			"Effect": "Allow",
+			"Principal": {"AWS": ["arn:aws:iam:::user/user-1"]},
+			"Action": ["s3:GetObject"],
+			"Resource": ["arn:aws:s3:::photos", "arn:aws:s3:::photos/*"]
+		}]}`, string(raw.Items[0]["policy"]), "the policy is the AWS-shaped document")
 
 		var list api.PrincipalPolicyList
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 		require.Equal(t, []api.PrincipalPolicy{
-			{BucketName: "photos", Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{allowUser1("s3:GetObject")}}},
+			{BucketName: "photos", Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{allowUser1("s3:GetObject")}}},
 		}, list.Items)
 	})
 

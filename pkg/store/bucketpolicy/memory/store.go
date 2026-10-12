@@ -184,13 +184,14 @@ func cloneRecord(r bucketpolicystore.Record) bucketpolicystore.Record {
 
 func clonePolicy(d bucketpolicy.Policy) bucketpolicy.Policy {
 	if d.Statements == nil {
-		return bucketpolicy.Policy{}
+		return bucketpolicy.Policy{Version: d.Version}
 	}
 	statements := make([]bucketpolicy.Statement, len(d.Statements))
 	copy(statements, d.Statements)
 	for i := range statements {
 		statements[i].Principal.IDs = slices.Clone(statements[i].Principal.IDs)
 		statements[i].Actions = slices.Clone(statements[i].Actions)
+		statements[i].Resources = slices.Clone(statements[i].Resources)
 	}
-	return bucketpolicy.Policy{Statements: statements}
+	return bucketpolicy.Policy{Version: d.Version, Statements: statements}
 }

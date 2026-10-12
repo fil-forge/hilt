@@ -141,10 +141,11 @@ func TestAuthorizeRequest(t *testing.T) {
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
-			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+			Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 				Effect:    bucketpolicy.Allow,
 				Principal: bucketpolicy.Only("user-1"),
 				Actions:   actions,
+				Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 			}}},
 			Conditional: true,
 		}, nil)

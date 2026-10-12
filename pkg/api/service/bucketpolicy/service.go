@@ -116,10 +116,11 @@ func WithCondition(c Condition) WriteOption {
 }
 
 // Write creates or replaces the bucket's policy, for a caller that has
-// resolved the tenant and the bucket. It validates doc against the tenant's
-// principals, and checks the condition [WithCondition] sets. bucketName names
-// the bucket in errors. It returns the new ETag and whether the bucket had no
-// policy before.
+// resolved the tenant and the bucket. It validates doc against the bucket
+// (every resource must name bucketName) and the tenant's principals, and
+// checks the condition [WithCondition] sets. bucketName also
+// names the bucket in errors. It returns the new ETag and whether the bucket
+// had no policy before.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
@@ -128,7 +129,7 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 	if err != nil {
 		return "", false, err
 	}
-	if err := bucketpolicy.Validate(doc, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
+	if err := bucketpolicy.Validate(doc, bucketName, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
 		return "", false, err
 	}
 	in := bucketpolicystore.Input{

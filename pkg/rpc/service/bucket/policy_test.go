@@ -131,11 +131,11 @@ func TestPolicy(t *testing.T) {
 		require.NoError(t, err)
 		return raw
 	}
-	read := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+	read := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 	}}
-	write := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:PutObject"}},
+	write := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:PutObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 	}}
 
 	t.Run("a PUT without a precondition creates the policy and returns its ETag", func(t *testing.T) {
@@ -216,8 +216,8 @@ func TestPolicy(t *testing.T) {
 
 	t.Run("a document the tenant may not store is refused", func(t *testing.T) {
 		f := setup(t, policyPerms, false)
-		unknown := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("nobody"), Actions: []string{"s3:GetObject"}},
+		unknown := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
+			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("nobody"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
 		}}
 		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, unknown)}))
 		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)

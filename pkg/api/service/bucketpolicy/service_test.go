@@ -288,15 +288,15 @@ var everyone = bucketpolicy.Everyone()
 func only(ids ...string) bucketpolicy.Principal { return bucketpolicy.Only(ids...) }
 
 func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions}
+	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
 }
 
 func deny(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions}
+	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
 }
 
 func doc(statements ...bucketpolicy.Statement) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Statements: statements}
+	return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements}
 }
 
 // createOnly is the condition of a first write: the bucket has no policy.
@@ -952,9 +952,13 @@ func TestPrincipalReads(t *testing.T) {
 		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, "backups"))
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
+		onBackups := func(st bucketpolicy.Statement) bucketpolicy.Statement {
+			st.Resources = []string{bucketpolicy.BucketARN("backups")}
+			return st
+		}
 		_, _, err = d.svc.Write(ctx, d.tenantID, backups, "backups", doc(
-			allow(everyone, "s3:ListBucket"),
-			deny(only("user-2"), "s3:ListBucket"),
+			onBackups(allow(everyone, "s3:ListBucket")),
+			onBackups(deny(only("user-2"), "s3:ListBucket")),
 		), createOnly)
 		require.NoError(t, err)
 		return d

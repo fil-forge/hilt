@@ -420,7 +420,7 @@ func TestDelete(t *testing.T) {
 		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: d.bucketID, Tenant: d.tenantID,
-			Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+			Policy:      bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}}},
 			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
@@ -442,7 +442,7 @@ func TestDelete(t *testing.T) {
 			func() error {
 				_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 					Bucket: d.bucketID, Tenant: d.tenantID,
-					Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+					Policy:      bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}}},
 					Conditional: true,
 				}, nil)
 				return err
@@ -729,10 +729,11 @@ func TestInfo(t *testing.T) {
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
-			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+			Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 				Effect:    bucketpolicy.Allow,
 				Principal: bucketpolicy.Only("user-1"),
 				Actions:   actions,
+				Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 			}}},
 			Conditional: true,
 		}, nil)
@@ -825,10 +826,11 @@ func TestInfo(t *testing.T) {
 				Bucket:  bucketID,
 				Tenant:  tenantID,
 				IfMatch: &rec.ETag,
-				Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 					Effect:    bucketpolicy.Allow,
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   []string{"s3:ListBucket"},
+					Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 				}}},
 				Conditional: true,
 			}, nil)
@@ -858,10 +860,11 @@ func TestInfo(t *testing.T) {
 				Bucket:  bucketID,
 				Tenant:  tenantID,
 				IfMatch: &rec.ETag,
-				Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 					Effect:    bucketpolicy.Allow,
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   []string{"s3:ListBucket"},
+					Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 				}}},
 				Conditional: true,
 			}, nil)
@@ -898,10 +901,11 @@ func TestInfo(t *testing.T) {
 				Bucket:  bucketID,
 				Tenant:  tenantID,
 				IfMatch: &rec.ETag,
-				Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
+				Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{
 					Effect:    bucketpolicy.Allow,
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   actions,
+					Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")},
 				}}},
 				Conditional: true,
 			}, nil)
@@ -996,7 +1000,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	require.NoError(t, delegations.PutBatch(ctx, append([]ucan.Delegation{root}, grants...)))
 
 	statement := func(actions ...string) bucketpolicy.Policy {
-		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions}}}
+		return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}}}
 	}
 	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket"), Conditional: true}, nil)
 	require.NoError(t, err)
