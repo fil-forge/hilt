@@ -421,6 +421,8 @@ func TestDelete(t *testing.T) {
 		_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: d.bucketID, Tenant: d.tenantID,
 			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}}},
+
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 
@@ -442,6 +444,8 @@ func TestDelete(t *testing.T) {
 				_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 					Bucket: d.bucketID, Tenant: d.tenantID,
 					Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}}},
+
+					Conditional: true,
 				}, nil)
 				return err
 			})

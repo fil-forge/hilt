@@ -180,6 +180,8 @@ func TestAuthorize(t *testing.T) {
 			Bucket: bucketID,
 			Tenant: tenantID,
 			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements},
+
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 	}
