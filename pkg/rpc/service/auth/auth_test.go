@@ -328,8 +328,8 @@ func TestAuthorize(t *testing.T) {
 		grant(t, policies, bucketID, tenantID, s3bkt.Statement{
 			Effect:    s3bkt.Allow,
 			Principal: s3bkt.Only("user-1"),
-			Actions:   []string{"s3:GetObject", "s3:ListBucket"},
-			Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")},
+			Actions:   s3bkt.NewStringSet("s3:GetObject", "s3:ListBucket"),
+			Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 		})
 
 		authz, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
@@ -342,8 +342,8 @@ func TestAuthorize(t *testing.T) {
 	t.Run("a Deny wins over an Allow naming the same action", func(t *testing.T) {
 		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 		grant(t, policies, bucketID, tenantID,
-			s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: []string{"s3:GetObject", "s3:ListBucket"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
-			s3bkt.Statement{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
+			s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject", "s3:ListBucket"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+			s3bkt.Statement{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		)
 
 		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
@@ -360,8 +360,8 @@ func TestAuthorize(t *testing.T) {
 
 		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 		grant(t, policies, bucketID, tenantID,
-			s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
-			s3bkt.Statement{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
+			s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+			s3bkt.Statement{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		)
 		_, err = az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
@@ -372,8 +372,8 @@ func TestAuthorize(t *testing.T) {
 		grant(t, policies, bucketID, tenantID, s3bkt.Statement{
 			Effect:    s3bkt.Allow,
 			Principal: s3bkt.Only("user-1"),
-			Actions:   []string{"s3:GetObject"},
-			Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")},
+			Actions:   s3bkt.NewStringSet("s3:GetObject"),
+			Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 		})
 		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
 		require.NoError(t, err)
@@ -410,7 +410,7 @@ func TestAuthorize(t *testing.T) {
 		// the write on the destination and the read on the source, each against
 		// the effective set the bucket's own policy gives the principal.
 		allow := func(actions ...string) s3bkt.Statement {
-			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 		}
 
 		t.Run("the source's policy grants the read", func(t *testing.T) {
@@ -660,7 +660,7 @@ func TestAuthorizeLockTimeout(t *testing.T) {
 	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 	seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
 	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.BucketPolicy{
-		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}},
+		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
 	}, Conditional: true}, nil)
 	require.NoError(t, err)
 
@@ -724,7 +724,7 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "effective-actions"))
 	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
 	statement := func(actions ...string) s3bkt.BucketPolicy {
-		return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}}}
+		return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
 	}
 	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
 	require.NoError(t, err)

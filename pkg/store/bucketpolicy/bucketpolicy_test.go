@@ -110,11 +110,11 @@ var everyone = s3bkt.Everyone()
 func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
 
 func allow(p s3bkt.Principal, actions ...string) s3bkt.Statement {
-	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
 func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
-	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
+	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
 func doc(statements ...s3bkt.Statement) s3bkt.BucketPolicy {
@@ -421,15 +421,15 @@ func TestPolicyStore(t *testing.T) {
 				d := doc(allow(only("alice"), "s3:GetObject"))
 				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
 				require.NoError(t, err)
-				d.Statements[0].Actions[0] = "s3:PutObject"
+				d.Statements[0].Actions["s3:PutObject"] = struct{}{}
 
 				rec, err := s.Get(t.Context(), bucketID)
 				require.NoError(t, err)
-				require.Equal(t, "s3:GetObject", rec.Policy.Statements[0].Actions[0])
-				rec.Policy.Statements[0].Actions[0] = "s3:DeleteObject"
+				require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), rec.Policy.Statements[0].Actions)
+				rec.Policy.Statements[0].Actions["s3:DeleteObject"] = struct{}{}
 				again, err := s.Get(t.Context(), bucketID)
 				require.NoError(t, err)
-				require.Equal(t, "s3:GetObject", again.Policy.Statements[0].Actions[0])
+				require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), again.Policy.Statements[0].Actions)
 			})
 
 			t.Run("Put stores the normalized document whatever the backend", func(t *testing.T) {

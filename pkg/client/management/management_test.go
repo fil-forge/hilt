@@ -348,8 +348,8 @@ func TestManagementClientPolicies(t *testing.T) {
 	document := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 		Effect:    s3bkt.Allow,
 		Principal: s3bkt.Only("user-1"),
-		Actions:   []string{"s3:GetObject"},
-		Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")},
+		Actions:   s3bkt.NewStringSet("s3:GetObject"),
+		Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 	}}}
 
 	t.Run("the principal reads unwrap their list", func(t *testing.T) {

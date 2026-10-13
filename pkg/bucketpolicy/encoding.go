@@ -11,8 +11,8 @@ import (
 	mh "github.com/multiformats/go-multihash"
 )
 
-// statementCID returns the CID of st's DAG-JSON encoding: its lists as sets
-// (see [s3bkt.StatementModel]), so order and duplicates do not reach it.
+// statementCID returns the CID of st's DAG-JSON encoding: its sets as maps
+// with sorted keys, so nothing about how the caller built them reaches it.
 func statementCID(st s3bkt.Statement) cid.Cid {
 	var buf bytes.Buffer
 	if err := st.MarshalDagJSON(&buf); err != nil {
@@ -30,12 +30,10 @@ func dagJSONCID(raw []byte) cid.Cid {
 	return cid.NewCidV1(cid.DagJSON, sum)
 }
 
-// normalize returns a copy of d in canonical form, its Version kept. The
-// statement, principal, action and resource lists are sets: each is
-// deduplicated and sorted, a wildcard principal drops any stray ids, nil
-// lists become empty lists, and the statements are ordered by their CID. Two
-// policies that differ only in order or in duplicates normalize to the same
-// value.
+// normalize returns a copy of d in canonical form, its Version kept: the
+// statements deduplicated and ordered by their CID. The principal, action and
+// resource sets need nothing, being sets. Two policies that differ only in
+// statement order or in duplicate statements normalize to the same value.
 func normalize(d s3bkt.BucketPolicy) s3bkt.BucketPolicy {
 	type keyed struct {
 		key string
@@ -43,7 +41,7 @@ func normalize(d s3bkt.BucketPolicy) s3bkt.BucketPolicy {
 	}
 	keyedStatements := make([]keyed, 0, len(d.Statements))
 	for _, st := range d.Statements {
-		keyedStatements = append(keyedStatements, keyed{key: statementCID(st).String(), st: st.Model().Statement()})
+		keyedStatements = append(keyedStatements, keyed{key: statementCID(st).String(), st: st})
 	}
 	slices.SortFunc(keyedStatements, func(a, b keyed) int { return strings.Compare(a.key, b.key) })
 	keyedStatements = slices.CompactFunc(keyedStatements, func(a, b keyed) bool { return a.key == b.key })
@@ -65,8 +63,8 @@ func Canonical(d s3bkt.BucketPolicy) []byte {
 
 // ETag returns the entity tag of d: the CID of the DAG-JSON encoding of the
 // [normalize]d document (CIDv1, dag-json, sha2-256), its statements in CID
-// order and each statement's lists as sets (see [s3bkt.StatementModel]), in
-// double quotes as HTTP carries it. Callers treat it as opaque.
+// order and each statement's sets as maps, in double quotes as HTTP carries
+// it. Callers treat it as opaque.
 func ETag(d s3bkt.BucketPolicy) string {
 	n := normalize(d)
 	var buf bytes.Buffer

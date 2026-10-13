@@ -113,7 +113,7 @@ func resources(bucket string) []string {
 // principal set.
 func allow(bucket string, p s3bkt.Principal, actions ...string) s3bkt.BucketPolicy {
 	return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-		{Effect: s3bkt.Allow, Principal: p, Actions: actions, Resources: resources(bucket)},
+		{Effect: s3bkt.Allow, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(resources(bucket)...)},
 	}}
 }
 
@@ -266,8 +266,8 @@ func testDenyBeatsAllow(t *testing.T, net *forgeNet) {
 	require.NoError(t, err)
 
 	doc := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-		{Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: writeActions, Resources: resources(bucket)},
-		{Effect: s3bkt.Deny, Principal: s3bkt.Only(principal), Actions: []string{"s3:PutObject"}, Resources: resources(bucket)},
+		{Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet(writeActions...), Resources: s3bkt.NewStringSet(resources(bucket)...)},
+		{Effect: s3bkt.Deny, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet("s3:PutObject"), Resources: s3bkt.NewStringSet(resources(bucket)...)},
 	}}
 	putPolicy(t, ctx, m.service, bucket, doc)
 

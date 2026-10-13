@@ -553,8 +553,8 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 					Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 						Effect:    s3bkt.Allow,
 						Principal: s3bkt.Only("held"),
-						Actions:   []string{"s3:GetObject"},
-						Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")},
+						Actions:   s3bkt.NewStringSet("s3:GetObject"),
+						Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 					}}},
 					Conditional: true,
 				}, nil)

@@ -67,7 +67,7 @@ func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 }
 
 func allowUser1(actions ...string) s3bkt.Statement {
-	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
 // createPolicy writes the photos bucket's first policy through the service,

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -191,9 +192,9 @@ func clonePolicy(d s3bkt.BucketPolicy) s3bkt.BucketPolicy {
 	statements := make([]s3bkt.Statement, len(d.Statements))
 	copy(statements, d.Statements)
 	for i := range statements {
-		statements[i].Principal.IDs = slices.Clone(statements[i].Principal.IDs)
-		statements[i].Actions = slices.Clone(statements[i].Actions)
-		statements[i].Resources = slices.Clone(statements[i].Resources)
+		statements[i].Principal = maps.Clone(statements[i].Principal)
+		statements[i].Actions = maps.Clone(statements[i].Actions)
+		statements[i].Resources = maps.Clone(statements[i].Resources)
 	}
 	return s3bkt.BucketPolicy{Version: d.Version, Statements: statements}
 }

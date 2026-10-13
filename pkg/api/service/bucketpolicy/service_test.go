@@ -290,11 +290,11 @@ var everyone = s3bkt.Everyone()
 func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
 
 func allow(p s3bkt.Principal, actions ...string) s3bkt.Statement {
-	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
 func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
-	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
+	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
 func doc(statements ...s3bkt.Statement) s3bkt.BucketPolicy {
@@ -955,7 +955,7 @@ func TestPrincipalReads(t *testing.T) {
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
 		onBackups := func(st s3bkt.Statement) s3bkt.Statement {
-			st.Resources = []string{s3bkt.BucketARN("backups")}
+			st.Resources = s3bkt.NewStringSet(s3bkt.BucketARN("backups"))
 			return st
 		}
 		_, _, err = d.svc.Write(ctx, d.tenantID, backups, "backups", doc(

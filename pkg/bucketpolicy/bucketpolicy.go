@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
@@ -70,15 +71,15 @@ func Validate(d s3bkt.BucketPolicy, bucket string, principalExists func(string) 
 		return err
 	}
 	for i, st := range d.Statements {
-		for _, r := range st.Resources {
+		for _, r := range st.Resources.Members() {
 			if b, _, _ := s3bkt.ParseS3ARN(r); b != bucket {
 				return fmt.Errorf("statement %d: Resource %q must name bucket %q: %w", i, r, bucket, s3bkt.ErrInvalidPolicy)
 			}
 		}
-		if st.Principal.All {
+		if st.Principal.All() {
 			continue
 		}
-		for _, p := range st.Principal.IDs {
+		for _, p := range st.Principal.Members() {
 			if p == "" || !principalExists(p) {
 				return fmt.Errorf("statement %d: unknown principal %q: %w", i, p, s3bkt.ErrInvalidPolicy)
 			}
@@ -135,11 +136,11 @@ func Effective(d *s3bkt.BucketPolicy, p string) []string {
 func Named(d s3bkt.BucketPolicy) (principals []string, wildcard bool) {
 	seen := map[string]bool{}
 	for _, st := range d.Statements {
-		if st.Principal.All {
+		if st.Principal.All() {
 			wildcard = true
 			continue
 		}
-		for _, p := range st.Principal.IDs {
+		for _, p := range st.Principal.Members() {
 			if !seen[p] {
 				seen[p] = true
 				principals = append(principals, p)
@@ -157,15 +158,14 @@ func RemovePrincipal(d s3bkt.BucketPolicy, principalID string) (s3bkt.BucketPoli
 	var statements []s3bkt.Statement
 	changed := false
 	for _, st := range d.Statements {
-		if !st.Principal.All {
-			ids := slices.DeleteFunc(slices.Clone(st.Principal.IDs), func(p string) bool { return p == principalID })
-			if len(ids) != len(st.Principal.IDs) {
-				changed = true
-			}
+		if _, named := st.Principal[principalID]; named && !st.Principal.All() {
+			changed = true
+			ids := maps.Clone(st.Principal)
+			delete(ids, principalID)
 			if len(ids) == 0 {
 				continue
 			}
-			st.Principal = s3bkt.Only(ids...)
+			st.Principal = ids
 		}
 		statements = append(statements, st)
 	}
@@ -208,16 +208,18 @@ func names(st s3bkt.Statement, p string) bool {
 	if p == s3bkt.Wildcard {
 		return false
 	}
-	return st.Principal.All || slices.Contains(st.Principal.IDs, p)
+	_, named := st.Principal[p]
+	return st.Principal.All() || named
 }
 
-// expand replaces [s3bkt.PolicyWildcard] with every policy action.
-func expand(actions []string) []string {
-	if !slices.Contains(actions, s3bkt.PolicyWildcard) {
-		return actions
+// expand returns the actions, sorted, with [s3bkt.PolicyWildcard] replaced by
+// every policy action.
+func expand(actions s3bkt.StringSet) []string {
+	if _, ok := actions[s3bkt.PolicyWildcard]; !ok {
+		return actions.Members()
 	}
 	out := make([]string, 0, len(actions)+16)
-	for _, a := range actions {
+	for _, a := range actions.Members() {
 		if a == s3bkt.PolicyWildcard {
 			out = append(out, s3bkt.PolicyActions()...)
 		} else {

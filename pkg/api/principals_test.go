@@ -249,7 +249,7 @@ func TestDeletePrincipalHandler(t *testing.T) {
 			Bucket: bucket,
 			Tenant: deps.tenantID,
 			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
+				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 			}},
 			Conditional: true,
 		}, nil)
