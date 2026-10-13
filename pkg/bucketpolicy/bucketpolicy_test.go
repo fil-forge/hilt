@@ -57,8 +57,8 @@ func TestDecode(t *testing.T) {
 		// Lists are sets: sorted and deduplicated, statements ordered by their
 		// CID (see TestETag for the encoding).
 		require.Equal(t, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Sid: "owners", Effect: s3bkt.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}, Resources: both()},
 			{Effect: s3bkt.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}, Resources: []string{objectsARN}},
+			{Sid: "owners", Effect: s3bkt.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}, Resources: both()},
 		}}, d)
 	})
 
@@ -298,12 +298,12 @@ func TestCanonical(t *testing.T) {
 			s3bkt.Statement{Sid: "rw", Effect: s3bkt.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:PutObject", "s3:GetObject"}, Resources: []string{objectsARN}},
 			deny(everyone, "s3:DeleteObject"),
 		)
-		// Statements are ordered by their CID: the deny's sorts before the rw
-		// statement's.
+		// Statements are ordered by their CID: the rw statement's sorts before
+		// the deny's.
 		require.Equal(t,
 			`{"Version":"2012-10-17","Statement":[`+
-				`{"Effect":"Deny","Principal":"*","Action":["s3:DeleteObject"],"Resource":["arn:aws:s3:::photos","arn:aws:s3:::photos/*"]},`+
-				`{"Sid":"rw","Effect":"Allow","Principal":{"AWS":["arn:aws:iam:::user/alice","arn:aws:iam:::user/bob"]},"Action":["s3:GetObject","s3:PutObject"],"Resource":["arn:aws:s3:::photos/*"]}]}`,
+				`{"Sid":"rw","Effect":"Allow","Principal":{"AWS":["arn:aws:iam:::user/alice","arn:aws:iam:::user/bob"]},"Action":["s3:GetObject","s3:PutObject"],"Resource":["arn:aws:s3:::photos/*"]},`+
+				`{"Effect":"Deny","Principal":"*","Action":["s3:DeleteObject"],"Resource":["arn:aws:s3:::photos","arn:aws:s3:::photos/*"]}]}`,
 			string(bucketpolicy.Canonical(d)))
 	})
 
@@ -371,25 +371,23 @@ func dagJSONSet(members ...string) string {
 }
 
 // dagJSONStatement is the DAG-JSON encoding of a statement: keys in sorted
-// order, Sid omitted when empty, principals, actions and resources as sets,
+// order, sid omitted when empty, principals, actions and resources as sets,
 // the wildcard principal as the set {"*"}.
 func dagJSONStatement(sid string, effect s3bkt.Effect, principals, actions, resources []string) string {
-	raw := `{"Action":` + dagJSONSet(actions...) + `,"Effect":"` + string(effect) + `","Principal":` + dagJSONSet(principals...) + `,"Resource":` + dagJSONSet(resources...)
+	raw := `{"action":` + dagJSONSet(actions...) + `,"effect":"` + string(effect) + `","principal":` + dagJSONSet(principals...) + `,"resource":` + dagJSONSet(resources...)
 	if sid != "" {
-		raw += `,"Sid":"` + sid + `"`
+		raw += `,"sid":"` + sid + `"`
 	}
 	return raw + "}"
 }
 
-// dagJSONPolicy is the DAG-JSON encoding of a policy: the set of its
-// statements' CIDs, then its version.
+// dagJSONPolicy is the DAG-JSON encoding of a policy: its statements as a
+// list in the order of their CIDs, then its version.
 func dagJSONPolicy(t *testing.T, version string, statements ...string) string {
 	t.Helper()
-	keys := make([]string, len(statements))
-	for i, st := range statements {
-		keys[i] = dagJSONCID(t, st).String()
-	}
-	return `{"Statement":` + dagJSONSet(keys...) + `,"Version":"` + version + `"}`
+	statements = slices.Clone(statements)
+	slices.SortFunc(statements, func(a, b string) int { return strings.Compare(dagJSONCID(t, a).String(), dagJSONCID(t, b).String()) })
+	return `{"statement":[` + strings.Join(statements, ",") + `],"version":"` + version + `"}`
 }
 
 func TestETag(t *testing.T) {
@@ -401,7 +399,7 @@ func TestETag(t *testing.T) {
 		c, err := cid.Decode(tag[1 : len(tag)-1])
 		require.NoError(t, err)
 		require.EqualValues(t, cid.DagJSON, c.Type())
-		statement := `{"Action":{"s3:GetObject":{}},"Effect":"Allow","Principal":{"alice":{}},"Resource":{"arn:aws:s3:::photos":{},"arn:aws:s3:::photos/*":{}}}`
+		statement := `{"action":{"s3:GetObject":{}},"effect":"Allow","principal":{"alice":{}},"resource":{"arn:aws:s3:::photos":{},"arn:aws:s3:::photos/*":{}}}`
 		require.Equal(t, dagJSONCID(t, dagJSONPolicy(t, "2012-10-17", statement)), c)
 	})
 
@@ -447,12 +445,12 @@ func TestETag(t *testing.T) {
 		// Stored tags are compared against freshly computed ones for If-Match, so
 		// these values must never change without a deliberate decision. Both
 		// were computed from hand-assembled DAG-JSON bytes:
-		// {"Statement":{},"Version":""} and
-		// {"Statement":{"<CID of the statement above>":{}},"Version":"2012-10-17"}.
-		require.Equal(t, `"baguqeera3ukm4dwurlcxssbaxivqmsq4s7j33v5jwdufi5e7oni7qykicx7a"`, bucketpolicy.ETag(s3bkt.BucketPolicy{}))
-		require.Equal(t, `"baguqeeraxrbpwxlgnbcvemoyaijexku27ww3g5am44tmnai7oxrqtw3z643a"`, bucketpolicy.ETag(d))
+		// {"statement":[],"version":""} and
+		// {"statement":[<the statement above>],"version":"2012-10-17"}.
+		require.Equal(t, `"baguqeerapfhqlt74verbk25awofci4fsi4dewjbihdbnexfwphaywy4srd2q"`, bucketpolicy.ETag(s3bkt.BucketPolicy{}))
+		require.Equal(t, `"baguqeeramb7bdvrj6whijwstk5ktmw3z3wrwg64cf4xfj6qb2xxgsxsj7emq"`, bucketpolicy.ETag(d))
 		require.Equal(t, bucketpolicy.ETag(s3bkt.BucketPolicy{}), bucketpolicy.ETag(s3bkt.BucketPolicy{Statements: []s3bkt.Statement{}}))
-		require.Equal(t, `"`+dagJSONCID(t, `{"Statement":{},"Version":""}`).String()+`"`, bucketpolicy.ETag(s3bkt.BucketPolicy{}))
+		require.Equal(t, `"`+dagJSONCID(t, `{"statement":[],"version":""}`).String()+`"`, bucketpolicy.ETag(s3bkt.BucketPolicy{}))
 	})
 }
 
