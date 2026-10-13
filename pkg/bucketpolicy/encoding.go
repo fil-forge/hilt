@@ -102,7 +102,8 @@ func normalize(d Policy) Policy {
 // Canonical returns the canonical JSON encoding of d: the [normalize]d
 // document in the AWS shape, compact, Version before Statement and the fields
 // of each statement in the order Sid (omitted when empty), Effect, Principal,
-// Action, Resource. It is what Hilt stores and returns.
+// Action, Resource. It is what Hilt stores, and the JSON Ingot writes for the
+// policy `/s3/bucket/policy` returns.
 func Canonical(d Policy) []byte {
 	return encodeJSON(normalize(d))
 }

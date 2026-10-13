@@ -46,7 +46,7 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		} else if err != nil {
 			return nil, fmt.Errorf("reading the policy of bucket %q: %w", name, err)
 		}
-		return &s3bkt.PolicyOK{ETag: rec.ETag, Policy: bucketpolicy.Canonical(rec.Policy)}, nil
+		return &s3bkt.PolicyOK{ETag: rec.ETag, Policy: (*s3bkt.BucketPolicy)(&rec.Policy)}, nil
 
 	case auth.OpPutBucketPolicy:
 		if err := bodyMatchesSignature(authz, args.Body); err != nil {

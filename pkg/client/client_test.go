@@ -196,13 +196,16 @@ func TestClientPolicy(t *testing.T) {
 		hilt := testutil.RandomIssuer(t)
 		ingot := testutil.RandomIssuer(t)
 		body := []byte(`{"Statement":[]}`)
+		policy := &s3bkt.BucketPolicy{Version: "2012-10-17", Statements: []s3bkt.Statement{
+			{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: []string{"s3:GetObject"}, Resources: []string{"arn:aws:s3:::bucket/*"}},
+		}}
 
 		var gotArgs *s3bkt.PolicyArguments
 		srv := server.NewHTTP(hilt)
 		srv.Handle(s3bkt.Policy.Command, s3bkt.Policy.Handler(
 			func(req *binding.Request[*s3bkt.PolicyArguments], res *binding.Response[*s3bkt.PolicyOK]) error {
 				gotArgs = req.Task().Arguments()
-				return res.SetSuccess(&s3bkt.PolicyOK{ETag: `"e1"`, Policy: gotArgs.Body})
+				return res.SetSuccess(&s3bkt.PolicyOK{ETag: `"e1"`, Policy: policy})
 			}))
 
 		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Policy, hilt, ingot.DID()))
@@ -212,7 +215,7 @@ func TestClientPolicy(t *testing.T) {
 		require.Equal(t, "PUT", gotArgs.Request.Method)
 		require.Equal(t, body, gotArgs.Body)
 		require.Equal(t, `"e1"`, ok.ETag)
-		require.Equal(t, body, ok.Policy)
+		require.Equal(t, policy, ok.Policy)
 	})
 
 	t.Run("failure receipt", func(t *testing.T) {

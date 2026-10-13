@@ -38,15 +38,16 @@ import (
 	"strings"
 
 	"github.com/fil-forge/hilt/pkg/s3perm"
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	"github.com/fil-forge/ucantone/errors"
 )
 
 // Effect is whether a statement grants or withholds its actions.
-type Effect string
+type Effect = s3bkt.Effect
 
 const (
-	Allow Effect = "Allow"
-	Deny  Effect = "Deny"
+	Allow = s3bkt.Allow
+	Deny  = s3bkt.Deny
 )
 
 // Version2012 and Version2008 are the policy language versions a document
@@ -59,18 +60,17 @@ const (
 // Wildcard is the principal value that names every principal of the tenant.
 // It is carried as the bare JSON string "*" or as {"AWS": "*"}; inside a list
 // it is rejected.
-const Wildcard = "*"
+const Wildcard = s3bkt.Wildcard
 
-// userARNPrefix and s3ARNPrefix begin the only ARN shapes a document names:
-// a principal's user ARN and the policy bucket's ARNs.
+// s3ARNPrefix begins the policy bucket's ARNs, the only resources a document
+// names.
 const (
-	userARNPrefix = "arn:aws:iam:::user/"
 	s3ARNPrefix   = "arn:aws:s3:::"
 	objectsSuffix = "/*"
 )
 
 // UserARN returns the ARN a document names principal id by.
-func UserARN(id string) string { return userARNPrefix + id }
+func UserARN(id string) string { return s3bkt.UserARN(id) }
 
 // BucketARN returns the ARN of bucket itself, which bucket actions need.
 func BucketARN(bucket string) string { return s3ARNPrefix + bucket }
@@ -82,85 +82,13 @@ func ObjectsARN(bucket string) string { return s3ARNPrefix + bucket + objectsSuf
 // Principal is the set of principals a statement applies to: every principal
 // of the tenant (All), or the listed ids. It encodes as the string "*" or as
 // {"AWS": [user ARNs]}.
-type Principal struct {
-	All bool
-	IDs []string
-}
+type Principal = s3bkt.Principal
 
 // Everyone returns the principal set naming every principal of the tenant.
-func Everyone() Principal { return Principal{All: true} }
+func Everyone() Principal { return s3bkt.Everyone() }
 
 // Only returns the principal set naming exactly the given ids.
-func Only(ids ...string) Principal { return Principal{IDs: ids} }
-
-// MarshalJSON encodes All as "*" and anything else as {"AWS": [user ARNs]},
-// nil encoding as an empty list.
-func (p Principal) MarshalJSON() ([]byte, error) {
-	if p.All {
-		return json.Marshal(Wildcard)
-	}
-	arns := make([]string, len(p.IDs))
-	for i, id := range p.IDs {
-		arns[i] = UserARN(id)
-	}
-	return json.Marshal(struct {
-		AWS []string `json:"AWS"`
-	}{arns})
-}
-
-// UnmarshalJSON accepts "*", {"AWS": "*"}, {"AWS": "<user ARN>"} or
-// {"AWS": ["<user ARN>", ...]}, keeping each id once, in the order it first
-// appears. Anything else is an error wrapping [ErrInvalidPolicy].
-func (p *Principal) UnmarshalJSON(data []byte) error {
-	const shape = `must be "*" or {"AWS": user ARNs}`
-	data = bytes.TrimSpace(data)
-	if len(data) > 0 && data[0] == '"' {
-		var s string
-		if err := json.Unmarshal(data, &s); err != nil {
-			return fmt.Errorf("Principal: %v: %w", err, ErrInvalidPolicy)
-		}
-		if s != Wildcard {
-			return fmt.Errorf("Principal %q: a string principal must be %q: %w", s, Wildcard, ErrInvalidPolicy)
-		}
-		*p = Everyone()
-		return nil
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(data, &obj); err != nil || obj == nil {
-		return fmt.Errorf("Principal: %s: %w", shape, ErrInvalidPolicy)
-	}
-	for k := range obj {
-		if k != "AWS" {
-			return fmt.Errorf("Principal: unknown key %q, %s: %w", k, shape, ErrInvalidPolicy)
-		}
-	}
-	aws, ok := obj["AWS"]
-	if !ok {
-		return fmt.Errorf("Principal: %s: %w", shape, ErrInvalidPolicy)
-	}
-	var one string
-	if json.Unmarshal(aws, &one) == nil && one == Wildcard {
-		*p = Everyone()
-		return nil
-	}
-	var arns stringOrList
-	if err := json.Unmarshal(aws, &arns); err != nil {
-		return fmt.Errorf("Principal: %s: %w", shape, ErrInvalidPolicy)
-	}
-	ids := make([]string, len(arns))
-	for i, arn := range arns {
-		if arn == Wildcard {
-			return fmt.Errorf("Principal %q must be the bare string or {\"AWS\": %q}, not a list entry: %w", Wildcard, Wildcard, ErrInvalidPolicy)
-		}
-		id, ok := strings.CutPrefix(arn, userARNPrefix)
-		if !ok || id == "" {
-			return fmt.Errorf("Principal %q: must be a user ARN %q: %w", arn, UserARN("<id>"), ErrInvalidPolicy)
-		}
-		ids[i] = id
-	}
-	*p = Principal{IDs: dedupe(ids)}
-	return nil
-}
+func Only(ids ...string) Principal { return s3bkt.Only(ids...) }
 
 // stringOrList is a JSON field AWS allows as a string or a list of strings.
 type stringOrList []string
@@ -183,35 +111,14 @@ func (l *stringOrList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// dedupe keeps the first occurrence of each id.
-func dedupe(ids []string) []string {
-	seen := make(map[string]bool, len(ids))
-	out := ids[:0]
-	for _, id := range ids {
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
 // Statement grants (Allow) or withholds (Deny) actions on the bucket's
 // resources to principals. Sid is an optional label the caller chooses; Hilt
 // stores and returns it and never reads it.
-type Statement struct {
-	Sid       string    `json:"Sid,omitempty"`
-	Effect    Effect    `json:"Effect"`
-	Principal Principal `json:"Principal"`
-	Actions   []string  `json:"Action"`
-	Resources []string  `json:"Resource"`
-}
+type Statement = s3bkt.Statement
 
-// Policy is a bucket policy.
-type Policy struct {
-	Version    string      `json:"Version"`
-	Statements []Statement `json:"Statement"`
-}
+// Policy is a bucket policy. It is the wire type of `/s3/bucket/policy`, with
+// the strict decoding below.
+type Policy s3bkt.BucketPolicy
 
 // InvalidPolicyErrorName is the name of [ErrInvalidPolicy].
 const InvalidPolicyErrorName = "InvalidBucketPolicy"
@@ -448,9 +355,9 @@ func Validate(d Policy, bucket string, principalExists func(string) bool) error 
 	return nil
 }
 
-// encodeJSON is json.Marshal for the types here, whose encoding cannot fail:
+// encodeJSON is json.Marshal for the policy types, whose encoding cannot fail:
 // struct fields are written in declaration order without whitespace, so the
-// struct definitions above fix the layout.
+// struct definitions in libforge's commands/s3/bucket fix the layout.
 func encodeJSON(v any) []byte {
 	out, _ := json.Marshal(v)
 	return out

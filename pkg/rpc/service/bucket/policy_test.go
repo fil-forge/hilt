@@ -156,7 +156,7 @@ func TestPolicy(t *testing.T) {
 		ok, err := f.svc.Policy(ctx, providerID, request(t, "GET", reqOpts{}))
 		require.NoError(t, err)
 		require.Equal(t, bucketpolicy.ETag(read), ok.ETag)
-		require.Equal(t, bucketpolicy.Canonical(read), ok.Policy)
+		require.Equal(t, (*s3bkt.BucketPolicy)(&read), ok.Policy)
 	})
 
 	t.Run("a PUT without a precondition replaces whatever is stored", func(t *testing.T) {
