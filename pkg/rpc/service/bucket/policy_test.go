@@ -125,17 +125,17 @@ func TestPolicy(t *testing.T) {
 		require.NoError(t, err)
 		return &s3bkt.PolicyArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL, Headers: o.headers}, Body: o.body}
 	}
-	encode := func(t *testing.T, doc bucketpolicy.Policy) []byte {
+	encode := func(t *testing.T, doc s3bkt.BucketPolicy) []byte {
 		t.Helper()
 		raw, err := json.Marshal(doc)
 		require.NoError(t, err)
 		return raw
 	}
-	read := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
+	read := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
 	}}
-	write := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:PutObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
+	write := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: []string{"s3:PutObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
 	}}
 
 	t.Run("a PUT without a precondition creates the policy and returns its ETag", func(t *testing.T) {
@@ -156,7 +156,7 @@ func TestPolicy(t *testing.T) {
 		ok, err := f.svc.Policy(ctx, providerID, request(t, "GET", reqOpts{}))
 		require.NoError(t, err)
 		require.Equal(t, bucketpolicy.ETag(read), ok.ETag)
-		require.Equal(t, (*s3bkt.BucketPolicy)(&read), ok.Policy)
+		require.Equal(t, &read, ok.Policy)
 	})
 
 	t.Run("a PUT without a precondition replaces whatever is stored", func(t *testing.T) {
@@ -216,13 +216,13 @@ func TestPolicy(t *testing.T) {
 
 	t.Run("a document the tenant may not store is refused", func(t *testing.T) {
 		f := setup(t, policyPerms, false)
-		unknown := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
-			{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("nobody"), Actions: []string{"s3:GetObject"}, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}},
+		unknown := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+			{Effect: s3bkt.Allow, Principal: s3bkt.Only("nobody"), Actions: []string{"s3:GetObject"}, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}},
 		}}
 		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, unknown)}))
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: []byte(`{"Version": "2012-10-17"}`)}))
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 	})
 
 	t.Run("a DELETE removes the policy, conditionally or not, and a bucket without one is PolicyNotFound", func(t *testing.T) {

@@ -1,9 +1,10 @@
-// Package bucketpolicy defines the bucket policy and its evaluation: which
-// actions a principal holds on a bucket, how a policy is canonicalized (its
-// lists are sets) and tagged for compare-and-set, and which principals a
-// change to it affects. It
-// has no store or transport dependencies; the bucket policy store persists
-// policies and the management API validates them with the rules here.
+// Package bucketpolicy evaluates bucket policies: which actions a principal
+// holds on a bucket, how a policy is canonicalized (its lists are sets) and
+// tagged for compare-and-set, and which principals a change to it affects.
+// The document type, its JSON form and its structural checks are libforge's
+// [s3bkt.BucketPolicy]; [Decode] and [Validate] add Hilt's canonical form and
+// its checks against the bucket and the tenant's principals. It has no store
+// or transport dependencies.
 //
 // The document is an AWS bucket policy, reduced to what Forge evaluates:
 //
@@ -21,7 +22,7 @@
 //	}
 //
 // A principal is a tenant principal, named by the user ARN of its id; in Go
-// the [Principal] holds the bare ids. Action and Resource may each be a
+// the [s3bkt.Principal] holds the bare ids. Action and Resource may each be a
 // string or a list. Every resource names the policy's bucket, as the bucket
 // (arn:aws:s3:::<bucket>) or its objects (arn:aws:s3:::<bucket>/*): an object
 // action needs the objects ARN in its statement, a bucket action the bucket
@@ -35,312 +36,43 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 
-	"github.com/fil-forge/hilt/pkg/s3perm"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	"github.com/fil-forge/ucantone/errors"
 )
 
-// Effect is whether a statement grants or withholds its actions.
-type Effect = s3bkt.Effect
-
-const (
-	Allow = s3bkt.Allow
-	Deny  = s3bkt.Deny
-)
-
-// Version2012 and Version2008 are the policy language versions a document
-// may declare. Forge evaluates both the same way.
-const (
-	Version2012 = "2012-10-17"
-	Version2008 = "2008-10-17"
-)
-
-// Wildcard is the principal value that names every principal of the tenant.
-// It is carried as the bare JSON string "*" or as {"AWS": "*"}; inside a list
-// it is rejected.
-const Wildcard = s3bkt.Wildcard
-
-// s3ARNPrefix begins the policy bucket's ARNs, the only resources a document
-// names.
-const (
-	s3ARNPrefix   = "arn:aws:s3:::"
-	objectsSuffix = "/*"
-)
-
-// UserARN returns the ARN a document names principal id by.
-func UserARN(id string) string { return s3bkt.UserARN(id) }
-
-// BucketARN returns the ARN of bucket itself, which bucket actions need.
-func BucketARN(bucket string) string { return s3ARNPrefix + bucket }
-
-// ObjectsARN returns the ARN of every object in bucket, which object actions
-// need.
-func ObjectsARN(bucket string) string { return s3ARNPrefix + bucket + objectsSuffix }
-
-// Principal is the set of principals a statement applies to: every principal
-// of the tenant (All), or the listed ids. It encodes as the string "*" or as
-// {"AWS": [user ARNs]}.
-type Principal = s3bkt.Principal
-
-// Everyone returns the principal set naming every principal of the tenant.
-func Everyone() Principal { return s3bkt.Everyone() }
-
-// Only returns the principal set naming exactly the given ids.
-func Only(ids ...string) Principal { return s3bkt.Only(ids...) }
-
-// stringOrList is a JSON field AWS allows as a string or a list of strings.
-type stringOrList []string
-
-func (l *stringOrList) UnmarshalJSON(data []byte) error {
-	data = bytes.TrimSpace(data)
-	if len(data) > 0 && data[0] == '"' {
-		var s string
-		if err := json.Unmarshal(data, &s); err != nil {
-			return fmt.Errorf("%v: %w", err, ErrInvalidPolicy)
-		}
-		*l = stringOrList{s}
-		return nil
-	}
-	var ss []string
-	if err := json.Unmarshal(data, &ss); err != nil {
-		return fmt.Errorf("must be a string or a list of strings: %w", ErrInvalidPolicy)
-	}
-	*l = ss
-	return nil
-}
-
-// Statement grants (Allow) or withholds (Deny) actions on the bucket's
-// resources to principals. Sid is an optional label the caller chooses; Hilt
-// stores and returns it and never reads it.
-type Statement = s3bkt.Statement
-
-// Policy is a bucket policy. It is the wire type of `/s3/bucket/policy`, with
-// the strict decoding below.
-type Policy s3bkt.BucketPolicy
-
-// InvalidPolicyErrorName is the name of [ErrInvalidPolicy].
-const InvalidPolicyErrorName = "InvalidBucketPolicy"
-
-// ErrInvalidPolicy is returned by [Decode] and [Validate] for a policy the API
-// rejects with 422. The returned error wraps it with the reason.
-var ErrInvalidPolicy = errors.New(InvalidPolicyErrorName, "invalid bucket policy")
-
-// Decode parses a policy document: [Policy.UnmarshalJSON]'s checks, plus
-// trailing data after the document is an error wrapping [ErrInvalidPolicy].
-// The result is in canonical form. Whether its principals exist is left to
-// [Validate].
-func Decode(data []byte) (Policy, error) {
+// Decode parses a policy document: [s3bkt.BucketPolicy.UnmarshalJSON]'s
+// checks, plus trailing data after the document is an error wrapping
+// [s3bkt.ErrInvalidPolicy]. The result is in canonical form (see [normalize]).
+// Whether its principals exist is left to [Validate].
+func Decode(data []byte) (s3bkt.BucketPolicy, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
-	var d Policy
+	var d s3bkt.BucketPolicy
 	if err := dec.Decode(&d); err != nil {
-		if errors.Is(err, ErrInvalidPolicy) {
-			return Policy{}, err
+		if errors.Is(err, s3bkt.ErrInvalidPolicy) {
+			return s3bkt.BucketPolicy{}, err
 		}
-		return Policy{}, fmt.Errorf("decoding policy: %v: %w", err, ErrInvalidPolicy)
+		return s3bkt.BucketPolicy{}, fmt.Errorf("decoding policy: %v: %w", err, s3bkt.ErrInvalidPolicy)
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return Policy{}, fmt.Errorf("decoding policy: trailing data after the document: %w", ErrInvalidPolicy)
+		return s3bkt.BucketPolicy{}, fmt.Errorf("decoding policy: trailing data after the document: %w", s3bkt.ErrInvalidPolicy)
 	}
-	return d, nil
+	return normalize(d), nil
 }
-
-// UnmarshalJSON parses a policy document strictly and refuses one that is not
-// well formed, so an invalid policy never comes into existence: a field the
-// schema does not define, a property name that differs from the schema in
-// case, a malformed principal, or a document [wellFormed] rejects is an error
-// wrapping [ErrInvalidPolicy]. The result is in canonical form.
-func (p *Policy) UnmarshalJSON(data []byte) error {
-	if err := strictKeys(data); err != nil {
-		return err
-	}
-	// The wire form takes Action and Resource as a string or a list.
-	var w struct {
-		Version   string
-		Statement []struct {
-			Sid       string
-			Effect    Effect
-			Principal Principal
-			Action    stringOrList
-			Resource  stringOrList
-		}
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&w); err != nil {
-		if errors.Is(err, ErrInvalidPolicy) {
-			return fmt.Errorf("decoding policy: %w", err)
-		}
-		return fmt.Errorf("decoding policy: %v: %w", err, ErrInvalidPolicy)
-	}
-	d := Policy{Version: w.Version, Statements: make([]Statement, len(w.Statement))}
-	for i, st := range w.Statement {
-		d.Statements[i] = Statement{Sid: st.Sid, Effect: st.Effect, Principal: st.Principal, Actions: st.Action, Resources: st.Resource}
-	}
-	if err := wellFormed(d); err != nil {
-		return err
-	}
-	*p = normalize(d)
-	return nil
-}
-
-// strictKeys rejects any property name that is not spelled exactly as the
-// schema defines it, and a null Sid. encoding/json matches field names
-// case-insensitively, so DisallowUnknownFields alone would accept "statement",
-// "effect" or "ACTION".
-// A document this cannot parse is left to the decoder, which reports it.
-func strictKeys(data []byte) error {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		return nil
-	}
-	for k := range top {
-		if k != "Version" && k != "Statement" {
-			return fmt.Errorf("decoding policy: unknown field %q: %w", k, ErrInvalidPolicy)
-		}
-	}
-	var statements []map[string]json.RawMessage
-	if err := json.Unmarshal(top["Statement"], &statements); err != nil {
-		return nil
-	}
-	for _, st := range statements {
-		for k, v := range st {
-			switch k {
-			case "Sid":
-				// encoding/json decodes null into "" without error, which would
-				// read as an absent Sid.
-				if string(bytes.TrimSpace(v)) == "null" {
-					return fmt.Errorf("decoding policy: Sid must be a string: %w", ErrInvalidPolicy)
-				}
-			case "Effect", "Principal", "Action", "Resource":
-			default:
-				return fmt.Errorf("decoding policy: unknown field %q: %w", k, ErrInvalidPolicy)
-			}
-		}
-	}
-	return nil
-}
-
-// maxSetSize bounds the statements of a policy and the principals of a
-// statement. It is the generated DAG-JSON encoder's map limit, so a document
-// within it always encodes; a real policy is far smaller.
-const maxSetSize = 4096
-
-// wellFormed is the structural check every decoded document passes: a
-// recognized Version, at least one statement and at most maxSetSize, each
-// with a recognized effect, naming [Wildcard] or at least one principal and
-// at most maxSetSize (and never [Wildcard] inside the list), holding at least
-// one action, each in the policy vocabulary (see [s3perm.PolicyAction]) or
-// [s3perm.PolicyWildcard], and at least one resource, each an ARN of the one
-// bucket every resource in the document names, covering what its actions act
-// on (see the package doc). It returns an error wrapping [ErrInvalidPolicy]
-// otherwise.
-func wellFormed(d Policy) error {
-	if d.Version != Version2012 && d.Version != Version2008 {
-		return fmt.Errorf("policy Version %q must be %q or %q: %w", d.Version, Version2012, Version2008, ErrInvalidPolicy)
-	}
-	if len(d.Statements) == 0 {
-		return fmt.Errorf("Statement must not be empty: %w", ErrInvalidPolicy)
-	}
-	if len(d.Statements) > maxSetSize {
-		return fmt.Errorf("Statement holds %d statements, at most %d are allowed: %w", len(d.Statements), maxSetSize, ErrInvalidPolicy)
-	}
-	bucket := ""
-	for i, st := range d.Statements {
-		if st.Effect != Allow && st.Effect != Deny {
-			return fmt.Errorf("statement %d: Effect %q must be %q or %q: %w", i, st.Effect, Allow, Deny, ErrInvalidPolicy)
-		}
-		if !st.Principal.All {
-			if len(st.Principal.IDs) == 0 {
-				return fmt.Errorf("statement %d: Principal must not be empty: %w", i, ErrInvalidPolicy)
-			}
-			if len(st.Principal.IDs) > maxSetSize {
-				return fmt.Errorf("statement %d: Principal names %d principals, at most %d are allowed: %w", i, len(st.Principal.IDs), maxSetSize, ErrInvalidPolicy)
-			}
-			if slices.Contains(st.Principal.IDs, Wildcard) {
-				return fmt.Errorf("statement %d: Principal %q must be the bare string, not a list entry: %w", i, Wildcard, ErrInvalidPolicy)
-			}
-		}
-		if len(st.Actions) == 0 {
-			return fmt.Errorf("statement %d: Action must not be empty: %w", i, ErrInvalidPolicy)
-		}
-		for _, a := range st.Actions {
-			if a != s3perm.PolicyWildcard && !s3perm.PolicyAction(a) {
-				return fmt.Errorf("statement %d: Action %q is not a policy action: %w", i, a, ErrInvalidPolicy)
-			}
-		}
-		if len(st.Resources) == 0 {
-			return fmt.Errorf("statement %d: Resource must not be empty: %w", i, ErrInvalidPolicy)
-		}
-		var hasBucket, hasObjects bool
-		for _, r := range st.Resources {
-			b, objects, ok := parseS3ARN(r)
-			if !ok {
-				return fmt.Errorf("statement %d: Resource %q must be %q or %q: %w", i, r, BucketARN("<bucket>"), ObjectsARN("<bucket>"), ErrInvalidPolicy)
-			}
-			if bucket == "" {
-				bucket = b
-			}
-			if b != bucket {
-				return fmt.Errorf("statement %d: Resource %q names bucket %q, the policy names %q: %w", i, r, b, bucket, ErrInvalidPolicy)
-			}
-			hasBucket = hasBucket || !objects
-			hasObjects = hasObjects || objects
-		}
-		for _, a := range st.Actions {
-			wildcard := a == s3perm.PolicyWildcard
-			if (wildcard || objectAction(a)) && !hasObjects {
-				return fmt.Errorf("statement %d: Action %q needs Resource %q: %w", i, a, ObjectsARN(bucket), ErrInvalidPolicy)
-			}
-			if (wildcard || !objectAction(a)) && !hasBucket {
-				return fmt.Errorf("statement %d: Action %q needs Resource %q: %w", i, a, BucketARN(bucket), ErrInvalidPolicy)
-			}
-		}
-	}
-	return nil
-}
-
-// parseS3ARN splits arn:aws:s3:::<bucket> or arn:aws:s3:::<bucket>/* into the
-// bucket and whether it names the bucket's objects. Any other shape, a key
-// prefix or a wildcard in the bucket name included, is not ok.
-func parseS3ARN(arn string) (bucket string, objects bool, ok bool) {
-	rest, ok := strings.CutPrefix(arn, s3ARNPrefix)
-	if !ok {
-		return "", false, false
-	}
-	bucket, objects = strings.CutSuffix(rest, objectsSuffix)
-	if bucket == "" || strings.ContainsAny(bucket, "/*?") {
-		return "", false, false
-	}
-	return bucket, objects, true
-}
-
-// bucketActions are the policy actions that act on the bucket rather than on
-// its objects; every other policy action is an object action. The split is
-// versitygw's, which evaluates the policy against these ARNs.
-var bucketActions = []string{
-	"s3:ListBucket",
-	"s3:ListBucketMultipartUploads",
-	"s3:ListBucketVersions",
-}
-
-// objectAction reports whether policy action a acts on objects.
-func objectAction(a string) bool { return !slices.Contains(bucketActions, a) }
 
 // Validate checks that d may be stored as the policy of bucket: it is
-// [wellFormed], every resource names bucket, and every named principal
+// [s3bkt.WellFormed], every resource names bucket, and every named principal
 // exists per principalExists. A document that came through [Decode] is well
 // formed already; the check is repeated here for documents built in code. It
-// returns an error wrapping [ErrInvalidPolicy] otherwise.
-func Validate(d Policy, bucket string, principalExists func(string) bool) error {
-	if err := wellFormed(d); err != nil {
+// returns an error wrapping [s3bkt.ErrInvalidPolicy] otherwise.
+func Validate(d s3bkt.BucketPolicy, bucket string, principalExists func(string) bool) error {
+	if err := s3bkt.WellFormed(d); err != nil {
 		return err
 	}
 	for i, st := range d.Statements {
 		for _, r := range st.Resources {
-			if b, _, _ := parseS3ARN(r); b != bucket {
-				return fmt.Errorf("statement %d: Resource %q must name bucket %q: %w", i, r, bucket, ErrInvalidPolicy)
+			if b, _, _ := s3bkt.ParseS3ARN(r); b != bucket {
+				return fmt.Errorf("statement %d: Resource %q must name bucket %q: %w", i, r, bucket, s3bkt.ErrInvalidPolicy)
 			}
 		}
 		if st.Principal.All {
@@ -348,7 +80,7 @@ func Validate(d Policy, bucket string, principalExists func(string) bool) error 
 		}
 		for _, p := range st.Principal.IDs {
 			if p == "" || !principalExists(p) {
-				return fmt.Errorf("statement %d: unknown principal %q: %w", i, p, ErrInvalidPolicy)
+				return fmt.Errorf("statement %d: unknown principal %q: %w", i, p, s3bkt.ErrInvalidPolicy)
 			}
 		}
 	}
@@ -364,13 +96,13 @@ func encodeJSON(v any) []byte {
 }
 
 // Effective returns the actions principal p holds under d: the actions of the
-// allow statements naming p or [Wildcard], minus the actions of the deny
-// statements naming p or [Wildcard], with [s3perm.PolicyWildcard] standing for
+// allow statements naming p or [s3bkt.Wildcard], minus the actions of the deny
+// statements naming p or [s3bkt.Wildcard], with [s3bkt.PolicyWildcard] standing for
 // every policy action. The result is sorted and deduplicated, and nil when it
 // is empty or d is nil (a bucket with no policy). It is also nil for
-// p == [Wildcard], which is not a principal: expanding the wildcard to the
+// p == [s3bkt.Wildcard], which is not a principal: expanding the wildcard to the
 // tenant's principals is [Changed]'s job.
-func Effective(d *Policy, p string) []string {
+func Effective(d *s3bkt.BucketPolicy, p string) []string {
 	if d == nil {
 		return nil
 	}
@@ -381,7 +113,7 @@ func Effective(d *Policy, p string) []string {
 			continue
 		}
 		set := allowed
-		if st.Effect == Deny {
+		if st.Effect == s3bkt.Deny {
 			set = denied
 		}
 		for _, a := range expand(st.Actions) {
@@ -399,8 +131,8 @@ func Effective(d *Policy, p string) []string {
 }
 
 // Named returns the principals d names explicitly, sorted and deduplicated,
-// and whether any statement names [Wildcard].
-func Named(d Policy) (principals []string, wildcard bool) {
+// and whether any statement names [s3bkt.Wildcard].
+func Named(d s3bkt.BucketPolicy) (principals []string, wildcard bool) {
 	seen := map[string]bool{}
 	for _, st := range d.Statements {
 		if st.Principal.All {
@@ -421,8 +153,8 @@ func Named(d Policy) (principals []string, wildcard bool) {
 // RemovePrincipal returns d with principalID removed from every statement
 // naming it, dropping statements left with no principal, and reports whether
 // anything changed. A wildcard statement names no principal and is kept as is.
-func RemovePrincipal(d Policy, principalID string) (Policy, bool) {
-	var statements []Statement
+func RemovePrincipal(d s3bkt.BucketPolicy, principalID string) (s3bkt.BucketPolicy, bool) {
+	var statements []s3bkt.Statement
 	changed := false
 	for _, st := range d.Statements {
 		if !st.Principal.All {
@@ -433,20 +165,20 @@ func RemovePrincipal(d Policy, principalID string) (Policy, bool) {
 			if len(ids) == 0 {
 				continue
 			}
-			st.Principal = Only(ids...)
+			st.Principal = s3bkt.Only(ids...)
 		}
 		statements = append(statements, st)
 	}
-	return Policy{Version: d.Version, Statements: statements}, changed
+	return s3bkt.BucketPolicy{Version: d.Version, Statements: statements}, changed
 }
 
 // Changed returns the principals whose effective set differs between old and
 // new, either of which may be nil for "no policy". It considers every
-// principal either policy names, with [Wildcard] expanding to
+// principal either policy names, with [s3bkt.Wildcard] expanding to
 // tenantPrincipals. The result is sorted and deduplicated.
-func Changed(old, new *Policy, tenantPrincipals []string) []string {
+func Changed(old, new *s3bkt.BucketPolicy, tenantPrincipals []string) []string {
 	candidates := map[string]bool{}
-	for _, d := range []*Policy{old, new} {
+	for _, d := range []*s3bkt.BucketPolicy{old, new} {
 		if d == nil {
 			continue
 		}
@@ -470,24 +202,24 @@ func Changed(old, new *Policy, tenantPrincipals []string) []string {
 	return out
 }
 
-// names reports whether st applies to principal p. [Wildcard] is never a
+// names reports whether st applies to principal p. [s3bkt.Wildcard] is never a
 // principal, so no statement applies to it.
-func names(st Statement, p string) bool {
-	if p == Wildcard {
+func names(st s3bkt.Statement, p string) bool {
+	if p == s3bkt.Wildcard {
 		return false
 	}
 	return st.Principal.All || slices.Contains(st.Principal.IDs, p)
 }
 
-// expand replaces [s3perm.PolicyWildcard] with every policy action.
+// expand replaces [s3bkt.PolicyWildcard] with every policy action.
 func expand(actions []string) []string {
-	if !slices.Contains(actions, s3perm.PolicyWildcard) {
+	if !slices.Contains(actions, s3bkt.PolicyWildcard) {
 		return actions
 	}
 	out := make([]string, 0, len(actions)+16)
 	for _, a := range actions {
-		if a == s3perm.PolicyWildcard {
-			out = append(out, s3perm.PolicyActions()...)
+		if a == s3bkt.PolicyWildcard {
+			out = append(out, s3bkt.PolicyActions()...)
 		} else {
 			out = append(out, a)
 		}

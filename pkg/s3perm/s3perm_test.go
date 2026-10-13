@@ -4,6 +4,8 @@ import (
 	"slices"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -179,31 +181,31 @@ func TestPolicyAction(t *testing.T) {
 		"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
 		"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
 	} {
-		require.True(t, s3perm.PolicyAction(p), p)
+		require.True(t, s3bkt.PolicyAction(p), p)
 	}
 	for _, p := range []string{
 		"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
 		"", "s3:Frobnicate", "s3:getobject",
 	} {
-		require.False(t, s3perm.PolicyAction(p), p)
+		require.False(t, s3bkt.PolicyAction(p), p)
 	}
 }
 
 // TestPolicyActions pins the wildcard expansion: sorted, every PolicyAction and
 // nothing else.
 func TestPolicyActions(t *testing.T) {
-	actions := s3perm.PolicyActions()
+	actions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(actions))
 	require.Len(t, actions, 14)
 	for _, p := range actions {
-		require.True(t, s3perm.PolicyAction(p), p)
+		require.True(t, s3bkt.PolicyAction(p), p)
 	}
 	for _, p := range []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
-		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", s3perm.PolicyWildcard} {
+		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", s3bkt.PolicyWildcard} {
 		require.NotContains(t, actions, p)
 	}
-	require.False(t, s3perm.PolicyAction(s3perm.PolicyWildcard))
+	require.False(t, s3bkt.PolicyAction(s3bkt.PolicyWildcard))
 }
 
 // TestOperationPermissionsAreValid keeps the two hardcoded permission lists in

@@ -4,8 +4,9 @@ import (
 	"errors"
 	"net/http"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
@@ -28,7 +29,7 @@ func policyHTTPError(log *zap.Logger, err error) error {
 		return httpError(http.StatusPreconditionFailed, err)
 	case errors.Is(err, bucketpolicysvc.ErrConcurrentChange):
 		return httpError(http.StatusConflict, err)
-	case errors.Is(err, bucketpolicy.ErrInvalidPolicy):
+	case errors.Is(err, s3bkt.ErrInvalidPolicy):
 		return httpError(http.StatusUnprocessableEntity, err)
 	default:
 		log.Error("request failed", zap.Error(err))

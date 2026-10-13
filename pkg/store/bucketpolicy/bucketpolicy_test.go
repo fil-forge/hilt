@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -103,20 +105,20 @@ func makeStore(t *testing.T, k StoreKind) (bucketpolicystore.Store, fixtures) {
 	panic("unknown store kind")
 }
 
-var everyone = bucketpolicy.Everyone()
+var everyone = s3bkt.Everyone()
 
-func only(ids ...string) bucketpolicy.Principal { return bucketpolicy.Only(ids...) }
+func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
 
-func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
+func allow(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
 }
 
-func deny(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
+func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
 }
 
-func doc(statements ...bucketpolicy.Statement) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements}
+func doc(statements ...s3bkt.Statement) s3bkt.BucketPolicy {
+	return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements}
 }
 
 func ptr(s string) *string { return &s }
@@ -547,7 +549,7 @@ func TestPolicyStore(t *testing.T) {
 				unpoliced := fx.bucket(t, tenantID) // no policy
 				_ = unpoliced
 
-				put := func(bucket did.DID, d bucketpolicy.Policy) {
+				put := func(bucket did.DID, d s3bkt.BucketPolicy) {
 					_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: d, Conditional: true}, nil)
 					require.NoError(t, err)
 				}

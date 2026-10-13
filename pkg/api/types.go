@@ -3,7 +3,7 @@ package api
 import (
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 )
 
 // TenantStatus is the access mode of a tenant.
@@ -146,8 +146,8 @@ type PrincipalList struct {
 // PrincipalPolicy is one of the policies naming a principal, addressed by the
 // bucket it applies to.
 type PrincipalPolicy struct {
-	BucketName string              `json:"bucketName"`
-	Policy     bucketpolicy.Policy `json:"policy"`
+	BucketName string             `json:"bucketName"`
+	Policy     s3bkt.BucketPolicy `json:"policy"`
 }
 
 // PrincipalPolicyList is the body of

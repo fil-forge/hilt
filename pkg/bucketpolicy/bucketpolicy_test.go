@@ -6,16 +6,17 @@ import (
 	"strings"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/ipfs/go-cid"
 	mh "github.com/multiformats/go-multihash"
 	"github.com/stretchr/testify/require"
 )
 
-var everyone = bucketpolicy.Everyone()
+var everyone = s3bkt.Everyone()
 
-func only(ids ...string) bucketpolicy.Principal { return bucketpolicy.Only(ids...) }
+func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
 
 const (
 	bucketARN  = "arn:aws:s3:::photos"
@@ -26,16 +27,16 @@ const (
 // every policy action.
 func both() []string { return []string{bucketARN, objectsARN} }
 
-func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions, Resources: both()}
+func allow(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: actions, Resources: both()}
 }
 
-func deny(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions, Resources: both()}
+func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: actions, Resources: both()}
 }
 
-func doc(statements ...bucketpolicy.Statement) *bucketpolicy.Policy {
-	return &bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements}
+func doc(statements ...s3bkt.Statement) *s3bkt.BucketPolicy {
+	return &s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements}
 }
 
 // policyJSON wraps statements, given as JSON, in a 2012-10-17 document.
@@ -55,16 +56,16 @@ func TestDecode(t *testing.T) {
 		require.NoError(t, err)
 		// Lists are sets: sorted and deduplicated, statements ordered by their
 		// CID (see TestETag for the encoding).
-		require.Equal(t, bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
-			{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}, Resources: both()},
-			{Effect: bucketpolicy.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}, Resources: []string{objectsARN}},
+		require.Equal(t, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+			{Sid: "owners", Effect: s3bkt.Allow, Principal: only("alice", "bob"), Actions: []string{"s3:GetObject", "s3:ListBucket"}, Resources: both()},
+			{Effect: s3bkt.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}, Resources: []string{objectsARN}},
 		}}, d)
 	})
 
 	principals := []struct {
 		name string
 		json string
-		want bucketpolicy.Principal
+		want s3bkt.Principal
 	}{
 		{"the bare wildcard", `"*"`, everyone},
 		{"the AWS wildcard", `{"AWS": "*"}`, everyone},
@@ -92,7 +93,7 @@ func TestDecode(t *testing.T) {
 	t.Run("accepts the 2008-10-17 version and keeps it", func(t *testing.T) {
 		d, err := bucketpolicy.Decode([]byte(`{"Version": "2008-10-17", "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::photos/*"}]}`))
 		require.NoError(t, err)
-		require.Equal(t, bucketpolicy.Version2008, d.Version)
+		require.Equal(t, s3bkt.Version2008, d.Version)
 	})
 
 	t.Run("keeps each principal, action and resource once, sorted", func(t *testing.T) {
@@ -183,24 +184,21 @@ func TestDecode(t *testing.T) {
 	for _, tt := range rejects {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
 			_, err := bucketpolicy.Decode([]byte(tt.body))
-			require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+			require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 			require.ErrorContains(t, err, tt.want)
 		})
 	}
 
 	t.Run("json.Unmarshal applies the same checks", func(t *testing.T) {
 		// The stores read documents back with encoding/json.
-		var d bucketpolicy.Policy
+		var d s3bkt.BucketPolicy
 		err := json.Unmarshal([]byte(policyJSON(`{"Effect": "Allow", "Principal": {"AWS": []}, "Action": ["s3:GetObject"], `+res+`}`)), &d)
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 		require.ErrorContains(t, err, `Principal must not be empty`)
 
 		err = json.Unmarshal([]byte(`{"statement": []}`), &d)
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 		require.ErrorContains(t, err, `unknown field "statement"`)
-
-		require.NoError(t, json.Unmarshal([]byte(policyJSON(`{"Effect": "Allow", "Principal": {"AWS": ["arn:aws:iam:::user/bob", "arn:aws:iam:::user/alice"]}, "Action": ["s3:GetObject"], `+res+`}`)), &d))
-		require.Equal(t, *doc(allow(only("alice", "bob"), "s3:GetObject")), d, "and normalizes")
 	})
 }
 
@@ -214,21 +212,21 @@ func TestActionResources(t *testing.T) {
 		"s3:GetObject", "s3:GetObjectLegalHold", "s3:GetObjectRetention", "s3:GetObjectVersion",
 		"s3:ListMultipartUploadParts", "s3:PutObject", "s3:PutObjectLegalHold", "s3:PutObjectRetention",
 	}
-	require.ElementsMatch(t, s3perm.PolicyActions(), append(slices.Clone(bucketActions), objectActions...))
+	require.ElementsMatch(t, s3bkt.PolicyActions(), append(slices.Clone(bucketActions), objectActions...))
 
-	on := func(a string, resources ...string) bucketpolicy.Policy {
-		return *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: everyone, Actions: []string{a}, Resources: resources})
+	on := func(a string, resources ...string) s3bkt.BucketPolicy {
+		return *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: everyone, Actions: []string{a}, Resources: resources})
 	}
 	all := func(string) bool { return true }
 	for _, a := range bucketActions {
 		require.NoError(t, bucketpolicy.Validate(on(a, bucketARN), "photos", all), a)
-		require.ErrorIs(t, bucketpolicy.Validate(on(a, objectsARN), "photos", all), bucketpolicy.ErrInvalidPolicy, a)
+		require.ErrorIs(t, bucketpolicy.Validate(on(a, objectsARN), "photos", all), s3bkt.ErrInvalidPolicy, a)
 	}
 	for _, a := range objectActions {
 		require.NoError(t, bucketpolicy.Validate(on(a, objectsARN), "photos", all), a)
-		require.ErrorIs(t, bucketpolicy.Validate(on(a, bucketARN), "photos", all), bucketpolicy.ErrInvalidPolicy, a)
+		require.ErrorIs(t, bucketpolicy.Validate(on(a, bucketARN), "photos", all), s3bkt.ErrInvalidPolicy, a)
 	}
-	require.NoError(t, bucketpolicy.Validate(on(s3perm.PolicyWildcard, bucketARN, objectsARN), "photos", all))
+	require.NoError(t, bucketpolicy.Validate(on(s3bkt.PolicyWildcard, bucketARN, objectsARN), "photos", all))
 }
 
 func TestValidate(t *testing.T) {
@@ -236,7 +234,7 @@ func TestValidate(t *testing.T) {
 
 	valid := []struct {
 		name string
-		doc  bucketpolicy.Policy
+		doc  s3bkt.BucketPolicy
 	}{
 		{"one allow", *doc(allow(only("alice"), "s3:GetObject"))},
 		{"wildcard is not looked up", *doc(allow(everyone, "s3:GetObject"))},
@@ -245,10 +243,10 @@ func TestValidate(t *testing.T) {
 			allow(only("alice", "bob"), "s3:GetObject", "s3:ListBucket"),
 			deny(only("bob"), "s3:ListBucket"),
 		)},
-		{"a sid", *doc(bucketpolicy.Statement{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: []string{objectsARN}})},
-		{"the 2008 version", bucketpolicy.Policy{Version: bucketpolicy.Version2008, Statements: []bucketpolicy.Statement{allow(only("alice"), "s3:GetObject")}}},
-		{"the action wildcard", *doc(allow(only("alice"), s3perm.PolicyWildcard))},
-		{"the action wildcard beside named actions", *doc(deny(everyone, "s3:PutObjectRetention"), allow(only("alice"), "s3:GetObject", s3perm.PolicyWildcard))},
+		{"a sid", *doc(s3bkt.Statement{Sid: "owners", Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: []string{objectsARN}})},
+		{"the 2008 version", s3bkt.BucketPolicy{Version: s3bkt.Version2008, Statements: []s3bkt.Statement{allow(only("alice"), "s3:GetObject")}}},
+		{"the action wildcard", *doc(allow(only("alice"), s3bkt.PolicyWildcard))},
+		{"the action wildcard beside named actions", *doc(deny(everyone, "s3:PutObjectRetention"), allow(only("alice"), "s3:GetObject", s3bkt.PolicyWildcard))},
 		{"versioned object reads", *doc(allow(only("alice"), "s3:GetObjectVersion", "s3:ListBucketVersions"))},
 		{"multipart actions", *doc(allow(only("alice"), "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads"))},
 	}
@@ -260,19 +258,19 @@ func TestValidate(t *testing.T) {
 
 	invalid := []struct {
 		name string
-		doc  bucketpolicy.Policy
+		doc  s3bkt.BucketPolicy
 		want string
 	}{
-		{"a missing version", bucketpolicy.Policy{Statements: []bucketpolicy.Statement{allow(only("alice"), "s3:GetObject")}}, `Version "" must be`},
+		{"a missing version", s3bkt.BucketPolicy{Statements: []s3bkt.Statement{allow(only("alice"), "s3:GetObject")}}, `Version "" must be`},
 		{"empty statements", *doc(), "Statement must not be empty"},
-		{"unknown effect", *doc(bucketpolicy.Statement{Effect: "Permit", Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: both()}), `Effect "Permit"`},
-		{"lowercase effect", *doc(bucketpolicy.Statement{Effect: "allow", Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: both()}), `Effect "allow"`},
+		{"unknown effect", *doc(s3bkt.Statement{Effect: "Permit", Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: both()}), `Effect "Permit"`},
+		{"lowercase effect", *doc(s3bkt.Statement{Effect: "allow", Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: both()}), `Effect "allow"`},
 		{"empty principal", *doc(allow(only(), "s3:GetObject")), "Principal must not be empty"},
 		{"wildcard inside the principal list", *doc(allow(only("alice", "*"), "s3:GetObject")), `Principal "*" must be the bare string`},
 		{"empty actions", *doc(allow(only("alice"))), "Action must not be empty"},
-		{"missing resources", *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}}), "Resource must not be empty"},
-		{"another bucket", *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: []string{"arn:aws:s3:::videos/*"}}), `Resource "arn:aws:s3:::videos/*" must name bucket "photos"`},
-		{"an object action on the bucket ARN", *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:PutObject"}, Resources: []string{bucketARN}}), `Action "s3:PutObject" needs Resource "arn:aws:s3:::photos/*"`},
+		{"missing resources", *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}}), "Resource must not be empty"},
+		{"another bucket", *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: []string{"arn:aws:s3:::videos/*"}}), `Resource "arn:aws:s3:::videos/*" must name bucket "photos"`},
+		{"an object action on the bucket ARN", *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:PutObject"}, Resources: []string{bucketARN}}), `Action "s3:PutObject" needs Resource "arn:aws:s3:::photos/*"`},
 		{"unknown principal", *doc(allow(only("alice", "mallory"), "s3:GetObject")), `unknown principal "mallory"`},
 		{"empty principal id", *doc(allow(only(""), "s3:GetObject")), `unknown principal ""`},
 		{"create bucket", *doc(allow(only("alice"), "s3:CreateBucket")), `Action "s3:CreateBucket"`},
@@ -288,7 +286,7 @@ func TestValidate(t *testing.T) {
 	for _, tt := range invalid {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
 			err := bucketpolicy.Validate(tt.doc, "photos", known)
-			require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+			require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 			require.ErrorContains(t, err, tt.want)
 		})
 	}
@@ -297,7 +295,7 @@ func TestValidate(t *testing.T) {
 func TestCanonical(t *testing.T) {
 	t.Run("compact JSON with fixed field order and every list sorted", func(t *testing.T) {
 		d := *doc(
-			bucketpolicy.Statement{Sid: "rw", Effect: bucketpolicy.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:PutObject", "s3:GetObject"}, Resources: []string{objectsARN}},
+			s3bkt.Statement{Sid: "rw", Effect: s3bkt.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:PutObject", "s3:GetObject"}, Resources: []string{objectsARN}},
 			deny(everyone, "s3:DeleteObject"),
 		)
 		// Statements are ordered by their CID: the deny's sorts before the rw
@@ -311,26 +309,26 @@ func TestCanonical(t *testing.T) {
 
 	t.Run("is valid JSON that decodes back to the document", func(t *testing.T) {
 		d := *doc(allow(only("alice"), "s3:GetObject"), deny(only("bob"), "s3:ListBucket"))
-		var back bucketpolicy.Policy
+		var back s3bkt.BucketPolicy
 		require.NoError(t, json.Unmarshal(bucketpolicy.Canonical(d), &back))
 		require.ElementsMatch(t, d.Statements, back.Statements)
 		require.Equal(t, d.Version, back.Version)
 	})
 
 	t.Run("nil and empty lists canonicalize the same", func(t *testing.T) {
-		withNil := bucketpolicy.Policy{Statements: nil}
-		withEmpty := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{}}
+		withNil := s3bkt.BucketPolicy{Statements: nil}
+		withEmpty := s3bkt.BucketPolicy{Statements: []s3bkt.Statement{}}
 		require.Equal(t, `{"Version":"","Statement":[]}`, string(bucketpolicy.Canonical(withNil)))
 		require.Equal(t, bucketpolicy.Canonical(withNil), bucketpolicy.Canonical(withEmpty))
 
-		stNil := *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow})
-		stEmpty := *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: only(), Actions: []string{}, Resources: []string{}})
+		stNil := *doc(s3bkt.Statement{Effect: s3bkt.Allow})
+		stEmpty := *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: only(), Actions: []string{}, Resources: []string{}})
 		require.Equal(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":[]},"Action":[],"Resource":[]}]}`, string(bucketpolicy.Canonical(stNil)))
 		require.Equal(t, bucketpolicy.Canonical(stNil), bucketpolicy.Canonical(stEmpty))
 	})
 
 	t.Run("a wildcard principal ignores stray ids", func(t *testing.T) {
-		d := *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Principal{All: true, IDs: []string{"alice"}}, Actions: []string{"s3:GetObject"}, Resources: []string{objectsARN}})
+		d := *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Principal{All: true, IDs: []string{"alice"}}, Actions: []string{"s3:GetObject"}, Resources: []string{objectsARN}})
 		require.Equal(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::photos/*"]}]}`, string(bucketpolicy.Canonical(d)))
 	})
 
@@ -375,7 +373,7 @@ func dagJSONSet(members ...string) string {
 // dagJSONStatement is the DAG-JSON encoding of a statement: keys in sorted
 // order, Sid omitted when empty, principals, actions and resources as sets,
 // the wildcard principal as the set {"*"}.
-func dagJSONStatement(sid string, effect bucketpolicy.Effect, principals, actions, resources []string) string {
+func dagJSONStatement(sid string, effect s3bkt.Effect, principals, actions, resources []string) string {
 	raw := `{"Action":` + dagJSONSet(actions...) + `,"Effect":"` + string(effect) + `","Principal":` + dagJSONSet(principals...) + `,"Resource":` + dagJSONSet(resources...)
 	if sid != "" {
 		raw += `,"Sid":"` + sid + `"`
@@ -409,12 +407,12 @@ func TestETag(t *testing.T) {
 
 	t.Run("encodes a sid, a wildcard principal and several statements", func(t *testing.T) {
 		d := *doc(
-			bucketpolicy.Statement{Sid: "owners", Effect: bucketpolicy.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:ListBucket", "s3:GetObject"}, Resources: both()},
-			bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}, Resources: []string{objectsARN}},
+			s3bkt.Statement{Sid: "owners", Effect: s3bkt.Allow, Principal: only("bob", "alice"), Actions: []string{"s3:ListBucket", "s3:GetObject"}, Resources: both()},
+			s3bkt.Statement{Effect: s3bkt.Deny, Principal: everyone, Actions: []string{"s3:PutObjectRetention"}, Resources: []string{objectsARN}},
 		)
 		want := dagJSONPolicy(t, "2012-10-17",
-			dagJSONStatement("owners", bucketpolicy.Allow, []string{"alice", "bob"}, []string{"s3:GetObject", "s3:ListBucket"}, both()),
-			dagJSONStatement("", bucketpolicy.Deny, []string{"*"}, []string{"s3:PutObjectRetention"}, []string{objectsARN}),
+			dagJSONStatement("owners", s3bkt.Allow, []string{"alice", "bob"}, []string{"s3:GetObject", "s3:ListBucket"}, both()),
+			dagJSONStatement("", s3bkt.Deny, []string{"*"}, []string{"s3:PutObjectRetention"}, []string{objectsARN}),
 		)
 		require.Equal(t, `"`+dagJSONCID(t, want).String()+`"`, bucketpolicy.ETag(d))
 	})
@@ -436,12 +434,12 @@ func TestETag(t *testing.T) {
 		require.NotEqual(t, bucketpolicy.ETag(d), bucketpolicy.ETag(*doc(allow(only("alice"), "s3:PutObject"))))
 		require.NotEqual(t, bucketpolicy.ETag(d), bucketpolicy.ETag(*doc(allow(only("bob"), "s3:GetObject"))))
 		require.NotEqual(t, bucketpolicy.ETag(d), bucketpolicy.ETag(*doc(deny(only("alice"), "s3:GetObject"))))
-		withSid := *doc(bucketpolicy.Statement{Sid: "read", Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: both()})
+		withSid := *doc(s3bkt.Statement{Sid: "read", Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: both()})
 		require.NotEqual(t, bucketpolicy.ETag(d), bucketpolicy.ETag(withSid))
-		objectsOnly := *doc(bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: []string{objectsARN}})
+		objectsOnly := *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}, Resources: []string{objectsARN}})
 		require.NotEqual(t, bucketpolicy.ETag(d), bucketpolicy.ETag(objectsOnly))
 		older := d
-		older.Version = bucketpolicy.Version2008
+		older.Version = s3bkt.Version2008
 		require.NotEqual(t, bucketpolicy.ETag(d), bucketpolicy.ETag(older))
 	})
 
@@ -451,15 +449,15 @@ func TestETag(t *testing.T) {
 		// were computed from hand-assembled DAG-JSON bytes:
 		// {"Statement":{},"Version":""} and
 		// {"Statement":{"<CID of the statement above>":{}},"Version":"2012-10-17"}.
-		require.Equal(t, `"baguqeera3ukm4dwurlcxssbaxivqmsq4s7j33v5jwdufi5e7oni7qykicx7a"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
+		require.Equal(t, `"baguqeera3ukm4dwurlcxssbaxivqmsq4s7j33v5jwdufi5e7oni7qykicx7a"`, bucketpolicy.ETag(s3bkt.BucketPolicy{}))
 		require.Equal(t, `"baguqeeraxrbpwxlgnbcvemoyaijexku27ww3g5am44tmnai7oxrqtw3z643a"`, bucketpolicy.ETag(d))
-		require.Equal(t, bucketpolicy.ETag(bucketpolicy.Policy{}), bucketpolicy.ETag(bucketpolicy.Policy{Statements: []bucketpolicy.Statement{}}))
-		require.Equal(t, `"`+dagJSONCID(t, `{"Statement":{},"Version":""}`).String()+`"`, bucketpolicy.ETag(bucketpolicy.Policy{}))
+		require.Equal(t, bucketpolicy.ETag(s3bkt.BucketPolicy{}), bucketpolicy.ETag(s3bkt.BucketPolicy{Statements: []s3bkt.Statement{}}))
+		require.Equal(t, `"`+dagJSONCID(t, `{"Statement":{},"Version":""}`).String()+`"`, bucketpolicy.ETag(s3bkt.BucketPolicy{}))
 	})
 }
 
 func TestEffective(t *testing.T) {
-	all := s3perm.PolicyActions()
+	all := s3bkt.PolicyActions()
 	require.NotContains(t, all, "s3:CreateBucket")
 	require.NotContains(t, all, "s3:DeleteBucket")
 	require.NotContains(t, all, "s3:ListAllMyBuckets")
@@ -471,7 +469,7 @@ func TestEffective(t *testing.T) {
 	}
 	tests := []struct {
 		name      string
-		doc       *bucketpolicy.Policy
+		doc       *s3bkt.BucketPolicy
 		principal string
 		want      []string
 	}{
@@ -509,14 +507,14 @@ func TestEffective(t *testing.T) {
 			deny(only("alice"), "s3:PutObject"),
 			allow(only("alice"), "s3:PutObject", "s3:GetObject"),
 		), "alice", []string{"s3:GetObject"}},
-		{"the action wildcard grants every policy action", doc(allow(only("alice"), s3perm.PolicyWildcard)), "alice", all},
+		{"the action wildcard grants every policy action", doc(allow(only("alice"), s3bkt.PolicyWildcard)), "alice", all},
 		{"a named deny narrows the action wildcard", doc(
-			allow(only("alice"), s3perm.PolicyWildcard),
+			allow(only("alice"), s3bkt.PolicyWildcard),
 			deny(everyone, "s3:PutObjectRetention", "s3:PutObjectLegalHold"),
 		), "alice", allButRetention},
 		{"a wildcard deny denies everything", doc(
 			allow(only("alice"), "s3:GetObject", "s3:PutObject"),
-			deny(only("alice"), s3perm.PolicyWildcard),
+			deny(only("alice"), s3bkt.PolicyWildcard),
 		), "alice", nil},
 		{"wildcard is not a principal name", doc(allow(only("alice"), "s3:GetObject")), "*", nil},
 		{"a wildcard statement does not grant the wildcard itself", doc(allow(everyone, "s3:GetObject")), "*", nil},
@@ -531,11 +529,11 @@ func TestEffective(t *testing.T) {
 func TestNamed(t *testing.T) {
 	tests := []struct {
 		name         string
-		doc          bucketpolicy.Policy
+		doc          s3bkt.BucketPolicy
 		want         []string
 		wantWildcard bool
 	}{
-		{"empty", bucketpolicy.Policy{}, nil, false},
+		{"empty", s3bkt.BucketPolicy{}, nil, false},
 		{"one principal", *doc(allow(only("alice"), "s3:GetObject")), []string{"alice"}, false},
 		{"sorted and deduplicated across statements", *doc(
 			allow(only("carol", "alice"), "s3:GetObject"),
@@ -560,7 +558,7 @@ func TestChanged(t *testing.T) {
 	tenant := []string{"alice", "bob", "carol"}
 	tests := []struct {
 		name       string
-		old, new   *bucketpolicy.Policy
+		old, new   *s3bkt.BucketPolicy
 		principals []string
 		want       []string
 	}{
@@ -568,13 +566,13 @@ func TestChanged(t *testing.T) {
 		{"creating a policy names its principals", nil, doc(allow(only("alice", "bob"), "s3:GetObject")), tenant, []string{"alice", "bob"}},
 		{"deleting a policy names its principals", doc(allow(only("alice"), "s3:GetObject")), nil, tenant, []string{"alice"}},
 		{"identical documents change nothing", doc(allow(only("alice"), "s3:GetObject")), doc(allow(only("alice"), "s3:GetObject")), tenant, nil},
-		{"a sid changes nothing", doc(allow(only("alice"), "s3:GetObject")), doc(bucketpolicy.Statement{Sid: "read", Effect: bucketpolicy.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}}), tenant, nil},
+		{"a sid changes nothing", doc(allow(only("alice"), "s3:GetObject")), doc(s3bkt.Statement{Sid: "read", Effect: s3bkt.Allow, Principal: only("alice"), Actions: []string{"s3:GetObject"}}), tenant, nil},
 		{"reordering changes nothing", doc(
 			allow(only("alice"), "s3:GetObject", "s3:PutObject"),
 		), doc(
 			allow(only("alice"), "s3:PutObject", "s3:GetObject"),
 		), tenant, nil},
-		{"spelling out the wildcard changes nothing", doc(allow(only("alice"), s3perm.PolicyWildcard)), doc(allow(only("alice"), s3perm.PolicyActions()...)), tenant, nil},
+		{"spelling out the wildcard changes nothing", doc(allow(only("alice"), s3bkt.PolicyWildcard)), doc(allow(only("alice"), s3bkt.PolicyActions()...)), tenant, nil},
 		{"only the principal whose set changed", doc(
 			allow(only("alice", "bob"), "s3:GetObject"),
 		), doc(

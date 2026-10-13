@@ -7,10 +7,11 @@ import (
 	"slices"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -65,15 +66,15 @@ func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 	return e, deps
 }
 
-func allowUser1(actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions, Resources: []string{bucketpolicy.BucketARN("photos"), bucketpolicy.ObjectsARN("photos")}}
+func allowUser1(actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: actions, Resources: []string{s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")}}
 }
 
 // createPolicy writes the photos bucket's first policy through the service,
 // as the S3 PutBucketPolicy path does, and returns its ETag.
-func createPolicy(t *testing.T, deps *policyDeps, statements ...bucketpolicy.Statement) string {
+func createPolicy(t *testing.T, deps *policyDeps, statements ...s3bkt.Statement) string {
 	t.Helper()
-	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
+	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
 	require.NoError(t, err)
 	return etag
 }
@@ -101,7 +102,7 @@ func TestPrincipalPolicyReadHandlers(t *testing.T) {
 		var list api.PrincipalPolicyList
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 		require.Equal(t, []api.PrincipalPolicy{
-			{BucketName: "photos", Policy: bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{allowUser1("s3:GetObject")}}},
+			{BucketName: "photos", Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{allowUser1("s3:GetObject")}}},
 		}, list.Items)
 	})
 

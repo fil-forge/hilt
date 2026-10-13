@@ -3,8 +3,9 @@ package rpc
 import (
 	"errors"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
@@ -74,7 +75,7 @@ func bucketFailure(res failer, err error) error {
 		errors.Is(err, bucketsvc.ErrInvalidArgument),
 		// A PutBucketPolicy body that does not decode or may not be stored,
 		// under InvalidBucketPolicy.
-		errors.Is(err, bucketpolicy.ErrInvalidPolicy),
+		errors.Is(err, s3bkt.ErrInvalidPolicy),
 		// The policy operations' own rejections.
 		errors.Is(err, bucketpolicysvc.ErrPolicyNotFound),
 		errors.Is(err, bucketpolicysvc.ErrInvalidPrecondition),

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
@@ -43,7 +45,7 @@ var (
 // plus the three bucket-level permissions no policy grants. The fixture's
 // service key holds them all so it can create buckets and seed objects for
 // any scenario.
-var allPermissions = append(s3perm.PolicyActions(), "s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
+var allPermissions = append(s3bkt.PolicyActions(), "s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
 	"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy")
 
 // member is one scenario's fixture: a tenant with a service key that creates
@@ -104,20 +106,20 @@ func newMember(t *testing.T, net *forgeNet, tenantID, principal string, buckets 
 // resources is the bucket's ARN and its objects' ARN, which together cover
 // every policy action.
 func resources(bucket string) []string {
-	return []string{bucketpolicy.BucketARN(bucket), bucketpolicy.ObjectsARN(bucket)}
+	return []string{s3bkt.BucketARN(bucket), s3bkt.ObjectsARN(bucket)}
 }
 
 // allow builds a one-statement document granting actions on bucket to a
 // principal set.
-func allow(bucket string, p bucketpolicy.Principal, actions ...string) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: p, Actions: actions, Resources: resources(bucket)},
+func allow(bucket string, p s3bkt.Principal, actions ...string) s3bkt.BucketPolicy {
+	return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		{Effect: s3bkt.Allow, Principal: p, Actions: actions, Resources: resources(bucket)},
 	}}
 }
 
 // putPolicy writes the bucket's policy over S3 with the service key, as the
 // console does, unconditionally: the preconditions are covered by unit tests.
-func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string, doc bucketpolicy.Policy) {
+func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string, doc s3bkt.BucketPolicy) {
 	t.Helper()
 	raw, err := json.Marshal(doc)
 	require.NoError(t, err)
@@ -126,7 +128,7 @@ func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket str
 }
 
 // getPolicy reads the bucket's policy over S3 with the service key.
-func getPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string) bucketpolicy.Policy {
+func getPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string) s3bkt.BucketPolicy {
 	t.Helper()
 	out, err := service.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{Bucket: aws.String(bucket)})
 	require.NoError(t, err, "GetBucketPolicy on %s", bucket)
@@ -221,7 +223,7 @@ func testPrincipalPolicyScopesToOneBucket(t *testing.T, net *forgeNet) {
 	const granted, ungranted = "iamscope-granted", "iamscope-other"
 	m := newMember(t, net, tenantID, principal, granted, ungranted)
 
-	putPolicy(t, ctx, m.service, granted, allow(granted, bucketpolicy.Only(principal), writeActions...))
+	putPolicy(t, ctx, m.service, granted, allow(granted, s3bkt.Only(principal), writeActions...))
 
 	payload := []byte("written by the member")
 	_, err := m.s3.PutObject(ctx, &s3.PutObjectInput{
@@ -263,9 +265,9 @@ func testDenyBeatsAllow(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
-	doc := bucketpolicy.Policy{Version: bucketpolicy.Version2012, Statements: []bucketpolicy.Statement{
-		{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(principal), Actions: writeActions, Resources: resources(bucket)},
-		{Effect: bucketpolicy.Deny, Principal: bucketpolicy.Only(principal), Actions: []string{"s3:PutObject"}, Resources: resources(bucket)},
+	doc := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		{Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: writeActions, Resources: resources(bucket)},
+		{Effect: s3bkt.Deny, Principal: s3bkt.Only(principal), Actions: []string{"s3:PutObject"}, Resources: resources(bucket)},
 	}}
 	putPolicy(t, ctx, m.service, bucket, doc)
 
@@ -292,7 +294,7 @@ func testNarrowingRevokesGrants(t *testing.T, net *forgeNet) {
 	_, err := net.console.CreatePrincipal(ctx, tenantID, keeper)
 	require.NoError(t, err)
 
-	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(principal, keeper), writeActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(principal, keeper), writeActions...))
 
 	payload := []byte("readable while the policy names the member")
 	_, err = m.s3.PutObject(ctx, &s3.PutObjectInput{
@@ -307,7 +309,7 @@ func testNarrowingRevokesGrants(t *testing.T, net *forgeNet) {
 	// nothing, since the key held nothing over the bucket; the narrowing
 	// revokes every delegation the create issued it, one per command the
 	// granted actions map to.
-	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(keeper), writeActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(keeper), writeActions...))
 
 	want := s3perm.CommandsFor(writeActions...)
 	records := net.awaitRevocations(t, ctx, len(want), "did:key:"+m.key.AccessKeyID)
@@ -350,7 +352,7 @@ func testDeletePrincipalRemovesKeysAndPolicies(t *testing.T, net *forgeNet) {
 	_, err := net.console.CreatePrincipal(ctx, tenantID, keeper)
 	require.NoError(t, err)
 
-	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(principal, keeper), readActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(principal, keeper), readActions...))
 
 	keys, err := net.console.ListPrincipalAccessKeys(ctx, tenantID, principal)
 	require.NoError(t, err)
@@ -395,7 +397,7 @@ func testDeletePrincipalRemovesKeysAndPolicies(t *testing.T, net *forgeNet) {
 	// removed one.
 	kept := getPolicy(t, ctx, m.service, bucket)
 	require.Len(t, kept.Statements, 1)
-	require.Equal(t, bucketpolicy.Only(keeper), kept.Statements[0].Principal)
+	require.Equal(t, s3bkt.Only(keeper), kept.Statements[0].Principal)
 
 	// The same id can be re-invited: the tombstone revives with nothing attached,
 	// so nothing of the old access survives.
@@ -428,7 +430,7 @@ func testPresignedGetFollowsPolicy(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
-	putPolicy(t, ctx, m.service, bucket, allow(bucket, bucketpolicy.Only(principal), readActions...))
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(principal), readActions...))
 
 	presign := s3.NewPresignClient(m.s3)
 	client := &http.Client{Timeout: 10 * time.Second}

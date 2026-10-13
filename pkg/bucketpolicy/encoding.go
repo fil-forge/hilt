@@ -5,13 +5,15 @@ import (
 	"slices"
 	"strings"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/bucketpolicy/internal/dagjson"
 	"github.com/ipfs/go-cid"
 	mh "github.com/multiformats/go-multihash"
 )
 
 // encode returns the DAG-JSON form of st (see [dagjson]): its lists as sets.
-func encode(st Statement) dagjson.Statement {
+func encode(st s3bkt.Statement) dagjson.Statement {
 	e := dagjson.Statement{
 		Sid:       st.Sid,
 		Effect:    string(st.Effect),
@@ -20,7 +22,7 @@ func encode(st Statement) dagjson.Statement {
 		Resource:  make(map[string]dagjson.Empty, len(st.Resources)),
 	}
 	if st.Principal.All {
-		e.Principal[Wildcard] = dagjson.Empty{}
+		e.Principal[s3bkt.Wildcard] = dagjson.Empty{}
 	} else {
 		for _, id := range st.Principal.IDs {
 			e.Principal[id] = dagjson.Empty{}
@@ -37,12 +39,12 @@ func encode(st Statement) dagjson.Statement {
 
 // decode returns the AWS-shaped statement of e: principals, actions and
 // resources in sorted order, never nil.
-func decode(e dagjson.Statement) Statement {
-	st := Statement{Sid: e.Sid, Effect: Effect(e.Effect), Actions: members(e.Action), Resources: members(e.Resource)}
-	if _, all := e.Principal[Wildcard]; all {
-		st.Principal = Everyone()
+func decode(e dagjson.Statement) s3bkt.Statement {
+	st := s3bkt.Statement{Sid: e.Sid, Effect: s3bkt.Effect(e.Effect), Actions: members(e.Action), Resources: members(e.Resource)}
+	if _, all := e.Principal[s3bkt.Wildcard]; all {
+		st.Principal = s3bkt.Everyone()
 	} else {
-		st.Principal = Only(members(e.Principal)...)
+		st.Principal = s3bkt.Only(members(e.Principal)...)
 	}
 	return st
 }
@@ -61,7 +63,7 @@ func members(set map[string]dagjson.Empty) []string {
 func statementCID(e dagjson.Statement) cid.Cid {
 	var buf bytes.Buffer
 	if err := e.MarshalDagJSON(&buf); err != nil {
-		panic(err) // the sets are bounded by maxSetSize, the only failure the encoder has
+		panic(err) // the sets are bounded by s3bkt.MaxSetSize, within the encoder's map limit
 	}
 	return dagJSONCID(buf.Bytes())
 }
@@ -80,10 +82,10 @@ func dagJSONCID(raw []byte) cid.Cid {
 // deduplicated and sorted, a wildcard principal drops any stray ids, nil
 // lists become empty lists, and the statements are ordered by their CID. Two policies that differ only in order
 // or in duplicates normalize to the same value.
-func normalize(d Policy) Policy {
+func normalize(d s3bkt.BucketPolicy) s3bkt.BucketPolicy {
 	type keyed struct {
 		key string
-		st  Statement
+		st  s3bkt.Statement
 	}
 	keyedStatements := make([]keyed, 0, len(d.Statements))
 	for _, st := range d.Statements {
@@ -92,19 +94,19 @@ func normalize(d Policy) Policy {
 	}
 	slices.SortFunc(keyedStatements, func(a, b keyed) int { return strings.Compare(a.key, b.key) })
 	keyedStatements = slices.CompactFunc(keyedStatements, func(a, b keyed) bool { return a.key == b.key })
-	statements := make([]Statement, len(keyedStatements))
+	statements := make([]s3bkt.Statement, len(keyedStatements))
 	for i, k := range keyedStatements {
 		statements[i] = k.st
 	}
-	return Policy{Version: d.Version, Statements: statements}
+	return s3bkt.BucketPolicy{Version: d.Version, Statements: statements}
 }
 
 // Canonical returns the canonical JSON encoding of d: the [normalize]d
-// document in the AWS shape, compact, Version before Statement and the fields
-// of each statement in the order Sid (omitted when empty), Effect, Principal,
+// document in the AWS shape, compact, Version before s3bkt.Statement and the fields
+// of each statement in the order Sid (omitted when empty), s3bkt.Effect, s3bkt.Principal,
 // Action, Resource. It is what Hilt stores, and the JSON Ingot writes for the
 // policy `/s3/bucket/policy` returns.
-func Canonical(d Policy) []byte {
+func Canonical(d s3bkt.BucketPolicy) []byte {
 	return encodeJSON(normalize(d))
 }
 
@@ -112,7 +114,7 @@ func Canonical(d Policy) []byte {
 // policy as sets (CIDv1, dag-json, sha2-256; the version, and each statement
 // by the CID of its own encoding), in double quotes as HTTP carries it.
 // Callers treat it as opaque.
-func ETag(d Policy) string {
+func ETag(d s3bkt.BucketPolicy) string {
 	p := dagjson.Policy{Version: d.Version, Statement: make(map[string]dagjson.Empty, len(d.Statements))}
 	for _, st := range d.Statements {
 		p.Statement[statementCID(encode(st)).String()] = dagjson.Empty{}
