@@ -3,10 +3,11 @@ package grant_test
 import (
 	"context"
 	"errors"
-	htestutil "github.com/fil-forge/hilt/internal/testutil"
-	"github.com/fil-forge/libforge/testutil"
 	"testing"
 	"time"
+
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
+	"github.com/fil-forge/libforge/testutil"
 
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"

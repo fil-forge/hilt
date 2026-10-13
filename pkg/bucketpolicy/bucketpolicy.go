@@ -44,7 +44,8 @@ import (
 
 // Decode parses a policy document: [s3bkt.BucketPolicy.UnmarshalJSON]'s
 // checks, plus trailing data after the document is an error wrapping
-// [s3bkt.ErrInvalidPolicy]. The result is in canonical form (see [normalize]).
+// [s3bkt.ErrInvalidPolicy]. The result is in canonical form (see
+// [s3bkt.Normalize]).
 // Whether its principals exist is left to [Validate].
 func Decode(data []byte) (s3bkt.BucketPolicy, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -58,7 +59,7 @@ func Decode(data []byte) (s3bkt.BucketPolicy, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return s3bkt.BucketPolicy{}, fmt.Errorf("decoding policy: trailing data after the document: %w", s3bkt.ErrInvalidPolicy)
 	}
-	return normalize(d), nil
+	return s3bkt.Normalize(d), nil
 }
 
 // Validate checks that d may be stored as the policy of bucket: it is

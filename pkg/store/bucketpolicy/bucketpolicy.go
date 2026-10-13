@@ -31,7 +31,7 @@ type Record struct {
 	Bucket did.DID
 	// Policy is the bucket's policy.
 	Policy s3bkt.BucketPolicy
-	// ETag is the strong entity tag of Policy (see [bucketpolicy.ETag]).
+	// ETag is the strong entity tag of Policy (see [s3bkt.ETag]).
 	ETag string
 	// UpdatedAt is when the policy was last written.
 	UpdatedAt time.Time

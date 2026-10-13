@@ -205,7 +205,7 @@ func TestClientPolicy(t *testing.T) {
 		srv.Handle(s3bkt.Policy.Command, s3bkt.Policy.Handler(
 			func(req *binding.Request[*s3bkt.PolicyArguments], res *binding.Response[*s3bkt.PolicyOK]) error {
 				gotArgs = req.Task().Arguments()
-				return res.SetSuccess(&s3bkt.PolicyOK{ETag: `"e1"`, Policy: policy})
+				return res.SetSuccess(&s3bkt.PolicyOK{Policy: policy})
 			}))
 
 		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Policy, hilt, ingot.DID()))
@@ -214,7 +214,6 @@ func TestClientPolicy(t *testing.T) {
 		require.NotNil(t, gotArgs)
 		require.Equal(t, "PUT", gotArgs.Request.Method)
 		require.Equal(t, body, gotArgs.Body)
-		require.Equal(t, `"e1"`, ok.ETag)
 		require.Equal(t, policy, ok.Policy)
 	})
 

@@ -193,7 +193,7 @@ func TestPolicyStore(t *testing.T) {
 
 				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, noCallback)
 				require.NoError(t, err)
-				require.Equal(t, bucketpolicy.ETag(d), etag)
+				require.Equal(t, s3bkt.ETag(d), etag)
 
 				rec, err := s.Get(t.Context(), bucketID)
 				require.NoError(t, err)
@@ -281,7 +281,7 @@ func TestPolicyStore(t *testing.T) {
 					return nil
 				})
 				require.NoError(t, err)
-				require.Equal(t, bucketpolicy.ETag(second), etag2)
+				require.Equal(t, s3bkt.ETag(second), etag2)
 				require.NotEqual(t, etag1, etag2)
 				require.NotNil(t, seen)
 				require.Equal(t, first, seen.Policy)
@@ -298,7 +298,7 @@ func TestPolicyStore(t *testing.T) {
 				first := doc(allow(only("alice"), "s3:GetObject"))
 				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first}, nil)
 				require.NoError(t, err)
-				require.Equal(t, bucketpolicy.ETag(first), etag1)
+				require.Equal(t, s3bkt.ETag(first), etag1)
 
 				second := doc(allow(only("bob"), "s3:PutObject"))
 				etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
@@ -876,7 +876,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.NoError(t, written)
 		require.NoError(t, got)
 		require.Equal(t, second, rec.Policy, "the waiting read is answered from the committed state")
-		require.Equal(t, bucketpolicy.ETag(second), rec.ETag)
+		require.Equal(t, s3bkt.ETag(second), rec.ETag)
 	})
 
 	t.Run("a share-locked Get during a first Put waits and sees the created policy", func(t *testing.T) {

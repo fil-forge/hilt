@@ -111,7 +111,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx
 	for _, p := range named {
 		namedSet[p] = true
 	}
-	etag := bucketpolicy.ETag(doc)
+	etag := s3bkt.ETag(doc)
 	s.policies[in.Bucket] = entry{
 		tenant: in.Tenant,
 		rec: bucketpolicystore.Record{

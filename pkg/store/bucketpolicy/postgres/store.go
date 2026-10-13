@@ -154,7 +154,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	}
 
 	canonical := bucketpolicy.Canonical(in.Policy)
-	etag = bucketpolicy.ETag(in.Policy)
+	etag = s3bkt.ETag(in.Policy)
 	if old == nil {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO bucket_policy (bucket_id, document, etag)

@@ -8,7 +8,6 @@ import (
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -751,5 +750,5 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	require.NoError(t, written)
 	require.NoError(t, read)
 	require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions, "the read is answered from the committed write")
-	require.Equal(t, bucketpolicy.ETag(statement("s3:GetObject", "s3:PutObject")), readETag)
+	require.Equal(t, s3bkt.ETag(statement("s3:GetObject", "s3:PutObject")), readETag)
 }

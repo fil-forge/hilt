@@ -15,7 +15,6 @@ import (
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -336,7 +335,7 @@ func TestPutAndGet(t *testing.T) {
 		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", document, createOnly)
 		require.NoError(t, err)
 		require.True(t, created)
-		require.Equal(t, bucketpolicy.ETag(document), etag)
+		require.Equal(t, s3bkt.ETag(document), etag)
 
 		rec, err := d.policies.Get(ctx, d.photos)
 		require.NoError(t, err)
@@ -351,13 +350,13 @@ func TestPutAndGet(t *testing.T) {
 		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first)
 		require.NoError(t, err)
 		require.True(t, created)
-		require.Equal(t, bucketpolicy.ETag(first), etag)
+		require.Equal(t, s3bkt.ETag(first), etag)
 
 		second := doc(allow(only("user-1"), "s3:PutObject"))
 		etag, created, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", second)
 		require.NoError(t, err)
 		require.False(t, created)
-		require.Equal(t, bucketpolicy.ETag(second), etag)
+		require.Equal(t, s3bkt.ETag(second), etag)
 		rec, err := d.policies.Get(ctx, d.photos)
 		require.NoError(t, err)
 		require.Equal(t, second, rec.Policy)
