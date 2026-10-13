@@ -1,6 +1,6 @@
 // Package bucketpolicy evaluates bucket policies: which actions a principal
-// holds on a bucket, how a policy is canonicalized (its lists are sets) and
-// tagged for compare-and-set, and which principals a change to it affects.
+// holds on a bucket, how a policy is canonicalized (its lists are sets), and
+// which principals a change to it affects.
 // The document type, its JSON form and its structural checks are libforge's
 // [s3bkt.BucketPolicy]; [Decode] and [Validate] add Hilt's canonical form and
 // its checks against the bucket and the tenant's principals. It has no store
