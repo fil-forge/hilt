@@ -76,28 +76,50 @@ func New(
 	}
 }
 
-// WriteOption sets the precondition of a [Service.Write]. Without one the
-// write is unconditional, as a PutBucketPolicy without If-Match or
-// If-None-Match is.
-type WriteOption func(*bucketpolicystore.Input)
-
-// IfMatch makes the write replace the bucket's policy only if its current ETag
-// is etag.
-func IfMatch(etag string) WriteOption {
-	return func(in *bucketpolicystore.Input) { in.IfMatch, in.Unconditional = &etag, false }
+// Condition is a write's precondition on the bucket's current policy, as
+// If-Match and If-None-Match state it.
+type Condition struct {
+	// Negate requires that no current policy matches Match (If-None-Match).
+	// Only "*" is accepted with it: the bucket must have no policy.
+	Negate bool
+	// Match is the ETag the current policy must carry, or "*".
+	Match string
 }
 
-// IfNoneMatch makes the write create the bucket's policy only if the bucket
-// has none (If-None-Match: *).
-func IfNoneMatch() WriteOption {
-	return func(in *bucketpolicystore.Input) { in.IfMatch, in.Unconditional = nil, false }
+// IfMatch is the condition that the bucket's current policy carries etag.
+func IfMatch(etag string) Condition { return Condition{Match: etag} }
+
+// IfNoneMatch is the condition that no current policy matches v; with "*",
+// that the bucket has no policy.
+func IfNoneMatch(v string) Condition { return Condition{Negate: true, Match: v} }
+
+// WriteOption configures a [Service.Write]. Without one the write is
+// unconditional, as a PutBucketPolicy without If-Match or If-None-Match is.
+type WriteOption func(*bucketpolicystore.Input) error
+
+// WithCondition makes the write check c. A second condition on the same
+// write, or a negated one other than "*", is [ErrInvalidPrecondition].
+func WithCondition(c Condition) WriteOption {
+	return func(in *bucketpolicystore.Input) error {
+		if in.Conditional {
+			return fmt.Errorf("a write takes one condition: %w", ErrInvalidPrecondition)
+		}
+		if c.Negate && c.Match != "*" {
+			return fmt.Errorf("If-None-Match must be *: %w", ErrInvalidPrecondition)
+		}
+		in.Conditional = true
+		if !c.Negate {
+			in.IfMatch = &c.Match
+		}
+		return nil
+	}
 }
 
 // Write creates or replaces the bucket's policy, for a caller that has
 // resolved the tenant and the bucket. It validates doc against the tenant's
-// principals, and checks the precondition [IfMatch] or [IfNoneMatch] sets.
-// bucketName names the bucket in errors. It returns the new ETag and whether
-// the bucket had no policy before.
+// principals, and checks the condition [WithCondition] sets. bucketName names
+// the bucket in errors. It returns the new ETag and whether the bucket had no
+// policy before.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
@@ -110,13 +132,14 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 		return "", false, err
 	}
 	in := bucketpolicystore.Input{
-		Bucket:        bucketID,
-		Tenant:        tenantID,
-		Policy:        doc,
-		Unconditional: true,
+		Bucket: bucketID,
+		Tenant: tenantID,
+		Policy: doc,
 	}
 	for _, opt := range opts {
-		opt(&in)
+		if err := opt(&in); err != nil {
+			return "", false, err
+		}
 	}
 	var created bool
 	etag, err := s.policies.Put(ctx, in, func(ctx context.Context, old *bucketpolicystore.Record) error {
@@ -151,12 +174,17 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 }
 
 // Remove removes the bucket's policy, for a caller that has resolved the
-// tenant and the bucket. ifMatch must equal the current ETag. Every principal
+// tenant and the bucket. A non-nil ifMatch must equal the current ETag; nil
+// removes whatever is stored (a DeleteBucketPolicy without If-Match). Every principal
 // the policy reached loses its access, so each one's keys lose their
 // delegations over the bucket inside the store's transaction. bucketName names
 // the bucket in errors and logs.
-func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName, ifMatch string) error {
-	err := s.policies.Delete(ctx, bucketID, ifMatch, func(ctx context.Context, old bucketpolicystore.Record) error {
+func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName string, ifMatch *string) error {
+	var tag string
+	if ifMatch != nil {
+		tag = *ifMatch
+	}
+	err := s.policies.Delete(ctx, bucketID, tag, func(ctx context.Context, old bucketpolicystore.Record) error {
 		// Re-list under the bucket lock, as Write does.
 		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 		if err != nil {

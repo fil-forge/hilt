@@ -250,6 +250,7 @@ func TestDeletePrincipalHandler(t *testing.T) {
 			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
 				{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
 			}},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 

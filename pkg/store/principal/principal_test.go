@@ -554,6 +554,7 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 						Principal: bucketpolicy.Only("held"),
 						Actions:   []string{"s3:GetObject"},
 					}}},
+					Conditional: true,
 				}, nil)
 				return err
 			},

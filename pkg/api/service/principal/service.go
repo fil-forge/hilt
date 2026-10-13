@@ -295,10 +295,11 @@ func (s *Service) stripFromPolicies(ctx context.Context, tenantID did.DID, princ
 			continue
 		}
 		if _, err := s.policies.Put(ctx, bucketpolicystore.Input{
-			Bucket:  rec.Bucket,
-			Tenant:  tenantID,
-			Policy:  doc,
-			IfMatch: &etag,
+			Bucket:      rec.Bucket,
+			Tenant:      tenantID,
+			Policy:      doc,
+			IfMatch:     &etag,
+			Conditional: true,
 		}, nil); err != nil {
 			return fmt.Errorf("rewriting the policy of bucket %s: %w", rec.Bucket, err)
 		}

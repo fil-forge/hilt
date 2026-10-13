@@ -96,7 +96,7 @@ func setup(t *testing.T) deps {
 func (d deps) putPolicy(t *testing.T, tenantID did.DID, doc bucketpolicy.Policy) (did.DID, string) {
 	t.Helper()
 	bucket := testutil.RandomDID(t)
-	etag, err := d.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: doc}, nil)
+	etag, err := d.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: doc, Conditional: true}, nil)
 	require.NoError(t, err)
 	return bucket, etag
 }
@@ -678,7 +678,7 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 	statement := func(ids ...string) bucketpolicy.Policy {
 		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only(ids...), Actions: []string{"s3:GetObject"}}}}
 	}
-	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("alice", "bob")}, nil)
+	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("alice", "bob"), Conditional: true}, nil)
 	require.NoError(t, err)
 
 	var released, returned time.Time
@@ -686,6 +686,7 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 		func(entered chan<- struct{}, release <-chan struct{}) error {
 			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
 				Bucket: bucketID, Tenant: tenantID, Policy: statement("bob"), IfMatch: &etag,
+				Conditional: true,
 			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
 				close(entered)
 				<-release

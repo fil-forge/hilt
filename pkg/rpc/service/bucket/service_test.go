@@ -420,7 +420,8 @@ func TestDelete(t *testing.T) {
 		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: d.bucketID, Tenant: d.tenantID,
-			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+			Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 
@@ -441,7 +442,8 @@ func TestDelete(t *testing.T) {
 			func() error {
 				_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 					Bucket: d.bucketID, Tenant: d.tenantID,
-					Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+					Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+					Conditional: true,
 				}, nil)
 				return err
 			})
@@ -732,6 +734,7 @@ func TestInfo(t *testing.T) {
 				Principal: bucketpolicy.Only("user-1"),
 				Actions:   actions,
 			}}},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 	}
@@ -827,6 +830,7 @@ func TestInfo(t *testing.T) {
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   []string{"s3:ListBucket"},
 				}}},
+				Conditional: true,
 			}, nil)
 			require.NoError(t, err)
 		}
@@ -859,6 +863,7 @@ func TestInfo(t *testing.T) {
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   []string{"s3:ListBucket"},
 				}}},
+				Conditional: true,
 			}, nil)
 			require.NoError(t, err)
 			narrowed, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, []string{"s3:ListBucket"}, nil)
@@ -898,6 +903,7 @@ func TestInfo(t *testing.T) {
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   actions,
 				}}},
+				Conditional: true,
 			}, nil)
 			require.NoError(t, err)
 			dels, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, actions, nil)
@@ -992,7 +998,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	statement := func(actions ...string) bucketpolicy.Policy {
 		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions}}}
 	}
-	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket")}, nil)
+	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket"), Conditional: true}, nil)
 	require.NoError(t, err)
 
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -1004,6 +1010,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 		go func() {
 			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
 				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:ListBucket"), IfMatch: &etag,
+				Conditional: true,
 			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
 				// The rotation commits the new grants in its own transaction
 				// before the policy row is written.

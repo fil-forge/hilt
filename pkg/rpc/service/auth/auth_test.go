@@ -175,9 +175,10 @@ func TestAuthorize(t *testing.T) {
 	grant := func(t *testing.T, policies *bucketpolicymemory.Store, bucketID, tenantID did.DID, statements ...bucketpolicy.Statement) {
 		t.Helper()
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
-			Bucket: bucketID,
-			Tenant: tenantID,
-			Policy: bucketpolicy.Policy{Statements: statements},
+			Bucket:      bucketID,
+			Tenant:      tenantID,
+			Policy:      bucketpolicy.Policy{Statements: statements},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 	}
@@ -655,7 +656,7 @@ func TestAuthorizeLockTimeout(t *testing.T) {
 	seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
 	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: bucketpolicy.Policy{
 		Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}}},
-	}}, nil)
+	}, Conditional: true}, nil)
 	require.NoError(t, err)
 
 	// With every read answered, the request is authorized.
@@ -720,7 +721,7 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	statement := func(actions ...string) bucketpolicy.Policy {
 		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("alice"), Actions: actions}}}
 	}
-	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject")}, nil)
+	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
 	require.NoError(t, err)
 
 	var actions []string
@@ -729,6 +730,7 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 		func(entered chan<- struct{}, release <-chan struct{}) error {
 			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
 				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:PutObject"), IfMatch: &etag,
+				Conditional: true,
 			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
 				close(entered)
 				<-release
