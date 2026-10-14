@@ -12,6 +12,8 @@ const (
 	UnknownBucketErrorName     = "UnknownBucket"
 	NameConflictErrorName      = "AccessKeyNameConflict"
 	AccessKeyNotFoundErrorName = "AccessKeyNotFound"
+	PrincipalScopedErrorName   = "PrincipalScopedAccessKey"
+	UnknownPrincipalErrorName  = "UnknownPrincipal"
 )
 
 // Known errors returned by the access-key [Service]. Handlers map these to HTTP
@@ -22,7 +24,7 @@ var (
 	// ErrTenantNotFound is returned when no tenant exists for the external id.
 	ErrTenantNotFound = errors.New(TenantNotFoundErrorName, "tenant not found")
 	// ErrInvalidName is returned when the access key name is empty or too long.
-	ErrInvalidName = errors.New(InvalidNameErrorName, "name must be between 1 and 100 characters")
+	ErrInvalidName = errors.New(InvalidNameErrorName, "name must be between 1 and 64 characters")
 	// ErrNoPermissions is returned when no permissions are requested.
 	ErrNoPermissions = errors.New(NoPermissionsErrorName, "at least one permission is required")
 	// ErrInvalidPermission is returned when a requested permission is unknown.
@@ -36,4 +38,10 @@ var (
 	// ErrAccessKeyNotFound is returned when the access key does not exist (or
 	// belongs to another tenant, or the id is unparseable).
 	ErrAccessKeyNotFound = errors.New(AccessKeyNotFoundErrorName, "access key not found")
+	// ErrPrincipalScoped is returned when a principal-bound key is requested with
+	// permissions or buckets. Its access comes from the bucket policies alone.
+	ErrPrincipalScoped = errors.New(PrincipalScopedErrorName, "a principal-bound access key takes no permissions or buckets")
+	// ErrUnknownPrincipal is returned when the principal to bind the key to is not
+	// a principal of the tenant.
+	ErrUnknownPrincipal = errors.New(UnknownPrincipalErrorName, "unknown principal")
 )

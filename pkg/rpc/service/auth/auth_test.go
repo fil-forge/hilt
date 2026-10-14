@@ -6,6 +6,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -117,7 +118,7 @@ func TestAuthorize(t *testing.T) {
 				permissions = setupConfig.accessKeyPermissions
 			}
 		}
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, permissions, accessKeyExpires))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Buckets: accessKeyBuckets, Permissions: permissions, ExpiresAt: accessKeyExpires}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), providers, tenantID
 	}
@@ -234,6 +235,24 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
+	t.Run("rejects a principal-bound key, which holds no permissions of its own", func(t *testing.T) {
+		// A principal-bound key carries no permissions and no buckets; this layer
+		// knows only the key's own set, so every operation is out of reach.
+		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
+		tenantID := testutil.RandomDID(t)
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
+		principalID := "alice"
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "laptop", Principal: &principalID}))
+		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets)
+
+		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+	})
+
 	t.Run("rejects an invalid signature", func(t *testing.T) {
 		// The access key record exists, but the vault holds a different secret than
 		// the one that signed the request, so the recomputed signature won't match.
@@ -244,7 +263,7 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), other.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
 
@@ -272,7 +291,7 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
 
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
