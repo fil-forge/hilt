@@ -3,6 +3,7 @@ package fx
 import (
 	"github.com/fil-forge/hilt/pkg/api"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
@@ -20,6 +21,7 @@ var APIModule = fx.Module("api",
 		metricssvc.New,
 		grant.NewRotator,
 		principalsvc.New,
+		bucketpolicysvc.New,
 		// Tenants
 		asRoute(api.NewProvisionTenantHandler),
 		asRoute(api.NewGetTenantHandler),
@@ -38,6 +40,9 @@ var APIModule = fx.Module("api",
 		asRoute(api.NewListPrincipalsHandler),
 		asRoute(api.NewGetPrincipalHandler),
 		asRoute(api.NewDeletePrincipalHandler),
+		// Bucket policies
+		asRoute(api.NewListPrincipalPoliciesHandler),
+		asRoute(api.NewGetPrincipalAccessHandler),
 	),
 )
 

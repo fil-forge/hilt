@@ -45,6 +45,10 @@ type Store interface {
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
 	ListByTenant(ctx context.Context, tenant did.DID) ([]Record, error)
+	// ListIDsByTenant returns the external IDs of the tenant's live
+	// principals, in the order ListByTenant returns them. It is the list a
+	// caller checks a policy document's principals against.
+	ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error)
 	// Tombstone marks a principal's row removed; the row stays, so that Add
 	// can revive it. It excludes concurrent removals and revives of the same
 	// row for the whole call, runs fn (nil allowed) inside the write, before
