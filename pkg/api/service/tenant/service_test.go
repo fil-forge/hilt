@@ -2,17 +2,21 @@ package tenant_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
@@ -30,9 +34,12 @@ import (
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
+	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -87,7 +94,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload)
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload, &testutil.FakeSwarf{})
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -148,7 +155,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil)
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil, &testutil.FakeSwarf{})
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -224,9 +231,17 @@ type deleteEnv struct {
 	buckets    *bucketmemory.Store
 	policies   *bucketpolicymemory.Store
 	principals *principalmemory.Store
-	bucketID   did.DID
-	tenantID   did.DID
-	directory  *plcDirectory
+	swarf      *testutil.FakeSwarf
+	// publisher is swarf as the service sees it, recording each publish's deadline.
+	publisher *deadlinePublisher
+	bucketID  did.DID
+	tenantID  did.DID
+	// grants are the delegations the tenant's one access key holds.
+	grants    []cid.Cid
+	directory *plcDirectory
+	// tombstone is the DID's signed tombstone, for a directory that already
+	// served a deactivation.
+	tombstone []byte
 }
 
 func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
@@ -244,6 +259,12 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	var genesisJSON bytes.Buffer
 	require.NoError(t, genesis.MarshalDagJSON(&genesisJSON))
+	tomb, err := plc.NewTombstoneFromPrevious(genesis)
+	require.NoError(t, err)
+	signedTomb, err := plc.SignTombstone(signer, tomb)
+	require.NoError(t, err)
+	var tombstoneJSON bytes.Buffer
+	require.NoError(t, signedTomb.MarshalDagJSON(&tombstoneJSON))
 	directory := &plcDirectory{logLast: genesisJSON.Bytes()}
 	dirServer := httptest.NewServer(directory)
 	t.Cleanup(dirServer.Close)
@@ -270,10 +291,42 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	}, nil)
 	require.NoError(t, err)
 
+	// One access key holding a grant over the bucket, so the revocations the
+	// removal publishes are observable.
+	accessKeys, delegations := accesskeymemory.New(), delegationmemory.New()
+	keyID := testutil.RandomDID(t)
+	require.NoError(t, accessKeys.Add(ctx, accesskeystore.Input{ID: keyID, Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
+	held, err := grant.Issue(multikey.NewIssuer(tenantID, signer), keyID, []did.DID{bucketID}, []string{"s3:GetObject"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, delegations.PutBatch(ctx, held))
+	var grants []cid.Cid
+	for _, d := range held {
+		grants = append(grants, d.Link())
+	}
+
+	swarf := &testutil.FakeSwarf{}
+	publisher := &deadlinePublisher{FakeSwarf: swarf}
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
-		accesskeymemory.New(), principals, policies, delegationmemory.New(), secrets, wrapkeysmemory.New(), plcClient, nil)
+		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, publisher)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
-		principals: principals, bucketID: bucketID, tenantID: tenantID, directory: directory}
+		principals: principals, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
+		tombstone: tombstoneJSON.Bytes()}
+}
+
+// deadlinePublisher records how long each publish had left on its deadline,
+// zero when it had none.
+type deadlinePublisher struct {
+	*testutil.FakeSwarf
+	remaining []time.Duration
+}
+
+func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
+	var left time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		left = time.Until(deadline)
+	}
+	p.remaining = append(p.remaining, left)
+	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
 }
 
 func TestDelete(t *testing.T) {
@@ -288,6 +341,41 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, ps)
 		require.Equal(t, 1, env.directory.deactivations)
+	})
+
+	t.Run("revokes every key's delegations in one request before deactivating the DID", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		require.Equal(t, 1, env.swarf.Calls())
+		require.ElementsMatch(t, env.grants, env.swarf.Revoked())
+		require.Equal(t, 1, env.directory.deactivations)
+	})
+
+	t.Run("bounds the revocation publish at the batch deadline", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.svc.Delete(context.Background(), "tenant-1"))
+		require.Len(t, env.publisher.remaining, 1)
+		require.Greater(t, env.publisher.remaining[0], time.Duration(0), "a stalled publish must not hold the keys' delegation locks past the batch deadline")
+		require.LessOrEqual(t, env.publisher.remaining[0], grant.BatchTimeout)
+	})
+
+	t.Run("a publish failure leaves the tenant and its DID in place", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		env.swarf.Err = errors.New("swarf unreachable")
+		require.ErrorContains(t, env.svc.Delete(ctx, "tenant-1"), "swarf unreachable")
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Zero(t, env.directory.deactivations)
+	})
+
+	t.Run("an already deactivated DID publishes nothing and finishes the cascade", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		env.directory.logLast = env.tombstone
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		require.Zero(t, env.swarf.Calls())
+		require.Zero(t, env.directory.deactivations)
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("deletes the tenant's buckets and their policies", func(t *testing.T) {
