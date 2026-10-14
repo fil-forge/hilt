@@ -88,6 +88,17 @@ type SignedRequest struct {
 	expires       int    // X-Amz-Expires seconds (presigned only)
 }
 
+// UnsignedPayload is the payload hash a request carries when the signature
+// does not cover its body.
+const UnsignedPayload = unsignedPayload
+
+// PayloadHash returns the payload hash the signature covers: the hex SHA-256
+// of the request body, or [UnsignedPayload]. Verify checks the signature over
+// this value; whether the body actually hashes to it is the caller's check.
+func (s *SignedRequest) PayloadHash() string {
+	return s.payloadHash
+}
+
 // HeaderSigned reports whether the named header is listed in the request's
 // SignedHeaders, and so is covered by the signature Verify checks. Headers
 // outside that list are not authenticated even on a verified request; a caller

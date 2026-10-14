@@ -163,7 +163,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &htestutil.FakeSwarf{}), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &htestutil.FakeSwarf{}, nil), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -400,7 +400,7 @@ func TestDelete(t *testing.T) {
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
 		swarf := &htestutil.FakeSwarf{}
 		return deleteDeps{
-			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf),
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, nil),
 			buckets:     buckets,
 			delegations: delegations,
 			policies:    policies,
@@ -420,7 +420,8 @@ func TestDelete(t *testing.T) {
 		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: d.bucketID, Tenant: d.tenantID,
-			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+			Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 
@@ -441,7 +442,8 @@ func TestDelete(t *testing.T) {
 			func() error {
 				_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 					Bucket: d.bucketID, Tenant: d.tenantID,
-					Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+					Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+					Conditional: true,
 				}, nil)
 				return err
 			})
@@ -569,7 +571,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		seedKey(t, accessKeys, secrets, delegations, principals, signer, tenantID, perms, principalBound)
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -718,7 +720,7 @@ func TestInfo(t *testing.T) {
 		for _, w := range wrap {
 			reads = w(reads)
 		}
-		return bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}), policies, root, accessKeys
+		return bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil), policies, root, accessKeys
 	}
 
 	// grantPolicy stores a policy allowing "user-1" the given actions on the bucket.
@@ -732,6 +734,7 @@ func TestInfo(t *testing.T) {
 				Principal: bucketpolicy.Only("user-1"),
 				Actions:   actions,
 			}}},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 	}
@@ -827,6 +830,7 @@ func TestInfo(t *testing.T) {
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   []string{"s3:ListBucket"},
 				}}},
+				Conditional: true,
 			}, nil)
 			require.NoError(t, err)
 		}
@@ -859,6 +863,7 @@ func TestInfo(t *testing.T) {
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   []string{"s3:ListBucket"},
 				}}},
+				Conditional: true,
 			}, nil)
 			require.NoError(t, err)
 			narrowed, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, []string{"s3:ListBucket"}, nil)
@@ -898,6 +903,7 @@ func TestInfo(t *testing.T) {
 					Principal: bucketpolicy.Only("user-1"),
 					Actions:   actions,
 				}}},
+				Conditional: true,
 			}, nil)
 			require.NoError(t, err)
 			dels, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, actions, nil)
@@ -992,7 +998,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	statement := func(actions ...string) bucketpolicy.Policy {
 		return bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: actions}}}
 	}
-	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket")}, nil)
+	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket"), Conditional: true}, nil)
 	require.NoError(t, err)
 
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -1004,6 +1010,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 		go func() {
 			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
 				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:ListBucket"), IfMatch: &etag,
+				Conditional: true,
 			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
 				// The rotation commits the new grants in its own transaction
 				// before the policy row is written.
@@ -1032,7 +1039,7 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	})
 
 	az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, policies, vaultmemory.New())
-	svc := bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{})
+	svc := bucketsvc.New(zap.NewNop(), az, buckets, reads, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil)
 
 	type result struct {
 		ok  *s3bkt.InfoOK

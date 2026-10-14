@@ -311,9 +311,9 @@ func (a *Authorizer) authorizeOperation(
 		// Every principal lists the tenant's buckets; no policy is consulted.
 		// The console filters the listing against the principal's access.
 		return []string{"s3:ListAllMyBuckets"}, nil, nil, nil
-	case OpCreateBucket, OpDeleteBucket:
-		// No policy grants them: a key holding them would act outside the policy
-		// that granted it.
+	case OpCreateBucket, OpDeleteBucket, OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy:
+		// No policy grants them: a key holding them would act outside, or
+		// rewrite, the policy that granted it.
 		log.Debug("rejecting bucket operation no policy grants", zap.Stringer("operation", op))
 		return nil, nil, nil, ErrOperationNotPermitted
 	}

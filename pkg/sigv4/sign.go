@@ -20,6 +20,14 @@ type PresignOption func(*presignConfig)
 
 type presignConfig struct {
 	signedHeaders []string
+	payloadHash   string
+}
+
+// WithPayloadHash covers the request body with the signature: hash is the hex
+// SHA-256 of the body, carried as the X-Amz-Content-Sha256 query parameter.
+// Without it the payload is unsigned.
+func WithPayloadHash(hash string) PresignOption {
+	return func(c *presignConfig) { c.payloadHash = hash }
 }
 
 // WithSignedHeaders covers the named request headers with the signature, in
@@ -43,7 +51,7 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 	if err != nil {
 		return Request{}, fmt.Errorf("parsing request URL: %w", err)
 	}
-	cfg := presignConfig{signedHeaders: []string{"host"}}
+	cfg := presignConfig{signedHeaders: []string{"host"}, payloadHash: unsignedPayload}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -64,6 +72,9 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 	q.Set(amzDate, date)
 	q.Set(amzExpires, strconv.Itoa(int(expires.Seconds())))
 	q.Set(amzSignedHdrs, strings.Join(cfg.signedHeaders, ";"))
+	if cfg.payloadHash != unsignedPayload {
+		q.Set(amzContentSHA, cfg.payloadHash)
+	}
 	if scheme == SchemeV4a {
 		q.Set(amzRegionSet, region)
 	}
@@ -87,7 +98,7 @@ func Presign(req Request, accessKeyID, secretAccessKey, region string, scheme Sc
 		headers:       headers,
 		host:          u.Host,
 		signedHeaders: cfg.signedHeaders,
-		payloadHash:   unsignedPayload,
+		payloadHash:   cfg.payloadHash,
 		amzDate:       date,
 		scope:         scope,
 	}

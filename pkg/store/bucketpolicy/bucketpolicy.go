@@ -46,13 +46,14 @@ type Input struct {
 	// Policy is the policy to store. The store does not validate it beyond
 	// referential integrity; callers run [bucketpolicy.Validate] first.
 	Policy bucketpolicy.Policy
-	// IfMatch is the ETag the bucket's current policy must carry for the write
-	// to proceed. Nil means the bucket must have no policy (If-None-Match: *).
+	// Conditional makes the write check IfMatch. Unset, the write replaces
+	// whatever is stored, whatever tag it carries, and creates when nothing
+	// is: the write a PutBucketPolicy without a precondition makes.
+	Conditional bool
+	// IfMatch is the ETag the bucket's current policy must carry for a
+	// Conditional write to proceed. Nil means the bucket must have no policy
+	// (If-None-Match: *).
 	IfMatch *string
-	// Unconditional writes whether or not the bucket has a policy and
-	// whatever tag it carries; IfMatch is ignored. It is the write a
-	// PutBucketPolicy without a precondition makes.
-	Unconditional bool
 }
 
 // Store persists bucket policies.
@@ -66,8 +67,8 @@ type Store interface {
 	// Put creates or replaces the bucket's policy in one transaction: it locks
 	// the current row, checks in.IfMatch against it, runs fn (nil
 	// allowed) with the current record (nil when creating), writes the row and
-	// its index rows, and commits. It returns the new ETag. Unless in is
-	// Unconditional, it returns [store.ErrPreconditionFailed] when IfMatch is
+	// its index rows, and commits. It returns the new ETag. When in is
+	// Conditional, it returns [store.ErrPreconditionFailed] when IfMatch is
 	// nil and a policy exists, or IfMatch names a tag other than the current
 	// one (including when no policy exists); [store.ErrRecordNotFound] when the
 	// bucket does not exist, checked before fn runs; and
@@ -110,10 +111,9 @@ type Store interface {
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]Record, error)
 }
 
-// CheckInputPrecondition applies [CheckPrecondition] to in unless it is
-// Unconditional.
+// CheckInputPrecondition applies [CheckPrecondition] to a Conditional in.
 func CheckInputPrecondition(in Input, old *Record) error {
-	if in.Unconditional {
+	if !in.Conditional {
 		return nil
 	}
 	return CheckPrecondition(old, in.IfMatch)

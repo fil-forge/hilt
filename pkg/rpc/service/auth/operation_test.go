@@ -29,6 +29,11 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "create bucket", method: "PUT", url: "https://s3.example.com/bkt", want: OpCreateBucket, wantBucket: "bkt"},
 		{name: "delete object", method: "DELETE", url: "https://s3.example.com/bkt/k", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
 		{name: "delete bucket", method: "DELETE", url: "https://s3.example.com/bkt", want: OpDeleteBucket, wantBucket: "bkt"},
+		{name: "get bucket policy", method: "GET", url: "https://s3.example.com/bkt?policy", want: OpGetBucketPolicy, wantBucket: "bkt"},
+		{name: "put bucket policy", method: "PUT", url: "https://s3.example.com/bkt?policy=", want: OpPutBucketPolicy, wantBucket: "bkt"},
+		{name: "delete bucket policy", method: "DELETE", url: "https://s3.example.com/bkt?policy", want: OpDeleteBucketPolicy, wantBucket: "bkt"},
+		{name: "a policy query on an object is the object operation", method: "GET", url: "https://s3.example.com/bkt/k?policy", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "a policy query on a HEAD is the bucket operation", method: "HEAD", url: "https://s3.example.com/bkt?policy", want: OpListBucket, wantBucket: "bkt"},
 
 		// Multipart operations. Each of these classified as its plain-object
 		// counterpart before the query string was taken into account.
@@ -182,6 +187,7 @@ func TestOperationPermission(t *testing.T) {
 		OpDeleteObject, OpDeleteBucket,
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
+		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}

@@ -146,6 +146,7 @@ func TestAuthorizeRequest(t *testing.T) {
 				Principal: bucketpolicy.Only("user-1"),
 				Actions:   actions,
 			}}},
+			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 	}

@@ -147,7 +147,6 @@ type PrincipalList struct {
 // bucket it applies to.
 type PrincipalPolicy struct {
 	BucketName string              `json:"bucketName"`
-	ETag       string              `json:"etag"`
 	Policy     bucketpolicy.Policy `json:"policy"`
 }
 

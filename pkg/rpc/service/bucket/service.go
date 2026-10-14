@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -63,6 +64,8 @@ type Service struct {
 	policies    bucketpolicystore.Store
 	uploads     UploadClient
 	revocations grant.RevocationPublisher
+	// policyWrites stores a policy as the management API stores a policy PUT.
+	policyWrites *bucketpolicysvc.Service
 }
 
 // New constructs the bucket service.
@@ -76,17 +79,19 @@ func New(
 	policies bucketpolicystore.Store,
 	uploads UploadClient,
 	revocations grant.RevocationPublisher,
+	policyWrites *bucketpolicysvc.Service,
 ) *Service {
 	return &Service{
-		logger:      logger,
-		authorizer:  authorizer,
-		buckets:     buckets,
-		delegations: delegations,
-		accessKeys:  accessKeys,
-		tenants:     tenants,
-		policies:    policies,
-		uploads:     uploads,
-		revocations: revocations,
+		logger:       logger,
+		authorizer:   authorizer,
+		buckets:      buckets,
+		delegations:  delegations,
+		accessKeys:   accessKeys,
+		tenants:      tenants,
+		policies:     policies,
+		uploads:      uploads,
+		revocations:  revocations,
+		policyWrites: policyWrites,
 	}
 }
 

@@ -48,7 +48,7 @@ func NewListPrincipalPoliciesHandler(logger *zap.Logger, policies *bucketpolicys
 		}
 		items := make([]PrincipalPolicy, len(recs))
 		for i, r := range recs {
-			items[i] = PrincipalPolicy{BucketName: r.BucketName, ETag: r.ETag, Policy: r.Policy}
+			items[i] = PrincipalPolicy{BucketName: r.BucketName, Policy: r.Policy}
 		}
 		return c.JSON(http.StatusOK, PrincipalPolicyList{Items: items})
 	})

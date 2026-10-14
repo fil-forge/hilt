@@ -155,7 +155,7 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	// alice may read bucket-a; her keys hold the matching delegations.
 	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: bucketpolicy.Policy{
 		Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("alice"), Actions: []string{"s3:GetObject"}}},
-	}}, nil)
+	}, Conditional: true}, nil)
 	require.NoError(t, err)
 
 	swarf := &testutil.FakeSwarf{}
