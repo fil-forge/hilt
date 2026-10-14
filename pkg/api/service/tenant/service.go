@@ -15,6 +15,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
+	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
@@ -38,6 +39,7 @@ type Service struct {
 	providers   provider.Store
 	buckets     bucket.Store
 	accessKeys  accesskey.Store
+	principals  principalstore.Store
 	delegations delegation.Store
 	secrets     vault.Vault
 	wrapKeys    wrapkeystore.Store
@@ -52,6 +54,7 @@ func New(
 	providers provider.Store,
 	buckets bucket.Store,
 	accessKeys accesskey.Store,
+	principals principalstore.Store,
 	delegations delegation.Store,
 	secrets vault.Vault,
 	wrapKeys wrapkeystore.Store,
@@ -64,6 +67,7 @@ func New(
 		providers:   providers,
 		buckets:     buckets,
 		accessKeys:  accessKeys,
+		principals:  principals,
 		delegations: delegations,
 		secrets:     secrets,
 		plcClient:   plcClient,
@@ -255,8 +259,8 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its
-// buckets, access keys, and delegations, and deactivating its did:plc. It is
-// idempotent: a missing tenant is a no-op.
+// buckets, access keys, principals, and delegations, and deactivating its
+// did:plc. It is idempotent: a missing tenant is a no-op.
 //
 // Out of scope: deprovisioning the tenant's spaces from the Forge upload service
 // (Sprue), for which there is no facility per the RFC.
@@ -297,6 +301,13 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.accessKeys.Delete(ctx, ak.ID); err != nil {
 			return fmt.Errorf("deleting access key: %w", err)
 		}
+	}
+
+	// Cascade: principals. They reference the tenant row (FK RESTRICT), so they
+	// go before it. Nothing is published: the tenant is disabled and its keys are
+	// gone, so no request can reach a principal's cached access.
+	if err := s.principals.DeleteByTenant(ctx, rec.ID); err != nil {
+		return fmt.Errorf("deleting principals: %w", err)
 	}
 
 	// Cascade: wrap keys (registry rows + their sealed private halves). Every
