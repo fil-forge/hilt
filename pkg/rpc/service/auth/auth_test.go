@@ -724,6 +724,7 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	require.NoError(t, err)
 
 	var actions []string
+	var readETag string
 	written, read := htestutil.RequireWaitsForWriter(t,
 		func(entered chan<- struct{}, release <-chan struct{}) error {
 			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
@@ -737,10 +738,11 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 		},
 		func() error {
 			var err error
-			actions, err = az.EffectiveActions(context.Background(), tenantID, "alice", bucketID)
+			actions, readETag, err = az.EffectiveActions(context.Background(), tenantID, "alice", bucketID)
 			return err
 		})
 	require.NoError(t, written)
 	require.NoError(t, read)
 	require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions, "the read is answered from the committed write")
+	require.Equal(t, bucketpolicy.ETag(statement("s3:GetObject", "s3:PutObject")), readETag)
 }
