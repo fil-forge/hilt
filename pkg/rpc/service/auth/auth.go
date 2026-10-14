@@ -396,7 +396,7 @@ func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, pri
 // while the policy is being changed waits for the outcome. A bucket with no
 // policy grants nothing, and reports no ETag.
 func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, string, error) {
-	var doc *s3bkt.BucketPolicy
+	var doc *s3bkt.PolicyDocument
 	var etag string
 	rec, err := a.policies.Get(ctx, bucketID, store.WithShareLock())
 	if err == nil {

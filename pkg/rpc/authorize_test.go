@@ -142,7 +142,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
-			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 				Effect:    s3bkt.Allow,
 				Principal: s3bkt.Only("user-1"),
 				Actions:   s3bkt.NewStringSet(actions...),

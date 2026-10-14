@@ -33,8 +33,8 @@ func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
 	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: both()}
 }
 
-func doc(statements ...s3bkt.Statement) *s3bkt.BucketPolicy {
-	return &s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements}
+func doc(statements ...s3bkt.Statement) *s3bkt.PolicyDocument {
+	return &s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}
 }
 
 // policyJSON wraps statements, given as JSON, in a 2012-10-17 document.
@@ -52,11 +52,11 @@ func TestDecode(t *testing.T) {
 			`{"Effect": "Deny", "Principal": "*", "Action": ["s3:PutObjectRetention"], "Resource": ["arn:aws:s3:::photos/*"]}`,
 		)))
 		require.NoError(t, err)
-		// Lists are sets: sorted and deduplicated, statements ordered by their
-		// CID (see TestETag for the encoding).
-		require.Equal(t, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Deny, Principal: everyone, Actions: s3bkt.NewStringSet("s3:PutObjectRetention"), Resources: s3bkt.NewStringSet(objectsARN)},
+		// The lists are sets; the statements keep the document's order in
+		// memory and come out in CID order (see TestCanonical).
+		require.Equal(t, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Sid: "owners", Effect: s3bkt.Allow, Principal: only("alice", "bob"), Actions: s3bkt.NewStringSet("s3:GetObject", "s3:ListBucket"), Resources: both()},
+			{Effect: s3bkt.Deny, Principal: everyone, Actions: s3bkt.NewStringSet("s3:PutObjectRetention"), Resources: s3bkt.NewStringSet(objectsARN)},
 		}}, d)
 	})
 
@@ -100,11 +100,13 @@ func TestDecode(t *testing.T) {
 		require.Equal(t, *doc(allow(only("alice", "bob"), "s3:GetObject", "s3:PutObject")), d)
 	})
 
-	t.Run("drops a duplicate statement", func(t *testing.T) {
+	t.Run("a duplicate statement is dropped on the way out", func(t *testing.T) {
 		st := `{"Effect": "Allow", "Principal": "*", "Action": ["s3:GetObject"], ` + res + `}`
 		d, err := bucketpolicy.Decode([]byte(policyJSON(st, st)))
 		require.NoError(t, err)
-		require.Equal(t, *doc(allow(everyone, "s3:GetObject")), d)
+		require.Len(t, d.Statements, 2)
+		require.Equal(t, bucketpolicy.Canonical(*doc(allow(everyone, "s3:GetObject"))), bucketpolicy.Canonical(d))
+		require.Equal(t, s3bkt.ETag(*doc(allow(everyone, "s3:GetObject"))), s3bkt.ETag(d))
 	})
 
 	t.Run("round-trips the canonical form", func(t *testing.T) {
@@ -189,7 +191,7 @@ func TestDecode(t *testing.T) {
 
 	t.Run("json.Unmarshal applies the same checks", func(t *testing.T) {
 		// The stores read documents back with encoding/json.
-		var d s3bkt.BucketPolicy
+		var d s3bkt.PolicyDocument
 		err := json.Unmarshal([]byte(policyJSON(`{"Effect": "Allow", "Principal": {"AWS": []}, "Action": ["s3:GetObject"], `+res+`}`)), &d)
 		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 		require.ErrorContains(t, err, `Principal must not be empty`)
@@ -212,7 +214,7 @@ func TestActionResources(t *testing.T) {
 	}
 	require.ElementsMatch(t, s3bkt.PolicyActions(), append(slices.Clone(bucketActions), objectActions...))
 
-	on := func(a string, resources ...string) s3bkt.BucketPolicy {
+	on := func(a string, resources ...string) s3bkt.PolicyDocument {
 		return *doc(s3bkt.Statement{Effect: s3bkt.Allow, Principal: everyone, Actions: s3bkt.NewStringSet(a), Resources: s3bkt.NewStringSet(resources...)})
 	}
 	all := func(string) bool { return true }
@@ -232,7 +234,7 @@ func TestValidate(t *testing.T) {
 
 	valid := []struct {
 		name string
-		doc  s3bkt.BucketPolicy
+		doc  s3bkt.PolicyDocument
 	}{
 		{"one allow", *doc(allow(only("alice"), "s3:GetObject"))},
 		{"wildcard is not looked up", *doc(allow(everyone, "s3:GetObject"))},
@@ -242,7 +244,7 @@ func TestValidate(t *testing.T) {
 			deny(only("bob"), "s3:ListBucket"),
 		)},
 		{"a sid", *doc(s3bkt.Statement{Sid: "owners", Effect: s3bkt.Allow, Principal: only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(objectsARN)})},
-		{"the 2008 version", s3bkt.BucketPolicy{Version: s3bkt.Version2008, Statements: []s3bkt.Statement{allow(only("alice"), "s3:GetObject")}}},
+		{"the 2008 version", s3bkt.PolicyDocument{Version: s3bkt.Version2008, Statements: []s3bkt.Statement{allow(only("alice"), "s3:GetObject")}}},
 		{"the action wildcard", *doc(allow(only("alice"), s3bkt.PolicyWildcard))},
 		{"the action wildcard beside named actions", *doc(deny(everyone, "s3:PutObjectRetention"), allow(only("alice"), "s3:GetObject", s3bkt.PolicyWildcard))},
 		{"versioned object reads", *doc(allow(only("alice"), "s3:GetObjectVersion", "s3:ListBucketVersions"))},
@@ -256,10 +258,10 @@ func TestValidate(t *testing.T) {
 
 	invalid := []struct {
 		name string
-		doc  s3bkt.BucketPolicy
+		doc  s3bkt.PolicyDocument
 		want string
 	}{
-		{"a missing version", s3bkt.BucketPolicy{Statements: []s3bkt.Statement{allow(only("alice"), "s3:GetObject")}}, `Version "" must be`},
+		{"a missing version", s3bkt.PolicyDocument{Statements: []s3bkt.Statement{allow(only("alice"), "s3:GetObject")}}, `Version "" must be`},
 		{"empty statements", *doc(), "Statement must not be empty"},
 		{"unknown effect", *doc(s3bkt.Statement{Effect: "Permit", Principal: only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: both()}), `Effect "Permit"`},
 		{"lowercase effect", *doc(s3bkt.Statement{Effect: "allow", Principal: only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: both()}), `Effect "allow"`},
@@ -307,15 +309,15 @@ func TestCanonical(t *testing.T) {
 
 	t.Run("is valid JSON that decodes back to the document", func(t *testing.T) {
 		d := *doc(allow(only("alice"), "s3:GetObject"), deny(only("bob"), "s3:ListBucket"))
-		var back s3bkt.BucketPolicy
+		var back s3bkt.PolicyDocument
 		require.NoError(t, json.Unmarshal(bucketpolicy.Canonical(d), &back))
 		require.ElementsMatch(t, d.Statements, back.Statements)
 		require.Equal(t, d.Version, back.Version)
 	})
 
 	t.Run("nil and empty lists canonicalize the same", func(t *testing.T) {
-		withNil := s3bkt.BucketPolicy{Statements: nil}
-		withEmpty := s3bkt.BucketPolicy{Statements: []s3bkt.Statement{}}
+		withNil := s3bkt.PolicyDocument{Statements: nil}
+		withEmpty := s3bkt.PolicyDocument{Statements: []s3bkt.Statement{}}
 		require.Equal(t, `{"Version":"","Statement":[]}`, string(bucketpolicy.Canonical(withNil)))
 		require.Equal(t, bucketpolicy.Canonical(withNil), bucketpolicy.Canonical(withEmpty))
 
@@ -360,7 +362,7 @@ func TestEffective(t *testing.T) {
 	}
 	tests := []struct {
 		name      string
-		doc       *s3bkt.BucketPolicy
+		doc       *s3bkt.PolicyDocument
 		principal string
 		want      []string
 	}{
@@ -420,11 +422,11 @@ func TestEffective(t *testing.T) {
 func TestNamed(t *testing.T) {
 	tests := []struct {
 		name         string
-		doc          s3bkt.BucketPolicy
+		doc          s3bkt.PolicyDocument
 		want         []string
 		wantWildcard bool
 	}{
-		{"empty", s3bkt.BucketPolicy{}, nil, false},
+		{"empty", s3bkt.PolicyDocument{}, nil, false},
 		{"one principal", *doc(allow(only("alice"), "s3:GetObject")), []string{"alice"}, false},
 		{"sorted and deduplicated across statements", *doc(
 			allow(only("carol", "alice"), "s3:GetObject"),
@@ -449,7 +451,7 @@ func TestChanged(t *testing.T) {
 	tenant := []string{"alice", "bob", "carol"}
 	tests := []struct {
 		name       string
-		old, new   *s3bkt.BucketPolicy
+		old, new   *s3bkt.PolicyDocument
 		principals []string
 		want       []string
 	}{

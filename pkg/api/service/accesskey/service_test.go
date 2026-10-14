@@ -154,7 +154,7 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	require.NoError(t, err)
 	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 	// alice may read bucket-a; her keys hold the matching delegations.
-	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.BucketPolicy{
+	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
 		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
 	}, Conditional: true}, nil)
 	require.NoError(t, err)

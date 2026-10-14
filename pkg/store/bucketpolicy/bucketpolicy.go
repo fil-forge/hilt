@@ -1,5 +1,5 @@
 // Package bucketpolicy defines the store of bucket policies: one policy per
-// bucket (see [s3bkt.BucketPolicy]) with the strong ETag its compare-and-set
+// bucket (see [s3bkt.PolicyDocument]) with the strong ETag its compare-and-set
 // writes are conditioned on, and an index from principal to the buckets whose
 // statements name it.
 //
@@ -30,7 +30,7 @@ type Record struct {
 	// Bucket is the bucket DID the policy applies to.
 	Bucket did.DID
 	// Policy is the bucket's policy.
-	Policy s3bkt.BucketPolicy
+	Policy s3bkt.PolicyDocument
 	// ETag is the strong entity tag of Policy (see [s3bkt.ETag]).
 	ETag string
 	// UpdatedAt is when the policy was last written.
@@ -46,7 +46,7 @@ type Input struct {
 	Tenant did.DID
 	// Policy is the policy to store. The store does not validate it beyond
 	// referential integrity; callers run [bucketpolicy.Validate] first.
-	Policy s3bkt.BucketPolicy
+	Policy s3bkt.PolicyDocument
 	// Conditional makes the write check IfMatch. Unset, the write replaces
 	// whatever is stored, whatever tag it carries, and creates when nothing
 	// is: the write a PutBucketPolicy without a precondition makes.

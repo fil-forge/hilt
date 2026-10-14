@@ -146,8 +146,8 @@ type PrincipalList struct {
 // PrincipalPolicy is one of the policies naming a principal, addressed by the
 // bucket it applies to.
 type PrincipalPolicy struct {
-	BucketName string             `json:"bucketName"`
-	Policy     s3bkt.BucketPolicy `json:"policy"`
+	BucketName string               `json:"bucketName"`
+	Policy     s3bkt.PolicyDocument `json:"policy"`
 }
 
 // PrincipalPolicyList is the body of

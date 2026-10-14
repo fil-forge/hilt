@@ -102,7 +102,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx
 	}
 
 	// Store the normalized document, as the Postgres backend does.
-	var doc s3bkt.BucketPolicy
+	var doc s3bkt.PolicyDocument
 	if err := json.Unmarshal(bucketpolicy.Canonical(in.Policy), &doc); err != nil {
 		return "", fmt.Errorf("normalizing policy: %w", err)
 	}
@@ -185,9 +185,9 @@ func cloneRecord(r bucketpolicystore.Record) bucketpolicystore.Record {
 	return r
 }
 
-func clonePolicy(d s3bkt.BucketPolicy) s3bkt.BucketPolicy {
+func clonePolicy(d s3bkt.PolicyDocument) s3bkt.PolicyDocument {
 	if d.Statements == nil {
-		return s3bkt.BucketPolicy{Version: d.Version}
+		return s3bkt.PolicyDocument{Version: d.Version}
 	}
 	statements := make([]s3bkt.Statement, len(d.Statements))
 	copy(statements, d.Statements)
@@ -196,5 +196,5 @@ func clonePolicy(d s3bkt.BucketPolicy) s3bkt.BucketPolicy {
 		statements[i].Actions = maps.Clone(statements[i].Actions)
 		statements[i].Resources = maps.Clone(statements[i].Resources)
 	}
-	return s3bkt.BucketPolicy{Version: d.Version, Statements: statements}
+	return s3bkt.PolicyDocument{Version: d.Version, Statements: statements}
 }

@@ -111,15 +111,15 @@ func resources(bucket string) []string {
 
 // allow builds a one-statement document granting actions on bucket to a
 // principal set.
-func allow(bucket string, p s3bkt.Principal, actions ...string) s3bkt.BucketPolicy {
-	return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+func allow(bucket string, p s3bkt.Principal, actions ...string) s3bkt.PolicyDocument {
+	return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 		{Effect: s3bkt.Allow, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(resources(bucket)...)},
 	}}
 }
 
 // putPolicy writes the bucket's policy over S3 with the service key, as the
 // console does, unconditionally: the preconditions are covered by unit tests.
-func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string, doc s3bkt.BucketPolicy) {
+func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string, doc s3bkt.PolicyDocument) {
 	t.Helper()
 	raw, err := json.Marshal(doc)
 	require.NoError(t, err)
@@ -128,7 +128,7 @@ func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket str
 }
 
 // getPolicy reads the bucket's policy over S3 with the service key.
-func getPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string) s3bkt.BucketPolicy {
+func getPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string) s3bkt.PolicyDocument {
 	t.Helper()
 	out, err := service.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{Bucket: aws.String(bucket)})
 	require.NoError(t, err, "GetBucketPolicy on %s", bucket)
@@ -265,7 +265,7 @@ func testDenyBeatsAllow(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
-	doc := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+	doc := s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 		{Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet(writeActions...), Resources: s3bkt.NewStringSet(resources(bucket)...)},
 		{Effect: s3bkt.Deny, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet("s3:PutObject"), Resources: s3bkt.NewStringSet(resources(bucket)...)},
 	}}

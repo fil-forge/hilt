@@ -178,7 +178,7 @@ func TestAuthorize(t *testing.T) {
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
-			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements},
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements},
 
 			Conditional: true,
 		}, nil)
@@ -658,7 +658,7 @@ func TestAuthorizeLockTimeout(t *testing.T) {
 	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
 	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 	seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
-	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.BucketPolicy{
+	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
 		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
 	}, Conditional: true}, nil)
 	require.NoError(t, err)
@@ -722,8 +722,8 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	require.NoError(t, tenantpostgres.New(pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
 	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "effective-actions"))
 	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
-	statement := func(actions ...string) s3bkt.BucketPolicy {
-		return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
+	statement := func(actions ...string) s3bkt.PolicyDocument {
+		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
 	}
 	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
 	require.NoError(t, err)

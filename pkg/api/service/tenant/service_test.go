@@ -288,7 +288,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "tenant-1-bucket"))
 	_, err = policies.Put(ctx, bucketpolicystore.Input{
 		Bucket: bucketID, Tenant: tenantID,
-		Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
+		Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
 
 		Conditional: true,
 	}, nil)

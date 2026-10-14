@@ -124,16 +124,16 @@ func TestPolicy(t *testing.T) {
 		require.NoError(t, err)
 		return &s3bkt.PolicyArguments{Request: s3.Request{Method: signed.Method, URL: signed.URL, Headers: o.headers}, Body: o.body}
 	}
-	encode := func(t *testing.T, doc s3bkt.BucketPolicy) []byte {
+	encode := func(t *testing.T, doc s3bkt.PolicyDocument) []byte {
 		t.Helper()
 		raw, err := json.Marshal(doc)
 		require.NoError(t, err)
 		return raw
 	}
-	read := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+	read := s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 		{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 	}}
-	write := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+	write := s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 		{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:PutObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 	}}
 
@@ -218,7 +218,7 @@ func TestPolicy(t *testing.T) {
 
 	t.Run("a document the tenant may not store is refused", func(t *testing.T) {
 		f := setup(t, policyPerms, false)
-		unknown := s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		unknown := s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("nobody"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}}
 		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, unknown)}))

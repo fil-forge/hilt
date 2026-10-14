@@ -339,7 +339,7 @@ const bucketFKConstraint = "bucket_policy_principal_bucket_fkey"
 
 // writeIndex replaces the bucket's index rows with one per named principal
 // and, when the document names the wildcard, one with a NULL principal.
-func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bkt.BucketPolicy) error {
+func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bkt.PolicyDocument) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`, bucket.String()); err != nil {
 		return fmt.Errorf("clearing policy index: %w", err)
 	}
@@ -397,7 +397,7 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 	if err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("parsing bucket DID: %w", err)
 	}
-	var doc s3bkt.BucketPolicy
+	var doc s3bkt.PolicyDocument
 	if err := json.Unmarshal(document, &doc); err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("decoding policy document: %w", err)
 	}

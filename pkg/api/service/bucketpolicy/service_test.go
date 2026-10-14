@@ -296,8 +296,8 @@ func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
 	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
-func doc(statements ...s3bkt.Statement) s3bkt.BucketPolicy {
-	return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements}
+func doc(statements ...s3bkt.Statement) s3bkt.PolicyDocument {
+	return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}
 }
 
 // createOnly is the condition of a first write: the bucket has no policy.
@@ -419,7 +419,7 @@ func TestPutAndGet(t *testing.T) {
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:CreateBucket")), createOnly)
 		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", s3bkt.BucketPolicy{}, createOnly)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", s3bkt.PolicyDocument{}, createOnly)
 		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 
 		_, err = d.policies.Get(ctx, d.photos)

@@ -74,7 +74,7 @@ func allowUser1(actions ...string) s3bkt.Statement {
 // as the S3 PutBucketPolicy path does, and returns its ETag.
 func createPolicy(t *testing.T, deps *policyDeps, statements ...s3bkt.Statement) string {
 	t.Helper()
-	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
+	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
 	require.NoError(t, err)
 	return etag
 }
@@ -102,7 +102,7 @@ func TestPrincipalPolicyReadHandlers(t *testing.T) {
 		var list api.PrincipalPolicyList
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 		require.Equal(t, []api.PrincipalPolicy{
-			{BucketName: "photos", Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{allowUser1("s3:GetObject")}}},
+			{BucketName: "photos", Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{allowUser1("s3:GetObject")}}},
 		}, list.Items)
 	})
 

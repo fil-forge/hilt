@@ -420,7 +420,7 @@ func TestDelete(t *testing.T) {
 		d := setup(t, allPerms, false, &fakeSprue{empty: true})
 		_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: d.bucketID, Tenant: d.tenantID,
-			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
 
 			Conditional: true,
 		}, nil)
@@ -443,7 +443,7 @@ func TestDelete(t *testing.T) {
 			func() error {
 				_, err := d.policies.Put(ctx, bucketpolicystore.Input{
 					Bucket: d.bucketID, Tenant: d.tenantID,
-					Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
+					Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
 
 					Conditional: true,
 				}, nil)
@@ -731,7 +731,7 @@ func TestInfo(t *testing.T) {
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
-			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 				Effect:    s3bkt.Allow,
 				Principal: s3bkt.Only("user-1"),
 				Actions:   s3bkt.NewStringSet(actions...),
@@ -828,7 +828,7 @@ func TestInfo(t *testing.T) {
 				Bucket:  bucketID,
 				Tenant:  tenantID,
 				IfMatch: &rec.ETag,
-				Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+				Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 					Effect:    s3bkt.Allow,
 					Principal: s3bkt.Only("user-1"),
 					Actions:   s3bkt.NewStringSet("s3:ListBucket"),
@@ -862,7 +862,7 @@ func TestInfo(t *testing.T) {
 				Bucket:  bucketID,
 				Tenant:  tenantID,
 				IfMatch: &rec.ETag,
-				Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+				Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 					Effect:    s3bkt.Allow,
 					Principal: s3bkt.Only("user-1"),
 					Actions:   s3bkt.NewStringSet("s3:ListBucket"),
@@ -903,7 +903,7 @@ func TestInfo(t *testing.T) {
 				Bucket:  bucketID,
 				Tenant:  tenantID,
 				IfMatch: &rec.ETag,
-				Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+				Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 					Effect:    s3bkt.Allow,
 					Principal: s3bkt.Only("user-1"),
 					Actions:   s3bkt.NewStringSet(actions...),
@@ -1001,8 +1001,8 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 	require.NoError(t, err)
 	require.NoError(t, delegations.PutBatch(ctx, append([]ucan.Delegation{root}, grants...)))
 
-	statement := func(actions ...string) s3bkt.BucketPolicy {
-		return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
+	statement := func(actions ...string) s3bkt.PolicyDocument {
+		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
 	}
 	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:ListBucket"), Conditional: true}, nil)
 	require.NoError(t, err)

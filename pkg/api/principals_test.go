@@ -248,7 +248,7 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		_, err := deps.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucket,
 			Tenant: deps.tenantID,
-			Policy: s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 			}},
 			Conditional: true,

@@ -2,7 +2,7 @@
 // holds on a bucket, how a policy is canonicalized (its lists are sets), and
 // which principals a change to it affects.
 // The document type, its JSON form and its structural checks are libforge's
-// [s3bkt.BucketPolicy]; [Decode] and [Validate] add Hilt's canonical form and
+// [s3bkt.PolicyDocument]; [Decode] and [Validate] add Hilt's canonical form and
 // its checks against the bucket and the tenant's principals. It has no store
 // or transport dependencies.
 //
@@ -42,24 +42,25 @@ import (
 	"github.com/fil-forge/ucantone/errors"
 )
 
-// Decode parses a policy document: [s3bkt.BucketPolicy.UnmarshalJSON]'s
+// Decode parses a policy document: [s3bkt.PolicyDocument.UnmarshalJSON]'s
 // checks, plus trailing data after the document is an error wrapping
-// [s3bkt.ErrInvalidPolicy]. The result is in canonical form (see
-// [s3bkt.Normalize]).
+// [s3bkt.ErrInvalidPolicy]. The statements keep the document's order in
+// memory; every encoding writes them in canonical order (see
+// [s3bkt.StatementSet]).
 // Whether its principals exist is left to [Validate].
-func Decode(data []byte) (s3bkt.BucketPolicy, error) {
+func Decode(data []byte) (s3bkt.PolicyDocument, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
-	var d s3bkt.BucketPolicy
+	var d s3bkt.PolicyDocument
 	if err := dec.Decode(&d); err != nil {
 		if errors.Is(err, s3bkt.ErrInvalidPolicy) {
-			return s3bkt.BucketPolicy{}, err
+			return s3bkt.PolicyDocument{}, err
 		}
-		return s3bkt.BucketPolicy{}, fmt.Errorf("decoding policy: %v: %w", err, s3bkt.ErrInvalidPolicy)
+		return s3bkt.PolicyDocument{}, fmt.Errorf("decoding policy: %v: %w", err, s3bkt.ErrInvalidPolicy)
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return s3bkt.BucketPolicy{}, fmt.Errorf("decoding policy: trailing data after the document: %w", s3bkt.ErrInvalidPolicy)
+		return s3bkt.PolicyDocument{}, fmt.Errorf("decoding policy: trailing data after the document: %w", s3bkt.ErrInvalidPolicy)
 	}
-	return s3bkt.Normalize(d), nil
+	return d, nil
 }
 
 // Validate checks that d may be stored as the policy of bucket: it is
@@ -67,7 +68,7 @@ func Decode(data []byte) (s3bkt.BucketPolicy, error) {
 // exists per principalExists. A document that came through [Decode] is well
 // formed already; the check is repeated here for documents built in code. It
 // returns an error wrapping [s3bkt.ErrInvalidPolicy] otherwise.
-func Validate(d s3bkt.BucketPolicy, bucket string, principalExists func(string) bool) error {
+func Validate(d s3bkt.PolicyDocument, bucket string, principalExists func(string) bool) error {
 	if err := s3bkt.WellFormed(d); err != nil {
 		return err
 	}
@@ -104,7 +105,7 @@ func encodeJSON(v any) []byte {
 // is empty or d is nil (a bucket with no policy). It is also nil for
 // p == [s3bkt.Wildcard], which is not a principal: expanding the wildcard to the
 // tenant's principals is [Changed]'s job.
-func Effective(d *s3bkt.BucketPolicy, p string) []string {
+func Effective(d *s3bkt.PolicyDocument, p string) []string {
 	if d == nil {
 		return nil
 	}
@@ -134,7 +135,7 @@ func Effective(d *s3bkt.BucketPolicy, p string) []string {
 
 // Named returns the principals d names explicitly, sorted and deduplicated,
 // and whether any statement names [s3bkt.Wildcard].
-func Named(d s3bkt.BucketPolicy) (principals []string, wildcard bool) {
+func Named(d s3bkt.PolicyDocument) (principals []string, wildcard bool) {
 	seen := map[string]bool{}
 	for _, st := range d.Statements {
 		if st.Principal.All() {
@@ -155,7 +156,7 @@ func Named(d s3bkt.BucketPolicy) (principals []string, wildcard bool) {
 // RemovePrincipal returns d with principalID removed from every statement
 // naming it, dropping statements left with no principal, and reports whether
 // anything changed. A wildcard statement names no principal and is kept as is.
-func RemovePrincipal(d s3bkt.BucketPolicy, principalID string) (s3bkt.BucketPolicy, bool) {
+func RemovePrincipal(d s3bkt.PolicyDocument, principalID string) (s3bkt.PolicyDocument, bool) {
 	var statements []s3bkt.Statement
 	changed := false
 	for _, st := range d.Statements {
@@ -170,16 +171,16 @@ func RemovePrincipal(d s3bkt.BucketPolicy, principalID string) (s3bkt.BucketPoli
 		}
 		statements = append(statements, st)
 	}
-	return s3bkt.BucketPolicy{Version: d.Version, Statements: statements}, changed
+	return s3bkt.PolicyDocument{Version: d.Version, Statements: statements}, changed
 }
 
 // Changed returns the principals whose effective set differs between old and
 // new, either of which may be nil for "no policy". It considers every
 // principal either policy names, with [s3bkt.Wildcard] expanding to
 // tenantPrincipals. The result is sorted and deduplicated.
-func Changed(old, new *s3bkt.BucketPolicy, tenantPrincipals []string) []string {
+func Changed(old, new *s3bkt.PolicyDocument, tenantPrincipals []string) []string {
 	candidates := map[string]bool{}
-	for _, d := range []*s3bkt.BucketPolicy{old, new} {
+	for _, d := range []*s3bkt.PolicyDocument{old, new} {
 		if d == nil {
 			continue
 		}

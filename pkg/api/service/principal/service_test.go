@@ -94,7 +94,7 @@ func setup(t *testing.T) deps {
 
 // putPolicy stores a bucket policy for the tenant and returns the bucket and
 // the stored ETag.
-func (d deps) putPolicy(t *testing.T, tenantID did.DID, doc s3bkt.BucketPolicy) (did.DID, string) {
+func (d deps) putPolicy(t *testing.T, tenantID did.DID, doc s3bkt.PolicyDocument) (did.DID, string) {
 	t.Helper()
 	bucket := testutil.RandomDID(t)
 	etag, err := d.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: doc, Conditional: true}, nil)
@@ -273,14 +273,14 @@ func TestDelete(t *testing.T) {
 
 		// A policy the principal shares, one it holds alone, and one that reaches
 		// it only through the wildcard.
-		shared, _ := d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		shared, _ := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1", "user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 			{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:DeleteObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
-		alone, _ := d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		alone, _ := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:PutObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
-		everyone, everyoneETag := d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		everyone, everyoneETag := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:ListBucket"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 
@@ -306,7 +306,7 @@ func TestDelete(t *testing.T) {
 		// removed one held alone.
 		rec, err := d.policies.Get(ctx, shared)
 		require.NoError(t, err)
-		require.Equal(t, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		require.Equal(t, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}}, rec.Policy)
 
@@ -326,7 +326,7 @@ func TestDelete(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		d.addKey(t, d.tenantID, "user-1", "laptop")
-		alone, _ := d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		alone, _ := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
@@ -354,7 +354,7 @@ func TestDelete(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		key := d.addKey(t, d.tenantID, "user-1", "laptop")
-		bucket, etag := d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		bucket, etag := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 		d.swarf.Err = errors.New("swarf unreachable")
@@ -476,7 +476,7 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		// deleting it.
 		_, _, err = d.svc.Create(ctx, "tenant-1", "user-2")
 		require.NoError(t, err)
-		d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1", "user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 
@@ -495,7 +495,7 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		require.NoError(t, err)
 		_, _, err = d.svc.Create(ctx, "tenant-1", "user-2")
 		require.NoError(t, err)
-		d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1", "user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 
@@ -515,7 +515,7 @@ func TestDeleteConcurrentChange(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		principals := &renamingPrincipals{Store: d.principals, write: func() {
-			d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+			d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 			}})
 		}}
@@ -601,7 +601,7 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		require.NoError(t, err)
 		// The wildcard policy survives the removal, so the creation has grants
 		// to store.
-		d.putPolicy(t, d.tenantID, s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 
@@ -676,8 +676,8 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 	require.NoError(t, err)
 	_, _, err = svc.Create(ctx, "tenant-pg", "bob")
 	require.NoError(t, err)
-	statement := func(ids ...string) s3bkt.BucketPolicy {
-		return s3bkt.BucketPolicy{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only(ids...), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
+	statement := func(ids ...string) s3bkt.PolicyDocument {
+		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only(ids...), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
 	}
 	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("alice", "bob"), Conditional: true}, nil)
 	require.NoError(t, err)
