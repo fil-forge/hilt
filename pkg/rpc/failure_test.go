@@ -7,6 +7,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	"github.com/fil-forge/hilt/pkg/store"
 	ucanerrors "github.com/fil-forge/ucantone/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -54,6 +55,15 @@ func TestBucketFailure(t *testing.T) {
 		require.NoError(t, bucketFailure(f, auth.ErrOperationNotPermitted))
 		require.True(t, f.called)
 		requireName(t, f.got, auth.OperationNotPermittedErrorName)
+	})
+
+	t.Run("a wrapped lock timeout is set as the retryable failure", func(t *testing.T) {
+		// Info reads the bucket policy share-locked, so it can return this too.
+		f := &recordingFailer{}
+		err := fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, store.ErrLockTimeout)
+		require.NoError(t, bucketFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, auth.TemporarilyUnavailableErrorName)
 	})
 
 	t.Run("unknown error is returned, not set as failure", func(t *testing.T) {
@@ -113,6 +123,25 @@ func TestAuthFailure(t *testing.T) {
 			require.True(t, f.called, tc.name)
 			requireName(t, f.got, tc.name)
 		}
+	})
+
+	t.Run("a bucket-scope refusal is set as failure", func(t *testing.T) {
+		f := &recordingFailer{}
+		err := fmt.Errorf("bucket %q: %w", "photos", auth.ErrBucketNotPermitted)
+		require.NoError(t, authFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, auth.BucketNotPermittedErrorName)
+	})
+
+	t.Run("a lock timeout is set as failure under its retryable name", func(t *testing.T) {
+		f := &recordingFailer{}
+		// As Authorize returns it: the named sentinel first, the store's timeout
+		// wrapped after it, so the receipt carries the retryable name.
+		err := fmt.Errorf("%w: looking up access key: %w", auth.ErrTemporarilyUnavailable, store.ErrLockTimeout)
+		require.NoError(t, authFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, auth.TemporarilyUnavailableErrorName)
+		require.ErrorIs(t, f.got, store.ErrLockTimeout)
 	})
 
 	t.Run("bucket sentinel is unknown to authFailure and returned", func(t *testing.T) {
