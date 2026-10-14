@@ -109,7 +109,8 @@ func TestAuthorizeRequest(t *testing.T) {
 	// built from them and the policy store. The credential is a service key
 	// carrying perms unless principalBound, in which case "user-1" is a
 	// principal of the tenant and the key holds its grants over the bucket.
-	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer) (*auth.Authorizer, *bucketpolicymemory.Store) {
+	// Each opt adjusts the stored key before it is added.
+	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *bucketpolicymemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
@@ -126,6 +127,9 @@ func TestAuthorizeRequest(t *testing.T) {
 			grants, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID}, []string{"s3:GetObject", "s3:ListBucket"}, nil)
 			require.NoError(t, err)
 			require.NoError(t, dels.PutBatch(ctx, grants))
+		}
+		for _, opt := range opts {
+			opt(&in)
 		}
 		require.NoError(t, accessKeys.Add(ctx, in))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
@@ -210,6 +214,45 @@ func TestAuthorizeRequest(t *testing.T) {
 		chain, found := ok.Delegations.Entries[reDel.Link()]
 		require.True(t, found)
 		require.Equal(t, []cid.Cid{reDel.Link()}, chain)
+	})
+
+	// expiringAt stores the key with the given expiry.
+	expiringAt := func(at time.Time) func(*accesskey.Input) {
+		return func(in *accesskey.Input) { in.ExpiresAt = &at }
+	}
+
+	t.Run("a key expiring before the next UTC midnight caps the delegation's expiry", func(t *testing.T) {
+		// An hour out is always sooner than the next UTC midnight plus the
+		// skew and the overhang, so the key's own expiry must win, and it
+		// leaves a stalled test run ample time before the key lapses.
+		keyExpiry := time.Now().Add(time.Hour).Truncate(time.Second)
+		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner, expiringAt(keyExpiry))
+		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
+
+		_, blocks, err := call(t, az, providerID, args)
+		require.NoError(t, err)
+		require.Len(t, blocks, 1)
+		exp := blocks[0].Expiration()
+		require.NotNil(t, exp)
+		require.Equal(t, keyExpiry.Unix(), int64(*exp),
+			"the gateway must not hold authority past the access key's expiry")
+	})
+
+	t.Run("a key expiring after the next UTC midnight leaves the delegation's expiry alone", func(t *testing.T) {
+		keyExpiry := time.Now().Add(72 * time.Hour)
+		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner, expiringAt(keyExpiry))
+		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
+
+		_, blocks, err := call(t, az, providerID, args)
+		require.NoError(t, err)
+		require.Len(t, blocks, 1)
+		exp := blocks[0].Expiration()
+		require.NotNil(t, exp)
+		skew := int64(sigv4.MaxClockSkew / time.Second)
+		overhang := int64(rpc.AsyncOverhang / time.Second)
+		require.Zero(t, (int64(*exp)-skew-overhang)%86400,
+			"expiry should be a UTC midnight plus the max clock skew and the async overhang")
+		require.Less(t, int64(*exp), keyExpiry.Unix())
 	})
 
 	t.Run("a copy from another bucket also delegates the source's read", func(t *testing.T) {
