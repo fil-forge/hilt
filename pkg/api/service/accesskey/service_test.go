@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/internal/testutil"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -153,8 +154,8 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	require.NoError(t, err)
 	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 	// alice may read bucket-a; her keys hold the matching delegations.
-	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: bucketpolicy.Policy{
-		Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("alice"), Actions: []string{"s3:GetObject"}}},
+	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
+		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
 	}, Conditional: true}, nil)
 	require.NoError(t, err)
 

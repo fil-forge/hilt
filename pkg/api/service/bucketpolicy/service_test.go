@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/internal/testutil"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -283,20 +284,20 @@ func (d deps) held(t *testing.T, key did.DID) []ucan.Delegation {
 	return page.Results
 }
 
-var everyone = bucketpolicy.Everyone()
+var everyone = s3bkt.Everyone()
 
-func only(ids ...string) bucketpolicy.Principal { return bucketpolicy.Only(ids...) }
+func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
 
-func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions}
+func allow(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
-func deny(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions}
+func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
-func doc(statements ...bucketpolicy.Statement) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Statements: statements}
+func doc(statements ...s3bkt.Statement) s3bkt.PolicyDocument {
+	return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}
 }
 
 // createOnly is the condition of a first write: the bucket has no policy.
@@ -334,7 +335,7 @@ func TestPutAndGet(t *testing.T) {
 		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", document, createOnly)
 		require.NoError(t, err)
 		require.True(t, created)
-		require.Equal(t, bucketpolicy.ETag(document), etag)
+		require.Equal(t, s3bkt.ETag(document), etag)
 
 		rec, err := d.policies.Get(ctx, d.photos)
 		require.NoError(t, err)
@@ -349,13 +350,13 @@ func TestPutAndGet(t *testing.T) {
 		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first)
 		require.NoError(t, err)
 		require.True(t, created)
-		require.Equal(t, bucketpolicy.ETag(first), etag)
+		require.Equal(t, s3bkt.ETag(first), etag)
 
 		second := doc(allow(only("user-1"), "s3:PutObject"))
 		etag, created, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", second)
 		require.NoError(t, err)
 		require.False(t, created)
-		require.Equal(t, bucketpolicy.ETag(second), etag)
+		require.Equal(t, s3bkt.ETag(second), etag)
 		rec, err := d.policies.Get(ctx, d.photos)
 		require.NoError(t, err)
 		require.Equal(t, second, rec.Policy)
@@ -413,13 +414,13 @@ func TestPutAndGet(t *testing.T) {
 		d.principal(t, "user-1")
 
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("ghost"), "s3:GetObject")), createOnly)
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:CreateBucket")), createOnly)
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", bucketpolicy.Policy{}, createOnly)
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", s3bkt.PolicyDocument{}, createOnly)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 
 		_, err = d.policies.Get(ctx, d.photos)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
@@ -636,7 +637,7 @@ func TestRotations(t *testing.T) {
 		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
 
 		_, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
-		require.ErrorIs(t, err, bucketpolicy.ErrInvalidPolicy)
+		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 	})
 
 	t.Run("a replace whose publish fails writes nothing", func(t *testing.T) {
@@ -738,7 +739,7 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	<-policies.reached
 	require.NoError(t, principals.Delete(ctx, "tenant-1", "user-1"))
 	close(policies.resume)
-	require.ErrorIs(t, <-put, bucketpolicy.ErrInvalidPolicy)
+	require.ErrorIs(t, <-put, s3bkt.ErrInvalidPolicy)
 
 	_, created, err := principals.Create(ctx, "tenant-1", "user-1")
 	require.NoError(t, err)
@@ -952,9 +953,13 @@ func TestPrincipalReads(t *testing.T) {
 		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, "backups"))
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
+		onBackups := func(st s3bkt.Statement) s3bkt.Statement {
+			st.Resources = s3bkt.NewStringSet(s3bkt.BucketARN("backups"))
+			return st
+		}
 		_, _, err = d.svc.Write(ctx, d.tenantID, backups, "backups", doc(
-			allow(everyone, "s3:ListBucket"),
-			deny(only("user-2"), "s3:ListBucket"),
+			onBackups(allow(everyone, "s3:ListBucket")),
+			onBackups(deny(only("user-2"), "s3:ListBucket")),
 		), createOnly)
 		require.NoError(t, err)
 		return d

@@ -3,7 +3,7 @@ module github.com/fil-forge/hilt
 go 1.27.0
 
 require (
-	github.com/alanshaw/dag-json-gen v0.0.10
+	github.com/alanshaw/dag-json-gen v0.0.11
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.24
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.23
@@ -11,7 +11,7 @@ require (
 	github.com/aws/smithy-go v1.27.2
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/exaring/otelpgx v0.12.0
-	github.com/fil-forge/libforge v0.0.0-20261002123347-24293c113b04
+	github.com/fil-forge/libforge v0.0.0-20261014110314-6d9e32d4eeef
 	github.com/fil-forge/smelt v0.0.0-20260914083257-f594cf02655c
 	github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c
 	github.com/fil-forge/ucantone v0.0.0-20260924160040-c31dec73d9b3
@@ -21,7 +21,6 @@ require (
 	github.com/labstack/echo/v4 v4.15.0
 	github.com/multiformats/go-multibase v0.3.0
 	github.com/multiformats/go-multicodec v0.10.0
-	github.com/multiformats/go-multihash v0.2.3
 	github.com/multiformats/go-varint v0.1.0
 	github.com/olekukonko/tablewriter v1.1.4
 	github.com/openbao/openbao/api/v2 v2.6.0
@@ -158,6 +157,7 @@ require (
 	github.com/mr-tron/base58 v1.3.0 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
+	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/olekukonko/cat v0.0.0-20250911104152-50322a0618f6 // indirect
 	github.com/olekukonko/errors v1.2.0 // indirect
 	github.com/olekukonko/ll v0.1.6 // indirect

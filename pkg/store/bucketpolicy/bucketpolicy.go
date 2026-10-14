@@ -1,5 +1,5 @@
 // Package bucketpolicy defines the store of bucket policies: one policy per
-// bucket (see [bucketpolicy.Policy]) with the strong ETag its compare-and-set
+// bucket (see [s3bkt.PolicyDocument]) with the strong ETag its compare-and-set
 // writes are conditioned on, and an index from principal to the buckets whose
 // statements name it.
 //
@@ -19,7 +19,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
@@ -29,8 +30,8 @@ type Record struct {
 	// Bucket is the bucket DID the policy applies to.
 	Bucket did.DID
 	// Policy is the bucket's policy.
-	Policy bucketpolicy.Policy
-	// ETag is the strong entity tag of Policy (see [bucketpolicy.ETag]).
+	Policy s3bkt.PolicyDocument
+	// ETag is the strong entity tag of Policy (see [s3bkt.ETag]).
 	ETag string
 	// UpdatedAt is when the policy was last written.
 	UpdatedAt time.Time
@@ -45,7 +46,7 @@ type Input struct {
 	Tenant did.DID
 	// Policy is the policy to store. The store does not validate it beyond
 	// referential integrity; callers run [bucketpolicy.Validate] first.
-	Policy bucketpolicy.Policy
+	Policy s3bkt.PolicyDocument
 	// Conditional makes the write check IfMatch. Unset, the write replaces
 	// whatever is stored, whatever tag it carries, and creates when nothing
 	// is: the write a PutBucketPolicy without a precondition makes.

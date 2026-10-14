@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
@@ -152,7 +154,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	}
 
 	canonical := bucketpolicy.Canonical(in.Policy)
-	etag = bucketpolicy.ETag(in.Policy)
+	etag = s3bkt.ETag(in.Policy)
 	if old == nil {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO bucket_policy (bucket_id, document, etag)
@@ -337,7 +339,7 @@ const bucketFKConstraint = "bucket_policy_principal_bucket_fkey"
 
 // writeIndex replaces the bucket's index rows with one per named principal
 // and, when the document names the wildcard, one with a NULL principal.
-func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc bucketpolicy.Policy) error {
+func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bkt.PolicyDocument) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`, bucket.String()); err != nil {
 		return fmt.Errorf("clearing policy index: %w", err)
 	}
@@ -395,7 +397,7 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 	if err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("parsing bucket DID: %w", err)
 	}
-	var doc bucketpolicy.Policy
+	var doc s3bkt.PolicyDocument
 	if err := json.Unmarshal(document, &doc); err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("decoding policy document: %w", err)
 	}

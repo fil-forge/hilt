@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -191,7 +192,7 @@ func TestCreatePrincipalHandler(t *testing.T) {
 
 	t.Run("the policy wildcard is 422", func(t *testing.T) {
 		e, deps := setupPrincipals(t)
-		rec := doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/"+bucketpolicy.Wildcard, nil)
+		rec := doRequest(t, e, http.MethodPut, "/tenants/tenant-1/principals/"+s3bkt.Wildcard, nil)
 		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 		require.Equal(t, "InvalidPrincipalID", decodeError(t, rec).Code)
 		recs, err := deps.principals.ListByTenant(t.Context(), deps.tenantID)
@@ -247,8 +248,8 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		_, err := deps.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucket,
 			Tenant: deps.tenantID,
-			Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{
-				{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Only("user-1"), Actions: []string{"s3:GetObject"}},
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 			}},
 			Conditional: true,
 		}, nil)

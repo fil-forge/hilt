@@ -96,9 +96,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/sigv4` — stdlib-only SigV4 / SigV4a verification, key derivation
   (`DeriveKey`), and local verification (`VerifyWithKey`).
 - `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
-- `pkg/bucketpolicy` — the bucket policy document and its evaluation
-  (`Decode`, `Validate`, `Canonical`/`ETag`, `Effective`, `Changed`); pure, no
-  store or transport dependencies. The package doc has the document shape.
+- `pkg/bucketpolicy` — bucket policy evaluation over libforge's
+  `s3bkt.BucketPolicy` (`Decode`, `Validate`, `Canonical`, `Effective`,
+  `Changed`); pure, no store or transport dependencies. The document type,
+  its JSON parsing and structural checks, ETag calculation, and the policy
+  action allowlist live in libforge `commands/s3/bucket`. The package doc has
+  the document shape.
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
   tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
   key's set as its policies change. See the package doc.

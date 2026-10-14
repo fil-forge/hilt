@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -54,10 +55,10 @@ func TestBucketFailure(t *testing.T) {
 
 	t.Run("a rejected policy document is set as failure under the policy name", func(t *testing.T) {
 		f := &recordingFailer{}
-		err := fmt.Errorf("decoding policy: unknown field %q: %w", "Version", bucketpolicy.ErrInvalidPolicy)
+		err := fmt.Errorf("decoding policy: unknown field %q: %w", "Version", s3bkt.ErrInvalidPolicy)
 		require.NoError(t, bucketFailure(f, err))
 		require.True(t, f.called)
-		requireName(t, f.got, bucketpolicy.InvalidPolicyErrorName)
+		requireName(t, f.got, s3bkt.InvalidPolicyErrorName)
 	})
 
 	t.Run("the policy operations' rejections are set as failures with their names", func(t *testing.T) {

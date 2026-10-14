@@ -4,10 +4,13 @@ import (
 	"slices"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/stretchr/testify/require"
 )
 
-// TestEveryPermissionIsClassified pins the policy allowlist against the
+// TestEveryPermissionIsClassified pins the policy allowlist (libforge's
+// s3bkt.PolicyActions) against the
 // permission table: every recognized permission is either a policy action or
 // one of the six named here, so a new permission is not a policy action until
 // someone lists it on one side.
@@ -16,6 +19,7 @@ func TestEveryPermissionIsClassified(t *testing.T) {
 		"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
 	}
+	policyActions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(policyActions), "policyActions must be sorted")
 	for _, p := range policyActions {
 		require.True(t, Valid(p), "%q is listed as a policy action but is not a permission", p)
@@ -27,7 +31,7 @@ func TestEveryPermissionIsClassified(t *testing.T) {
 	}
 	for _, p := range notPolicy {
 		require.True(t, Valid(p), p)
-		require.False(t, PolicyAction(p), p)
+		require.False(t, s3bkt.PolicyAction(p), p)
 	}
 	require.Len(t, policyActions, len(permissionCommands)-len(notPolicy))
 }

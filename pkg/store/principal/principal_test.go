@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
@@ -549,10 +550,11 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 				_, err := bucketpolicypostgres.New(pool).Put(ctx, bucketpolicystore.Input{
 					Bucket: bucketID,
 					Tenant: tenantID,
-					Policy: bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
-						Effect:    bucketpolicy.Allow,
-						Principal: bucketpolicy.Only("held"),
-						Actions:   []string{"s3:GetObject"},
+					Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+						Effect:    s3bkt.Allow,
+						Principal: s3bkt.Only("held"),
+						Actions:   s3bkt.NewStringSet("s3:GetObject"),
+						Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 					}}},
 					Conditional: true,
 				}, nil)

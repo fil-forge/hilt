@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/internal/testutil"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -287,7 +288,8 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "tenant-1-bucket"))
 	_, err = policies.Put(ctx, bucketpolicystore.Input{
 		Bucket: bucketID, Tenant: tenantID,
-		Policy:      bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{Effect: bucketpolicy.Allow, Principal: bucketpolicy.Everyone(), Actions: []string{"s3:GetObject"}}}},
+		Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
+
 		Conditional: true,
 	}, nil)
 	require.NoError(t, err)

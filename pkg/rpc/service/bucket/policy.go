@@ -46,7 +46,7 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		} else if err != nil {
 			return nil, fmt.Errorf("reading the policy of bucket %q: %w", name, err)
 		}
-		return &s3bkt.PolicyOK{ETag: rec.ETag, Policy: bucketpolicy.Canonical(rec.Policy)}, nil
+		return &s3bkt.PolicyOK{Policy: &rec.Policy}, nil
 
 	case auth.OpPutBucketPolicy:
 		if err := bodyMatchesSignature(authz, args.Body); err != nil {
@@ -64,14 +64,14 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		if cond != nil {
 			opts = append(opts, bucketpolicysvc.WithCondition(*cond))
 		}
-		etag, _, err := s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, opts...)
+		_, _, err = s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, opts...)
 		if errors.Is(err, bucketpolicysvc.ErrBucketNotFound) {
 			return nil, fmt.Errorf("%w: %q", ErrUnknownBucket, name)
 		} else if err != nil {
 			return nil, err
 		}
 		log.Info("wrote bucket policy over S3")
-		return &s3bkt.PolicyOK{ETag: etag}, nil
+		return &s3bkt.PolicyOK{}, nil
 
 	case auth.OpDeleteBucketPolicy:
 		cond, err := precondition(authz, args.Request.Headers)

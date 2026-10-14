@@ -21,6 +21,8 @@ import (
 	"slices"
 	"strings"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -37,7 +39,7 @@ import (
 type Record struct {
 	BucketName string
 	ETag       string
-	Policy     bucketpolicy.Policy
+	Policy     s3bkt.PolicyDocument
 }
 
 // Access is a principal's effective actions on one bucket.
@@ -116,19 +118,20 @@ func WithCondition(c Condition) WriteOption {
 }
 
 // Write creates or replaces the bucket's policy, for a caller that has
-// resolved the tenant and the bucket. It validates doc against the tenant's
-// principals, and checks the condition [WithCondition] sets. bucketName names
-// the bucket in errors. It returns the new ETag and whether the bucket had no
-// policy before.
+// resolved the tenant and the bucket. It validates doc against the bucket
+// (every resource must name bucketName) and the tenant's principals, and
+// checks the condition [WithCondition] sets. bucketName also
+// names the bucket in errors. It returns the new ETag and whether the bucket
+// had no policy before.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
-func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc bucketpolicy.Policy, opts ...WriteOption) (string, bool, error) {
+func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc s3bkt.PolicyDocument, opts ...WriteOption) (string, bool, error) {
 	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
 		return "", false, err
 	}
-	if err := bucketpolicy.Validate(doc, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
+	if err := bucketpolicy.Validate(doc, bucketName, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
 		return "", false, err
 	}
 	in := bucketpolicystore.Input{
@@ -144,7 +147,7 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 	var created bool
 	etag, err := s.policies.Put(ctx, in, func(ctx context.Context, old *bucketpolicystore.Record) error {
 		created = old == nil
-		var oldDoc *bucketpolicy.Policy
+		var oldDoc *s3bkt.PolicyDocument
 		if old != nil {
 			oldDoc = &old.Policy
 		}
@@ -267,7 +270,7 @@ func (s *Service) principalPolicies(ctx context.Context, externalID, principalID
 // store's write transaction while the bucket is locked, so the whole of it is
 // bounded at [grant.BatchTimeout] (see there). Any failure, the deadline
 // included, fails the write and rolls it back.
-func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc, newDoc *bucketpolicy.Policy, principals []string) error {
+func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc, newDoc *s3bkt.PolicyDocument, principals []string) error {
 	affected := bucketpolicy.Changed(oldDoc, newDoc, principals)
 	if len(affected) == 0 {
 		return nil
@@ -304,7 +307,7 @@ func (s *Service) writeError(ctx context.Context, bucketName string, err error) 
 	case errors.Is(err, store.ErrRecordNotFound):
 		return ErrBucketNotFound
 	case errors.Is(err, store.ErrInvalidArgument):
-		return fmt.Errorf("%w: a principal the policy names no longer exists", bucketpolicy.ErrInvalidPolicy)
+		return fmt.Errorf("%w: a principal the policy names no longer exists", s3bkt.ErrInvalidPolicy)
 	}
 	return fmt.Errorf("writing the policy of bucket %q: %w", bucketName, err)
 }

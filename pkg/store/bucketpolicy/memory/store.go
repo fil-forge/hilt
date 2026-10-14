@@ -8,10 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -99,7 +102,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx
 	}
 
 	// Store the normalized document, as the Postgres backend does.
-	var doc bucketpolicy.Policy
+	var doc s3bkt.PolicyDocument
 	if err := json.Unmarshal(bucketpolicy.Canonical(in.Policy), &doc); err != nil {
 		return "", fmt.Errorf("normalizing policy: %w", err)
 	}
@@ -108,7 +111,7 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx
 	for _, p := range named {
 		namedSet[p] = true
 	}
-	etag := bucketpolicy.ETag(doc)
+	etag := s3bkt.ETag(doc)
 	s.policies[in.Bucket] = entry{
 		tenant: in.Tenant,
 		rec: bucketpolicystore.Record{
@@ -182,15 +185,16 @@ func cloneRecord(r bucketpolicystore.Record) bucketpolicystore.Record {
 	return r
 }
 
-func clonePolicy(d bucketpolicy.Policy) bucketpolicy.Policy {
+func clonePolicy(d s3bkt.PolicyDocument) s3bkt.PolicyDocument {
 	if d.Statements == nil {
-		return bucketpolicy.Policy{}
+		return s3bkt.PolicyDocument{Version: d.Version}
 	}
-	statements := make([]bucketpolicy.Statement, len(d.Statements))
+	statements := make([]s3bkt.Statement, len(d.Statements))
 	copy(statements, d.Statements)
 	for i := range statements {
-		statements[i].Principal.IDs = slices.Clone(statements[i].Principal.IDs)
-		statements[i].Actions = slices.Clone(statements[i].Actions)
+		statements[i].Principal = maps.Clone(statements[i].Principal)
+		statements[i].Actions = maps.Clone(statements[i].Actions)
+		statements[i].Resources = maps.Clone(statements[i].Resources)
 	}
-	return bucketpolicy.Policy{Statements: statements}
+	return s3bkt.PolicyDocument{Version: d.Version, Statements: statements}
 }

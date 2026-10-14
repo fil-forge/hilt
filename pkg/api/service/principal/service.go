@@ -22,6 +22,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -80,7 +82,7 @@ func New(
 	}
 }
 
-// ValidID reports whether id can be a principalId. bucketpolicy.Wildcard is the
+// ValidID reports whether id can be a principalId. s3bkt.Wildcard is the
 // policy language's "every principal", so a principal of that name would
 // collide with it: deleting the principal would strip the wildcard from every
 // policy the tenant has. Postgres refuses invalid UTF-8 and NUL in text. The id
@@ -88,7 +90,7 @@ func New(
 // character that delimits or escapes a segment, nor be a dot segment a client
 // could resolve away.
 func ValidID(id string) bool {
-	return id != "" && len(id) <= maxPrincipalIDLength && id != bucketpolicy.Wildcard &&
+	return id != "" && len(id) <= maxPrincipalIDLength && id != s3bkt.Wildcard &&
 		utf8.ValidString(id) && !strings.ContainsRune(id, 0) &&
 		!strings.ContainsAny(id, "/;,?%") && id != "." && id != ".."
 }

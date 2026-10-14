@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -103,20 +105,20 @@ func makeStore(t *testing.T, k StoreKind) (bucketpolicystore.Store, fixtures) {
 	panic("unknown store kind")
 }
 
-var everyone = bucketpolicy.Everyone()
+var everyone = s3bkt.Everyone()
 
-func only(ids ...string) bucketpolicy.Principal { return bucketpolicy.Only(ids...) }
+func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
 
-func allow(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Allow, Principal: p, Actions: actions}
+func allow(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
-func deny(p bucketpolicy.Principal, actions ...string) bucketpolicy.Statement {
-	return bucketpolicy.Statement{Effect: bucketpolicy.Deny, Principal: p, Actions: actions}
+func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
+	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
-func doc(statements ...bucketpolicy.Statement) bucketpolicy.Policy {
-	return bucketpolicy.Policy{Statements: statements}
+func doc(statements ...s3bkt.Statement) s3bkt.PolicyDocument {
+	return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}
 }
 
 func ptr(s string) *string { return &s }
@@ -191,7 +193,7 @@ func TestPolicyStore(t *testing.T) {
 
 				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, noCallback)
 				require.NoError(t, err)
-				require.Equal(t, bucketpolicy.ETag(d), etag)
+				require.Equal(t, s3bkt.ETag(d), etag)
 
 				rec, err := s.Get(t.Context(), bucketID)
 				require.NoError(t, err)
@@ -279,7 +281,7 @@ func TestPolicyStore(t *testing.T) {
 					return nil
 				})
 				require.NoError(t, err)
-				require.Equal(t, bucketpolicy.ETag(second), etag2)
+				require.Equal(t, s3bkt.ETag(second), etag2)
 				require.NotEqual(t, etag1, etag2)
 				require.NotNil(t, seen)
 				require.Equal(t, first, seen.Policy)
@@ -296,7 +298,7 @@ func TestPolicyStore(t *testing.T) {
 				first := doc(allow(only("alice"), "s3:GetObject"))
 				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first}, nil)
 				require.NoError(t, err)
-				require.Equal(t, bucketpolicy.ETag(first), etag1)
+				require.Equal(t, s3bkt.ETag(first), etag1)
 
 				second := doc(allow(only("bob"), "s3:PutObject"))
 				etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
@@ -419,15 +421,15 @@ func TestPolicyStore(t *testing.T) {
 				d := doc(allow(only("alice"), "s3:GetObject"))
 				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
 				require.NoError(t, err)
-				d.Statements[0].Actions[0] = "s3:PutObject"
+				d.Statements[0].Actions["s3:PutObject"] = struct{}{}
 
 				rec, err := s.Get(t.Context(), bucketID)
 				require.NoError(t, err)
-				require.Equal(t, "s3:GetObject", rec.Policy.Statements[0].Actions[0])
-				rec.Policy.Statements[0].Actions[0] = "s3:DeleteObject"
+				require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), rec.Policy.Statements[0].Actions)
+				rec.Policy.Statements[0].Actions["s3:DeleteObject"] = struct{}{}
 				again, err := s.Get(t.Context(), bucketID)
 				require.NoError(t, err)
-				require.Equal(t, "s3:GetObject", again.Policy.Statements[0].Actions[0])
+				require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), again.Policy.Statements[0].Actions)
 			})
 
 			t.Run("Put stores the normalized document whatever the backend", func(t *testing.T) {
@@ -547,7 +549,7 @@ func TestPolicyStore(t *testing.T) {
 				unpoliced := fx.bucket(t, tenantID) // no policy
 				_ = unpoliced
 
-				put := func(bucket did.DID, d bucketpolicy.Policy) {
+				put := func(bucket did.DID, d s3bkt.PolicyDocument) {
 					_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: d, Conditional: true}, nil)
 					require.NoError(t, err)
 				}
@@ -874,7 +876,7 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.NoError(t, written)
 		require.NoError(t, got)
 		require.Equal(t, second, rec.Policy, "the waiting read is answered from the committed state")
-		require.Equal(t, bucketpolicy.ETag(second), rec.ETag)
+		require.Equal(t, s3bkt.ETag(second), rec.ETag)
 	})
 
 	t.Run("a share-locked Get during a first Put waits and sees the created policy", func(t *testing.T) {

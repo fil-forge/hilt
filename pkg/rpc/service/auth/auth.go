@@ -11,6 +11,8 @@ import (
 	"slices"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -394,7 +396,7 @@ func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, pri
 // while the policy is being changed waits for the outcome. A bucket with no
 // policy grants nothing, and reports no ETag.
 func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, string, error) {
-	var doc *bucketpolicy.Policy
+	var doc *s3bkt.PolicyDocument
 	var etag string
 	rec, err := a.policies.Get(ctx, bucketID, store.WithShareLock())
 	if err == nil {

@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/api"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/management"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
@@ -344,10 +345,11 @@ func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 func TestManagementClientPolicies(t *testing.T) {
 	ctx := context.Background()
-	document := bucketpolicy.Policy{Statements: []bucketpolicy.Statement{{
-		Effect:    bucketpolicy.Allow,
-		Principal: bucketpolicy.Only("user-1"),
-		Actions:   []string{"s3:GetObject"},
+	document := s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+		Effect:    s3bkt.Allow,
+		Principal: s3bkt.Only("user-1"),
+		Actions:   s3bkt.NewStringSet("s3:GetObject"),
+		Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 	}}}
 
 	t.Run("the principal reads unwrap their list", func(t *testing.T) {
