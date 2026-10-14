@@ -144,9 +144,12 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	return nil
 }
 
-// WithLock runs in one transaction: it locks the live rows FOR UPDATE in
-// external ID order, runs fn while holding them and commits. Sorting keeps two
-// WithLock calls over overlapping principals from deadlocking.
+// WithLock runs in one transaction: it locks the live rows FOR NO KEY UPDATE
+// in external ID order, runs fn while holding them and commits. Sorting keeps
+// two WithLock calls over overlapping principals from deadlocking. The mode
+// blocks a share-locked Get and a Tombstone, and leaves alone the FOR KEY SHARE
+// a policy write holds on the principals it names, since fn may run inside
+// that write.
 func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error {
 	if len(externalIDs) == 0 {
 		return fn(ctx)
@@ -162,7 +165,7 @@ func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []stri
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = ANY($2) AND deleted_at IS NULL
 		ORDER BY external_id ASC
-		FOR UPDATE
+		FOR NO KEY UPDATE
 	`, tenant.String(), externalIDs); err != nil {
 		return fmt.Errorf("locking principals: %w", err)
 	}

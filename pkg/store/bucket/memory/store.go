@@ -54,6 +54,14 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 	return nil
 }
 
+// Has reports whether a bucket with the id is stored.
+func (s *Store) Has(id did.DID) bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	_, ok := s.buckets[id]
+	return ok
+}
+
 func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()

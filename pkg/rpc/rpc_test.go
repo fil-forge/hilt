@@ -11,6 +11,7 @@ import (
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
@@ -33,7 +34,7 @@ func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 	require.NoError(t, err)
 	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), tenantmemory.New(), up, revocations)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), tenantmemory.New(), bucketpolicymemory.New(), up, revocations)
 
 	return []server.Route{
 		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),
