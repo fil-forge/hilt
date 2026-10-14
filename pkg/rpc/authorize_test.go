@@ -222,9 +222,10 @@ func TestAuthorizeRequest(t *testing.T) {
 	}
 
 	t.Run("a key expiring before the next UTC midnight caps the delegation's expiry", func(t *testing.T) {
-		// A minute out is always sooner than the next UTC midnight plus the
-		// skew and the overhang, so the key's own expiry must win.
-		keyExpiry := time.Now().Add(time.Minute).Truncate(time.Second)
+		// An hour out is always sooner than the next UTC midnight plus the
+		// skew and the overhang, so the key's own expiry must win, and it
+		// leaves a stalled test run ample time before the key lapses.
+		keyExpiry := time.Now().Add(time.Hour).Truncate(time.Second)
 		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner, expiringAt(keyExpiry))
 		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
 
