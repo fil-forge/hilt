@@ -6,6 +6,7 @@ import "github.com/fil-forge/ucantone/errors"
 // match on the stable Name() of a serialized failure.
 const (
 	TenantNotFoundErrorName     = "TenantNotFound"
+	InvalidTenantIDErrorName    = "InvalidTenantID"
 	RegionRequiredErrorName     = "RegionRequired"
 	UnknownRegionErrorName      = "UnknownRegion"
 	InvalidStatusErrorName      = "InvalidStatus"
@@ -22,6 +23,9 @@ const (
 var (
 	// ErrTenantNotFound is returned when no tenant exists for the external id.
 	ErrTenantNotFound = errors.New(TenantNotFoundErrorName, "tenant not found")
+	// ErrInvalidTenantID is returned when the tenantId holds a character that
+	// delimits or escapes a URL path segment, or is a dot segment, see [ValidID].
+	ErrInvalidTenantID = errors.New(InvalidTenantIDErrorName, `tenantId must not contain "/", ";", ",", "?" or "%", and must not be "." or ".."`)
 	// ErrRegionRequired is returned when a provision request omits the region.
 	ErrRegionRequired = errors.New(RegionRequiredErrorName, "region is required")
 	// ErrUnknownRegion is returned when no provider serves the requested region.

@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -30,14 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
-
-// noopRevocations stands in for the revocation service: these tests exercise the
-// HTTP layer, not revocation (see the accesskey service tests for that).
-type noopRevocations struct{}
-
-func (noopRevocations) PublishBatch(context.Context, ucan.Issuer, []ucan.Delegation) error {
-	return nil
-}
 
 type accessKeyDeps struct {
 	tenants     *tenantmemory.Store
@@ -86,7 +78,7 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "alice"))
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), deps.delegations, deps.vault, noopRevocations{})
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), deps.delegations, deps.vault, &testutil.FakeSwarf{})
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
@@ -122,6 +114,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 		require.NotEmpty(t, created.AccessKeyID)
 		require.True(t, strings.HasPrefix(created.SecretAccessKey, "u"), "secret is multibase base64url")
+		require.Equal(t, api.AccessKeyTypeService, created.Type)
 		require.Equal(t, []string{"bucket-a"}, created.Buckets)
 		require.Nil(t, created.ExpiresAt)
 
@@ -245,7 +238,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		}, decodeError(t, rec))
 	})
 
-	t.Run("an empty principalId is an unknown principal", func(t *testing.T) {
+	t.Run("an empty principalId is an invalid principal id", func(t *testing.T) {
 		e, deps := setupAccessKeys(t)
 		for name, body := range map[string]string{
 			"without permissions": `{"name":"k","principalId":""}`,
@@ -254,7 +247,7 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				rec := doRequest(t, e, http.MethodPost, "/tenants/tenant-1/access-keys", []byte(body))
 				require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-				require.Equal(t, api.Error{Code: "UnknownPrincipal", Message: "unknown principal"}, decodeError(t, rec))
+				require.Equal(t, api.Error{Code: "InvalidPrincipalID", Message: principalsvc.ErrInvalidPrincipalID.Error()}, decodeError(t, rec))
 			})
 		}
 		keys, err := deps.accessKeys.ListByTenant(ctx, deps.tenantID)
@@ -348,6 +341,7 @@ func TestCreatePrincipalBoundAccessKeyHandler(t *testing.T) {
 		require.NotEmpty(t, created.AccessKeyID)
 		require.True(t, strings.HasPrefix(created.SecretAccessKey, "u"), "secret is multibase base64url")
 		require.Equal(t, "laptop", created.Name)
+		require.Equal(t, api.AccessKeyTypePrincipal, created.Type)
 		require.Equal(t, new("alice"), created.PrincipalID)
 		require.Nil(t, created.ExpiresAt)
 
@@ -415,12 +409,30 @@ func TestListAccessKeysHandler(t *testing.T) {
 		}
 		require.Equal(t, []string{"bucket-a"}, byName["a"].Buckets) // bucket DID resolved back to name
 		require.Equal(t, []string{"s3:GetObject"}, byName["a"].Permissions)
+		require.Equal(t, api.AccessKeyTypeService, byName["a"].Type)
 		require.Nil(t, byName["a"].PrincipalID)
 		require.Empty(t, byName["b"].Buckets)
+		require.Equal(t, api.AccessKeyTypeService, byName["b"].Type)
 		require.Nil(t, byName["b"].PrincipalID)
+		require.Equal(t, api.AccessKeyTypePrincipal, byName["laptop"].Type)
 		require.Equal(t, new("alice"), byName["laptop"].PrincipalID)
 		require.Empty(t, byName["laptop"].Permissions)
 		require.Empty(t, byName["laptop"].Buckets)
+	})
+
+	t.Run("principalId filters to that principal's keys", func(t *testing.T) {
+		rec := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys?principalId=alice", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var list api.AccessKeyList
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+		require.Len(t, list.Items, 1)
+		require.Equal(t, "laptop", list.Items[0].Name)
+		require.Equal(t, new("alice"), list.Items[0].PrincipalID)
+
+		rec = doRequest(t, e, http.MethodGet, "/tenants/tenant-1/access-keys?principalId=nobody", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+		require.Empty(t, list.Items)
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {
@@ -443,6 +455,7 @@ func TestGetAccessKeyHandler(t *testing.T) {
 		var ak api.AccessKey
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ak))
 		require.Equal(t, ck.AccessKeyID, ak.AccessKeyID)
+		require.Equal(t, api.AccessKeyTypeService, ak.Type)
 		require.Equal(t, []string{"bucket-a"}, ak.Buckets)
 	})
 
@@ -472,6 +485,7 @@ func TestGetAccessKeyHandler(t *testing.T) {
 		var ak api.AccessKey
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ak))
 		require.Equal(t, bound.AccessKeyID, ak.AccessKeyID)
+		require.Equal(t, api.AccessKeyTypePrincipal, ak.Type)
 		require.Equal(t, new("alice"), ak.PrincipalID)
 	})
 }
@@ -519,6 +533,9 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		_, err = deps.vault.Read(ctx, "/tenant/"+deps.tenantID.String()+"/access-key/"+akID.String())
 		require.ErrorIs(t, err, vault.ErrNotFound)
+		dels, err := deps.delegations.ListByAudience(ctx, akID)
+		require.NoError(t, err)
+		require.Empty(t, dels.Results, "the delegations go with the key")
 
 		again := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/access-keys/"+ck.AccessKeyID, nil)
 		require.Equal(t, http.StatusNotFound, again.Code)

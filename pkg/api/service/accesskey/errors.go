@@ -14,6 +14,7 @@ const (
 	AccessKeyNotFoundErrorName = "AccessKeyNotFound"
 	PrincipalScopedErrorName   = "PrincipalScopedAccessKey"
 	UnknownPrincipalErrorName  = "UnknownPrincipal"
+	ConcurrentChangeErrorName  = "ConcurrentChange"
 )
 
 // Known errors returned by the access-key [Service]. Handlers map these to HTTP
@@ -44,4 +45,8 @@ var (
 	// ErrUnknownPrincipal is returned when the principal to bind the key to is not
 	// a principal of the tenant.
 	ErrUnknownPrincipal = errors.New(UnknownPrincipalErrorName, "unknown principal")
+	// ErrConcurrentChange is returned when another write to the access key was
+	// in flight and this call gave up rather than wait on it. Nothing was
+	// changed and the call can be repeated.
+	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the access key is being changed concurrently, retry the request")
 )

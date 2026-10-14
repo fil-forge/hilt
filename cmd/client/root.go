@@ -5,6 +5,7 @@ package client
 import (
 	"github.com/fil-forge/hilt/cmd/client/accesskey"
 	"github.com/fil-forge/hilt/cmd/client/admin"
+	"github.com/fil-forge/hilt/cmd/client/principal"
 	"github.com/fil-forge/hilt/cmd/client/tenant"
 	"github.com/spf13/cobra"
 )
@@ -20,4 +21,5 @@ func init() {
 	Cmd.AddCommand(admin.Cmd)
 	Cmd.AddCommand(tenant.Cmd)
 	Cmd.AddCommand(accesskey.Cmd)
+	Cmd.AddCommand(principal.Cmd)
 }

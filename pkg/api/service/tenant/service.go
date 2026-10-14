@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -78,6 +79,13 @@ func New(
 		wrapKeys:    wrapKeys,
 		upload:      upload,
 	}
+}
+
+// ValidID reports whether id can be a tenantId. The id travels as one path
+// segment of the Tenant API, so it must not hold a character that delimits or
+// escapes a segment, nor be a dot segment a client could resolve away.
+func ValidID(id string) bool {
+	return !strings.ContainsAny(id, "/;,?%") && id != "." && id != ".."
 }
 
 // Provision provisions (or, idempotently, returns) the tenant for externalID: it
