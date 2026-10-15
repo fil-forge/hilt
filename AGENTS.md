@@ -215,9 +215,10 @@ useful. Skip it for changes nothing operational depends on.
   would act on at error level, with the context needed to act on it (DIDs and
   CIDs, never key material), in a stable message an alert can match.
 - **Metrics.** When a feature's health is best read as a number, such as a
-  failure count, a queue depth or the time of the last success, note it on
-  [FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143) so it is
-  instrumented when the service exports metrics.
+  failure count, a queue depth or the time of the last success, say so in the
+  PR description, naming the metric and
+  [FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143), so it can
+  be carried to the issue and instrumented when the service exports metrics.
 - **Traces** don't reach Grafana from Central yet either, but keep the spans
   complete for when they do: new work runs inside the request's span, and a
   new outbound HTTP client uses `tracing.NewHTTPClient()` (`pkg/tracing`).
