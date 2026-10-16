@@ -1,6 +1,7 @@
 package fx
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -18,7 +19,20 @@ import (
 // NewUploadClient builds the Sprue upload-service client from configuration. Its
 // proof store — the delegations it presents to Sprue — is loaded from
 // upload.proofs (see [uploadProofs]).
+//
+// The service DID, URL and product DID are required. None has a default, so a
+// deployment that forgets one fails at startup rather than provisioning on
+// another stage's Sprue.
 func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.Logger) (*upload.Client, error) {
+	if cfg.ServiceID == "" {
+		return nil, errors.New("upload.service_id is required: set HILT_UPLOAD_SERVICE_ID or --upload-service-id")
+	}
+	if cfg.ServiceURL == "" {
+		return nil, errors.New("upload.service_url is required: set HILT_UPLOAD_SERVICE_URL or --upload-service-url")
+	}
+	if cfg.ProductID == "" {
+		return nil, errors.New("upload.product_id is required: set HILT_UPLOAD_PRODUCT_ID or --upload-product-id")
+	}
 	serviceID, err := did.Parse(cfg.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("parsing upload.service_id %q: %w", cfg.ServiceID, err)
@@ -27,15 +41,9 @@ func NewUploadClient(id identity.Identity, cfg config.UploadConfig, logger *zap.
 	if err != nil {
 		return nil, fmt.Errorf("parsing upload.service_url %q: %w", cfg.ServiceURL, err)
 	}
-	// The product DID is optional here: it is only consumed when registering
-	// tenants as customers. Leave it undefined when unset so the client remains
-	// usable for the bucket-provisioning flows that do not need it.
-	var product did.DID
-	if cfg.ProductID != "" {
-		product, err = did.Parse(cfg.ProductID)
-		if err != nil {
-			return nil, fmt.Errorf("parsing upload.product_id %q: %w", cfg.ProductID, err)
-		}
+	product, err := did.Parse(cfg.ProductID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing upload.product_id %q: %w", cfg.ProductID, err)
 	}
 	proofs, err := uploadProofs(cfg.Proofs)
 	if err != nil {

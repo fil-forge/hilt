@@ -25,3 +25,17 @@ func TestLoadEnvOnly(t *testing.T) {
 	require.Equal(t, "https://upload.example.com", cfg.Upload.ServiceURL)
 	require.Equal(t, "https://revocation.example.com", cfg.Revocation.ServiceURL)
 }
+
+// TestLoadUploadHasNoDefault verifies the upload service settings stay empty
+// when nothing configures them, so `hilt serve` refuses to start instead of
+// provisioning tenants and buckets on another stage's Sprue.
+func TestLoadUploadHasNoDefault(t *testing.T) {
+	t.Setenv("HILT_UPLOAD_SERVICE_ID", "")
+	t.Setenv("HILT_UPLOAD_SERVICE_URL", "")
+	t.Setenv("HILT_UPLOAD_PRODUCT_ID", "")
+	t.Setenv("HILT_UPLOAD_PROOFS", "")
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	require.Equal(t, config.UploadConfig{}, cfg.Upload)
+}
