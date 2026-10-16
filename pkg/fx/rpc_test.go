@@ -45,7 +45,7 @@ func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *
 	cfg := &config.Config{
 		Storage:    config.StorageConfig{Type: config.StorageTypeMemory},
 		Vault:      config.VaultConfig{Type: config.VaultTypeMemory},
-		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test"},
+		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test", ProductID: testutil.RandomDID(t).String()},
 		Revocation: config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
 	}
 	app := fx.New(

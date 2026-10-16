@@ -104,12 +104,14 @@ Pre-shared bearer token required on Tenant API requests.
 
 | Key | Flag | Env var | Default |
 | --- | --- | --- | --- |
-| `upload.service_id` | `--upload-service-id` | `HILT_UPLOAD_SERVICE_ID` | `did:web:upload.fil-forge.com` |
-| `upload.service_url` | `--upload-service-url` | `HILT_UPLOAD_SERVICE_URL` | `https://upload.fil-forge.com` |
-| `upload.product_id` | `--upload-product-id` | `HILT_UPLOAD_PRODUCT_ID` | `did:web:hilt.fil-forge.com` |
+| `upload.service_id` | `--upload-service-id` | `HILT_UPLOAD_SERVICE_ID` | required |
+| `upload.service_url` | `--upload-service-url` | `HILT_UPLOAD_SERVICE_URL` | required |
+| `upload.product_id` | `--upload-product-id` | `HILT_UPLOAD_PRODUCT_ID` | required |
 
 The Sprue service DID + HTTP endpoint Hilt calls to provision bucket space, and
-the product/plan DID tenants are registered under.
+the product/plan DID tenants are registered under. All three are required, and
+`hilt serve` exits at startup when any of them is unset. Each stage points at
+its own Sprue.
 
 ### Revocation service (Swarf)
 
