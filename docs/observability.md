@@ -1,0 +1,32 @@
+# Observability
+
+How Hilt's logs, metrics and traces reach Grafana, and where its alerts and
+dashboards go.
+
+## Logs
+
+Logs are what reaches Grafana today. This service runs in Forge Central, whose
+CloudWatch logs and AWS metrics (load balancer, ECS, RDS) ship to Grafana; its
+own metrics don't yet ([FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143): Instrument Hilt to provide useful telemetry). Log a
+failure an operator would act on at error level, with the context needed to act
+on it (DIDs and CIDs, never key material), in a stable message an alert can
+match.
+
+## Metrics
+
+When a feature's health is best read as a number, such as a failure count, a
+queue depth or the time of the last success, say so in the PR description,
+naming the metric and [FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143), so it can be carried to the issue and instrumented
+when the service exports metrics.
+
+## Traces
+
+Traces don't reach Grafana from Central yet either, but keep the spans complete
+for when they do: new work runs inside the request's span, and a new outbound
+HTTP client uses `tracing.NewHTTPClient()` (`pkg/tracing`).
+
+## Alerts and dashboards
+
+Alerts and dashboard panels live in fil-forge/infra-central, under
+`terraform/envs/grafana/`; its `docs/observability.md` ("Adding an alert or panel") says how to add them. Open a
+companion PR there, or say in this PR that one is needed.
