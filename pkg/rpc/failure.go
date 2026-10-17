@@ -73,6 +73,7 @@ func bucketFailure(res failer, err error) error {
 		errors.Is(err, bucketsvc.ErrUnknownBucket),
 		errors.Is(err, bucketsvc.ErrUnknownAccessKey),
 		errors.Is(err, bucketsvc.ErrInvalidArgument),
+		errors.Is(err, bucketsvc.ErrExportInProgress),
 		// A PutBucketPolicy body that does not decode or may not be stored,
 		// under InvalidBucketPolicy.
 		errors.Is(err, s3bkt.ErrInvalidPolicy),
