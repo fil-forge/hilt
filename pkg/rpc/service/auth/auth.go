@@ -313,9 +313,11 @@ func (a *Authorizer) authorizeOperation(
 		// Every principal lists the tenant's buckets; no policy is consulted.
 		// The console filters the listing against the principal's access.
 		return []string{"s3:ListAllMyBuckets"}, nil, nil, nil
-	case OpCreateBucket, OpDeleteBucket, OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy:
+	case OpCreateBucket, OpDeleteBucket, OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
+		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption:
 		// No policy grants them: a key holding them would act outside, or
-		// rewrite, the policy that granted it.
+		// rewrite, the policy that granted it, or change how the bucket
+		// stores every principal's objects.
 		log.Debug("rejecting bucket operation no policy grants", zap.Stringer("operation", op))
 		return nil, nil, nil, ErrOperationNotPermitted
 	}

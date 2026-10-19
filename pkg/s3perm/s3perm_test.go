@@ -18,6 +18,7 @@ func TestValid(t *testing.T) {
 		"s3:CreateBucket", "s3:ListAllMyBuckets", "s3:DeleteBucket",
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
 		"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+		"s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
 	} {
 		require.True(t, s3perm.Valid(p), p)
 	}
@@ -236,6 +237,9 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 		{"PUT", "https://s3.example.com/bkt/k?retention"},
 		{"PUT", "https://s3.example.com/bkt/k?legal-hold"},
 		{"DELETE", "https://s3.example.com/bkt/k?versionId=v"},
+		{"GET", "https://s3.example.com/bkt?encryption"},
+		{"PUT", "https://s3.example.com/bkt?encryption"},
+		{"DELETE", "https://s3.example.com/bkt?encryption"},
 	}
 	for _, r := range reqs {
 		op, err := auth.OperationFor(s3.Request{Method: r.method, URL: r.url})

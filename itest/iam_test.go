@@ -42,11 +42,12 @@ var (
 )
 
 // allPermissions is every S3 permission Hilt recognises: the policy actions
-// plus the three bucket-level permissions no policy grants. The fixture's
+// plus the bucket-management permissions no policy grants. The fixture's
 // service key holds them all so it can create buckets and seed objects for
 // any scenario.
 var allPermissions = append(s3bkt.PolicyActions(), "s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
-	"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy")
+	"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+	"s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration")
 
 // member is one scenario's fixture: a tenant with a service key that creates
 // its buckets and seeds objects, and one principal with an access key bound to

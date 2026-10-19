@@ -45,6 +45,13 @@ const (
 	OpPutBucketPolicy    Operation = "PutBucketPolicy"    // PUT, bucket, no key, ?policy
 	OpDeleteBucketPolicy Operation = "DeleteBucketPolicy" // DELETE, bucket, no key, ?policy
 
+	// Bucket encryption configuration operations, distinguished from the plain
+	// bucket operations by the `encryption` query parameter. Removing the
+	// configuration needs the same permission as writing it, as it does in S3.
+	OpGetBucketEncryption    Operation = "GetBucketEncryption"    // GET, bucket, no key, ?encryption
+	OpPutBucketEncryption    Operation = "PutBucketEncryption"    // PUT, bucket, no key, ?encryption
+	OpDeleteBucketEncryption Operation = "DeleteBucketEncryption" // DELETE, bucket, no key, ?encryption
+
 	// Multipart upload operations, distinguished from their plain-object
 	// counterparts by the query parameters on the signed URL.
 	OpCreateMultipartUpload      Operation = "CreateMultipartUpload"      // POST, bucket + key, ?uploads
@@ -78,9 +85,12 @@ var operationPermission = map[Operation]string{
 	OpDeleteObjectVersion: "s3:DeleteObjectVersion",
 	OpListBucketVersions:  "s3:ListBucketVersions",
 
-	OpGetBucketPolicy:    "s3:GetBucketPolicy",
-	OpPutBucketPolicy:    "s3:PutBucketPolicy",
-	OpDeleteBucketPolicy: "s3:DeleteBucketPolicy",
+	OpGetBucketPolicy:        "s3:GetBucketPolicy",
+	OpPutBucketPolicy:        "s3:PutBucketPolicy",
+	OpDeleteBucketPolicy:     "s3:DeleteBucketPolicy",
+	OpGetBucketEncryption:    "s3:GetEncryptionConfiguration",
+	OpPutBucketEncryption:    "s3:PutEncryptionConfiguration",
+	OpDeleteBucketEncryption: "s3:PutEncryptionConfiguration",
 
 	OpCreateMultipartUpload:      "s3:PutObject",
 	OpUploadPart:                 "s3:PutObject",
@@ -121,6 +131,7 @@ func (o Operation) addressesExistingBucket() bool {
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
+		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads:
 		return true
@@ -212,6 +223,12 @@ type classification struct {
 // (pkg/s3perm's TestClassifiedPermissionsCoverTheirShapes pins that the
 // broader permission grants everything the narrower one does).
 //
+// The bucket encryption configuration is distinguished from the plain bucket
+// operations by `encryption`, again only on the methods S3 defines for it:
+// a GET reads it, a PUT writes it and a DELETE removes it, each under its own
+// permission rather than the bucket's create or delete permission. A HEAD with
+// the parameter is the plain bucket operation, as it is for `?uploads`.
+//
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
 // and key. Headers are signed only when listed in the signature's SignedHeaders,
@@ -242,7 +259,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 	retention := query.Has("retention")  // valueless flag: `?retention`
 	legalHold := query.Has("legal-hold") // valueless flag: `?legal-hold`
 	versionID := query.Get("versionId")
-	policy := query.Has("policy") // valueless flag: `?policy`
+	policy := query.Has("policy")         // valueless flag: `?policy`
+	encryption := query.Has("encryption") // valueless flag: `?encryption`
 
 	// A plain-object or part PUT with a parseable copy source is a copy.
 	copy := func(plain, copied Operation) Operation {
@@ -274,6 +292,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(OpListBuckets)
 		case c.key == "" && policy && method == http.MethodGet:
 			return classify(OpGetBucketPolicy)
+		case c.key == "" && encryption && method == http.MethodGet:
+			return classify(OpGetBucketEncryption)
 		case c.key == "" && uploads:
 			return classify(OpListBucketMultipartUploads)
 		case c.key == "" && versions:
@@ -298,6 +318,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 		switch {
 		case c.key == "" && policy && method == http.MethodPut:
 			return classify(OpPutBucketPolicy)
+		case c.key == "" && encryption && method == http.MethodPut:
+			return classify(OpPutBucketEncryption)
 		case c.key == "":
 			return classify(OpCreateBucket)
 		case method == http.MethodPost && uploads:
@@ -320,6 +342,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 		switch {
 		case c.key == "" && policy:
 			return classify(OpDeleteBucketPolicy)
+		case c.key == "" && encryption:
+			return classify(OpDeleteBucketEncryption)
 		case c.key == "":
 			return classify(OpDeleteBucket)
 		case uploadID != "":

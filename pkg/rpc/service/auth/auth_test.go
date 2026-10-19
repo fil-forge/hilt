@@ -366,7 +366,7 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
 	})
 
-	t.Run("a principal-bound key may not create or delete a bucket", func(t *testing.T) {
+	t.Run("a principal-bound key may not create or delete a bucket or set its encryption", func(t *testing.T) {
 		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 		grant(t, policies, bucketID, tenantID, s3bkt.Statement{
 			Effect:    s3bkt.Allow,
@@ -380,6 +380,9 @@ func TestAuthorize(t *testing.T) {
 		for _, req := range []sigv4.Request{
 			{Method: "PUT", URL: "https://s3.fil.one/bucket"},
 			{Method: "DELETE", URL: "https://s3.fil.one/bucket"},
+			{Method: "GET", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "PUT", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "DELETE", URL: "https://s3.fil.one/bucket?encryption"},
 		} {
 			signed, err := sigv4.Presign(req, accessKey.DID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
 			require.NoError(t, err)

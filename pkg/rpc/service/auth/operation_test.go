@@ -81,6 +81,14 @@ func TestClassifyRequest(t *testing.T) {
 		// the gateway routes on. Each has its own permission, so an access key
 		// granted plain reads, writes or deletes does not get these too.
 		{name: "list object versions", method: "GET", url: "https://s3.example.com/bkt?versions", want: OpListBucketVersions, wantBucket: "bkt"},
+		// The bucket encryption configuration, distinguished by `encryption` on
+		// the methods S3 defines for it.
+		{name: "get bucket encryption", method: "GET", url: "https://s3.example.com/bkt?encryption", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "put bucket encryption", method: "PUT", url: "https://s3.example.com/bkt?encryption=", want: OpPutBucketEncryption, wantBucket: "bkt"},
+		{name: "delete bucket encryption", method: "DELETE", url: "https://s3.example.com/bkt?encryption", want: OpDeleteBucketEncryption, wantBucket: "bkt"},
+		{name: "an encryption query on a HEAD is the bucket operation", method: "HEAD", url: "https://s3.example.com/bkt?encryption", want: OpListBucket, wantBucket: "bkt"},
+		{name: "an encryption query on a POST is a bucket create", method: "POST", url: "https://s3.example.com/bkt?encryption", want: OpCreateBucket, wantBucket: "bkt"},
+		{name: "an encryption query on an object is the object operation", method: "GET", url: "https://s3.example.com/bkt/k?encryption", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object version", method: "GET", url: "https://s3.example.com/bkt/k?versionId=v", want: OpGetObjectVersion, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object retention", method: "GET", url: "https://s3.example.com/bkt/k?retention", want: OpGetObjectRetention, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object legal hold", method: "GET", url: "https://s3.example.com/bkt/k?legal-hold", want: OpGetObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
@@ -188,6 +196,7 @@ func TestOperationPermission(t *testing.T) {
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
+		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}
