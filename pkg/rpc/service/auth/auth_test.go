@@ -200,6 +200,19 @@ func TestAuthorize(t *testing.T) {
 		require.Equal(t, []string{"s3:GetObject"}, authz.Permissions)
 	})
 
+	t.Run("refuses a request naming two subresources", func(t *testing.T) {
+		// Refused by name, before any permission is consulted, as S3 refuses it.
+		az, _, _ := setup(t, accessKey, nil)
+		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+		require.NoError(t, err)
+		signed, err := sigv4.Presign(sigv4.Request{Method: "GET", URL: "https://s3.fil.one/bucket?uploads&encryption"},
+			accessKey.DID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		_, err = az.Authorize(ctx, providerID, s3.Request{Method: signed.Method, URL: signed.URL})
+		require.ErrorIs(t, err, auth.ErrConflictingQuery)
+		require.ErrorContains(t, err, "encryption, uploads")
+	})
+
 	t.Run("rejects a bucket the access key is not scoped to", func(t *testing.T) {
 		// The key is scoped to some other bucket, so it may not use "bucket".
 		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyBuckets: []did.DID{testutil.RandomDID(t)}})
@@ -366,7 +379,7 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
 	})
 
-	t.Run("a principal-bound key may not create or delete a bucket", func(t *testing.T) {
+	t.Run("a principal-bound key may not create or delete a bucket or set its encryption", func(t *testing.T) {
 		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 		grant(t, policies, bucketID, tenantID, s3bkt.Statement{
 			Effect:    s3bkt.Allow,
@@ -380,6 +393,9 @@ func TestAuthorize(t *testing.T) {
 		for _, req := range []sigv4.Request{
 			{Method: "PUT", URL: "https://s3.fil.one/bucket"},
 			{Method: "DELETE", URL: "https://s3.fil.one/bucket"},
+			{Method: "GET", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "PUT", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "DELETE", URL: "https://s3.fil.one/bucket?encryption"},
 		} {
 			signed, err := sigv4.Presign(req, accessKey.DID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
 			require.NoError(t, err)

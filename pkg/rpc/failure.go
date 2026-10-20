@@ -32,6 +32,7 @@ func authFailure(res failer, err error) error {
 		errors.Is(err, auth.ErrIssuerForbidden),
 		errors.Is(err, auth.ErrRegionNotServed),
 		errors.Is(err, auth.ErrUnsupportedOperation),
+		errors.Is(err, auth.ErrConflictingQuery),
 		errors.Is(err, auth.ErrOperationNotPermitted),
 		errors.Is(err, auth.ErrUnknownBucket),
 		errors.Is(err, auth.ErrForeignBucket),

@@ -12,12 +12,16 @@ import (
 // TestEveryPermissionIsClassified pins the policy allowlist (libforge's
 // s3bkt.PolicyActions) against the
 // permission table: every recognized permission is either a policy action or
-// one of the six named here, so a new permission is not a policy action until
-// someone lists it on one side.
+// one of the bucket-management permissions named here, so a new permission is
+// not a policy action until someone lists it on one side. The encryption
+// configuration stays out of policies with the rest of bucket management: a
+// principal that could set a bucket to store its bytes unencrypted would be
+// changing the bucket, not acting within it.
 func TestEveryPermissionIsClassified(t *testing.T) {
 	notPolicy := []string{
 		"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+		"s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
 	}
 	policyActions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(policyActions), "policyActions must be sorted")

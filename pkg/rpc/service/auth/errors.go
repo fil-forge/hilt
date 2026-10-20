@@ -16,6 +16,7 @@ const (
 	IssuerForbiddenErrorName        = "IssuerForbidden"
 	RegionNotServedErrorName        = "RegionNotServed"
 	UnsupportedOperationErrorName   = "UnsupportedOperation"
+	ConflictingQueryErrorName       = "ConflictingQuery"
 	OperationNotPermittedErrorName  = "OperationNotPermitted"
 	UnknownBucketErrorName          = "UnknownBucket"
 	ForeignBucketErrorName          = "ForeignBucket"
@@ -61,6 +62,11 @@ var (
 	// ErrUnsupportedOperation is returned when the request's method and path map to
 	// no supported S3 operation.
 	ErrUnsupportedOperation = errors.New(UnsupportedOperationErrorName, "unsupported S3 operation")
+	// ErrConflictingQuery is returned when the request's query names more than
+	// one S3 subresource, so no single operation is addressed. S3 refuses such a
+	// request before authenticating it; the wrapped message names the
+	// parameters, sorted, as S3 does.
+	ErrConflictingQuery = errors.New(ConflictingQueryErrorName, "conflicting query string parameters")
 	// ErrOperationNotPermitted is returned when the credential does not hold the
 	// permission required for the requested operation: an action outside a
 	// service key's own permissions, an action outside a principal's non-empty

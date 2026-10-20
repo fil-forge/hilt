@@ -81,6 +81,33 @@ func TestClassifyRequest(t *testing.T) {
 		// the gateway routes on. Each has its own permission, so an access key
 		// granted plain reads, writes or deletes does not get these too.
 		{name: "list object versions", method: "GET", url: "https://s3.example.com/bkt?versions", want: OpListBucketVersions, wantBucket: "bkt"},
+		// The bucket encryption configuration, distinguished by `encryption` on
+		// the methods S3 defines for it.
+		{name: "get bucket encryption", method: "GET", url: "https://s3.example.com/bkt?encryption", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "put bucket encryption", method: "PUT", url: "https://s3.example.com/bkt?encryption=", want: OpPutBucketEncryption, wantBucket: "bkt"},
+		{name: "delete bucket encryption", method: "DELETE", url: "https://s3.example.com/bkt?encryption", want: OpDeleteBucketEncryption, wantBucket: "bkt"},
+		{name: "an encryption query on a HEAD is the bucket operation", method: "HEAD", url: "https://s3.example.com/bkt?encryption", want: OpListBucket, wantBucket: "bkt"},
+		{name: "an encryption query on a POST is a bucket create", method: "POST", url: "https://s3.example.com/bkt?encryption", want: OpCreateBucket, wantBucket: "bkt"},
+		{name: "an encryption query on an object is the object operation", method: "GET", url: "https://s3.example.com/bkt/k?encryption", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		// Other query parameters, known to some operation or not, neither select
+		// an operation nor conflict with one, and a subresource may carry a value.
+		{name: "an unknown parameter is ignored", method: "GET", url: "https://s3.example.com/bkt?encryption&foo", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "an unknown parameter first is ignored", method: "GET", url: "https://s3.example.com/bkt?foo=bar&encryption", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "another operation's parameter is ignored", method: "GET", url: "https://s3.example.com/bkt?encryption&max-keys=1", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "a subresource with a value still selects", method: "GET", url: "https://s3.example.com/bkt?encryption=true", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "subresource names are case-sensitive", method: "GET", url: "https://s3.example.com/bkt?Encryption", want: OpListBucket, wantBucket: "bkt"},
+		// DeleteObjects names its keys in the body and needs the delete
+		// permission on the bucket, as each single delete does.
+		{name: "delete objects", method: "POST", url: "https://s3.example.com/bkt?delete", want: OpDeleteObjects, wantBucket: "bkt"},
+		// Supported subresources with no operation of their own classify as the
+		// plain operation they are served under.
+		{name: "get bucket versioning is the bucket read", method: "GET", url: "https://s3.example.com/bkt?versioning", want: OpListBucket, wantBucket: "bkt"},
+		{name: "put bucket versioning is the bucket write", method: "PUT", url: "https://s3.example.com/bkt?versioning", want: OpCreateBucket, wantBucket: "bkt"},
+		{name: "get bucket location is the bucket read", method: "GET", url: "https://s3.example.com/bkt?location", want: OpListBucket, wantBucket: "bkt"},
+		{name: "get object attributes is the object read", method: "GET", url: "https://s3.example.com/bkt/k?attributes", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "put object tagging is the object write", method: "PUT", url: "https://s3.example.com/bkt/k?tagging", want: OpPutObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "delete object tagging is the object delete", method: "DELETE", url: "https://s3.example.com/bkt/k?tagging", want: OpDeleteObject, wantBucket: "bkt", wantKey: "k"},
+		{name: "a versioned object tagging read is the version read", method: "GET", url: "https://s3.example.com/bkt/k?tagging&versionId=v", want: OpGetObjectVersion, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object version", method: "GET", url: "https://s3.example.com/bkt/k?versionId=v", want: OpGetObjectVersion, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object retention", method: "GET", url: "https://s3.example.com/bkt/k?retention", want: OpGetObjectRetention, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object legal hold", method: "GET", url: "https://s3.example.com/bkt/k?legal-hold", want: OpGetObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
@@ -131,6 +158,44 @@ func TestClassifyRequest(t *testing.T) {
 		})
 	}
 
+	t.Run("refuses a query naming two subresources, whatever their order", func(t *testing.T) {
+		for _, tc := range []struct{ method, url, want string }{
+			{"GET", "https://s3.example.com/bkt?uploads&encryption", "encryption, uploads"},
+			{"GET", "https://s3.example.com/bkt?encryption&uploads", "encryption, uploads"},
+			{"GET", "https://s3.example.com/bkt?versions&encryption", "encryption, versions"},
+			{"GET", "https://s3.example.com/bkt?policy&encryption", "encryption, policy"},
+			{"HEAD", "https://s3.example.com/bkt?uploads&encryption", "encryption, uploads"},
+			{"PUT", "https://s3.example.com/bkt?policy&encryption", "encryption, policy"},
+			{"DELETE", "https://s3.example.com/bkt?encryption&policy", "encryption, policy"},
+			{"GET", "https://s3.example.com/bkt/k?retention&legal-hold", "legal-hold, retention"},
+			{"GET", "https://s3.example.com/bkt/k?uploadId=abc&uploads", "uploadId, uploads"},
+		} {
+			_, err := classifyRequest(s3.Request{Method: tc.method, URL: tc.url})
+			require.ErrorIs(t, err, ErrConflictingQuery, "%s %s", tc.method, tc.url)
+			require.ErrorContains(t, err, tc.want, "%s %s", tc.method, tc.url)
+		}
+	})
+
+	t.Run("refuses a subresource the gateway does not serve", func(t *testing.T) {
+		for _, tc := range []struct{ method, url, name string }{
+			{"GET", "https://s3.example.com/bkt?lifecycle", "lifecycle"},
+			{"PUT", "https://s3.example.com/bkt?website", "website"},
+			{"DELETE", "https://s3.example.com/bkt?replication", "replication"},
+			{"GET", "https://s3.example.com/bkt?ownershipControls&foo=bar", "ownershipControls"},
+			{"POST", "https://s3.example.com/bkt/k?restore", "restore"},
+			{"POST", "https://s3.example.com/bkt/k?select&select-type=2", "select"},
+			{"GET", "https://s3.example.com/bkt/k?torrent", "torrent"},
+		} {
+			_, err := classifyRequest(s3.Request{Method: tc.method, URL: tc.url})
+			require.ErrorIs(t, err, ErrUnsupportedOperation, "%s %s", tc.method, tc.url)
+			require.ErrorContains(t, err, tc.name, "%s %s", tc.method, tc.url)
+		}
+		// Two subresources conflict whether supported or not.
+		_, err := classifyRequest(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?lifecycle&versioning"})
+		require.ErrorIs(t, err, ErrConflictingQuery)
+		require.ErrorContains(t, err, "lifecycle, versioning")
+	})
+
 	t.Run("rejects unsupported method and path combinations", func(t *testing.T) {
 		for _, req := range []s3.Request{
 			{Method: "PUT", URL: "https://s3.example.com/"},
@@ -176,6 +241,11 @@ func TestRequirementsFor(t *testing.T) {
 
 	_, _, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
 	require.Error(t, err)
+
+	// The gateway sees the refusal of two subresources by its name, so it can
+	// answer it without consulting hilt.
+	_, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
+	require.ErrorIs(t, err, ErrConflictingQuery)
 }
 
 // TestOperationPermission asserts every operation requires a permission, so a new
@@ -186,8 +256,9 @@ func TestOperationPermission(t *testing.T) {
 		OpListBuckets, OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpCreateBucket,
 		OpDeleteObject, OpDeleteBucket,
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
-		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
+		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpDeleteObjects, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
+		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
 	}

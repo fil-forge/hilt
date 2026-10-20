@@ -84,9 +84,9 @@ var (
 // permissionCommands maps each supported S3 permission to the Forge commands
 // that must be delegated for it. Permissions with no Forge equivalent map to
 // nil — they are valid and stored on the access key, but issue no delegation
-// and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket-level
-// actions only s3:DeleteBucket needs commands, since it releases the space's
-// blobs.
+// and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket
+// operations only s3:DeleteBucket needs commands, since it releases the
+// space's blobs.
 //
 // Several permissions name a narrower shape of another: s3:PutObjectRetention
 // and s3:PutObjectLegalHold against s3:PutObject, s3:DeleteObjectVersion
@@ -114,6 +114,11 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:GetBucketPolicy":     nil,
 	"s3:PutBucketPolicy":     nil,
 	"s3:DeleteBucketPolicy":  nil,
+
+	// Bucket encryption configuration. Removing the configuration needs the
+	// write permission, as it does in S3.
+	"s3:GetEncryptionConfiguration": nil,
+	"s3:PutEncryptionConfiguration": nil,
 
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.

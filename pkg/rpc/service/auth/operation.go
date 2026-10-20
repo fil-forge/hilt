@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -37,6 +38,7 @@ const (
 	OpPutObjectRetention  Operation = "PutObjectRetention"  // PUT, bucket + key, ?retention
 	OpPutObjectLegalHold  Operation = "PutObjectLegalHold"  // PUT, bucket + key, ?legal-hold
 	OpDeleteObjectVersion Operation = "DeleteObjectVersion" // DELETE, bucket + key, ?versionId
+	OpDeleteObjects       Operation = "DeleteObjects"       // POST, bucket, no key, ?delete
 	OpListBucketVersions  Operation = "ListBucketVersions"  // GET, bucket, no key, ?versions
 
 	// Bucket policy operations, distinguished from the plain bucket operations
@@ -44,6 +46,13 @@ const (
 	OpGetBucketPolicy    Operation = "GetBucketPolicy"    // GET, bucket, no key, ?policy
 	OpPutBucketPolicy    Operation = "PutBucketPolicy"    // PUT, bucket, no key, ?policy
 	OpDeleteBucketPolicy Operation = "DeleteBucketPolicy" // DELETE, bucket, no key, ?policy
+
+	// Bucket encryption configuration operations, distinguished from the plain
+	// bucket operations by the `encryption` query parameter. Removing the
+	// configuration needs the same permission as writing it, as it does in S3.
+	OpGetBucketEncryption    Operation = "GetBucketEncryption"    // GET, bucket, no key, ?encryption
+	OpPutBucketEncryption    Operation = "PutBucketEncryption"    // PUT, bucket, no key, ?encryption
+	OpDeleteBucketEncryption Operation = "DeleteBucketEncryption" // DELETE, bucket, no key, ?encryption
 
 	// Multipart upload operations, distinguished from their plain-object
 	// counterparts by the query parameters on the signed URL.
@@ -76,11 +85,15 @@ var operationPermission = map[Operation]string{
 	OpPutObjectRetention:  "s3:PutObjectRetention",
 	OpPutObjectLegalHold:  "s3:PutObjectLegalHold",
 	OpDeleteObjectVersion: "s3:DeleteObjectVersion",
+	OpDeleteObjects:       "s3:DeleteObject",
 	OpListBucketVersions:  "s3:ListBucketVersions",
 
-	OpGetBucketPolicy:    "s3:GetBucketPolicy",
-	OpPutBucketPolicy:    "s3:PutBucketPolicy",
-	OpDeleteBucketPolicy: "s3:DeleteBucketPolicy",
+	OpGetBucketPolicy:        "s3:GetBucketPolicy",
+	OpPutBucketPolicy:        "s3:PutBucketPolicy",
+	OpDeleteBucketPolicy:     "s3:DeleteBucketPolicy",
+	OpGetBucketEncryption:    "s3:GetEncryptionConfiguration",
+	OpPutBucketEncryption:    "s3:PutEncryptionConfiguration",
+	OpDeleteBucketEncryption: "s3:PutEncryptionConfiguration",
 
 	OpCreateMultipartUpload:      "s3:PutObject",
 	OpUploadPart:                 "s3:PutObject",
@@ -119,8 +132,9 @@ func (o Operation) addressesExistingBucket() bool {
 	switch o {
 	case OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpDeleteObject, OpDeleteBucket,
 		OpGetObjectVersion, OpGetObjectRetention, OpGetObjectLegalHold,
-		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpListBucketVersions,
+		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpDeleteObjects, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
+		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads:
 		return true
@@ -181,6 +195,56 @@ type classification struct {
 	srcBucket, srcKey string
 }
 
+// subresources is every query parameter S3 treats as a subresource: one that
+// selects the operation a request performs, rather than parameterising it.
+// The value says whether the gateway serves the operation over Ingot. A
+// request naming two is refused as [ErrConflictingQuery], as S3 refuses it,
+// and one naming an unsupported subresource is refused as
+// [ErrUnsupportedOperation] before any permission is consulted, so the
+// gateway's own refusal is never preceded by an authorization. Supported
+// subresources that select no operation of their own here (versioning,
+// tagging, object-lock, location, acl, cors, policyStatus, attributes)
+// classify as the plain bucket or object operation they are served under;
+// giving each its own permission is a change to the permission vocabulary.
+var subresources = map[string]bool{
+	"accelerate":            false,
+	"acl":                   true, // GetBucketAcl only
+	"analytics":             false,
+	"attributes":            true,
+	"cors":                  true, // GetBucketCors only
+	"delete":                true,
+	"encryption":            true,
+	"intelligent-tiering":   false,
+	"inventory":             false,
+	"legal-hold":            true,
+	"lifecycle":             false,
+	"location":              true,
+	"logging":               false,
+	"metadataConfiguration": false,
+	"metadataTable":         false,
+	"metrics":               false,
+	"notification":          false,
+	"object-lock":           true,
+	"ownershipControls":     false,
+	"policy":                true,
+	"policyStatus":          true,
+	"publicAccessBlock":     false,
+	"renameObject":          false,
+	"replication":           false,
+	"requestPayment":        false,
+	"restore":               false,
+	"retention":             true,
+	"select":                false,
+	"session":               false,
+	"tagging":               true,
+	"torrent":               false,
+	"uploadId":              true,
+	"uploads":               true,
+	"versioning":            true,
+	"versions":              true,
+	"website":               false,
+}
+
 // classifyRequest determines the S3 operation and the addressed bucket/object key
 // from a request's HTTP method, path-style URL (https://<host>/<bucket>/<key...>) and
 // query parameters. Both the path and the query string are part of the SigV4-signed
@@ -212,6 +276,27 @@ type classification struct {
 // (pkg/s3perm's TestClassifiedPermissionsCoverTheirShapes pins that the
 // broader permission grants everything the narrower one does).
 //
+// The bucket encryption configuration is distinguished from the plain bucket
+// operations by `encryption`, again only on the methods S3 defines for it:
+// a GET reads it, a PUT writes it and a DELETE removes it, each under its own
+// permission rather than the bucket's create or delete permission. A HEAD with
+// the parameter is the plain bucket operation, as it is for `?uploads`.
+//
+// A request naming more than one subresource (see [subresources]) addresses
+// no single operation and is refused with [ErrConflictingQuery], as S3
+// refuses it (400 InvalidArgument, "Conflicting query string parameters"),
+// whatever order the parameters come in; one naming a subresource the
+// gateway does not serve is refused with [ErrUnsupportedOperation]. Any
+// other query parameter, known to some operation or not, with a value or
+// without, neither selects an operation nor conflicts with one:
+// `?encryption&max-keys=1` and `?encryption&foo` are both
+// GetBucketEncryption, as they are on S3. A subresource may carry a value
+// (`?encryption=true` is still GetBucketEncryption) and its name is
+// case-sensitive (`?Encryption` is the plain bucket operation).
+//
+// DeleteObjects (`POST /bucket?delete`) deletes the keys its body names
+// and needs s3:DeleteObject on the bucket, as each single delete does.
+//
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
 // and key. Headers are signed only when listed in the signature's SignedHeaders,
@@ -242,7 +327,24 @@ func classifyRequest(req s3.Request) (classification, error) {
 	retention := query.Has("retention")  // valueless flag: `?retention`
 	legalHold := query.Has("legal-hold") // valueless flag: `?legal-hold`
 	versionID := query.Get("versionId")
-	policy := query.Has("policy") // valueless flag: `?policy`
+	policy := query.Has("policy")         // valueless flag: `?policy`
+	encryption := query.Has("encryption") // valueless flag: `?encryption`
+
+	// Each subresource selects an operation on its own; two at once address
+	// none, and one the gateway does not serve addresses nothing to authorize.
+	var named []string
+	for name := range subresources {
+		if query.Has(name) {
+			named = append(named, name)
+		}
+	}
+	if len(named) > 1 {
+		slices.Sort(named)
+		return classification{}, fmt.Errorf("%w: %s", ErrConflictingQuery, strings.Join(named, ", "))
+	}
+	if len(named) == 1 && !subresources[named[0]] {
+		return classification{}, fmt.Errorf("%w: subresource %q", ErrUnsupportedOperation, named[0])
+	}
 
 	// A plain-object or part PUT with a parseable copy source is a copy.
 	copy := func(plain, copied Operation) Operation {
@@ -278,6 +380,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(OpListBucketMultipartUploads)
 		case c.key == "" && versions:
 			return classify(OpListBucketVersions)
+		case c.key == "" && encryption && method == http.MethodGet:
+			return classify(OpGetBucketEncryption)
 		case c.key == "":
 			return classify(OpListBucket)
 		case uploadID != "":
@@ -298,6 +402,10 @@ func classifyRequest(req s3.Request) (classification, error) {
 		switch {
 		case c.key == "" && policy && method == http.MethodPut:
 			return classify(OpPutBucketPolicy)
+		case c.key == "" && encryption && method == http.MethodPut:
+			return classify(OpPutBucketEncryption)
+		case c.key == "" && method == http.MethodPost && query.Has("delete"):
+			return classify(OpDeleteObjects)
 		case c.key == "":
 			return classify(OpCreateBucket)
 		case method == http.MethodPost && uploads:
@@ -320,6 +428,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 		switch {
 		case c.key == "" && policy:
 			return classify(OpDeleteBucketPolicy)
+		case c.key == "" && encryption:
+			return classify(OpDeleteBucketEncryption)
 		case c.key == "":
 			return classify(OpDeleteBucket)
 		case uploadID != "":
