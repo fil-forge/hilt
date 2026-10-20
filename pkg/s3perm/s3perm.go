@@ -59,6 +59,9 @@ var (
 	// nothing else: no bytes stored, no version minted or retired, no blob
 	// released. The catalog write is the whole of it.
 	cmdsLockState = cmdsCatalogWrite
+	// Writing or removing an object's tags rewrites that version's tag set
+	// and nothing else, so like the lock state it is a catalog write alone.
+	cmdsTagState = cmdsCatalogWrite
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
 	// /blob/remove. Without the grant Ingot can release them only with authority
@@ -84,18 +87,18 @@ var (
 // permissionCommands maps each supported S3 permission to the Forge commands
 // that must be delegated for it. Permissions with no Forge equivalent map to
 // nil — they are valid and stored on the access key, but issue no delegation
-// and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket-level
-// actions only s3:DeleteBucket needs commands, since it releases the space's
-// blobs.
+// and are enforced directly by Ingot/Hilt (see the RFC). Of the bucket
+// operations only s3:DeleteBucket needs commands, since it releases the
+// space's blobs; the bucket's configuration lives in the gateway's registry.
 //
 // Several permissions name a narrower shape of another: s3:PutObjectRetention
 // and s3:PutObjectLegalHold against s3:PutObject, s3:DeleteObjectVersion
 // against s3:DeleteObject, the version-scoped reads against s3:GetObject and
 // s3:ListBucket. auth.classifyRequest gives each shape its own operation, but
-// a request that misses the narrower branch falls back to the broader one — a
-// lock parameter on a method the gateway does not route it on, a versionId
-// naming no version. So each broad set has to grant what its narrower
-// counterparts do, which TestClassifiedPermissionsCoverTheirShapes pins.
+// a request that misses the narrower branch, such as one whose versionId names
+// no version, is the broader one. So each broad set has to grant what its
+// narrower counterparts do, which TestClassifiedPermissionsCoverTheirShapes
+// pins.
 var permissionCommands = map[string][]ucan.Command{
 	"s3:GetObject":           cmdsRetrieve,
 	"s3:GetObjectVersion":    cmdsRetrieve,
@@ -114,6 +117,33 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:GetBucketPolicy":     nil,
 	"s3:PutBucketPolicy":     nil,
 	"s3:DeleteBucketPolicy":  nil,
+	// GetBucketPolicyStatus reports whether the policy makes the bucket
+	// public; the gateway computes it from the stored policy.
+	"s3:GetBucketPolicyStatus": nil,
+
+	// Bucket encryption configuration. Removing the configuration needs the
+	// write permission, as it does in S3.
+	"s3:GetEncryptionConfiguration": nil,
+	"s3:PutEncryptionConfiguration": nil,
+
+	// Bucket configuration other than the policy and encryption. Removing the
+	// bucket's tags needs s3:PutBucketTagging, as it does in S3.
+	"s3:GetBucketLocation":                nil,
+	"s3:GetBucketAcl":                     nil,
+	"s3:GetBucketCORS":                    nil,
+	"s3:GetBucketTagging":                 nil,
+	"s3:PutBucketTagging":                 nil,
+	"s3:GetBucketVersioning":              nil,
+	"s3:PutBucketVersioning":              nil,
+	"s3:GetBucketObjectLockConfiguration": nil,
+	"s3:PutBucketObjectLockConfiguration": nil,
+
+	// Object tags and attributes. Both reads go through the object's catalog
+	// entry, which may have to come back over the network.
+	"s3:GetObjectTagging":    cmdsRetrieve,
+	"s3:PutObjectTagging":    cmdsTagState,
+	"s3:DeleteObjectTagging": cmdsTagState,
+	"s3:GetObjectAttributes": cmdsRetrieve,
 
 	// Multipart uploads. Initiating an upload, uploading a part and completing an
 	// upload all require s3:PutObject, so they need no permission of their own.

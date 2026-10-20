@@ -43,7 +43,7 @@ type Config struct {
 
 // RevocationConfig holds settings for the Swarf revocation service, which Hilt
 // publishes UCAN revocations to when a delegation it issued is withdrawn (e.g.
-// when an access key is deleted).
+// when an access key is deleted). Both fields are required by `hilt serve`.
 type RevocationConfig struct {
 	// ServiceID is the Swarf service's DID (e.g. "did:web:swarf.example.com").
 	ServiceID string `mapstructure:"service_id"`
@@ -186,8 +186,9 @@ func SetDefaults(v *viper.Viper) {
 	// default: every deployment names its own stage's Sprue and product, and
 	// `serve` refuses to start without them (see fx.NewUploadClient).
 
-	v.SetDefault("revocation.service_id", "did:web:revoke.fil-forge.com")
-	v.SetDefault("revocation.service_url", "https://revoke.fil-forge.com")
+	// revocation.service_id and revocation.service_url have no default: every
+	// deployment names its own stage's Swarf, and `serve` refuses to start
+	// without one (see fx.NewRevocationClient).
 }
 
 // flagBindings maps each config key to its serve-command flag name.

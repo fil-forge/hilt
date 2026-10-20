@@ -1,6 +1,7 @@
 package fx
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 
@@ -29,7 +30,17 @@ var RevocationModule = fx.Module("revocation",
 // NewRevocationClient builds the Swarf revocation-service client from
 // configuration. It takes no issuer: revocations are signed by the tenant that
 // issued the revoked delegations, which is passed per publish call.
+//
+// Both settings are required. Neither has a default, so a deployment that
+// forgets them fails at startup rather than publishing to another stage's
+// Swarf.
 func NewRevocationClient(cfg config.RevocationConfig) (*swarfclient.Client, error) {
+	if cfg.ServiceID == "" {
+		return nil, errors.New("revocation.service_id is required: set HILT_REVOCATION_SERVICE_ID or --revocation-service-id")
+	}
+	if cfg.ServiceURL == "" {
+		return nil, errors.New("revocation.service_url is required: set HILT_REVOCATION_SERVICE_URL or --revocation-service-url")
+	}
 	serviceID, err := did.Parse(cfg.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("parsing revocation.service_id %q: %w", cfg.ServiceID, err)
