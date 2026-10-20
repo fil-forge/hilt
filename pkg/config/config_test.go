@@ -25,3 +25,15 @@ func TestLoadEnvOnly(t *testing.T) {
 	require.Equal(t, "https://upload.example.com", cfg.Upload.ServiceURL)
 	require.Equal(t, "https://revocation.example.com", cfg.Revocation.ServiceURL)
 }
+
+// TestLoadRevocationHasNoDefault verifies the revocation service settings stay
+// empty when nothing configures them, so `hilt serve` refuses to start instead
+// of publishing revocations to another stage's Swarf.
+func TestLoadRevocationHasNoDefault(t *testing.T) {
+	t.Setenv("HILT_REVOCATION_SERVICE_ID", "")
+	t.Setenv("HILT_REVOCATION_SERVICE_URL", "")
+
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	require.Equal(t, config.RevocationConfig{}, cfg.Revocation)
+}
