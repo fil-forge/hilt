@@ -229,6 +229,11 @@ type classification struct {
 // permission rather than the bucket's create or delete permission. A HEAD with
 // the parameter is the plain bucket operation, as it is for `?uploads`.
 //
+// A request carrying more than one of these parameters is classified in the
+// gateway's route order, so the permission checked is the one the operation
+// the gateway runs needs: on a bucket GET, `policy` wins, then `uploads`,
+// then `versions`, then `encryption`.
+//
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
 // and key. Headers are signed only when listed in the signature's SignedHeaders,
@@ -292,12 +297,12 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return classify(OpListBuckets)
 		case c.key == "" && policy && method == http.MethodGet:
 			return classify(OpGetBucketPolicy)
-		case c.key == "" && encryption && method == http.MethodGet:
-			return classify(OpGetBucketEncryption)
 		case c.key == "" && uploads:
 			return classify(OpListBucketMultipartUploads)
 		case c.key == "" && versions:
 			return classify(OpListBucketVersions)
+		case c.key == "" && encryption && method == http.MethodGet:
+			return classify(OpGetBucketEncryption)
 		case c.key == "":
 			return classify(OpListBucket)
 		case uploadID != "":

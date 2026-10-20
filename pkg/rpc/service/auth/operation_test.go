@@ -89,6 +89,11 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "an encryption query on a HEAD is the bucket operation", method: "HEAD", url: "https://s3.example.com/bkt?encryption", want: OpListBucket, wantBucket: "bkt"},
 		{name: "an encryption query on a POST is a bucket create", method: "POST", url: "https://s3.example.com/bkt?encryption", want: OpCreateBucket, wantBucket: "bkt"},
 		{name: "an encryption query on an object is the object operation", method: "GET", url: "https://s3.example.com/bkt/k?encryption", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
+		// Mixed queries follow the gateway's route order: a listing wins over
+		// the encryption configuration, as it does in versitygw's router.
+		{name: "uploads wins over encryption", method: "GET", url: "https://s3.example.com/bkt?uploads&encryption", want: OpListBucketMultipartUploads, wantBucket: "bkt"},
+		{name: "versions wins over encryption", method: "GET", url: "https://s3.example.com/bkt?versions&encryption", want: OpListBucketVersions, wantBucket: "bkt"},
+		{name: "policy wins over encryption", method: "GET", url: "https://s3.example.com/bkt?policy&encryption", want: OpGetBucketPolicy, wantBucket: "bkt"},
 		{name: "get object version", method: "GET", url: "https://s3.example.com/bkt/k?versionId=v", want: OpGetObjectVersion, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object retention", method: "GET", url: "https://s3.example.com/bkt/k?retention", want: OpGetObjectRetention, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object legal hold", method: "GET", url: "https://s3.example.com/bkt/k?legal-hold", want: OpGetObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
