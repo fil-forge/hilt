@@ -203,6 +203,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   for an invalid/unknown selection). This proves every module combination yields a
   graph with all dependencies satisfied, without starting the app.
 
+## Observability
+
+When a change adds or alters behavior someone depends on, decide how on-call
+would see it working and see it fail, and add what's useful in the same PR:
+logs, complete trace spans, and an alert or dashboard panel in
+fil-forge/infra-central. Skip it for changes nothing operational depends on.
+When a feature's health is best read as a number, say so in the PR
+description, naming the metric and [FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143).
+`docs/observability.md` says how to do each.
+
 ## Security
 
 Key material is sensitive. **Never log or echo private keys, secrets, or seed
