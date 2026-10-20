@@ -89,11 +89,13 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "an encryption query on a HEAD is the bucket operation", method: "HEAD", url: "https://s3.example.com/bkt?encryption", want: OpListBucket, wantBucket: "bkt"},
 		{name: "an encryption query on a POST is a bucket create", method: "POST", url: "https://s3.example.com/bkt?encryption", want: OpCreateBucket, wantBucket: "bkt"},
 		{name: "an encryption query on an object is the object operation", method: "GET", url: "https://s3.example.com/bkt/k?encryption", want: OpGetObject, wantBucket: "bkt", wantKey: "k"},
-		// Mixed queries follow the gateway's route order: a listing wins over
-		// the encryption configuration, as it does in versitygw's router.
-		{name: "uploads wins over encryption", method: "GET", url: "https://s3.example.com/bkt?uploads&encryption", want: OpListBucketMultipartUploads, wantBucket: "bkt"},
-		{name: "versions wins over encryption", method: "GET", url: "https://s3.example.com/bkt?versions&encryption", want: OpListBucketVersions, wantBucket: "bkt"},
-		{name: "policy wins over encryption", method: "GET", url: "https://s3.example.com/bkt?policy&encryption", want: OpGetBucketPolicy, wantBucket: "bkt"},
+		// Other query parameters, known to some operation or not, neither select
+		// an operation nor conflict with one, and a subresource may carry a value.
+		{name: "an unknown parameter is ignored", method: "GET", url: "https://s3.example.com/bkt?encryption&foo", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "an unknown parameter first is ignored", method: "GET", url: "https://s3.example.com/bkt?foo=bar&encryption", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "another operation's parameter is ignored", method: "GET", url: "https://s3.example.com/bkt?encryption&max-keys=1", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "a subresource with a value still selects", method: "GET", url: "https://s3.example.com/bkt?encryption=true", want: OpGetBucketEncryption, wantBucket: "bkt"},
+		{name: "subresource names are case-sensitive", method: "GET", url: "https://s3.example.com/bkt?Encryption", want: OpListBucket, wantBucket: "bkt"},
 		{name: "get object version", method: "GET", url: "https://s3.example.com/bkt/k?versionId=v", want: OpGetObjectVersion, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object retention", method: "GET", url: "https://s3.example.com/bkt/k?retention", want: OpGetObjectRetention, wantBucket: "bkt", wantKey: "k"},
 		{name: "get object legal hold", method: "GET", url: "https://s3.example.com/bkt/k?legal-hold", want: OpGetObjectLegalHold, wantBucket: "bkt", wantKey: "k"},
@@ -144,6 +146,24 @@ func TestClassifyRequest(t *testing.T) {
 		})
 	}
 
+	t.Run("refuses a query naming two subresources, whatever their order", func(t *testing.T) {
+		for _, tc := range []struct{ method, url, want string }{
+			{"GET", "https://s3.example.com/bkt?uploads&encryption", "encryption, uploads"},
+			{"GET", "https://s3.example.com/bkt?encryption&uploads", "encryption, uploads"},
+			{"GET", "https://s3.example.com/bkt?versions&encryption", "encryption, versions"},
+			{"GET", "https://s3.example.com/bkt?policy&encryption", "encryption, policy"},
+			{"HEAD", "https://s3.example.com/bkt?uploads&encryption", "encryption, uploads"},
+			{"PUT", "https://s3.example.com/bkt?policy&encryption", "encryption, policy"},
+			{"DELETE", "https://s3.example.com/bkt?encryption&policy", "encryption, policy"},
+			{"GET", "https://s3.example.com/bkt/k?retention&legal-hold", "legal-hold, retention"},
+			{"GET", "https://s3.example.com/bkt/k?uploadId=abc&uploads", "uploadId, uploads"},
+		} {
+			_, err := classifyRequest(s3.Request{Method: tc.method, URL: tc.url})
+			require.ErrorIs(t, err, ErrConflictingQuery, "%s %s", tc.method, tc.url)
+			require.ErrorContains(t, err, tc.want, "%s %s", tc.method, tc.url)
+		}
+	})
+
 	t.Run("rejects unsupported method and path combinations", func(t *testing.T) {
 		for _, req := range []s3.Request{
 			{Method: "PUT", URL: "https://s3.example.com/"},
@@ -189,6 +209,11 @@ func TestRequirementsFor(t *testing.T) {
 
 	_, _, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
 	require.Error(t, err)
+
+	// The gateway sees the refusal of two subresources by its name, so it can
+	// answer it without consulting hilt.
+	_, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
+	require.ErrorIs(t, err, ErrConflictingQuery)
 }
 
 // TestOperationPermission asserts every operation requires a permission, so a new

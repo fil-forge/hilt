@@ -229,10 +229,15 @@ type classification struct {
 // permission rather than the bucket's create or delete permission. A HEAD with
 // the parameter is the plain bucket operation, as it is for `?uploads`.
 //
-// A request carrying more than one of these parameters is classified in the
-// gateway's route order, so the permission checked is the one the operation
-// the gateway runs needs: on a bucket GET, `policy` wins, then `uploads`,
-// then `versions`, then `encryption`.
+// A request naming more than one subresource addresses no single operation
+// and is refused with [ErrConflictingQuery], as S3 refuses it (400
+// InvalidArgument, "Conflicting query string parameters"), whatever order the
+// parameters come in. Any other query parameter, known to some operation or
+// not, with a value or without, neither selects an operation nor conflicts
+// with one: `?encryption&max-keys=1` and `?encryption&foo` are both
+// GetBucketEncryption, as they are on S3. A subresource may carry a value
+// (`?encryption=true` is still GetBucketEncryption) and its name is
+// case-sensitive (`?Encryption` is the plain bucket operation).
 //
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
@@ -266,6 +271,17 @@ func classifyRequest(req s3.Request) (classification, error) {
 	versionID := query.Get("versionId")
 	policy := query.Has("policy")         // valueless flag: `?policy`
 	encryption := query.Has("encryption") // valueless flag: `?encryption`
+
+	// Each of these selects an operation on its own; two at once address none.
+	var subresources []string
+	for _, p := range []string{"encryption", "legal-hold", "policy", "retention", "uploadId", "uploads", "versions"} {
+		if query.Has(p) {
+			subresources = append(subresources, p)
+		}
+	}
+	if len(subresources) > 1 {
+		return classification{}, fmt.Errorf("%w: %s", ErrConflictingQuery, strings.Join(subresources, ", "))
+	}
 
 	// A plain-object or part PUT with a parseable copy source is a copy.
 	copy := func(plain, copied Operation) Operation {

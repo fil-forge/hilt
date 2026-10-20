@@ -210,6 +210,10 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	// handler can check it matches the operation it serves.
 	c, err := classifyRequest(req)
 	if err != nil {
+		if errors.Is(err, ErrConflictingQuery) {
+			log.Debug("rejecting conflicting query", zap.Error(err))
+			return nil, err
+		}
 		log.Debug("rejecting unsupported operation", zap.Error(err))
 		return nil, ErrUnsupportedOperation
 	}

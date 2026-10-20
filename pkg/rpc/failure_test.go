@@ -145,6 +145,7 @@ func TestAuthFailure(t *testing.T) {
 			{auth.ErrForeignBucket, auth.ForeignBucketErrorName},
 			{auth.ErrBucketNotPermitted, auth.BucketNotPermittedErrorName},
 			{auth.ErrUnsignedCopySource, auth.UnsignedCopySourceErrorName},
+			{auth.ErrConflictingQuery, auth.ConflictingQueryErrorName},
 		} {
 			f := &recordingFailer{}
 			require.NoError(t, authFailure(f, fmt.Errorf("authorizing: %w", tc.err)))
