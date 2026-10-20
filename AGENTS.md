@@ -176,7 +176,15 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - **Authorization**: signature-bearing S3 commands authenticate via the
   `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
   provider + region served by that provider), which also classifies the operation
-  and resolves every bucket it addresses within the tenant and the key's scope. A
+  and resolves every bucket it addresses within the tenant and the key's scope.
+  Classification mirrors the gateway's router (`pkg/rpc/service/auth/operation.go`):
+  `subresources` is S3's subresource vocabulary, each marked supported or
+  not, and `bucketRoutes` / `objectRoutes` give the operation a supported
+  one selects per method. A request naming two subresources, an unsupported
+  one, or a route Hilt does not authorize is refused; other query parameters
+  are ignored, as S3 ignores them. When a versitygw bump serves a new
+  subresource, mark it supported and give it a route (and an operation) or
+  it stays refused. A
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
   destination and `s3:GetObject` on the source, and the header must be a signed
   header. Command-specific S3-permission checks stay in each handler. Both key
