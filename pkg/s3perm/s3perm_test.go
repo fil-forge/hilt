@@ -198,12 +198,13 @@ func TestPolicyAction(t *testing.T) {
 func TestPolicyActions(t *testing.T) {
 	actions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(actions))
-	require.Len(t, actions, 14)
+	require.Len(t, actions, 24)
 	for _, p := range actions {
 		require.True(t, s3bkt.PolicyAction(p), p)
 	}
 	for _, p := range []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
-		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", s3bkt.PolicyWildcard} {
+		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration", s3bkt.PolicyWildcard} {
 		require.NotContains(t, actions, p)
 	}
 	require.False(t, s3bkt.PolicyAction(s3bkt.PolicyWildcard))
@@ -240,6 +241,22 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 		{"GET", "https://s3.example.com/bkt?encryption"},
 		{"PUT", "https://s3.example.com/bkt?encryption"},
 		{"DELETE", "https://s3.example.com/bkt?encryption"},
+		{"POST", "https://s3.example.com/bkt?delete"},
+		{"GET", "https://s3.example.com/bkt?location"},
+		{"GET", "https://s3.example.com/bkt?acl"},
+		{"GET", "https://s3.example.com/bkt?cors"},
+		{"GET", "https://s3.example.com/bkt?tagging"},
+		{"PUT", "https://s3.example.com/bkt?tagging"},
+		{"DELETE", "https://s3.example.com/bkt?tagging"},
+		{"GET", "https://s3.example.com/bkt?versioning"},
+		{"PUT", "https://s3.example.com/bkt?versioning"},
+		{"GET", "https://s3.example.com/bkt?object-lock"},
+		{"PUT", "https://s3.example.com/bkt?object-lock"},
+		{"GET", "https://s3.example.com/bkt/k?tagging"},
+		{"PUT", "https://s3.example.com/bkt/k?tagging"},
+		{"DELETE", "https://s3.example.com/bkt/k?tagging"},
+		{"GET", "https://s3.example.com/bkt/k?attributes"},
+		{"GET", "https://s3.example.com/bkt?policyStatus"},
 	}
 	for _, r := range reqs {
 		op, err := auth.OperationFor(s3.Request{Method: r.method, URL: r.url})

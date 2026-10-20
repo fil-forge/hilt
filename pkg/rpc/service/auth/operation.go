@@ -63,6 +63,28 @@ const (
 	OpAbortMultipartUpload       Operation = "AbortMultipartUpload"       // DELETE, bucket + key, ?uploadId
 	OpListMultipartUploadParts   Operation = "ListMultipartUploadParts"   // GET, bucket + key, ?uploadId
 	OpListBucketMultipartUploads Operation = "ListBucketMultipartUploads" // GET, bucket, no key, ?uploads
+
+	// Bucket configuration operations, each distinguished from the plain
+	// bucket operations by its subresource. Removing the bucket's tags needs
+	// the same permission as writing them, as it does in S3.
+	OpGetBucketLocation          Operation = "GetBucketLocation"          // GET, bucket, no key, ?location
+	OpGetBucketAcl               Operation = "GetBucketAcl"               // GET, bucket, no key, ?acl
+	OpGetBucketCors              Operation = "GetBucketCors"              // GET, bucket, no key, ?cors
+	OpGetBucketPolicyStatus      Operation = "GetBucketPolicyStatus"      // GET, bucket, no key, ?policyStatus
+	OpGetBucketTagging           Operation = "GetBucketTagging"           // GET, bucket, no key, ?tagging
+	OpPutBucketTagging           Operation = "PutBucketTagging"           // PUT, bucket, no key, ?tagging
+	OpDeleteBucketTagging        Operation = "DeleteBucketTagging"        // DELETE, bucket, no key, ?tagging
+	OpGetBucketVersioning        Operation = "GetBucketVersioning"        // GET, bucket, no key, ?versioning
+	OpPutBucketVersioning        Operation = "PutBucketVersioning"        // PUT, bucket, no key, ?versioning
+	OpGetObjectLockConfiguration Operation = "GetObjectLockConfiguration" // GET, bucket, no key, ?object-lock
+	OpPutObjectLockConfiguration Operation = "PutObjectLockConfiguration" // PUT, bucket, no key, ?object-lock
+
+	// Object tagging and attributes, distinguished from the plain object
+	// operations by their subresources.
+	OpGetObjectTagging    Operation = "GetObjectTagging"    // GET, bucket + key, ?tagging
+	OpPutObjectTagging    Operation = "PutObjectTagging"    // PUT, bucket + key, ?tagging
+	OpDeleteObjectTagging Operation = "DeleteObjectTagging" // DELETE, bucket + key, ?tagging
+	OpGetObjectAttributes Operation = "GetObjectAttributes" // GET, bucket + key, ?attributes
 )
 
 // operationPermission maps each operation to the S3 permission an access key
@@ -102,6 +124,23 @@ var operationPermission = map[Operation]string{
 	OpAbortMultipartUpload:       "s3:AbortMultipartUpload",
 	OpListMultipartUploadParts:   "s3:ListMultipartUploadParts",
 	OpListBucketMultipartUploads: "s3:ListBucketMultipartUploads",
+
+	OpGetBucketLocation:          "s3:GetBucketLocation",
+	OpGetBucketAcl:               "s3:GetBucketAcl",
+	OpGetBucketCors:              "s3:GetBucketCORS",
+	OpGetBucketPolicyStatus:      "s3:GetBucketPolicyStatus",
+	OpGetBucketTagging:           "s3:GetBucketTagging",
+	OpPutBucketTagging:           "s3:PutBucketTagging",
+	OpDeleteBucketTagging:        "s3:PutBucketTagging",
+	OpGetBucketVersioning:        "s3:GetBucketVersioning",
+	OpPutBucketVersioning:        "s3:PutBucketVersioning",
+	OpGetObjectLockConfiguration: "s3:GetBucketObjectLockConfiguration",
+	OpPutObjectLockConfiguration: "s3:PutBucketObjectLockConfiguration",
+
+	OpGetObjectTagging:    "s3:GetObjectTagging",
+	OpPutObjectTagging:    "s3:PutObjectTagging",
+	OpDeleteObjectTagging: "s3:DeleteObjectTagging",
+	OpGetObjectAttributes: "s3:GetObjectAttributes",
 }
 
 // Permission returns the S3 permission an access key must hold to perform the
@@ -135,6 +174,11 @@ func (o Operation) addressesExistingBucket() bool {
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpDeleteObjects, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
 		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
+		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpGetBucketPolicyStatus,
+		OpGetBucketTagging, OpPutBucketTagging, OpDeleteBucketTagging,
+		OpGetBucketVersioning, OpPutBucketVersioning,
+		OpGetObjectLockConfiguration, OpPutObjectLockConfiguration,
+		OpGetObjectTagging, OpPutObjectTagging, OpDeleteObjectTagging, OpGetObjectAttributes,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads:
 		return true
@@ -197,15 +241,13 @@ type classification struct {
 
 // subresources is every query parameter S3 treats as a subresource: one that
 // selects the operation a request performs, rather than parameterising it.
-// The value says whether the gateway serves the operation over Ingot. A
-// request naming two is refused as [ErrConflictingQuery], as S3 refuses it,
-// and one naming an unsupported subresource is refused as
+// The value says whether the gateway serves an operation for it over Ingot.
+// A request naming two is refused as [ErrConflictingQuery], as S3 refuses
+// it, and one naming an unsupported subresource is refused as
 // [ErrUnsupportedOperation] before any permission is consulted, so the
-// gateway's own refusal is never preceded by an authorization. Supported
-// subresources that select no operation of their own here (versioning,
-// tagging, object-lock, location, acl, cors, policyStatus, attributes)
-// classify as the plain bucket or object operation they are served under;
-// giving each its own permission is a change to the permission vocabulary.
+// gateway's own refusal is never preceded by an authorization. Which
+// operation a supported subresource selects depends on the method and on
+// whether the path names a key; see [bucketRoutes] and [objectRoutes].
 var subresources = map[string]bool{
 	"accelerate":            false,
 	"acl":                   true, // GetBucketAcl only
@@ -245,57 +287,118 @@ var subresources = map[string]bool{
 	"website":               false,
 }
 
+// bucketRoutes are the operations the gateway's router selects by subresource
+// for a request that addresses a bucket and no key, by method. An empty
+// operation is a route the gateway has (one it serves, or answers with an
+// error) that Hilt does not authorize, and is refused. A supported
+// subresource with no entry for the method selects nothing in the router
+// either, which performs the plain bucket operation: `PUT /b?uploads`
+// creates the bucket.
+var bucketRoutes = map[string]map[string]Operation{
+	http.MethodGet: {
+		"location":     OpGetBucketLocation,
+		"tagging":      OpGetBucketTagging,
+		"versioning":   OpGetBucketVersioning,
+		"policy":       OpGetBucketPolicy,
+		"cors":         OpGetBucketCors,
+		"object-lock":  OpGetObjectLockConfiguration,
+		"acl":          OpGetBucketAcl,
+		"uploads":      OpListBucketMultipartUploads,
+		"versions":     OpListBucketVersions,
+		"policyStatus": OpGetBucketPolicyStatus,
+		"encryption":   OpGetBucketEncryption,
+	},
+	http.MethodPut: {
+		"tagging":     OpPutBucketTagging,
+		"versioning":  OpPutBucketVersioning,
+		"object-lock": OpPutObjectLockConfiguration,
+		"cors":        "",
+		"policy":      OpPutBucketPolicy,
+		"acl":         "",
+		"encryption":  OpPutBucketEncryption,
+	},
+	http.MethodDelete: {
+		"tagging":    OpDeleteBucketTagging,
+		"policy":     OpDeleteBucketPolicy,
+		"cors":       "",
+		"encryption": OpDeleteBucketEncryption,
+	},
+	http.MethodPost: {
+		"delete": OpDeleteObjects,
+	},
+}
+
+// objectRoutes are bucketRoutes' counterpart for a request that addresses an
+// object. A PUT naming uploadId is a part upload only with a partNumber;
+// classifyRequest checks for it, and the gateway answers either alone with
+// an error.
+var objectRoutes = map[string]map[string]Operation{
+	http.MethodGet: {
+		"uploads":    "",
+		"versions":   "",
+		"tagging":    OpGetObjectTagging,
+		"retention":  OpGetObjectRetention,
+		"legal-hold": OpGetObjectLegalHold,
+		"acl":        "",
+		"attributes": OpGetObjectAttributes,
+		"uploadId":   OpListMultipartUploadParts,
+	},
+	http.MethodPut: {
+		"tagging":    OpPutObjectTagging,
+		"retention":  OpPutObjectRetention,
+		"legal-hold": OpPutObjectLegalHold,
+		"acl":        "",
+		"uploadId":   OpUploadPart,
+	},
+	http.MethodPost: {
+		"uploadId": OpCompleteMultipartUpload,
+		"uploads":  OpCreateMultipartUpload,
+	},
+	http.MethodDelete: {
+		"tagging":  OpDeleteObjectTagging,
+		"uploadId": OpAbortMultipartUpload,
+	},
+}
+
 // classifyRequest determines the S3 operation and the addressed bucket/object key
 // from a request's HTTP method, path-style URL (https://<host>/<bucket>/<key...>) and
 // query parameters. Both the path and the query string are part of the SigV4-signed
 // canonical request (see sigv4.canonicalQueryString), so once the signature is
 // verified the classification is bound to what the caller signed. It returns an
-// error for method/path combinations that map to no supported operation.
+// error for any request it cannot classify as the operation the gateway would
+// perform.
 //
-// Multipart uploads are distinguished only by their query parameters — S3 spells
-// them `uploads`, `uploadId` and `partNumber`, and the names are case-sensitive.
-// Those branches are checked before the plain-object fallbacks they shadow, and
-// each is reachable only via the method S3 defines for it: a part is uploaded with
-// PUT, while an upload is initiated and completed with POST. A shape whose method
-// does not match is not a multipart request and falls back to its plain-object
-// classification, which requires the same permission.
+// The classification mirrors the gateway's router, which picks the operation
+// from the method, whether the path names a key, and the subresource the
+// query names, if any ([bucketRoutes], [objectRoutes]). A request naming more
+// than one subresource (see [subresources]) addresses no single operation and
+// is refused with [ErrConflictingQuery], as S3 refuses it (400
+// InvalidArgument, "Conflicting query string parameters"), whatever order the
+// parameters come in. One naming a subresource the gateway does not serve, or
+// a route Hilt does not authorize, is refused with [ErrUnsupportedOperation].
+// So is a POST naming no route: on a bucket it is a browser form upload,
+// authenticated by a signed policy in the body that Hilt does not verify, and
+// on an object the gateway has no such route.
 //
-// Object-lock and version-scoped operations are distinguished the same way,
-// by the query parameters the gateway routes on: `retention`, `legal-hold`,
-// `versions` and `versionId`. Each carries its own S3 permission, so an access
-// key granted s3:PutObject cannot thereby set a retention period or a legal
-// hold, and one granted s3:DeleteObject cannot delete a named version.
-//
-// A lock parameter decides the operation on its own, ahead of `versionId`:
-// hilt's permission vocabulary has no version-scoped variant of the lock
-// actions, so `?retention&versionId=` is a retention write. The lock branches
-// are reached only by the method S3 defines for them, and a PUT with the
-// parameter is a lock write rather than a copy, as it is in the gateway's
-// router. Every shape whose method does not match falls back to its
-// plain-object classification, which needs the broader permission of the two
-// (pkg/s3perm's TestClassifiedPermissionsCoverTheirShapes pins that the
-// broader permission grants everything the narrower one does).
-//
-// The bucket encryption configuration is distinguished from the plain bucket
-// operations by `encryption`, again only on the methods S3 defines for it:
-// a GET reads it, a PUT writes it and a DELETE removes it, each under its own
-// permission rather than the bucket's create or delete permission. A HEAD with
-// the parameter is the plain bucket operation, as it is for `?uploads`.
-//
-// A request naming more than one subresource (see [subresources]) addresses
-// no single operation and is refused with [ErrConflictingQuery], as S3
-// refuses it (400 InvalidArgument, "Conflicting query string parameters"),
-// whatever order the parameters come in; one naming a subresource the
-// gateway does not serve is refused with [ErrUnsupportedOperation]. Any
-// other query parameter, known to some operation or not, with a value or
+// Any other query parameter, known to some operation or not, with a value or
 // without, neither selects an operation nor conflicts with one:
 // `?encryption&max-keys=1` and `?encryption&foo` are both
 // GetBucketEncryption, as they are on S3. A subresource may carry a value
 // (`?encryption=true` is still GetBucketEncryption) and its name is
 // case-sensitive (`?Encryption` is the plain bucket operation).
 //
-// DeleteObjects (`POST /bucket?delete`) deletes the keys its body names
-// and needs s3:DeleteObject on the bucket, as each single delete does.
+// A HEAD is HeadBucket or HeadObject whatever subresource it names, as it is
+// in the router, and needs s3:ListBucket or s3:GetObject; a versionId makes
+// the object read version-scoped. With no subresource, a versionId likewise
+// makes a GET or a DELETE of an object version-scoped, each under its own
+// permission. A subresource decides the operation on its own, ahead of
+// versionId: hilt's permission vocabulary has no version-scoped variant of
+// the lock or tagging actions, so `?retention&versionId=` is a retention
+// write.
+//
+// DeleteObjects (`POST /bucket?delete`) deletes the keys its body names and
+// needs s3:DeleteObject on the bucket, as each single delete does; the
+// gateway checks s3:DeleteObjectVersion for each entry that names a version.
 //
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
@@ -321,14 +424,7 @@ func classifyRequest(req s3.Request) (classification, error) {
 	c.bucket, c.key, _ = strings.Cut(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
 
 	query := u.Query()
-	uploads := query.Has("uploads") // valueless flag: `?uploads`
-	uploadID := query.Get("uploadId")
-	versions := query.Has("versions")    // valueless flag: `?versions`
-	retention := query.Has("retention")  // valueless flag: `?retention`
-	legalHold := query.Has("legal-hold") // valueless flag: `?legal-hold`
 	versionID := query.Get("versionId")
-	policy := query.Has("policy")         // valueless flag: `?policy`
-	encryption := query.Has("encryption") // valueless flag: `?encryption`
 
 	// Each subresource selects an operation on its own; two at once address
 	// none, and one the gateway does not serve addresses nothing to authorize.
@@ -348,9 +444,6 @@ func classifyRequest(req s3.Request) (classification, error) {
 
 	// A plain-object or part PUT with a parseable copy source is a copy.
 	copy := func(plain, copied Operation) Operation {
-		if method := strings.ToUpper(req.Method); method != http.MethodPut {
-			return plain
-		}
 		src, ok := HeaderValue(req.Headers, copySourceHeader)
 		if !ok {
 			return plain
@@ -370,77 +463,74 @@ func classifyRequest(req s3.Request) (classification, error) {
 
 	method := strings.ToUpper(req.Method)
 	switch method {
-	case http.MethodGet, http.MethodHead:
-		switch {
-		case c.bucket == "":
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPost, http.MethodDelete:
+	default:
+		return classification{}, fmt.Errorf("unsupported S3 method %q", req.Method)
+	}
+
+	if c.bucket == "" {
+		if method == http.MethodGet || method == http.MethodHead {
 			return classify(OpListBuckets)
-		case c.key == "" && policy && method == http.MethodGet:
-			return classify(OpGetBucketPolicy)
-		case c.key == "" && uploads:
-			return classify(OpListBucketMultipartUploads)
-		case c.key == "" && versions:
-			return classify(OpListBucketVersions)
-		case c.key == "" && encryption && method == http.MethodGet:
-			return classify(OpGetBucketEncryption)
+		}
+		return classification{}, fmt.Errorf("%s request has no bucket in its path", req.Method)
+	}
+
+	if method == http.MethodHead {
+		switch {
 		case c.key == "":
 			return classify(OpListBucket)
-		case uploadID != "":
-			return classify(OpListMultipartUploadParts)
-		case retention:
-			return classify(OpGetObjectRetention)
-		case legalHold:
-			return classify(OpGetObjectLegalHold)
 		case versionID != "":
 			return classify(OpGetObjectVersion)
 		default:
 			return classify(OpGetObject)
 		}
-	case http.MethodPut, http.MethodPost:
-		if c.bucket == "" {
-			return classification{}, fmt.Errorf("%s request has no bucket in its path", req.Method)
+	}
+
+	routes := bucketRoutes[method]
+	if c.key != "" {
+		routes = objectRoutes[method]
+	}
+	if len(named) == 1 {
+		if op, ok := routes[named[0]]; ok {
+			switch {
+			case op == "":
+				return classification{}, fmt.Errorf("%w: %s ?%s", ErrUnsupportedOperation, req.Method, named[0])
+			case op == OpUploadPart && !query.Has("partNumber"):
+				return classification{}, fmt.Errorf("%w: %s ?uploadId without partNumber", ErrUnsupportedOperation, req.Method)
+			case op == OpUploadPart:
+				return classify(copy(OpUploadPart, OpUploadPartCopy))
+			default:
+				return classify(op)
+			}
 		}
+	}
+
+	switch method {
+	case http.MethodGet:
 		switch {
-		case c.key == "" && policy && method == http.MethodPut:
-			return classify(OpPutBucketPolicy)
-		case c.key == "" && encryption && method == http.MethodPut:
-			return classify(OpPutBucketEncryption)
-		case c.key == "" && method == http.MethodPost && query.Has("delete"):
-			return classify(OpDeleteObjects)
 		case c.key == "":
-			return classify(OpCreateBucket)
-		case method == http.MethodPost && uploads:
-			return classify(OpCreateMultipartUpload)
-		case method == http.MethodPut && uploadID != "" && query.Has("partNumber"):
-			return classify(copy(OpUploadPart, OpUploadPartCopy))
-		case method == http.MethodPost && uploadID != "" && !query.Has("partNumber"):
-			return classify(OpCompleteMultipartUpload)
-		case method == http.MethodPut && retention:
-			return classify(OpPutObjectRetention)
-		case method == http.MethodPut && legalHold:
-			return classify(OpPutObjectLegalHold)
+			return classify(OpListBucket)
+		case versionID != "":
+			return classify(OpGetObjectVersion)
 		default:
-			return classify(copy(OpPutObject, OpCopyObject))
+			return classify(OpGetObject)
 		}
+	case http.MethodPut:
+		if c.key == "" {
+			return classify(OpCreateBucket)
+		}
+		return classify(copy(OpPutObject, OpCopyObject))
 	case http.MethodDelete:
-		if c.bucket == "" {
-			return classification{}, fmt.Errorf("%s request has no bucket in its path", req.Method)
-		}
 		switch {
-		case c.key == "" && policy:
-			return classify(OpDeleteBucketPolicy)
-		case c.key == "" && encryption:
-			return classify(OpDeleteBucketEncryption)
 		case c.key == "":
 			return classify(OpDeleteBucket)
-		case uploadID != "":
-			return classify(OpAbortMultipartUpload)
 		case versionID != "":
 			return classify(OpDeleteObjectVersion)
 		default:
 			return classify(OpDeleteObject)
 		}
 	default:
-		return classification{}, fmt.Errorf("unsupported S3 method %q", req.Method)
+		return classification{}, fmt.Errorf("%w: %s names no route", ErrUnsupportedOperation, req.Method)
 	}
 }
 
