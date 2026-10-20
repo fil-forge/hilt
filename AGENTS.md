@@ -51,10 +51,11 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 
 - Build / vet / test: `go build ./... && go vet ./... && go test ./...`. Run all
   three after changes — this is the standard loop.
-- Run locally: `go run ./cmd serve --revocation-service-id=<did>
-  --revocation-service-url=<url>` (both required, no default; add
-  `--storage=memory --vault=memory` to avoid external deps; see `cmd/main.go` /
-  `pkg/config`).
+- Run locally: `go run ./cmd serve --upload-service-id=<did>
+  --upload-service-url=<url> --upload-product-id=<did>
+  --revocation-service-id=<did> --revocation-service-url=<url>` (all required,
+  no default; add `--storage=memory --vault=memory` to avoid external deps; see
+  `cmd/main.go` / `pkg/config`).
 - Postgres and OpenBao-backed tests use testcontainers and **skip when Docker is
   unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
   only exercises the memory backends; run with Docker for full coverage.

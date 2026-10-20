@@ -102,21 +102,23 @@ Pre-shared bearer token required on Tenant API requests.
 
 ### Upload service (Sprue)
 
-| Key | Flag | Env var | Default |
+| Key | Flag | Env var | Example |
 | --- | --- | --- | --- |
 | `upload.service_id` | `--upload-service-id` | `HILT_UPLOAD_SERVICE_ID` | `did:web:upload.fil-forge.com` |
 | `upload.service_url` | `--upload-service-url` | `HILT_UPLOAD_SERVICE_URL` | `https://upload.fil-forge.com` |
 | `upload.product_id` | `--upload-product-id` | `HILT_UPLOAD_PRODUCT_ID` | `did:web:hilt.fil-forge.com` |
 
 The Sprue service DID + HTTP endpoint Hilt calls to provision bucket space, and
-the product/plan DID tenants are registered under.
+the product/plan DID tenants are registered under. All three are required, and
+`hilt serve` exits at startup when any of them is unset. Each stage points at
+its own Sprue.
 
 ### Revocation service (Swarf)
 
-| Key | Flag | Env var | Default |
+| Key | Flag | Env var | Example |
 | --- | --- | --- | --- |
-| `revocation.service_id` | `--revocation-service-id` | `HILT_REVOCATION_SERVICE_ID` | required |
-| `revocation.service_url` | `--revocation-service-url` | `HILT_REVOCATION_SERVICE_URL` | required |
+| `revocation.service_id` | `--revocation-service-id` | `HILT_REVOCATION_SERVICE_ID` | `did:web:revoke.fil-forge.com` |
+| `revocation.service_url` | `--revocation-service-url` | `HILT_REVOCATION_SERVICE_URL` | `https://revoke.fil-forge.com` |
 
 The Swarf service DID + HTTP endpoint Hilt publishes UCAN revocations to when a
 delegation it issued is withdrawn (e.g. when an access key is deleted). Both
