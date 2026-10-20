@@ -338,8 +338,8 @@ func classifyRequest(req s3.Request) (classification, error) {
 			named = append(named, name)
 		}
 	}
-	slices.Sort(named)
 	if len(named) > 1 {
+		slices.Sort(named)
 		return classification{}, fmt.Errorf("%w: %s", ErrConflictingQuery, strings.Join(named, ", "))
 	}
 	if len(named) == 1 && !subresources[named[0]] {
