@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"slices"
 	"testing"
+	"time"
 
+	"github.com/fil-forge/hilt/pkg/sigv4"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	"github.com/stretchr/testify/require"
 )
@@ -257,12 +260,25 @@ func TestClassifyRequest(t *testing.T) {
 // TestRequirementsFor covers the gateway's local view of what a request
 // needs: one bucket/permission pair for an ordinary operation, a second for
 // the copy source, a companion permission or a header that adds one, none
-// for operations that address no existing bucket, and the headers each
-// decision was taken from.
+// for operations that address no existing bucket, and a refusal when a
+// header a decision was taken from is not signed.
 func TestRequirementsFor(t *testing.T) {
+	// presigned signs the request with every header it carries covered.
+	presigned := func(method, url string, headers map[string]string, unsigned ...string) s3.Request {
+		t.Helper()
+		var signed []string
+		for name := range headers {
+			if !slices.Contains(unsigned, name) {
+				signed = append(signed, name)
+			}
+		}
+		req, err := sigv4.Presign(sigv4.Request{Method: method, URL: url, Headers: headers}, "AKIATEST", "secret", "us-east-1", sigv4.SchemeV4, time.Now(), time.Hour, sigv4.WithSignedHeaders(signed...))
+		require.NoError(t, err)
+		return s3.Request{Method: req.Method, URL: req.URL, Headers: headers}
+	}
 	requirements := func(method, url string, headers map[string]string) Requirements {
 		t.Helper()
-		r, err := RequirementsFor(s3.Request{Method: method, URL: url, Headers: headers})
+		r, err := RequirementsFor(presigned(method, url, headers))
 		require.NoError(t, err)
 		return r
 	}
@@ -271,12 +287,10 @@ func TestRequirementsFor(t *testing.T) {
 	r := requirements("PUT", "https://s3.example.com/bkt/k", copyHdr)
 	require.Equal(t, OpCopyObject, r.Operation)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
-	require.Equal(t, []string{"x-amz-copy-source"}, r.Headers)
 
 	r = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", copyHdr)
 	require.Equal(t, OpUploadPartCopy, r.Operation)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
-	require.Equal(t, []string{"x-amz-copy-source"}, r.Headers)
 
 	// A source naming a version needs the version read there instead.
 	versionHdr := map[string]string{"x-amz-copy-source": "src/obj?versionId=v1"}
@@ -291,7 +305,6 @@ func TestRequirementsFor(t *testing.T) {
 	r = requirements("GET", "https://s3.example.com/bkt/k", nil)
 	require.Equal(t, OpGetObject, r.Operation)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, r.Buckets)
-	require.Empty(t, r.Headers)
 
 	// Reading an object's attributes needs the object read too, on the same
 	// bucket, as S3 requires.
@@ -300,41 +313,64 @@ func TestRequirementsFor(t *testing.T) {
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, r.Buckets)
 
 	// A header that adds a permission puts it on the addressed bucket, after
-	// the operation's own and before the copy source's, and is listed as a
-	// header the decision was taken from.
+	// the operation's own and before the copy source's.
 	r = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"})
 	require.Equal(t, OpPutObject, r.Operation)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectRetention"}}, r.Buckets)
-	require.Equal(t, []string{"x-amz-object-lock-mode"}, r.Headers)
 
 	r = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE"})
 	require.Equal(t, OpCopyObject, r.Operation)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
-	require.Equal(t, []string{"x-amz-copy-source", "x-amz-tagging-directive"}, r.Headers)
 
 	// CreateBucket addresses no existing bucket, so it yields no pair for
-	// the gateway to check locally, but the header it was decided from is
-	// still listed.
+	// the gateway to check locally, with or without the Object Lock flag.
 	r = requirements("PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"})
 	require.Equal(t, OpCreateBucket, r.Operation)
 	require.Empty(t, r.Buckets)
-	require.Equal(t, []string{"x-amz-bucket-object-lock-enabled"}, r.Headers)
 
 	for _, req := range []s3.Request{
-		{Method: "GET", URL: "https://s3.example.com/"},
-		{Method: "PUT", URL: "https://s3.example.com/bkt"},
+		presigned("GET", "https://s3.example.com/", nil),
+		presigned("PUT", "https://s3.example.com/bkt", nil),
 	} {
 		r, err := RequirementsFor(req)
 		require.NoError(t, err)
 		require.Empty(t, r.Buckets, "%s %s", req.Method, req.URL)
-		require.Empty(t, r.Headers, "%s %s", req.Method, req.URL)
 	}
 
-	_, err := RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
+	// A header a decision was taken from that the signature does not cover
+	// is refused by name, as Authorize refuses it; the rest of the request
+	// is not decided on. A request deciding on no header needs no signature
+	// at all to be read.
+	for _, tt := range []struct {
+		name    string
+		method  string
+		url     string
+		headers map[string]string
+		leave   string
+	}{
+		{"copy source", "PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj"}, "x-amz-copy-source"},
+		{"lock mode", "PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-tagging": "k=v"}, "x-amz-object-lock-mode"},
+		{"replacement tags", "PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE", "x-amz-tagging": "k=v"}, "x-amz-tagging"},
+		{"object lock flag", "PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"}, "x-amz-bucket-object-lock-enabled"},
+	} {
+		t.Run(tt.name+" unsigned", func(t *testing.T) {
+			_, err := RequirementsFor(presigned(tt.method, tt.url, tt.headers, tt.leave))
+			require.ErrorIs(t, err, ErrUnsignedHeader)
+			require.ErrorContains(t, err, tt.leave)
+		})
+	}
+	_, err := RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
+	require.Error(t, err, "an unsigned request names a copy source it cannot be trusted on")
+	require.NotErrorIs(t, err, ErrUnsignedHeader)
+	r, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
+	require.NoError(t, err)
+	require.Equal(t, OpGetObject, r.Operation)
+
+	_, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
 	require.Error(t, err)
 
 	// The gateway sees the refusal of two subresources by its name, so it can
-	// answer it without consulting hilt.
+	// answer it without consulting hilt, and before any signature is read.
 	_, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
 	require.ErrorIs(t, err, ErrConflictingQuery)
 }

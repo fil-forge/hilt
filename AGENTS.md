@@ -193,8 +193,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   too) is checked for both, and so is a header that adds one
   (`classification.readHeaders`: lock and tagging headers on a write,
   `x-amz-bucket-object-lock-enabled` on CreateBucket). Every header a
-  decision is taken from must be a signed header; `RequirementsFor` lists
-  them for the gateway's local check. Command-specific S3-permission checks
+  decision is taken from must be a signed header, which `RequirementsFor`
+  refuses too for the gateway's local check. Command-specific S3-permission checks
   stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
   each per-request delegation keyed to itself. `/s3/bucket/info` carries no
   signed request, so it authorizes on the invocation issuer instead: the issuer

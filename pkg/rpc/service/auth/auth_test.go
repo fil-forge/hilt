@@ -426,22 +426,16 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 	})
 
-	t.Run("a request's requirements name the headers a local check must see signed", func(t *testing.T) {
-		req := signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}, region, "x-amz-tagging")
-		sr, err := sigv4.Parse(sigv4.Request{Method: req.Method, URL: req.URL, Headers: req.Headers})
-		require.NoError(t, err)
-		r, err := auth.RequirementsFor(req)
-		require.NoError(t, err)
-		require.Equal(t, []string{"x-amz-object-lock-legal-hold", "x-amz-tagging"}, r.Headers)
-		unsigned, ok := r.Unsigned(sr)
-		require.True(t, ok)
-		require.Equal(t, "x-amz-object-lock-legal-hold", unsigned)
+	t.Run("a request's requirements refuse an unsigned header as Authorize does", func(t *testing.T) {
+		headers := map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}
+		_, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-object-lock-legal-hold")
 
-		req = signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}, region, "x-amz-tagging", "x-amz-object-lock-legal-hold")
-		sr, err = sigv4.Parse(sigv4.Request{Method: req.Method, URL: req.URL, Headers: req.Headers})
+		r, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging", "x-amz-object-lock-legal-hold"))
 		require.NoError(t, err)
-		_, ok = r.Unsigned(sr)
-		require.False(t, ok)
+		require.Equal(t, auth.OpPutObject, r.Operation)
+		require.Equal(t, []auth.Requirement{{Bucket: "bucket", Permission: "s3:PutObject"}, {Bucket: "bucket", Permission: "s3:PutObjectLegalHold"}, {Bucket: "bucket", Permission: "s3:PutObjectTagging"}}, r.Buckets)
 	})
 
 	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {

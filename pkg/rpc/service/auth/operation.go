@@ -241,20 +241,12 @@ type Requirements struct {
 	// operation that addresses no existing bucket (ListBuckets,
 	// CreateBucket).
 	Buckets []Requirement
-	// Headers names the request headers the requirements were decided from:
-	// a copy's source, and each header that added a permission to the
-	// operation. The path is always signed; a header only when listed, so
-	// nothing decided from one is trusted until it is covered by the
-	// signature. Authorize refuses otherwise ([ErrUnsignedHeader]), and a
-	// caller deciding locally must not decide at all ([Requirements.Unsigned]).
-	Headers []string
 }
 
-// Unsigned names the first of Headers the signature does not cover, if any.
-func (r Requirements) Unsigned(sr *sigv4.SignedRequest) (string, bool) {
-	return unsignedHeader(sr, r.Headers)
-}
-
+// unsignedHeader names the first of headers the signature does not cover,
+// if any. A copy's source and the headers that add a permission decide
+// what a request needs; the path is always signed, a header only when
+// listed, so nothing decided from one is trusted until it is covered.
 func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
 	for _, h := range headers {
 		if !sr.HeaderSigned(h) {
@@ -265,13 +257,26 @@ func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
 }
 
 // RequirementsFor classifies a request and returns what it needs authorized
-// (see [Requirements]).
+// (see [Requirements]). Like [Authorizer.Authorize] it refuses a request
+// whose copy source or permission-adding header is not covered by the
+// signature, as [ErrUnsignedHeader] naming the header; the signature is
+// parsed for that, not verified. A classification error ([ErrConflictingQuery],
+// [ErrUnsupportedOperation]) comes first, as it needs no signature.
 func RequirementsFor(req s3.Request) (Requirements, error) {
 	c, err := classifyRequest(req)
 	if err != nil {
 		return Requirements{}, err
 	}
-	r := Requirements{Operation: c.op, Headers: c.headers}
+	if len(c.headers) > 0 {
+		sr, err := sigv4.Parse(sigv4.Request{Method: req.Method, URL: req.URL, Headers: req.Headers})
+		if err != nil {
+			return Requirements{}, fmt.Errorf("parsing request signature: %w", err)
+		}
+		if h, ok := unsignedHeader(sr, c.headers); ok {
+			return Requirements{}, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
+		}
+	}
+	r := Requirements{Operation: c.op}
 	if !c.op.addressesExistingBucket() {
 		return r, nil
 	}
