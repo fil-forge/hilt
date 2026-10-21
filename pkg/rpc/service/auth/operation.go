@@ -143,12 +143,34 @@ var operationPermission = map[Operation]string{
 	OpGetObjectAttributes: "s3:GetObjectAttributes",
 }
 
-// Permission returns the S3 permission an access key must hold to perform the
-// operation on the bucket it addresses. Callers that map permissions to Forge
-// commands (see the `/s3/request/authorize` handler) use it to avoid re-deriving
-// the permission. For the copy operations this is the destination's permission;
-// the source's is [SourcePermission].
+// Permission returns the S3 permission that names the operation: the one an
+// access key must hold to perform it on the bucket it addresses, and the one
+// whose Forge commands the `/s3/request/authorize` handler re-delegates. An
+// operation with a companion permission ([Permissions]) needs that too. For
+// the copy operations this is the destination's permission; the source's is
+// [SourcePermission].
 func (o Operation) Permission() string { return operationPermission[o] }
+
+// companionPermission is a second S3 permission an access key must hold on
+// the addressed bucket beside the operation's own, as S3 requires. Reading an
+// object's attributes needs read access to the object, so GetObjectAttributes
+// needs s3:GetObject as well as s3:GetObjectAttributes. Only the operation's
+// own permission is re-delegated, so it must grant every command its
+// companion does, which s3perm's TestOperationPermissionCoversCompanion pins.
+var companionPermission = map[Operation]string{
+	OpGetObjectAttributes: "s3:GetObject",
+}
+
+// Permissions returns every S3 permission an access key must hold on the
+// bucket the operation addresses: [Permission], then the companion for an
+// operation that has one. The copy source's permission is separate.
+func (o Operation) Permissions() []string {
+	perms := []string{operationPermission[o]}
+	if companion, ok := companionPermission[o]; ok {
+		perms = append(perms, companion)
+	}
+	return perms
+}
 
 // SourcePermission is the S3 permission an access key must additionally hold,
 // on the copy source's bucket, to perform CopyObject or UploadPartCopy: S3
@@ -202,8 +224,9 @@ type Requirement struct {
 }
 
 // RequirementsFor classifies a request and returns every bucket/permission pair
-// it needs: the addressed bucket with the operation's permission, plus, for the
-// copy operations, the copy source's bucket with [SourcePermission]. Operations
+// it needs: the addressed bucket with each of the operation's permissions,
+// plus, for the copy operations, the copy source's bucket with
+// [SourcePermission]. Operations
 // that address no existing bucket (ListBuckets, CreateBucket) yield none. It is
 // the local mirror of the checks [Authorizer.Authorize] performs, for a gateway
 // authorizing over cached delegations; such a caller must also confirm the
@@ -217,7 +240,10 @@ func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 	if !c.op.addressesExistingBucket() {
 		return c.op, nil, nil
 	}
-	reqs := []Requirement{{Bucket: c.bucket, Permission: c.op.Permission()}}
+	var reqs []Requirement
+	for _, perm := range c.op.Permissions() {
+		reqs = append(reqs, Requirement{Bucket: c.bucket, Permission: perm})
+	}
 	if c.op.CopiesSource() {
 		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: SourcePermission})
 	}

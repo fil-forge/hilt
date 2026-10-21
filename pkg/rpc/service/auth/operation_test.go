@@ -249,7 +249,8 @@ func TestClassifyRequest(t *testing.T) {
 
 // TestRequirementsFor covers the gateway's local view of what a request needs:
 // one bucket/permission pair for an ordinary operation, a second for the copy
-// source, none for operations that address no existing bucket.
+// source or for a companion permission, none for operations that address no
+// existing bucket.
 func TestRequirementsFor(t *testing.T) {
 	copyHdr := map[string]string{"x-amz-copy-source": "src/obj"}
 
@@ -267,6 +268,13 @@ func TestRequirementsFor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OpGetObject, op)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
+
+	// Reading an object's attributes needs the object read too, on the same
+	// bucket, as S3 requires.
+	op, reqs, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k?attributes"})
+	require.NoError(t, err)
+	require.Equal(t, OpGetObjectAttributes, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
 
 	for _, req := range []s3.Request{
 		{Method: "GET", URL: "https://s3.example.com/"},
@@ -329,6 +337,22 @@ func TestOperationPermission(t *testing.T) {
 
 	// Removing the bucket's tags needs the permission that writes them.
 	require.Equal(t, "s3:PutBucketTagging", OpDeleteBucketTagging.Permission())
+
+	// Reading an object's attributes needs the object read as well; every
+	// other operation needs only its own permission on its bucket, and a
+	// companion is always something a key can hold.
+	require.Equal(t, []string{"s3:GetObjectAttributes", "s3:GetObject"}, OpGetObjectAttributes.Permissions())
+	for _, op := range ops {
+		perms := op.Permissions()
+		require.Equal(t, op.Permission(), perms[0], "operation %s", op)
+		if op != OpGetObjectAttributes {
+			require.Len(t, perms, 1, "operation %s", op)
+		}
+	}
+	for op, companion := range companionPermission {
+		require.Contains(t, ops, op, "companion for an unlisted operation %s", op)
+		require.NotEqual(t, op.Permission(), companion, "operation %s names its own permission as its companion", op)
+	}
 
 	require.Empty(t, Operation("Unknown").Permission())
 }

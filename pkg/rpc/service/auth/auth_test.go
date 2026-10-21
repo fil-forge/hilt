@@ -112,9 +112,20 @@ func seedKey(t *testing.T, accessKeys *accesskeymemory.Store, secrets *vaultmemo
 // signedObjectRequest presigns a GET of an object in the named bucket.
 func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, region string) s3.Request {
 	t.Helper()
+	return signedObjectQueryRequest(t, signer, bucketName, "", region)
+}
+
+// signedObjectQueryRequest presigns a GET of an object in the named bucket
+// with the given query, such as "attributes".
+func signedObjectQueryRequest(t *testing.T, signer multikey.Signer, bucketName, query, region string) s3.Request {
+	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
-	req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/" + bucketName + "/object-key"}
+	url := "https://s3.fil.one/" + bucketName + "/object-key"
+	if query != "" {
+		url += "?" + query
+	}
+	req := sigv4.Request{Method: "GET", URL: url}
 	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
 	require.NoError(t, err)
 	return s3.Request{Method: signed.Method, URL: signed.URL}
@@ -299,6 +310,20 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
+	t.Run("an attributes read needs the object read too", func(t *testing.T) {
+		// S3 requires s3:GetObject beside s3:GetObjectAttributes, so a key
+		// holding the attributes permission alone reads nothing.
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectAttributes"}})
+		_, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectAttributes", "s3:GetObject"}})
+		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
 	t.Run("rejects an operation the access key lacks permission for", func(t *testing.T) {
 		// The key holds only s3:GetObject, but a ListBuckets-shaped request (GET
 		// with no bucket in the path) requires s3:ListAllMyBuckets.
@@ -348,6 +373,23 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, authz.Permissions)
 		require.NotNil(t, authz.Bucket)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
+	t.Run("a principal's attributes read needs both actions from the policy", func(t *testing.T) {
+		allow := func(actions ...string) s3bkt.Statement {
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
+		}
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:GetObjectAttributes"))
+		_, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:GetObjectAttributes", "s3:GetObject"))
+		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
 		require.Equal(t, bucketID, authz.Bucket.ID)
 	})
 
