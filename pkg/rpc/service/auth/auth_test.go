@@ -78,17 +78,27 @@ func signedCopyRequest(t *testing.T, signer multikey.Signer, dstBucket, srcBucke
 // value given whole, so a test can name a source version.
 func signedCopySourceRequest(t *testing.T, signer multikey.Signer, dstBucket, source, region string, signSource bool) s3.Request {
 	t.Helper()
+	var signed []string
+	if signSource {
+		signed = []string{"x-amz-copy-source"}
+	}
+	return signedRequestWith(t, signer, "PUT", "https://s3.fil.one/"+dstBucket+"/object-key", map[string]string{"x-amz-copy-source": source}, region, signed...)
+}
+
+// signedRequestWith presigns a request carrying the given headers, of which
+// those named in signed are covered by the signature.
+func signedRequestWith(t *testing.T, signer multikey.Signer, method, url string, headers map[string]string, region string, signed ...string) s3.Request {
+	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
-	headers := map[string]string{"x-amz-copy-source": source}
-	req := sigv4.Request{Method: "PUT", URL: "https://s3.fil.one/" + dstBucket + "/object-key", Headers: headers}
+	req := sigv4.Request{Method: method, URL: url, Headers: headers}
 	var opts []sigv4.PresignOption
-	if signSource {
-		opts = append(opts, sigv4.WithSignedHeaders("x-amz-copy-source"))
+	if len(signed) > 0 {
+		opts = append(opts, sigv4.WithSignedHeaders(signed...))
 	}
-	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+	presigned, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
 	require.NoError(t, err)
-	return s3.Request{Method: signed.Method, URL: signed.URL, Headers: headers}
+	return s3.Request{Method: presigned.Method, URL: presigned.URL, Headers: headers}
 }
 
 // seedKey stores the credential's record and vault entry: a service key with
@@ -286,7 +296,7 @@ func TestAuthorize(t *testing.T) {
 	t.Run("rejects a copy whose source header is not signed", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, copyPerms)
 		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, false))
-		require.ErrorIs(t, err, auth.ErrUnsignedCopySource)
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 	})
 
 	t.Run("rejects a copy from another tenant's bucket", func(t *testing.T) {
@@ -334,6 +344,112 @@ func TestAuthorize(t *testing.T) {
 		require.Equal(t, auth.OpCopyObject, authz.Operation)
 		require.Equal(t, auth.SourceVersionPermission, authz.SourcePermission)
 		require.Equal(t, bucketID, authz.SourceBucket.ID)
+	})
+
+	t.Run("a header that adds a permission is checked with the write", func(t *testing.T) {
+		// S3 needs s3:PutObjectRetention beside s3:PutObject to set a
+		// retention period on the version a put creates, and the gateway
+		// stamps it from the header, so the header is priced here.
+		const objectURL = "https://s3.fil.one/bucket/object-key"
+		lock := map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"}
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:PutObject"}})
+		_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", objectURL, lock, region, "x-amz-object-lock-mode"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:PutObject", "s3:PutObjectRetention"}})
+		authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", objectURL, lock, region, "x-amz-object-lock-mode"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpPutObject, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+
+		// The header is trusted only when the signature covers it.
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", objectURL, lock, region))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-object-lock-mode")
+
+		// A copy replacing the tags needs the tagging write on the destination
+		// beside the put and the source read.
+		replace := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE"}
+		az, _, _ = setup(t, accessKey, copyPerms)
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:PutObjectTagging"}})
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+
+		// With the source signed and the directive not, the copy is refused on
+		// the directive.
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-tagging-directive")
+
+		// A repeated directive reaches hilt comma-joined and the gateway acts
+		// on its first value, so the first value decides here too.
+		repeated := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE,COPY"}
+		az, _, _ = setup(t, accessKey, copyPerms)
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", repeated, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:PutObjectTagging"}})
+
+		// The replacement tags are written from the tagging header, so a
+		// signed directive does not cover unsigned tags.
+		withTags := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE", "x-amz-tagging": "k=v"}
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", withTags, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-tagging")
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", withTags, region, "x-amz-copy-source", "x-amz-tagging-directive", "x-amz-tagging"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+	})
+
+	t.Run("creating a bucket with Object Lock needs the configuration permissions", func(t *testing.T) {
+		// The bucket is born versioned and locked, which S3 prices as
+		// s3:PutBucketVersioning and s3:PutBucketObjectLockConfiguration
+		// beside s3:CreateBucket.
+		const bucketURL = "https://s3.fil.one/newbucket"
+		locked := map[string]string{"x-amz-bucket-object-lock-enabled": "true"}
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket"}})
+		authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, nil, region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCreateBucket, authz.Operation)
+
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket", "s3:PutBucketVersioning"}})
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		// A repeated flag is comma-joined and the gateway acts on its first
+		// value: "true,false" creates a locked bucket.
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket"}})
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, map[string]string{"x-amz-bucket-object-lock-enabled": "true,false"}, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration"}})
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCreateBucket, authz.Operation)
+		require.Nil(t, authz.Bucket)
+
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+	})
+
+	t.Run("a request's requirements refuse an unsigned header as Authorize does", func(t *testing.T) {
+		headers := map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}
+		_, _, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-object-lock-legal-hold")
+
+		op, reqs, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging", "x-amz-object-lock-legal-hold"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpPutObject, op)
+		require.Equal(t, []auth.Requirement{{Bucket: "bucket", Permission: "s3:PutObject"}, {Bucket: "bucket", Permission: "s3:PutObjectLegalHold"}, {Bucket: "bucket", Permission: "s3:PutObjectTagging"}}, reqs)
 	})
 
 	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {
@@ -554,6 +670,22 @@ func TestAuthorize(t *testing.T) {
 			require.Equal(t, bucketID, authz.SourceBucket.ID)
 		})
 
+		t.Run("a lock header needs the lock action from the destination's policy", func(t *testing.T) {
+			hold := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-object-lock-legal-hold": "ON"}
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject", "s3:PutObjectLegalHold"))
+			_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", hold, region, "x-amz-copy-source", "x-amz-object-lock-legal-hold"))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject", "s3:PutObjectLegalHold"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
+			authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", hold, region, "x-amz-copy-source", "x-amz-object-lock-legal-hold"))
+			require.NoError(t, err)
+			require.Equal(t, bucket2ID, authz.Bucket.ID)
+		})
+
 		t.Run("a copy within one bucket needs both actions there", func(t *testing.T) {
 			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
 			grant(t, policies, bucketID, tenantID, allow("s3:PutObject"))
@@ -581,7 +713,7 @@ func TestAuthorize(t *testing.T) {
 			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
 
 			_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, false))
-			require.ErrorIs(t, err, auth.ErrUnsignedCopySource)
+			require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 		})
 	})
 

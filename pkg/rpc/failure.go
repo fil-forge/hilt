@@ -37,7 +37,7 @@ func authFailure(res failer, err error) error {
 		errors.Is(err, auth.ErrUnknownBucket),
 		errors.Is(err, auth.ErrForeignBucket),
 		errors.Is(err, auth.ErrBucketNotPermitted),
-		errors.Is(err, auth.ErrUnsignedCopySource),
+		errors.Is(err, auth.ErrUnsignedHeader),
 		errors.Is(err, auth.ErrTemporarilyUnavailable):
 		return res.SetFailure(err)
 	default:

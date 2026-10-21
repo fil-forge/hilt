@@ -165,6 +165,11 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 		{"s3:GetObject", "s3:GetObjectRetention"},
 		{"s3:GetObject", "s3:GetObjectLegalHold"},
 		{"s3:ListBucket", "s3:ListBucketVersions"},
+		// A write that tags the version it creates is authorized under the
+		// write's re-delegation, with s3:PutObjectTagging checked beside it
+		// (auth.classification.readHeaders); the lock pairs above cover the
+		// lock headers the same way.
+		{"s3:PutObject", "s3:PutObjectTagging"},
 	} {
 		// Guard against the check going vacuous if a set is ever emptied.
 		require.NotEmpty(t, strs(c.specialized), c.specialized)

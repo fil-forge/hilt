@@ -188,10 +188,14 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   it stays refused. A
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
   destination and `s3:GetObject` on the source (`s3:GetObjectVersion` when the
-  source names a versionId), and the header must be a signed header. An operation S3 gives a second permission on its own bucket
-  (`companionPermission`: GetObjectAttributes needs `s3:GetObject` too) is
-  checked for both. Command-specific S3-permission checks stay in each
-  handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
+  source names a versionId). An operation S3 gives a second permission on its
+  own bucket (`companionPermission`: GetObjectAttributes needs `s3:GetObject`
+  too) is checked for both, and so is a header that adds one
+  (`classification.readHeaders`: lock and tagging headers on a write,
+  `x-amz-bucket-object-lock-enabled` on CreateBucket). Every header a
+  decision is taken from must be a signed header, which `RequirementsFor`
+  refuses too for the gateway's local check. Command-specific S3-permission checks
+  stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
   each per-request delegation keyed to itself. `/s3/bucket/info` carries no
   signed request, so it authorizes on the invocation issuer instead: the issuer
   must be the provider of the bucket's tenant, and the access key in the
