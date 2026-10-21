@@ -254,63 +254,175 @@ func TestClassifyRequest(t *testing.T) {
 	})
 }
 
-// TestRequirementsFor covers the gateway's local view of what a request needs:
-// one bucket/permission pair for an ordinary operation, a second for the copy
-// source or for a companion permission, none for operations that address no
-// existing bucket.
+// TestRequirementsFor covers the gateway's local view of what a request
+// needs: one bucket/permission pair for an ordinary operation, a second for
+// the copy source, a companion permission or a header that adds one, none
+// for operations that address no existing bucket, and the headers each
+// decision was taken from.
 func TestRequirementsFor(t *testing.T) {
+	requirements := func(method, url string, headers map[string]string) Requirements {
+		t.Helper()
+		r, err := RequirementsFor(s3.Request{Method: method, URL: url, Headers: headers})
+		require.NoError(t, err)
+		return r
+	}
 	copyHdr := map[string]string{"x-amz-copy-source": "src/obj"}
 
-	op, reqs, err := RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
-	require.NoError(t, err)
-	require.Equal(t, OpCopyObject, op)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
+	r := requirements("PUT", "https://s3.example.com/bkt/k", copyHdr)
+	require.Equal(t, OpCopyObject, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
+	require.Equal(t, []string{"x-amz-copy-source"}, r.Headers)
 
-	op, reqs, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", Headers: copyHdr})
-	require.NoError(t, err)
-	require.Equal(t, OpUploadPartCopy, op)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
+	r = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", copyHdr)
+	require.Equal(t, OpUploadPartCopy, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
+	require.Equal(t, []string{"x-amz-copy-source"}, r.Headers)
 
 	// A source naming a version needs the version read there instead.
 	versionHdr := map[string]string{"x-amz-copy-source": "src/obj?versionId=v1"}
-	op, reqs, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: versionHdr})
-	require.NoError(t, err)
-	require.Equal(t, OpCopyObject, op)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, reqs)
+	r = requirements("PUT", "https://s3.example.com/bkt/k", versionHdr)
+	require.Equal(t, OpCopyObject, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, r.Buckets)
 
-	op, reqs, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", Headers: versionHdr})
-	require.NoError(t, err)
-	require.Equal(t, OpUploadPartCopy, op)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, reqs)
+	r = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", versionHdr)
+	require.Equal(t, OpUploadPartCopy, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, r.Buckets)
 
-	op, reqs, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
-	require.NoError(t, err)
-	require.Equal(t, OpGetObject, op)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
+	r = requirements("GET", "https://s3.example.com/bkt/k", nil)
+	require.Equal(t, OpGetObject, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, r.Buckets)
+	require.Empty(t, r.Headers)
 
 	// Reading an object's attributes needs the object read too, on the same
 	// bucket, as S3 requires.
-	op, reqs, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k?attributes"})
-	require.NoError(t, err)
-	require.Equal(t, OpGetObjectAttributes, op)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
+	r = requirements("GET", "https://s3.example.com/bkt/k?attributes", nil)
+	require.Equal(t, OpGetObjectAttributes, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, r.Buckets)
+
+	// A header that adds a permission puts it on the addressed bucket, after
+	// the operation's own and before the copy source's, and is listed as a
+	// header the decision was taken from.
+	r = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"})
+	require.Equal(t, OpPutObject, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectRetention"}}, r.Buckets)
+	require.Equal(t, []string{"x-amz-object-lock-mode"}, r.Headers)
+
+	r = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE"})
+	require.Equal(t, OpCopyObject, r.Operation)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
+	require.Equal(t, []string{"x-amz-copy-source", "x-amz-tagging-directive"}, r.Headers)
+
+	// CreateBucket addresses no existing bucket, so it yields no pair for
+	// the gateway to check locally, but the header it was decided from is
+	// still listed.
+	r = requirements("PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"})
+	require.Equal(t, OpCreateBucket, r.Operation)
+	require.Empty(t, r.Buckets)
+	require.Equal(t, []string{"x-amz-bucket-object-lock-enabled"}, r.Headers)
 
 	for _, req := range []s3.Request{
 		{Method: "GET", URL: "https://s3.example.com/"},
 		{Method: "PUT", URL: "https://s3.example.com/bkt"},
 	} {
-		_, reqs, err := RequirementsFor(req)
+		r, err := RequirementsFor(req)
 		require.NoError(t, err)
-		require.Empty(t, reqs, "%s %s", req.Method, req.URL)
+		require.Empty(t, r.Buckets, "%s %s", req.Method, req.URL)
+		require.Empty(t, r.Headers, "%s %s", req.Method, req.URL)
 	}
 
-	_, _, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
+	_, err := RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
 	require.Error(t, err)
 
 	// The gateway sees the refusal of two subresources by its name, so it can
 	// answer it without consulting hilt.
-	_, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
+	_, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
 	require.ErrorIs(t, err, ErrConflictingQuery)
+}
+
+// TestReadHeaders covers the permissions a request's headers add to its
+// operation, and the headers recorded as decided from: the lock and tagging
+// headers on the three writes that create a version, the Object Lock flag
+// on CreateBucket, and nothing anywhere else.
+func TestReadHeaders(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		method, url string
+		headers     map[string]string
+		wantPerms   []string
+		wantHeaders []string
+	}{
+		{name: "put with a lock mode", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:   map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"},
+			wantPerms: []string{"s3:PutObjectRetention"}, wantHeaders: []string{"x-amz-object-lock-mode"}},
+		{name: "put with a retain-until date alone", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:   map[string]string{"x-amz-object-lock-retain-until-date": "2030-01-01T00:00:00Z"},
+			wantPerms: []string{"s3:PutObjectRetention"}, wantHeaders: []string{"x-amz-object-lock-retain-until-date"}},
+		{name: "put with a legal hold", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:   map[string]string{"x-amz-object-lock-legal-hold": "ON"},
+			wantPerms: []string{"s3:PutObjectLegalHold"}, wantHeaders: []string{"x-amz-object-lock-legal-hold"}},
+		{name: "put with tags", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:   map[string]string{"x-amz-tagging": "k=v"},
+			wantPerms: []string{"s3:PutObjectTagging"}, wantHeaders: []string{"x-amz-tagging"}},
+		{name: "put with every header, names each once", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers: map[string]string{
+				"X-Amz-Object-Lock-Mode": "COMPLIANCE", "x-amz-object-lock-retain-until-date": "2030-01-01T00:00:00Z",
+				"x-amz-object-lock-legal-hold": "OFF", "x-amz-tagging": "k=v",
+			},
+			wantPerms:   []string{"s3:PutObjectRetention", "s3:PutObjectLegalHold", "s3:PutObjectTagging"},
+			wantHeaders: []string{"x-amz-object-lock-mode", "x-amz-object-lock-retain-until-date", "x-amz-object-lock-legal-hold", "x-amz-tagging"}},
+		{name: "an empty header value is absent", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers: map[string]string{"x-amz-object-lock-mode": "", "x-amz-tagging": ""}},
+		{name: "create multipart upload with a lock and tags", method: "POST", url: "https://s3.example.com/bkt/k?uploads",
+			headers:     map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"},
+			wantPerms:   []string{"s3:PutObjectLegalHold", "s3:PutObjectTagging"},
+			wantHeaders: []string{"x-amz-object-lock-legal-hold", "x-amz-tagging"}},
+		{name: "copy with a lock mode", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-object-lock-mode": "GOVERNANCE"},
+			wantPerms:   []string{"s3:PutObjectRetention"},
+			wantHeaders: []string{"x-amz-copy-source", "x-amz-object-lock-mode"}},
+		{name: "copy replacing the tags", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE", "x-amz-tagging": "k=v"},
+			wantPerms:   []string{"s3:PutObjectTagging"},
+			wantHeaders: []string{"x-amz-copy-source", "x-amz-tagging-directive"}},
+		{name: "copy carrying the tags, which the gateway ignores", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "COPY", "x-amz-tagging": "k=v"},
+			wantHeaders: []string{"x-amz-copy-source"}},
+		{name: "copy with tags and no directive", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging": "k=v"},
+			wantHeaders: []string{"x-amz-copy-source"}},
+		{name: "the directive is compared exactly", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "replace"},
+			wantHeaders: []string{"x-amz-copy-source"}},
+		{name: "upload part ignores the lock headers", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc",
+			headers: map[string]string{"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-tagging": "k=v"}},
+		{name: "upload part copy ignores them too", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-object-lock-mode": "GOVERNANCE", "x-amz-tagging-directive": "REPLACE"},
+			wantHeaders: []string{"x-amz-copy-source"}},
+		{name: "complete multipart upload ignores them", method: "POST", url: "https://s3.example.com/bkt/k?uploadId=abc",
+			headers: map[string]string{"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-tagging": "k=v"}},
+		{name: "a read ignores them", method: "GET", url: "https://s3.example.com/bkt/k",
+			headers: map[string]string{"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-tagging": "k=v"}},
+		{name: "create bucket with object lock enabled", method: "PUT", url: "https://s3.example.com/bkt",
+			headers:     map[string]string{"x-amz-bucket-object-lock-enabled": "true"},
+			wantPerms:   []string{"s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration"},
+			wantHeaders: []string{"x-amz-bucket-object-lock-enabled"}},
+		{name: "the flag is read case-insensitively", method: "PUT", url: "https://s3.example.com/bkt",
+			headers:     map[string]string{"X-Amz-Bucket-Object-Lock-Enabled": "TRUE"},
+			wantPerms:   []string{"s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration"},
+			wantHeaders: []string{"x-amz-bucket-object-lock-enabled"}},
+		{name: "create bucket with object lock disabled", method: "PUT", url: "https://s3.example.com/bkt",
+			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "false"}},
+		{name: "put object ignores the bucket flag", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "true"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := classifyRequest(s3.Request{Method: tt.method, URL: tt.url, Headers: tt.headers})
+			require.NoError(t, err)
+			require.Equal(t, tt.wantPerms, c.headerPermissions)
+			require.Equal(t, tt.wantHeaders, c.headers)
+			require.Equal(t, append(c.op.Permissions(), tt.wantPerms...), c.permissions())
+		})
+	}
 }
 
 // TestOperationPermission asserts every operation requires a permission, so a new

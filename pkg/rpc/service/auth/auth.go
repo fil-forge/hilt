@@ -48,8 +48,8 @@ type AuthorizedRequest struct {
 	// on Bucket, or s3:ListAllMyBuckets alone for ListBuckets.
 	Permissions []string
 	// Operation is the S3 operation the (signature-verified) request performs. The
-	// access key is confirmed to hold its permissions; handlers check it matches
-	// the operation they serve.
+	// access key is confirmed to hold its permissions, and those the request's
+	// headers add; handlers check it matches the operation they serve.
 	Operation Operation
 	// BucketName is the bucket name from the request.
 	BucketName string
@@ -223,13 +223,14 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	}
 	op, bucketName := c.op, c.bucket
 
-	// A copy also reads its source, named by a header. The path is always
-	// signed; a header only when listed, so the naming must be covered by the
-	// signature before anything is decided from it. What the credential needs on
-	// the source is decided with the rest of its access.
-	if op.CopiesSource() && !sr.HeaderSigned(copySourceHeader) {
-		log.Debug("rejecting copy whose source header is not signed", zap.Stringer("operation", op))
-		return nil, ErrUnsignedCopySource
+	// A copy reads its source, and a write may set a lock or tags, each named
+	// by a header. The path is always signed; a header only when listed, so
+	// every header a decision was taken from must be covered by the signature
+	// before the decision is trusted. What the credential needs is decided
+	// with the rest of its access.
+	if h, ok := unsignedHeader(sr, c.headers); ok {
+		log.Debug("rejecting request whose header is not signed", zap.Stringer("operation", op), zap.String("header", h))
+		return nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
 	}
 
 	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, c)
@@ -276,7 +277,7 @@ func (a *Authorizer) authorizeOperation(
 	// A service key carries its own permissions and bucket scope, evaluated
 	// against no policy.
 	if akRec.Principal == nil {
-		for _, perm := range op.Permissions() {
+		for _, perm := range c.permissions() {
 			if !slices.Contains(akRec.Permissions, perm) {
 				log.Debug("rejecting operation the access key lacks permission for", zap.Stringer("operation", op), zap.String("permission", perm))
 				return nil, nil, nil, ErrOperationNotPermitted
@@ -338,7 +339,7 @@ func (a *Authorizer) authorizeOperation(
 		return nil, nil, nil, ErrOperationNotPermitted
 	}
 
-	b, eff, err := a.principalAccess(ctx, log, tenantRec.ID, principalID, bucketName, op.Permissions()...)
+	b, eff, err := a.principalAccess(ctx, log, tenantRec.ID, principalID, bucketName, c.permissions()...)
 	if err != nil {
 		return nil, nil, nil, err
 	}

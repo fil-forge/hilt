@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/fil-forge/hilt/pkg/sigv4"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 )
 
@@ -228,31 +229,59 @@ type Requirement struct {
 	Permission string
 }
 
-// RequirementsFor classifies a request and returns every bucket/permission pair
-// it needs: the addressed bucket with each of the operation's permissions,
-// plus, for the copy operations, the copy source's bucket with
-// [SourcePermission] or [SourceVersionPermission]. Operations
-// that address no existing bucket (ListBuckets, CreateBucket) yield none. It is
-// the local mirror of the checks [Authorizer.Authorize] performs, for a gateway
-// authorizing over cached delegations; such a caller must also confirm the
-// x-amz-copy-source header is covered by the signature (see
-// [sigv4.SignedRequest.HeaderSigned]), as Authorize does.
-func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
+// Requirements is what a request needs authorized, as a gateway deciding
+// over cached delegations sees it: the local mirror of the checks
+// [Authorizer.Authorize] performs.
+type Requirements struct {
+	Operation Operation
+	// Buckets is every bucket/permission pair the request needs: the
+	// addressed bucket with each permission the operation and its headers
+	// put on it, then, for the copy operations, the copy source's bucket
+	// with [SourcePermission] or [SourceVersionPermission]. Empty for an
+	// operation that addresses no existing bucket (ListBuckets,
+	// CreateBucket).
+	Buckets []Requirement
+	// Headers names the request headers the requirements were decided from:
+	// a copy's source, and each header that added a permission to the
+	// operation. The path is always signed; a header only when listed, so
+	// nothing decided from one is trusted until it is covered by the
+	// signature. Authorize refuses otherwise ([ErrUnsignedHeader]), and a
+	// caller deciding locally must not decide at all ([Requirements.Unsigned]).
+	Headers []string
+}
+
+// Unsigned names the first of Headers the signature does not cover, if any.
+func (r Requirements) Unsigned(sr *sigv4.SignedRequest) (string, bool) {
+	return unsignedHeader(sr, r.Headers)
+}
+
+func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
+	for _, h := range headers {
+		if !sr.HeaderSigned(h) {
+			return h, true
+		}
+	}
+	return "", false
+}
+
+// RequirementsFor classifies a request and returns what it needs authorized
+// (see [Requirements]).
+func RequirementsFor(req s3.Request) (Requirements, error) {
 	c, err := classifyRequest(req)
 	if err != nil {
-		return "", nil, err
+		return Requirements{}, err
 	}
+	r := Requirements{Operation: c.op, Headers: c.headers}
 	if !c.op.addressesExistingBucket() {
-		return c.op, nil, nil
+		return r, nil
 	}
-	var reqs []Requirement
-	for _, perm := range c.op.Permissions() {
-		reqs = append(reqs, Requirement{Bucket: c.bucket, Permission: perm})
+	for _, perm := range c.permissions() {
+		r.Buckets = append(r.Buckets, Requirement{Bucket: c.bucket, Permission: perm})
 	}
 	if c.op.CopiesSource() {
-		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: c.sourcePermission()})
+		r.Buckets = append(r.Buckets, Requirement{Bucket: c.srcBucket, Permission: c.sourcePermission()})
 	}
-	return c.op, reqs, nil
+	return r, nil
 }
 
 // copySourceHeader names the copy source of a CopyObject / UploadPartCopy
@@ -260,15 +289,82 @@ func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 // optional "?versionId=" suffix.
 const copySourceHeader = "x-amz-copy-source"
 
+// The request headers that put a permission on the operation they ride on,
+// as S3 requires. A write that sets a retention period or a legal hold on
+// the version it creates needs the lock permission beside the write, one
+// that tags it needs the tagging permission, and a bucket created with
+// Object Lock enabled is born versioned and locked, which needs both
+// configuration permissions beside s3:CreateBucket. The gateway acts on
+// these headers exactly as read here: it stamps the lock state and the tags
+// at commit (a copy's tags only under a REPLACE directive) and creates the
+// bucket versioned and locked, so a header that adds no permission here is
+// one the gateway does not act on either.
+const (
+	objectLockModeHeader          = "x-amz-object-lock-mode"
+	objectLockRetainUntilHeader   = "x-amz-object-lock-retain-until-date"
+	objectLockLegalHoldHeader     = "x-amz-object-lock-legal-hold"
+	taggingHeader                 = "x-amz-tagging"
+	taggingDirectiveHeader        = "x-amz-tagging-directive"
+	bucketObjectLockEnabledHeader = "x-amz-bucket-object-lock-enabled"
+)
+
 // classification is what classifyRequest derives from a request: the operation,
-// the bucket and key it addresses, and for the copy operations the bucket,
-// key and version named by x-amz-copy-source.
+// the bucket and key it addresses, for the copy operations the bucket, key
+// and version named by x-amz-copy-source, and the permissions the request's
+// headers add.
 type classification struct {
 	op          Operation
 	bucket, key string
 	// srcBucket, srcKey and srcVersionID are set only when op.CopiesSource();
 	// srcVersionID is empty when the source names no version.
 	srcBucket, srcKey, srcVersionID string
+	// headerPermissions are the permissions the request's headers put on the
+	// operation, beside its own, and headers names every header a decision
+	// was taken from: the copy source and each of those. See [Requirements].
+	headerPermissions, headers []string
+}
+
+// permissions is every S3 permission the credential needs on the bucket the
+// request addresses: the operation's own, then those its headers add.
+func (c classification) permissions() []string {
+	return append(c.op.Permissions(), c.headerPermissions...)
+}
+
+// readHeaders adds the permissions the request's headers put on the
+// operation (see the header constants) and records each header it decided
+// from. A header is present when it has a value; the directive is compared
+// exactly and the enabled flag case-insensitively, as the gateway reads them.
+func (c *classification) readHeaders(headers map[string]string) {
+	need := func(header string, perms ...string) {
+		c.headers = append(c.headers, header)
+		for _, p := range perms {
+			if !slices.Contains(c.headerPermissions, p) {
+				c.headerPermissions = append(c.headerPermissions, p)
+			}
+		}
+	}
+	switch c.op {
+	case OpPutObject, OpCopyObject, OpCreateMultipartUpload:
+		for _, h := range []string{objectLockModeHeader, objectLockRetainUntilHeader} {
+			if _, ok := HeaderValue(headers, h); ok {
+				need(h, "s3:PutObjectRetention")
+			}
+		}
+		if _, ok := HeaderValue(headers, objectLockLegalHoldHeader); ok {
+			need(objectLockLegalHoldHeader, "s3:PutObjectLegalHold")
+		}
+		if c.op == OpCopyObject {
+			if v, ok := HeaderValue(headers, taggingDirectiveHeader); ok && v == "REPLACE" {
+				need(taggingDirectiveHeader, "s3:PutObjectTagging")
+			}
+		} else if _, ok := HeaderValue(headers, taggingHeader); ok {
+			need(taggingHeader, "s3:PutObjectTagging")
+		}
+	case OpCreateBucket:
+		if v, ok := HeaderValue(headers, bucketObjectLockEnabledHeader); ok && strings.EqualFold(v, "true") {
+			need(bucketObjectLockEnabledHeader, "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration")
+		}
+	}
 }
 
 // sourcePermission is the S3 permission the copy's source needs: the version
@@ -457,7 +553,22 @@ var objectRoutes = map[string]map[string]Operation{
 // the gateway's own validation of the value rejects the request. Which error
 // the caller sees for a malformed value is the gateway's call; it validates
 // the header before consulting hilt.
+//
+// The lock, tagging and Object Lock headers add a permission to the write
+// they ride on (see the header constants); like the copy source, each is
+// trusted only once Authorize has confirmed it was signed.
 func classifyRequest(req s3.Request) (classification, error) {
+	c, err := classifyRoute(req)
+	if err != nil {
+		return classification{}, err
+	}
+	c.readHeaders(req.Headers)
+	return c, nil
+}
+
+// classifyRoute derives the operation, the bucket and key, and the copy
+// source from the request's method, path, query and copy-source header.
+func classifyRoute(req s3.Request) (classification, error) {
 	u, err := url.Parse(req.URL)
 	if err != nil {
 		return classification{}, fmt.Errorf("parsing request URL: %w", err)
@@ -495,6 +606,7 @@ func classifyRequest(req s3.Request) (classification, error) {
 			return plain
 		}
 		c.srcBucket, c.srcKey, c.srcVersionID = srcBucket, srcKey, srcVersionID
+		c.headers = append(c.headers, copySourceHeader)
 		return copied
 	}
 
