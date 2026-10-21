@@ -322,6 +322,12 @@ func TestRequirementsFor(t *testing.T) {
 	require.Equal(t, OpCopyObject, op)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
 
+	// A repeated directive is comma-joined by the gateway, which then acts on
+	// its first value; so does the decision here.
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE,COPY"})
+	require.Equal(t, OpCopyObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
+
 	// CreateBucket addresses no existing bucket, so it yields no pair for
 	// the gateway to check locally, with or without the Object Lock flag.
 	op, reqs = requirements("PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"})
@@ -433,6 +439,15 @@ func TestReadHeaders(t *testing.T) {
 		{name: "the directive is compared exactly", method: "PUT", url: "https://s3.example.com/bkt/k",
 			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "replace"},
 			wantHeaders: []string{"x-amz-copy-source"}},
+		// A repeated header arrives comma-joined; the gateway acts on the
+		// first value, so the decision is taken on it.
+		{name: "a repeated directive decides on its first value", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE,COPY"},
+			wantPerms:   []string{"s3:PutObjectTagging"},
+			wantHeaders: []string{"x-amz-copy-source", "x-amz-tagging-directive"}},
+		{name: "a repeated directive whose first value copies", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers:     map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "COPY, REPLACE"},
+			wantHeaders: []string{"x-amz-copy-source"}},
 		{name: "upload part ignores the lock headers", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc",
 			headers: map[string]string{"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-tagging": "k=v"}},
 		{name: "upload part copy ignores them too", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc",
@@ -452,6 +467,12 @@ func TestReadHeaders(t *testing.T) {
 			wantHeaders: []string{"x-amz-bucket-object-lock-enabled"}},
 		{name: "create bucket with object lock disabled", method: "PUT", url: "https://s3.example.com/bkt",
 			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "false"}},
+		{name: "a repeated flag decides on its first value", method: "PUT", url: "https://s3.example.com/bkt",
+			headers:     map[string]string{"x-amz-bucket-object-lock-enabled": "true,false"},
+			wantPerms:   []string{"s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration"},
+			wantHeaders: []string{"x-amz-bucket-object-lock-enabled"}},
+		{name: "a repeated flag whose first value disables", method: "PUT", url: "https://s3.example.com/bkt",
+			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "false, true"}},
 		{name: "put object ignores the bucket flag", method: "PUT", url: "https://s3.example.com/bkt/k",
 			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "true"}},
 	} {

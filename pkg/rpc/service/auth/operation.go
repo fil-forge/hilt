@@ -330,8 +330,15 @@ func (c classification) permissions() []string {
 // operation (see the header constants) and records each header it decided
 // from, with any header the gateway then writes the version from. A header
 // is present when it has a value; the directive is compared exactly and the
-// enabled flag case-insensitively, as the gateway reads them.
+// enabled flag case-insensitively, as the gateway reads them. A repeated
+// header reaches hilt comma-joined and the gateway acts on its first value
+// alone, so a value is decided on its first comma-separated part; the
+// signature covers them all.
 func (c *classification) readHeaders(headers map[string]string) {
+	first := func(v string) string {
+		v, _, _ = strings.Cut(v, ",")
+		return strings.TrimSpace(v)
+	}
 	need := func(header string, perms ...string) {
 		c.headers = append(c.headers, header)
 		for _, p := range perms {
@@ -353,7 +360,7 @@ func (c *classification) readHeaders(headers map[string]string) {
 		if c.op == OpCopyObject {
 			// The directive decides the permission; the tags the gateway then
 			// writes come from the tagging header, so that must be signed too.
-			if v, ok := HeaderValue(headers, taggingDirectiveHeader); ok && v == "REPLACE" {
+			if v, ok := HeaderValue(headers, taggingDirectiveHeader); ok && first(v) == "REPLACE" {
 				need(taggingDirectiveHeader, "s3:PutObjectTagging")
 				if _, ok := HeaderValue(headers, taggingHeader); ok {
 					need(taggingHeader)
@@ -363,7 +370,7 @@ func (c *classification) readHeaders(headers map[string]string) {
 			need(taggingHeader, "s3:PutObjectTagging")
 		}
 	case OpCreateBucket:
-		if v, ok := HeaderValue(headers, bucketObjectLockEnabledHeader); ok && strings.EqualFold(v, "true") {
+		if v, ok := HeaderValue(headers, bucketObjectLockEnabledHeader); ok && strings.EqualFold(first(v), "true") {
 			need(bucketObjectLockEnabledHeader, "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration")
 		}
 	}

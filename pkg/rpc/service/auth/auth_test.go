@@ -386,6 +386,14 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 		require.ErrorContains(t, err, "x-amz-tagging-directive")
 
+		// A repeated directive reaches hilt comma-joined and the gateway acts
+		// on its first value, so the first value decides here too.
+		repeated := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE,COPY"}
+		az, _, _ = setup(t, accessKey, copyPerms)
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", repeated, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:PutObjectTagging"}})
+
 		// The replacement tags are written from the tagging header, so a
 		// signed directive does not cover unsigned tags.
 		withTags := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE", "x-amz-tagging": "k=v"}
@@ -414,6 +422,12 @@ func TestAuthorize(t *testing.T) {
 
 		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket", "s3:PutBucketVersioning"}})
 		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		// A repeated flag is comma-joined and the gateway acts on its first
+		// value: "true,false" creates a locked bucket.
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket"}})
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, map[string]string{"x-amz-bucket-object-lock-enabled": "true,false"}, region, "x-amz-bucket-object-lock-enabled"))
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 
 		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration"}})
