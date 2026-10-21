@@ -385,6 +385,16 @@ func TestAuthorize(t *testing.T) {
 		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source"))
 		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 		require.ErrorContains(t, err, "x-amz-tagging-directive")
+
+		// The replacement tags are written from the tagging header, so a
+		// signed directive does not cover unsigned tags.
+		withTags := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE", "x-amz-tagging": "k=v"}
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", withTags, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-tagging")
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", withTags, region, "x-amz-copy-source", "x-amz-tagging-directive", "x-amz-tagging"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
 	})
 
 	t.Run("creating a bucket with Object Lock needs the configuration permissions", func(t *testing.T) {

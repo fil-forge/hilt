@@ -332,8 +332,9 @@ func (c classification) permissions() []string {
 
 // readHeaders adds the permissions the request's headers put on the
 // operation (see the header constants) and records each header it decided
-// from. A header is present when it has a value; the directive is compared
-// exactly and the enabled flag case-insensitively, as the gateway reads them.
+// from, with any header the gateway then writes the version from. A header
+// is present when it has a value; the directive is compared exactly and the
+// enabled flag case-insensitively, as the gateway reads them.
 func (c *classification) readHeaders(headers map[string]string) {
 	need := func(header string, perms ...string) {
 		c.headers = append(c.headers, header)
@@ -354,8 +355,13 @@ func (c *classification) readHeaders(headers map[string]string) {
 			need(objectLockLegalHoldHeader, "s3:PutObjectLegalHold")
 		}
 		if c.op == OpCopyObject {
+			// The directive decides the permission; the tags the gateway then
+			// writes come from the tagging header, so that must be signed too.
 			if v, ok := HeaderValue(headers, taggingDirectiveHeader); ok && v == "REPLACE" {
 				need(taggingDirectiveHeader, "s3:PutObjectTagging")
+				if _, ok := HeaderValue(headers, taggingHeader); ok {
+					need(taggingHeader)
+				}
 			}
 		} else if _, ok := HeaderValue(headers, taggingHeader); ok {
 			need(taggingHeader, "s3:PutObjectTagging")
