@@ -17,6 +17,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -483,4 +484,42 @@ func testPresignedGetFollowsPolicy(t *testing.T, net *forgeNet) {
 		lastStatus, lastBody, lastErr = get()
 		return lastErr == nil && lastStatus == http.StatusNotFound && bytes.Contains(lastBody, []byte("NoSuchBucket"))
 	}, time.Minute, time.Second, "the presigned url should be refused once the policy is gone")
+}
+
+// testDeleteObjectsVersionNeedsTheVersionAction covers the body hilt reads:
+// a DeleteObjects entry naming a version needs s3:DeleteObjectVersion from
+// the policy beside s3:DeleteObject, and the whole request is refused
+// without it. The SDK binds the body to the signature, as every client
+// does, so the refusal is on the action alone.
+func testDeleteObjectsVersionNeedsTheVersionAction(t *testing.T, net *forgeNet) {
+	ctx := t.Context()
+	const bucket, principal = "delobjs", "deleter"
+	m := newMember(t, net, "tenant-delobjs", principal, bucket)
+
+	_, err := m.service.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket:                  aws.String(bucket),
+		VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+	})
+	require.NoError(t, err)
+	first, err := m.service.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String("k"), Body: bytes.NewReader([]byte("one"))})
+	require.NoError(t, err)
+	_, err = m.service.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String("k"), Body: bytes.NewReader([]byte("two"))})
+	require.NoError(t, err)
+	require.NotEmpty(t, aws.ToString(first.VersionId))
+
+	deleteFirst := func() error {
+		_, err := m.s3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &types.Delete{Objects: []types.ObjectIdentifier{{Key: aws.String("k"), VersionId: first.VersionId}}},
+		})
+		return err
+	}
+
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(principal), "s3:DeleteObject", "s3:GetObject"))
+	awaitS3Code(t, "AccessDenied", deleteFirst)
+
+	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(principal), "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:GetObject"))
+	var last error
+	require.Eventually(t, func() bool { last = deleteFirst(); return last == nil }, time.Minute, time.Second,
+		"the version delete should succeed once the policy grants the action, last error: %v", last)
 }

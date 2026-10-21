@@ -1,6 +1,10 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"hash/crc32"
 	"slices"
 	"testing"
 	"time"
@@ -282,6 +286,24 @@ func TestRequirementsFor(t *testing.T) {
 		require.NoError(t, err)
 		return op, reqs
 	}
+	// withBody attaches body to a presigned request, covered by the payload
+	// hash when bind is set and left unsigned otherwise.
+	withBody := func(method, url string, headers map[string]string, body string, bind bool) s3.Request {
+		t.Helper()
+		var opts []sigv4.PresignOption
+		var signed []string
+		for name := range headers {
+			signed = append(signed, name)
+		}
+		opts = append(opts, sigv4.WithSignedHeaders(signed...))
+		if bind {
+			sum := sha256.Sum256([]byte(body))
+			opts = append(opts, sigv4.WithPayloadHash(hex.EncodeToString(sum[:])))
+		}
+		req, err := sigv4.Presign(sigv4.Request{Method: method, URL: url, Headers: headers}, "AKIATEST", "secret", "us-east-1", sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+		require.NoError(t, err)
+		return s3.Request{Method: req.Method, URL: req.URL, Headers: headers, Body: []byte(body)}
+	}
 	copyHdr := map[string]string{"x-amz-copy-source": "src/obj"}
 
 	op, reqs := requirements("PUT", "https://s3.example.com/bkt/k", copyHdr)
@@ -328,6 +350,42 @@ func TestRequirementsFor(t *testing.T) {
 	require.Equal(t, OpCopyObject, op)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
 
+	// A DeleteObjects is decided on its body, bound by the payload hash: an
+	// entry naming a version adds the version permission on the bucket.
+	const versions = `<Delete><Object><Key>a</Key></Object><Object><Key>b</Key><VersionId>v1</VersionId></Object></Delete>`
+	const plain = `<Delete><Object><Key>a</Key></Object></Delete>`
+	op, reqs, err := RequirementsFor(withBody("POST", "https://s3.example.com/bkt?delete", nil, versions, true))
+	require.NoError(t, err)
+	require.Equal(t, OpDeleteObjects, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:DeleteObject"}, {Bucket: "bkt", Permission: "s3:DeleteObjectVersion"}}, reqs)
+	op, reqs, err = RequirementsFor(withBody("POST", "https://s3.example.com/bkt?delete", nil, plain, true))
+	require.NoError(t, err)
+	require.Equal(t, OpDeleteObjects, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:DeleteObject"}}, reqs)
+
+	// Under an unsigned payload a signed checksum header binds the body; an
+	// unsigned one, or none, leaves it unbound, as does a mismatch.
+	crc := base64.StdEncoding.EncodeToString(binary32(crc32.ChecksumIEEE([]byte(versions))))
+	op, reqs, err = RequirementsFor(withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc}, versions, false))
+	require.NoError(t, err)
+	require.Equal(t, OpDeleteObjects, op)
+	require.Len(t, reqs, 2)
+	for name, req := range map[string]s3.Request{
+		"unsigned payload, no checksum":        withBody("POST", "https://s3.example.com/bkt?delete", nil, versions, false),
+		"unsigned checksum header":             presignedWithBody(t, "POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc}, versions),
+		"wrong checksum":                       withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": "AAAAAA=="}, versions, false),
+		"wrong payload hash":                   tamper(withBody("POST", "https://s3.example.com/bkt?delete", nil, plain, true), versions),
+		"body missing":                         presigned("POST", "https://s3.example.com/bkt?delete", nil),
+		"body on an operation that reads none": withBody("GET", "https://s3.example.com/bkt/k", nil, plain, true),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := RequirementsFor(req)
+			require.ErrorIs(t, err, ErrUnboundBody)
+		})
+	}
+	_, _, err = RequirementsFor(withBody("POST", "https://s3.example.com/bkt?delete", nil, "<Delete><Object>", true))
+	require.ErrorIs(t, err, ErrUnboundBody, "an unparseable body")
+
 	// CreateBucket addresses no existing bucket, so it yields no pair for
 	// the gateway to check locally, with or without the Object Lock flag.
 	op, reqs = requirements("PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"})
@@ -365,7 +423,7 @@ func TestRequirementsFor(t *testing.T) {
 			require.ErrorContains(t, err, tt.leave)
 		})
 	}
-	_, _, err := RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
+	_, _, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
 	require.Error(t, err, "an unsigned request names a copy source it cannot be trusted on")
 	require.NotErrorIs(t, err, ErrUnsignedHeader)
 	op, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
@@ -379,6 +437,70 @@ func TestRequirementsFor(t *testing.T) {
 	// answer it without consulting hilt, and before any signature is read.
 	_, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
 	require.ErrorIs(t, err, ErrConflictingQuery)
+}
+
+// presignedWithBody presigns a request whose headers are all left unsigned
+// and attaches body under an unsigned payload.
+func presignedWithBody(t *testing.T, method, url string, headers map[string]string, body string) s3.Request {
+	t.Helper()
+	req, err := sigv4.Presign(sigv4.Request{Method: method, URL: url, Headers: headers}, "AKIATEST", "secret", "us-east-1", sigv4.SchemeV4, time.Now(), time.Hour)
+	require.NoError(t, err)
+	return s3.Request{Method: req.Method, URL: req.URL, Headers: headers, Body: []byte(body)}
+}
+
+// tamper swaps the body of a signed request for another.
+func tamper(req s3.Request, body string) s3.Request {
+	req.Body = []byte(body)
+	return req
+}
+
+func binary32(v uint32) []byte { return []byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)} }
+
+// TestReadsBody pins the operations whose body hilt reads: DeleteObjects
+// and nothing else, so no streaming write ever has its body forwarded.
+func TestReadsBody(t *testing.T) {
+	for _, op := range []Operation{
+		OpListBuckets, OpListBucket, OpGetObject, OpPutObject, OpCopyObject, OpCreateBucket, OpDeleteObject, OpDeleteBucket,
+		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
+		OpPutBucketPolicy, OpPutObjectRetention, OpPutObjectTagging, OpPutBucketVersioning,
+	} {
+		require.False(t, op.ReadsBody(), "%s", op)
+	}
+	require.True(t, OpDeleteObjects.ReadsBody())
+}
+
+// TestReadBody covers what a DeleteObjects body adds: the version
+// permission when any entry names a version, including the null version,
+// and nothing otherwise; a body is ignored on an operation that reads none
+// (boundBody refuses it) and refused when unparseable.
+func TestReadBody(t *testing.T) {
+	classify := func(method, url, body string) (classification, error) {
+		return classifyRequest(s3.Request{Method: method, URL: url, Body: []byte(body)})
+	}
+	c, err := classify("POST", "https://s3.example.com/bkt?delete", `<Delete><Object><Key>a</Key><VersionId>v</VersionId></Object></Delete>`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"s3:DeleteObjectVersion"}, c.bodyPermissions)
+	require.Equal(t, []string{"s3:DeleteObject", "s3:DeleteObjectVersion"}, c.permissions())
+
+	c, err = classify("POST", "https://s3.example.com/bkt?delete", `<Delete><Object><Key>a</Key><VersionId>null</VersionId></Object></Delete>`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"s3:DeleteObjectVersion"}, c.bodyPermissions)
+
+	c, err = classify("POST", "https://s3.example.com/bkt?delete", `<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet><Object><Key>a</Key></Object><Object><Key>b</Key><VersionId></VersionId></Object></Delete>`)
+	require.NoError(t, err)
+	require.Empty(t, c.bodyPermissions)
+	require.Equal(t, []string{"s3:DeleteObject"}, c.permissions())
+
+	c, err = classify("PUT", "https://s3.example.com/bkt/k", `<Delete><Object><Key>a</Key><VersionId>v</VersionId></Object></Delete>`)
+	require.NoError(t, err)
+	require.Empty(t, c.bodyPermissions)
+
+	_, err = classify("POST", "https://s3.example.com/bkt?delete", `<Delete><Object>`)
+	require.ErrorIs(t, err, ErrUnboundBody)
+
+	c, err = classify("POST", "https://s3.example.com/bkt?delete", "")
+	require.NoError(t, err, "a missing body is boundBody's refusal, not the classifier's")
+	require.Equal(t, OpDeleteObjects, c.op)
 }
 
 // TestReadHeaders covers the permissions a request's headers add to its

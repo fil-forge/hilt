@@ -232,6 +232,12 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		log.Debug("rejecting request whose header is not signed", zap.Stringer("operation", op), zap.String("header", h))
 		return nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
 	}
+	// A DeleteObjects is decided on its body too, which must be the one the
+	// signer sent (boundBody) and is forwarded for that operation alone.
+	if err := boundBody(sr, req, op); err != nil {
+		log.Debug("rejecting request whose body is not bound", zap.Stringer("operation", op), zap.Error(err))
+		return nil, err
+	}
 
 	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, c)
 	if err != nil {

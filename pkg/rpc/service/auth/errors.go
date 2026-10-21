@@ -22,6 +22,7 @@ const (
 	ForeignBucketErrorName          = "ForeignBucket"
 	BucketNotPermittedErrorName     = "BucketNotPermitted"
 	UnsignedHeaderErrorName         = "UnsignedHeader"
+	UnboundBodyErrorName            = "UnboundBody"
 	TemporarilyUnavailableErrorName = "TemporarilyUnavailable"
 )
 
@@ -91,6 +92,13 @@ var (
 	// signature, so what it says cannot be trusted and the request cannot be
 	// authorized. The wrapped message names the header.
 	ErrUnsignedHeader = errors.New(UnsignedHeaderErrorName, "a header the request is authorized on is not covered by the request signature")
+	// ErrUnboundBody is returned when the body a request is authorized on
+	// (a DeleteObjects' entries, see [Operation.ReadsBody]) cannot be
+	// trusted: missing, carried by an operation hilt does not read one for,
+	// unparseable, over [MaxBodySize], or not covered by the signature as
+	// the payload hash or a signed checksum header. The wrapped message says
+	// which.
+	ErrUnboundBody = errors.New(UnboundBodyErrorName, "the request body is not bound to the request")
 	// ErrTemporarilyUnavailable is returned when the share-locked read of the
 	// key, its principal or the bucket's policy waited out the store's lock
 	// timeout behind a write still committing. Nothing about the request was

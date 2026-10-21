@@ -194,7 +194,13 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   (`classification.readHeaders`: lock and tagging headers on a write,
   `x-amz-bucket-object-lock-enabled` on CreateBucket). Every header a
   decision is taken from must be a signed header, which `RequirementsFor`
-  refuses too for the gateway's local check. Command-specific S3-permission checks
+  refuses too for the gateway's local check. A body is read only for the
+  operations `Operation.ReadsBody` names (DeleteObjects: an entry naming a
+  version adds `s3:DeleteObjectVersion`); the gateway attaches the body for
+  those alone, and it must be bound to the signature (the payload hash, or a
+  signed checksum header under an unsigned payload) before it is read. Never
+  widen that set to a write that streams its body; the policy PUT carries
+  its document on its own command. Command-specific S3-permission checks
   stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
   each per-request delegation keyed to itself. `/s3/bucket/info` carries no
   signed request, so it authorizes on the invocation issuer instead: the issuer

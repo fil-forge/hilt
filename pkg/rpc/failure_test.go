@@ -145,6 +145,7 @@ func TestAuthFailure(t *testing.T) {
 			{auth.ErrForeignBucket, auth.ForeignBucketErrorName},
 			{auth.ErrBucketNotPermitted, auth.BucketNotPermittedErrorName},
 			{auth.ErrUnsignedHeader, auth.UnsignedHeaderErrorName},
+			{auth.ErrUnboundBody, auth.UnboundBodyErrorName},
 			{auth.ErrConflictingQuery, auth.ConflictingQueryErrorName},
 		} {
 			f := &recordingFailer{}
