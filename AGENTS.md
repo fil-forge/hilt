@@ -198,7 +198,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   operations `Operation.ReadsBody` names (DeleteObjects: an entry naming a
   version adds `s3:DeleteObjectVersion`); the gateway attaches the body for
   those alone, and it must be bound to the signature (the payload hash, or a
-  signed checksum header under an unsigned payload) before it is read. Never
+  signed checksum header under an unsigned payload) before it is read;
+  `MaxBodySize` matches the codec's limit on the field. Never
   widen that set to a write that streams its body; the policy PUT carries
   its document on its own command. Command-specific S3-permission checks
   stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,

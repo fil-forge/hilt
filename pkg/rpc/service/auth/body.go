@@ -17,10 +17,11 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 )
 
-// MaxBodySize bounds a body hilt reads. A DeleteObjects body is at most a
-// thousand entries of a kilobyte key and a version id, about 1.2 MiB, and
-// the request codec caps the field at 2 MiB.
-const MaxBodySize = 2 << 20
+// MaxBodySize bounds a body hilt reads, matching the request codec's limit
+// on the field. It holds the largest valid DeleteObjects document: a
+// thousand entries of a kilobyte key expanded up to sixfold by XML
+// escaping, a version id as long, and the conditional fields, about 7.3 MB.
+const MaxBodySize = 8 << 20
 
 // deleteObjectsBody is the shape of a DeleteObjects body hilt reads: the
 // entries, each of which may name the version it deletes.

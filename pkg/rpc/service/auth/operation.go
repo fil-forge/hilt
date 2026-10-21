@@ -219,7 +219,7 @@ func (o Operation) addressesExistingBucket() bool {
 // needs authorized, so a gateway attaches the body ([s3.Request.Body]) for
 // it and for no other: DeleteObjects, whose entries may name versions. The
 // body must be bound to the signature before it is read ([ErrUnboundBody])
-// and is refused over [MaxBodySize]. The bucket policy PUT carries its
+// and is refused over [MaxBodySize], which matches the codec's limit on it. The bucket policy PUT carries its
 // document on its own command instead. Never widen this to a write that
 // streams its body.
 func (o Operation) ReadsBody() bool { return o == OpDeleteObjects }
