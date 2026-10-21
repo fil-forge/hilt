@@ -60,10 +60,14 @@ type AuthorizedRequest struct {
 	// SourceBucketName and SourceBucket are the copy source's bucket, for the copy
 	// operations (Operation.CopiesSource()): resolved, tenant-checked and
 	// scope-checked like Bucket, with the access key confirmed to hold
-	// SourcePermission. Empty and nil for every other operation. SourceBucket is
-	// Bucket itself when the copy stays within one bucket.
+	// SourcePermission there. Empty and nil for every other operation.
+	// SourceBucket is Bucket itself when the copy stays within one bucket.
 	SourceBucketName string
 	SourceBucket     *bucket.Record
+	// SourcePermission is the S3 permission confirmed on the copy source:
+	// the version read when the source names a version, the object read
+	// otherwise. Empty for every other operation.
+	SourcePermission string
 	// Signed is the parsed, verified request signature. Handlers use it to derive
 	// the verification key and to inspect the requested action.
 	Signed *sigv4.SignedRequest
@@ -232,6 +236,10 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	if err != nil {
 		return nil, err
 	}
+	var sourcePermission string
+	if op.CopiesSource() {
+		sourcePermission = c.sourcePermission()
+	}
 
 	log.Debug("request authorized", zap.Stringer("operation", op))
 	return &AuthorizedRequest{
@@ -245,6 +253,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		Bucket:           resolved,
 		SourceBucketName: c.srcBucket,
 		SourceBucket:     source,
+		SourcePermission: sourcePermission,
 		Signed:           sr,
 	}, nil
 }
@@ -285,7 +294,7 @@ func (a *Authorizer) authorizeOperation(
 		// the tenant's and within the key's scope.
 		var source *bucket.Record
 		if op.CopiesSource() {
-			if !slices.Contains(akRec.Permissions, SourcePermission) {
+			if !slices.Contains(akRec.Permissions, c.sourcePermission()) {
 				log.Debug("rejecting copy by a key lacking the source permission", zap.Stringer("operation", op))
 				return nil, nil, nil, ErrOperationNotPermitted
 			}
@@ -342,11 +351,11 @@ func (a *Authorizer) authorizeOperation(
 	if op.CopiesSource() {
 		if c.srcBucket == bucketName {
 			source = b
-			if !slices.Contains(eff, SourcePermission) {
+			if !slices.Contains(eff, c.sourcePermission()) {
 				log.Debug("rejecting copy source outside the principal's effective set", zap.String("bucket", c.srcBucket))
 				return nil, nil, nil, ErrOperationNotPermitted
 			}
-		} else if source, _, err = a.principalAccess(ctx, log, tenantRec.ID, principalID, c.srcBucket, SourcePermission); err != nil {
+		} else if source, _, err = a.principalAccess(ctx, log, tenantRec.ID, principalID, c.srcBucket, c.sourcePermission()); err != nil {
 			return nil, nil, nil, err
 		}
 	}

@@ -293,4 +293,5 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 	require.Equal(t, auth.OpUploadPartCopy, op)
 	require.True(t, s3perm.Valid(op.Permission()))
 	require.True(t, s3perm.Valid(auth.SourcePermission))
+	require.True(t, s3perm.Valid(auth.SourceVersionPermission))
 }

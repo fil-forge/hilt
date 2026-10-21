@@ -172,10 +172,15 @@ func (o Operation) Permissions() []string {
 	return perms
 }
 
-// SourcePermission is the S3 permission an access key must additionally hold,
-// on the copy source's bucket, to perform CopyObject or UploadPartCopy: S3
-// requires read access to the object being copied.
-const SourcePermission = "s3:GetObject"
+// SourcePermission and SourceVersionPermission are the S3 permissions an
+// access key must additionally hold, on the copy source's bucket, to perform
+// CopyObject or UploadPartCopy: S3 requires read access to the object being
+// copied, and to the version when x-amz-copy-source names one. Which applies
+// is [classification.sourcePermission].
+const (
+	SourcePermission        = "s3:GetObject"
+	SourceVersionPermission = "s3:GetObjectVersion"
+)
 
 // CopiesSource reports whether the operation reads a copy source named by the
 // x-amz-copy-source header, and so needs [SourcePermission] on that bucket.
@@ -226,7 +231,7 @@ type Requirement struct {
 // RequirementsFor classifies a request and returns every bucket/permission pair
 // it needs: the addressed bucket with each of the operation's permissions,
 // plus, for the copy operations, the copy source's bucket with
-// [SourcePermission]. Operations
+// [SourcePermission] or [SourceVersionPermission]. Operations
 // that address no existing bucket (ListBuckets, CreateBucket) yield none. It is
 // the local mirror of the checks [Authorizer.Authorize] performs, for a gateway
 // authorizing over cached delegations; such a caller must also confirm the
@@ -245,7 +250,7 @@ func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 		reqs = append(reqs, Requirement{Bucket: c.bucket, Permission: perm})
 	}
 	if c.op.CopiesSource() {
-		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: SourcePermission})
+		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: c.sourcePermission()})
 	}
 	return c.op, reqs, nil
 }
@@ -256,13 +261,24 @@ func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 const copySourceHeader = "x-amz-copy-source"
 
 // classification is what classifyRequest derives from a request: the operation,
-// the bucket and key it addresses, and for the copy operations the bucket and
-// key named by x-amz-copy-source.
+// the bucket and key it addresses, and for the copy operations the bucket,
+// key and version named by x-amz-copy-source.
 type classification struct {
 	op          Operation
 	bucket, key string
-	// srcBucket and srcKey are set only when op.CopiesSource().
-	srcBucket, srcKey string
+	// srcBucket, srcKey and srcVersionID are set only when op.CopiesSource();
+	// srcVersionID is empty when the source names no version.
+	srcBucket, srcKey, srcVersionID string
+}
+
+// sourcePermission is the S3 permission the copy's source needs: the version
+// read when the source names a version, the object read otherwise, as S3
+// decides it.
+func (c classification) sourcePermission() string {
+	if c.srcVersionID != "" {
+		return SourceVersionPermission
+	}
+	return SourcePermission
 }
 
 // subresources is every query parameter S3 treats as a subresource: one that
@@ -474,11 +490,11 @@ func classifyRequest(req s3.Request) (classification, error) {
 		if !ok {
 			return plain
 		}
-		srcBucket, srcKey, ok := parseCopySource(src)
+		srcBucket, srcKey, srcVersionID, ok := parseCopySource(src)
 		if !ok {
 			return plain
 		}
-		c.srcBucket, c.srcKey = srcBucket, srcKey
+		c.srcBucket, c.srcKey, c.srcVersionID = srcBucket, srcKey, srcVersionID
 		return copied
 	}
 
@@ -575,21 +591,22 @@ func HeaderValue(headers map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-// parseCopySource splits an x-amz-copy-source value into its bucket and key
-// exactly as the gateway's backend parser does: an optional leading slash,
-// URL-decoding of the whole value, an optional "?versionId=<id>" suffix, then
-// bucket/key at the first slash. ok is false only for bad percent-encoding or
-// a missing separator; an empty bucket or key is returned as such.
-func parseCopySource(v string) (bucket, key string, ok bool) {
+// parseCopySource splits an x-amz-copy-source value into its bucket, key and
+// version exactly as the gateway's backend parser does: an optional leading
+// slash, URL-decoding of the whole value, an optional "?versionId=<id>"
+// suffix, then bucket/key at the first slash. ok is false only for bad
+// percent-encoding or a missing separator; an empty bucket or key is returned
+// as such, and an absent or empty versionId names no version.
+func parseCopySource(v string) (bucket, key, versionID string, ok bool) {
 	v = strings.TrimPrefix(v, "/")
 	decoded, err := url.QueryUnescape(v)
 	if err != nil {
-		return "", "", false
+		return "", "", "", false
 	}
-	decoded, _, _ = strings.Cut(decoded, "?versionId=")
+	decoded, versionID, _ = strings.Cut(decoded, "?versionId=")
 	bucket, key, ok = strings.Cut(decoded, "/")
 	if !ok {
-		return "", "", false
+		return "", "", "", false
 	}
-	return bucket, key, true
+	return bucket, key, versionID, true
 }
