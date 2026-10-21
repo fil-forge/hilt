@@ -276,65 +276,65 @@ func TestRequirementsFor(t *testing.T) {
 		require.NoError(t, err)
 		return s3.Request{Method: req.Method, URL: req.URL, Headers: headers}
 	}
-	requirements := func(method, url string, headers map[string]string) Requirements {
+	requirements := func(method, url string, headers map[string]string) (Operation, []Requirement) {
 		t.Helper()
-		r, err := RequirementsFor(presigned(method, url, headers))
+		op, reqs, err := RequirementsFor(presigned(method, url, headers))
 		require.NoError(t, err)
-		return r
+		return op, reqs
 	}
 	copyHdr := map[string]string{"x-amz-copy-source": "src/obj"}
 
-	r := requirements("PUT", "https://s3.example.com/bkt/k", copyHdr)
-	require.Equal(t, OpCopyObject, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
+	op, reqs := requirements("PUT", "https://s3.example.com/bkt/k", copyHdr)
+	require.Equal(t, OpCopyObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
 
-	r = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", copyHdr)
-	require.Equal(t, OpUploadPartCopy, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", copyHdr)
+	require.Equal(t, OpUploadPartCopy, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
 
 	// A source naming a version needs the version read there instead.
 	versionHdr := map[string]string{"x-amz-copy-source": "src/obj?versionId=v1"}
-	r = requirements("PUT", "https://s3.example.com/bkt/k", versionHdr)
-	require.Equal(t, OpCopyObject, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, r.Buckets)
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt/k", versionHdr)
+	require.Equal(t, OpCopyObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, reqs)
 
-	r = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", versionHdr)
-	require.Equal(t, OpUploadPartCopy, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, r.Buckets)
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", versionHdr)
+	require.Equal(t, OpUploadPartCopy, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, reqs)
 
-	r = requirements("GET", "https://s3.example.com/bkt/k", nil)
-	require.Equal(t, OpGetObject, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, r.Buckets)
+	op, reqs = requirements("GET", "https://s3.example.com/bkt/k", nil)
+	require.Equal(t, OpGetObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
 
 	// Reading an object's attributes needs the object read too, on the same
 	// bucket, as S3 requires.
-	r = requirements("GET", "https://s3.example.com/bkt/k?attributes", nil)
-	require.Equal(t, OpGetObjectAttributes, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, r.Buckets)
+	op, reqs = requirements("GET", "https://s3.example.com/bkt/k?attributes", nil)
+	require.Equal(t, OpGetObjectAttributes, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
 
 	// A header that adds a permission puts it on the addressed bucket, after
 	// the operation's own and before the copy source's.
-	r = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"})
-	require.Equal(t, OpPutObject, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectRetention"}}, r.Buckets)
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"})
+	require.Equal(t, OpPutObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectRetention"}}, reqs)
 
-	r = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE"})
-	require.Equal(t, OpCopyObject, r.Operation)
-	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, r.Buckets)
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt/k", map[string]string{"x-amz-copy-source": "src/obj", "x-amz-tagging-directive": "REPLACE"})
+	require.Equal(t, OpCopyObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "bkt", Permission: "s3:PutObjectTagging"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
 
 	// CreateBucket addresses no existing bucket, so it yields no pair for
 	// the gateway to check locally, with or without the Object Lock flag.
-	r = requirements("PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"})
-	require.Equal(t, OpCreateBucket, r.Operation)
-	require.Empty(t, r.Buckets)
+	op, reqs = requirements("PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"})
+	require.Equal(t, OpCreateBucket, op)
+	require.Empty(t, reqs)
 
 	for _, req := range []s3.Request{
 		presigned("GET", "https://s3.example.com/", nil),
 		presigned("PUT", "https://s3.example.com/bkt", nil),
 	} {
-		r, err := RequirementsFor(req)
+		_, reqs, err := RequirementsFor(req)
 		require.NoError(t, err)
-		require.Empty(t, r.Buckets, "%s %s", req.Method, req.URL)
+		require.Empty(t, reqs, "%s %s", req.Method, req.URL)
 	}
 
 	// A header a decision was taken from that the signature does not cover
@@ -354,24 +354,24 @@ func TestRequirementsFor(t *testing.T) {
 		{"object lock flag", "PUT", "https://s3.example.com/bkt", map[string]string{"x-amz-bucket-object-lock-enabled": "true"}, "x-amz-bucket-object-lock-enabled"},
 	} {
 		t.Run(tt.name+" unsigned", func(t *testing.T) {
-			_, err := RequirementsFor(presigned(tt.method, tt.url, tt.headers, tt.leave))
+			_, _, err := RequirementsFor(presigned(tt.method, tt.url, tt.headers, tt.leave))
 			require.ErrorIs(t, err, ErrUnsignedHeader)
 			require.ErrorContains(t, err, tt.leave)
 		})
 	}
-	_, err := RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
+	_, _, err := RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: copyHdr})
 	require.Error(t, err, "an unsigned request names a copy source it cannot be trusted on")
 	require.NotErrorIs(t, err, ErrUnsignedHeader)
-	r, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
+	op, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
 	require.NoError(t, err)
-	require.Equal(t, OpGetObject, r.Operation)
+	require.Equal(t, OpGetObject, op)
 
-	_, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
+	_, _, err = RequirementsFor(s3.Request{Method: "PATCH", URL: "https://s3.example.com/bkt/k"})
 	require.Error(t, err)
 
 	// The gateway sees the refusal of two subresources by its name, so it can
 	// answer it without consulting hilt, and before any signature is read.
-	_, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
+	_, _, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt?uploads&encryption"})
 	require.ErrorIs(t, err, ErrConflictingQuery)
 }
 

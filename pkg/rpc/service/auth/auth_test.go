@@ -428,14 +428,14 @@ func TestAuthorize(t *testing.T) {
 
 	t.Run("a request's requirements refuse an unsigned header as Authorize does", func(t *testing.T) {
 		headers := map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}
-		_, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging"))
+		_, _, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging"))
 		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 		require.ErrorContains(t, err, "x-amz-object-lock-legal-hold")
 
-		r, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging", "x-amz-object-lock-legal-hold"))
+		op, reqs, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging", "x-amz-object-lock-legal-hold"))
 		require.NoError(t, err)
-		require.Equal(t, auth.OpPutObject, r.Operation)
-		require.Equal(t, []auth.Requirement{{Bucket: "bucket", Permission: "s3:PutObject"}, {Bucket: "bucket", Permission: "s3:PutObjectLegalHold"}, {Bucket: "bucket", Permission: "s3:PutObjectTagging"}}, r.Buckets)
+		require.Equal(t, auth.OpPutObject, op)
+		require.Equal(t, []auth.Requirement{{Bucket: "bucket", Permission: "s3:PutObject"}, {Bucket: "bucket", Permission: "s3:PutObjectLegalHold"}, {Bucket: "bucket", Permission: "s3:PutObjectTagging"}}, reqs)
 	})
 
 	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {

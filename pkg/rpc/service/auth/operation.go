@@ -229,20 +229,6 @@ type Requirement struct {
 	Permission string
 }
 
-// Requirements is what a request needs authorized, as a gateway deciding
-// over cached delegations sees it: the local mirror of the checks
-// [Authorizer.Authorize] performs.
-type Requirements struct {
-	Operation Operation
-	// Buckets is every bucket/permission pair the request needs: the
-	// addressed bucket with each permission the operation and its headers
-	// put on it, then, for the copy operations, the copy source's bucket
-	// with [SourcePermission] or [SourceVersionPermission]. Empty for an
-	// operation that addresses no existing bucket (ListBuckets,
-	// CreateBucket).
-	Buckets []Requirement
-}
-
 // unsignedHeader names the first of headers the signature does not cover,
 // if any. A copy's source and the headers that add a permission decide
 // what a request needs; the path is always signed, a header only when
@@ -256,37 +242,42 @@ func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
 	return "", false
 }
 
-// RequirementsFor classifies a request and returns what it needs authorized
-// (see [Requirements]). Like [Authorizer.Authorize] it refuses a request
-// whose copy source or permission-adding header is not covered by the
-// signature, as [ErrUnsignedHeader] naming the header; the signature is
+// RequirementsFor classifies a request and returns every bucket/permission
+// pair it needs: the addressed bucket with each permission the operation and
+// its headers put on it, then, for the copy operations, the copy source's
+// bucket with [SourcePermission] or [SourceVersionPermission]. Operations
+// that address no existing bucket (ListBuckets, CreateBucket) yield none. It
+// is the local mirror of the checks [Authorizer.Authorize] performs, for a
+// gateway authorizing over cached delegations, and like Authorize it refuses
+// a request whose copy source or permission-adding header is not covered by
+// the signature, as [ErrUnsignedHeader] naming the header; the signature is
 // parsed for that, not verified. A classification error ([ErrConflictingQuery],
 // [ErrUnsupportedOperation]) comes first, as it needs no signature.
-func RequirementsFor(req s3.Request) (Requirements, error) {
+func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 	c, err := classifyRequest(req)
 	if err != nil {
-		return Requirements{}, err
+		return "", nil, err
 	}
 	if len(c.headers) > 0 {
 		sr, err := sigv4.Parse(sigv4.Request{Method: req.Method, URL: req.URL, Headers: req.Headers})
 		if err != nil {
-			return Requirements{}, fmt.Errorf("parsing request signature: %w", err)
+			return "", nil, fmt.Errorf("parsing request signature: %w", err)
 		}
 		if h, ok := unsignedHeader(sr, c.headers); ok {
-			return Requirements{}, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
+			return "", nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
 		}
 	}
-	r := Requirements{Operation: c.op}
 	if !c.op.addressesExistingBucket() {
-		return r, nil
+		return c.op, nil, nil
 	}
+	var reqs []Requirement
 	for _, perm := range c.permissions() {
-		r.Buckets = append(r.Buckets, Requirement{Bucket: c.bucket, Permission: perm})
+		reqs = append(reqs, Requirement{Bucket: c.bucket, Permission: perm})
 	}
 	if c.op.CopiesSource() {
-		r.Buckets = append(r.Buckets, Requirement{Bucket: c.srcBucket, Permission: c.sourcePermission()})
+		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: c.sourcePermission()})
 	}
-	return r, nil
+	return c.op, reqs, nil
 }
 
 // copySourceHeader names the copy source of a CopyObject / UploadPartCopy
