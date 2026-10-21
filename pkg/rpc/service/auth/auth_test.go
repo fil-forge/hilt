@@ -71,9 +71,16 @@ type setupConfig struct {
 // signature only when signSource is set.
 func signedCopyRequest(t *testing.T, signer multikey.Signer, dstBucket, srcBucket, region string, signSource bool) s3.Request {
 	t.Helper()
+	return signedCopySourceRequest(t, signer, dstBucket, "/"+srcBucket+"/object-key", region, signSource)
+}
+
+// signedCopySourceRequest is signedCopyRequest with the x-amz-copy-source
+// value given whole, so a test can name a source version.
+func signedCopySourceRequest(t *testing.T, signer multikey.Signer, dstBucket, source, region string, signSource bool) s3.Request {
+	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
-	headers := map[string]string{"x-amz-copy-source": "/" + srcBucket + "/object-key"}
+	headers := map[string]string{"x-amz-copy-source": source}
 	req := sigv4.Request{Method: "PUT", URL: "https://s3.fil.one/" + dstBucket + "/object-key", Headers: headers}
 	var opts []sigv4.PresignOption
 	if signSource {
@@ -112,9 +119,20 @@ func seedKey(t *testing.T, accessKeys *accesskeymemory.Store, secrets *vaultmemo
 // signedObjectRequest presigns a GET of an object in the named bucket.
 func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, region string) s3.Request {
 	t.Helper()
+	return signedObjectQueryRequest(t, signer, bucketName, "", region)
+}
+
+// signedObjectQueryRequest presigns a GET of an object in the named bucket
+// with the given query, such as "attributes".
+func signedObjectQueryRequest(t *testing.T, signer multikey.Signer, bucketName, query, region string) s3.Request {
+	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
-	req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/" + bucketName + "/object-key"}
+	url := "https://s3.fil.one/" + bucketName + "/object-key"
+	if query != "" {
+		url += "?" + query
+	}
+	req := sigv4.Request{Method: "GET", URL: url}
 	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
 	require.NoError(t, err)
 	return s3.Request{Method: signed.Method, URL: signed.URL}
@@ -299,6 +317,46 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
+	t.Run("a copy of a source version needs the version read", func(t *testing.T) {
+		// S3 reads a source naming a versionId under s3:GetObjectVersion, so
+		// the object read alone does not reach it.
+		az, _, _ := setup(t, accessKey, copyPerms)
+		authz, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.SourcePermission, authz.SourcePermission)
+
+		_, err = az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectVersion", "s3:PutObject"}})
+		authz, err = az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+		require.Equal(t, auth.SourceVersionPermission, authz.SourcePermission)
+		require.Equal(t, bucketID, authz.SourceBucket.ID)
+	})
+
+	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, nil)
+		authz, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.NoError(t, err)
+		require.Empty(t, authz.SourcePermission)
+	})
+
+	t.Run("an attributes read needs the object read too", func(t *testing.T) {
+		// S3 requires s3:GetObject beside s3:GetObjectAttributes, so a key
+		// holding the attributes permission alone reads nothing.
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectAttributes"}})
+		_, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectAttributes", "s3:GetObject"}})
+		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
 	t.Run("rejects an operation the access key lacks permission for", func(t *testing.T) {
 		// The key holds only s3:GetObject, but a ListBuckets-shaped request (GET
 		// with no bucket in the path) requires s3:ListAllMyBuckets.
@@ -348,6 +406,23 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, authz.Permissions)
 		require.NotNil(t, authz.Bucket)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
+	t.Run("a principal's attributes read needs both actions from the policy", func(t *testing.T) {
+		allow := func(actions ...string) s3bkt.Statement {
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
+		}
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:GetObjectAttributes"))
+		_, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:GetObjectAttributes", "s3:GetObject"))
+		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
 		require.Equal(t, bucketID, authz.Bucket.ID)
 	})
 
@@ -461,6 +536,22 @@ func TestAuthorize(t *testing.T) {
 			// No policy on the source, so it is not a bucket the principal may
 			// learn exists.
 			require.ErrorIs(t, err, auth.ErrUnknownBucket)
+		})
+
+		t.Run("a source version needs the version read from the source's policy", func(t *testing.T) {
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
+			_, err := az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObjectVersion"))
+			authz, err := az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+			require.NoError(t, err)
+			require.Equal(t, auth.SourceVersionPermission, authz.SourcePermission)
+			require.Equal(t, bucketID, authz.SourceBucket.ID)
 		})
 
 		t.Run("a copy within one bucket needs both actions there", func(t *testing.T) {

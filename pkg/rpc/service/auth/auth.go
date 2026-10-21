@@ -48,8 +48,8 @@ type AuthorizedRequest struct {
 	// on Bucket, or s3:ListAllMyBuckets alone for ListBuckets.
 	Permissions []string
 	// Operation is the S3 operation the (signature-verified) request performs. The
-	// access key is confirmed to hold its permission; handlers check it matches the
-	// operation they serve.
+	// access key is confirmed to hold its permissions; handlers check it matches
+	// the operation they serve.
 	Operation Operation
 	// BucketName is the bucket name from the request.
 	BucketName string
@@ -60,10 +60,14 @@ type AuthorizedRequest struct {
 	// SourceBucketName and SourceBucket are the copy source's bucket, for the copy
 	// operations (Operation.CopiesSource()): resolved, tenant-checked and
 	// scope-checked like Bucket, with the access key confirmed to hold
-	// SourcePermission. Empty and nil for every other operation. SourceBucket is
-	// Bucket itself when the copy stays within one bucket.
+	// SourcePermission there. Empty and nil for every other operation.
+	// SourceBucket is Bucket itself when the copy stays within one bucket.
 	SourceBucketName string
 	SourceBucket     *bucket.Record
+	// SourcePermission is the S3 permission confirmed on the copy source:
+	// the version read when the source names a version, the object read
+	// otherwise. Empty for every other operation.
+	SourcePermission string
 	// Signed is the parsed, verified request signature. Handlers use it to derive
 	// the verification key and to inspect the requested action.
 	Signed *sigv4.SignedRequest
@@ -232,6 +236,10 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	if err != nil {
 		return nil, err
 	}
+	var sourcePermission string
+	if op.CopiesSource() {
+		sourcePermission = c.sourcePermission()
+	}
 
 	log.Debug("request authorized", zap.Stringer("operation", op))
 	return &AuthorizedRequest{
@@ -245,6 +253,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		Bucket:           resolved,
 		SourceBucketName: c.srcBucket,
 		SourceBucket:     source,
+		SourcePermission: sourcePermission,
 		Signed:           sr,
 	}, nil
 }
@@ -267,9 +276,11 @@ func (a *Authorizer) authorizeOperation(
 	// A service key carries its own permissions and bucket scope, evaluated
 	// against no policy.
 	if akRec.Principal == nil {
-		if !slices.Contains(akRec.Permissions, op.Permission()) {
-			log.Debug("rejecting operation the access key lacks permission for", zap.Stringer("operation", op))
-			return nil, nil, nil, ErrOperationNotPermitted
+		for _, perm := range op.Permissions() {
+			if !slices.Contains(akRec.Permissions, perm) {
+				log.Debug("rejecting operation the access key lacks permission for", zap.Stringer("operation", op), zap.String("permission", perm))
+				return nil, nil, nil, ErrOperationNotPermitted
+			}
 		}
 		if !op.addressesExistingBucket() {
 			return akRec.Permissions, nil, nil, nil
@@ -283,7 +294,7 @@ func (a *Authorizer) authorizeOperation(
 		// the tenant's and within the key's scope.
 		var source *bucket.Record
 		if op.CopiesSource() {
-			if !slices.Contains(akRec.Permissions, SourcePermission) {
+			if !slices.Contains(akRec.Permissions, c.sourcePermission()) {
 				log.Debug("rejecting copy by a key lacking the source permission", zap.Stringer("operation", op))
 				return nil, nil, nil, ErrOperationNotPermitted
 			}
@@ -327,7 +338,7 @@ func (a *Authorizer) authorizeOperation(
 		return nil, nil, nil, ErrOperationNotPermitted
 	}
 
-	b, eff, err := a.principalAccess(ctx, log, tenantRec.ID, principalID, bucketName, op.Permission())
+	b, eff, err := a.principalAccess(ctx, log, tenantRec.ID, principalID, bucketName, op.Permissions()...)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -340,23 +351,23 @@ func (a *Authorizer) authorizeOperation(
 	if op.CopiesSource() {
 		if c.srcBucket == bucketName {
 			source = b
-			if !slices.Contains(eff, SourcePermission) {
+			if !slices.Contains(eff, c.sourcePermission()) {
 				log.Debug("rejecting copy source outside the principal's effective set", zap.String("bucket", c.srcBucket))
 				return nil, nil, nil, ErrOperationNotPermitted
 			}
-		} else if source, _, err = a.principalAccess(ctx, log, tenantRec.ID, principalID, c.srcBucket, SourcePermission); err != nil {
+		} else if source, _, err = a.principalAccess(ctx, log, tenantRec.ID, principalID, c.srcBucket, c.sourcePermission()); err != nil {
 			return nil, nil, nil, err
 		}
 	}
 	return eff, b, source, nil
 }
 
-// principalAccess resolves the bucket and confirms the principal holds perm on
-// it under the bucket's policy, returning the bucket and the principal's
-// effective set there. A bucket the principal holds no action on is not a
-// bucket it may learn exists, so an empty set reads as an unknown bucket
-// rather than a refusal.
-func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenantID did.DID, principalID, bucketName, perm string) (*bucket.Record, []string, error) {
+// principalAccess resolves the bucket and confirms the principal holds every
+// one of perms on it under the bucket's policy, returning the bucket and the
+// principal's effective set there. A bucket the principal holds no action on
+// is not a bucket it may learn exists, so an empty set reads as an unknown
+// bucket rather than a refusal.
+func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenantID did.DID, principalID, bucketName string, perms ...string) (*bucket.Record, []string, error) {
 	b, err := a.resolveBucket(ctx, log, tenantID, bucketName)
 	if err != nil {
 		return nil, nil, err
@@ -369,9 +380,11 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 		log.Debug("rejecting bucket outside the principal's reach", zap.String("bucket", bucketName))
 		return nil, nil, ErrUnknownBucket
 	}
-	if !slices.Contains(eff, perm) {
-		log.Debug("rejecting operation outside the principal's effective set", zap.String("permission", perm))
-		return nil, nil, ErrOperationNotPermitted
+	for _, perm := range perms {
+		if !slices.Contains(eff, perm) {
+			log.Debug("rejecting operation outside the principal's effective set", zap.String("permission", perm))
+			return nil, nil, ErrOperationNotPermitted
+		}
 	}
 	return b, eff, nil
 }

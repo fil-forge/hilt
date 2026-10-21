@@ -175,6 +175,21 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 	}
 }
 
+// TestOperationPermissionCoversCompanion pins that an operation's own
+// permission grants every command its companion does. The authorize handler
+// re-delegates the commands of the operation's own permission alone, so a
+// companion that mapped to a command outside that set would leave the gateway
+// a command short at runtime.
+func TestOperationPermissionCoversCompanion(t *testing.T) {
+	perms := auth.OpGetObjectAttributes.Permissions()
+	require.Len(t, perms, 2)
+	own, companion := perms[0], perms[1]
+	require.NotEmpty(t, strs(companion), companion)
+	for _, cmd := range strs(companion) {
+		require.Contains(t, strs(own), cmd, "%s needs %s, which must therefore grant %s", own, companion, cmd)
+	}
+}
+
 // TestPolicyAction pins the policy vocabulary: every recognized permission except
 // the three bucket-level actions, which a policy can neither grant nor withhold.
 func TestPolicyAction(t *testing.T) {
@@ -278,4 +293,5 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 	require.Equal(t, auth.OpUploadPartCopy, op)
 	require.True(t, s3perm.Valid(op.Permission()))
 	require.True(t, s3perm.Valid(auth.SourcePermission))
+	require.True(t, s3perm.Valid(auth.SourceVersionPermission))
 }

@@ -19,6 +19,8 @@ func TestClassifyRequest(t *testing.T) {
 		wantBucket string
 		wantKey    string
 		wantSrc    string // "bucket/key" named by x-amz-copy-source, for the copy operations
+		// wantSrcVersion is the versionId the copy source names, if any.
+		wantSrcVersion string
 	}{
 		// Plain object and bucket operations.
 		{name: "list buckets", method: "GET", url: "https://s3.example.com/", want: OpListBuckets},
@@ -45,10 +47,14 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "abort multipart upload", method: "DELETE", url: "https://s3.example.com/bkt/k?uploadId=abc", want: OpAbortMultipartUpload, wantBucket: "bkt", wantKey: "k"},
 
 		// Copies: a PUT of an object or a part naming a parseable x-amz-copy-source.
-		// The header name is case-insensitive; the value may carry a leading slash,
-		// URL-encoding and a versionId suffix, all of which the source parse strips.
+		// The header name is case-insensitive; the value may carry a leading slash
+		// and URL-encoding, which the source parse strips, and a versionId suffix,
+		// which names the source version; an empty one names none.
 		{name: "copy object", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj"},
-		{name: "copy object, header name case", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"X-Amz-Copy-Source": "/src/a%20b/c?versionId=v1"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/a b/c"},
+		{name: "copy object, header name case", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"X-Amz-Copy-Source": "/src/a%20b/c?versionId=v1"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/a b/c", wantSrcVersion: "v1"},
+		{name: "copy of a version", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/obj?versionId=v1"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj", wantSrcVersion: "v1"},
+		{name: "copy with an empty versionId names no version", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "src/obj?versionId="}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj"},
+		{name: "upload part copy of a version", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=2&uploadId=abc", headers: map[string]string{"x-amz-copy-source": "src/obj?versionId=v1"}, want: OpUploadPartCopy, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj", wantSrcVersion: "v1"},
 		{name: "upload part copy", method: "PUT", url: "https://s3.example.com/bkt/k?partNumber=2&uploadId=abc", headers: map[string]string{"x-amz-copy-source": "src/obj"}, want: OpUploadPartCopy, wantBucket: "bkt", wantKey: "k", wantSrc: "src/obj"},
 		{name: "copy within a bucket", method: "PUT", url: "https://s3.example.com/bkt/k", headers: map[string]string{"x-amz-copy-source": "bkt/other"}, want: OpCopyObject, wantBucket: "bkt", wantKey: "k", wantSrc: "bkt/other"},
 
@@ -167,6 +173,7 @@ func TestClassifyRequest(t *testing.T) {
 				src = c.srcBucket + "/" + c.srcKey
 			}
 			require.Equal(t, tt.wantSrc, src)
+			require.Equal(t, tt.wantSrcVersion, c.srcVersionID)
 		})
 	}
 
@@ -249,7 +256,8 @@ func TestClassifyRequest(t *testing.T) {
 
 // TestRequirementsFor covers the gateway's local view of what a request needs:
 // one bucket/permission pair for an ordinary operation, a second for the copy
-// source, none for operations that address no existing bucket.
+// source or for a companion permission, none for operations that address no
+// existing bucket.
 func TestRequirementsFor(t *testing.T) {
 	copyHdr := map[string]string{"x-amz-copy-source": "src/obj"}
 
@@ -263,10 +271,29 @@ func TestRequirementsFor(t *testing.T) {
 	require.Equal(t, OpUploadPartCopy, op)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourcePermission}}, reqs)
 
+	// A source naming a version needs the version read there instead.
+	versionHdr := map[string]string{"x-amz-copy-source": "src/obj?versionId=v1"}
+	op, reqs, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k", Headers: versionHdr})
+	require.NoError(t, err)
+	require.Equal(t, OpCopyObject, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, reqs)
+
+	op, reqs, err = RequirementsFor(s3.Request{Method: "PUT", URL: "https://s3.example.com/bkt/k?partNumber=1&uploadId=abc", Headers: versionHdr})
+	require.NoError(t, err)
+	require.Equal(t, OpUploadPartCopy, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:PutObject"}, {Bucket: "src", Permission: SourceVersionPermission}}, reqs)
+
 	op, reqs, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k"})
 	require.NoError(t, err)
 	require.Equal(t, OpGetObject, op)
 	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
+
+	// Reading an object's attributes needs the object read too, on the same
+	// bucket, as S3 requires.
+	op, reqs, err = RequirementsFor(s3.Request{Method: "GET", URL: "https://s3.example.com/bkt/k?attributes"})
+	require.NoError(t, err)
+	require.Equal(t, OpGetObjectAttributes, op)
+	require.Equal(t, []Requirement{{Bucket: "bkt", Permission: "s3:GetObjectAttributes"}, {Bucket: "bkt", Permission: "s3:GetObject"}}, reqs)
 
 	for _, req := range []s3.Request{
 		{Method: "GET", URL: "https://s3.example.com/"},
@@ -319,6 +346,7 @@ func TestOperationPermission(t *testing.T) {
 	require.Equal(t, "s3:PutObject", OpCopyObject.Permission())
 	require.Equal(t, "s3:PutObject", OpUploadPartCopy.Permission())
 	require.Equal(t, "s3:GetObject", SourcePermission)
+	require.Equal(t, "s3:GetObjectVersion", SourceVersionPermission)
 	require.True(t, OpCopyObject.CopiesSource())
 	require.True(t, OpUploadPartCopy.CopiesSource())
 	require.False(t, OpPutObject.CopiesSource())
@@ -329,6 +357,22 @@ func TestOperationPermission(t *testing.T) {
 
 	// Removing the bucket's tags needs the permission that writes them.
 	require.Equal(t, "s3:PutBucketTagging", OpDeleteBucketTagging.Permission())
+
+	// Reading an object's attributes needs the object read as well; every
+	// other operation needs only its own permission on its bucket, and a
+	// companion is always something a key can hold.
+	require.Equal(t, []string{"s3:GetObjectAttributes", "s3:GetObject"}, OpGetObjectAttributes.Permissions())
+	for _, op := range ops {
+		perms := op.Permissions()
+		require.Equal(t, op.Permission(), perms[0], "operation %s", op)
+		if op != OpGetObjectAttributes {
+			require.Len(t, perms, 1, "operation %s", op)
+		}
+	}
+	for op, companion := range companionPermission {
+		require.Contains(t, ops, op, "companion for an unlisted operation %s", op)
+		require.NotEqual(t, op.Permission(), companion, "operation %s names its own permission as its companion", op)
+	}
 
 	require.Empty(t, Operation("Unknown").Permission())
 }

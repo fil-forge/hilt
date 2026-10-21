@@ -128,7 +128,7 @@ func AuthorizeRequest(
 	// the destination grant's retrieve is scoped to the destination. A copy
 	// within one bucket is already covered.
 	if src := authz.SourceBucket; src != nil && (bucketID == nil || src.ID != *bucketID) {
-		srcDlgs, err := issuePermissionDelegations(akIssuer, issuer, &src.ID, auth.SourcePermission, exp)
+		srcDlgs, err := issuePermissionDelegations(akIssuer, issuer, &src.ID, authz.SourcePermission, exp)
 		if err != nil {
 			return nil, nil, err
 		}
