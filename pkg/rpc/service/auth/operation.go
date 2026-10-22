@@ -215,8 +215,21 @@ func (o Operation) addressesExistingBucket() bool {
 	}
 }
 
-// OperationFor classifies the S3 operation addressed by a request. See
-// [classifyRequest] for the method/path rules.
+// ReadsBody reports whether the operation's body decides what the request
+// needs authorized, so a gateway attaches the body ([s3.Request.Body]) for
+// it and for no other: the operations with a reader in bodyReaders, today
+// DeleteObjects, whose entries may name versions. The body must be bound to
+// the signature before it is read ([ErrInvalidBody]) and is refused over
+// [MaxBodySize], which matches the codec's limit on it. The bucket policy
+// PUT carries its document on its own command instead. Never give a reader
+// to a write that streams its body.
+func (o Operation) ReadsBody() bool {
+	_, ok := bodyReaders[o]
+	return ok
+}
+
+// OperationFor classifies the S3 operation addressed by a request, with or
+// without its body. See [classifyRequest] for the method/path rules.
 func OperationFor(req s3.Request) (Operation, error) {
 	c, err := classifyRequest(req)
 	return c.op, err
@@ -250,21 +263,25 @@ func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
 // is the local mirror of the checks [Authorizer.Authorize] performs, for a
 // gateway authorizing over cached delegations, and like Authorize it refuses
 // a request whose copy source or permission-adding header is not covered by
-// the signature, as [ErrUnsignedHeader] naming the header; the signature is
-// parsed for that, not verified. A classification error ([ErrConflictingQuery],
+// the signature, as [ErrUnsignedHeader] naming the header, or whose body is
+// not bound to it ([ErrInvalidBody]); the signature is parsed for that, not
+// verified. A classification error ([ErrConflictingQuery],
 // [ErrUnsupportedOperation]) comes first, as it needs no signature.
 func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 	c, err := classifyRequest(req)
 	if err != nil {
 		return "", nil, err
 	}
-	if len(c.headers) > 0 {
+	if len(c.headers) > 0 || c.op.ReadsBody() || len(req.Body) > 0 {
 		sr, err := sigv4.Parse(sigv4.Request{Method: req.Method, URL: req.URL, Headers: req.Headers})
 		if err != nil {
 			return "", nil, fmt.Errorf("parsing request signature: %w", err)
 		}
 		if h, ok := unsignedHeader(sr, c.headers); ok {
 			return "", nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
+		}
+		if err := c.bindBody(sr, req); err != nil {
+			return "", nil, err
 		}
 	}
 	if !c.op.addressesExistingBucket() {
@@ -316,14 +333,17 @@ type classification struct {
 	srcBucket, srcKey, srcVersionID string
 	// headerPermissions are the permissions the request's headers put on the
 	// operation, beside its own, and headers names every header a decision
-	// was taken from: the copy source and each of those. See [Requirements].
+	// was taken from: the copy source and each of those. bodyPermissions are
+	// those its body puts on it (readBody).
 	headerPermissions, headers []string
+	bodyPermissions            []string
 }
 
 // permissions is every S3 permission the credential needs on the bucket the
-// request addresses: the operation's own, then those its headers add.
+// request addresses: the operation's own, then those its headers add, then
+// those its body adds.
 func (c classification) permissions() []string {
-	return append(c.op.Permissions(), c.headerPermissions...)
+	return append(append(c.op.Permissions(), c.headerPermissions...), c.bodyPermissions...)
 }
 
 // readHeaders adds the permissions the request's headers put on the
@@ -544,8 +564,9 @@ var objectRoutes = map[string]map[string]Operation{
 // write.
 //
 // DeleteObjects (`POST /bucket?delete`) deletes the keys its body names and
-// needs s3:DeleteObject on the bucket, as each single delete does; the
-// gateway checks s3:DeleteObjectVersion for each entry that names a version.
+// needs s3:DeleteObject on the bucket, as each single delete does, and
+// s3:DeleteObjectVersion as well when any entry names a version: the body
+// is read for that (readBody), once bound to the signature.
 //
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
@@ -565,7 +586,8 @@ var objectRoutes = map[string]map[string]Operation{
 //
 // The lock, tagging and Object Lock headers add a permission to the write
 // they ride on (see the header constants); like the copy source, each is
-// trusted only once Authorize has confirmed it was signed.
+// trusted only once Authorize has confirmed it was signed. A DeleteObjects
+// body adds one when it names a version, read by bindBody once bound.
 func classifyRequest(req s3.Request) (classification, error) {
 	c, err := classifyRoute(req)
 	if err != nil {

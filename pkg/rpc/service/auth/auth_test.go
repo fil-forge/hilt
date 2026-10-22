@@ -2,6 +2,8 @@ package auth_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -83,6 +85,22 @@ func signedCopySourceRequest(t *testing.T, signer multikey.Signer, dstBucket, so
 		signed = []string{"x-amz-copy-source"}
 	}
 	return signedRequestWith(t, signer, "PUT", "https://s3.fil.one/"+dstBucket+"/object-key", map[string]string{"x-amz-copy-source": source}, region, signed...)
+}
+
+// signedBodyRequest presigns a request carrying body, covered by the payload
+// hash when bind is set and left unsigned otherwise.
+func signedBodyRequest(t *testing.T, signer multikey.Signer, method, url, body, region string, bind bool) s3.Request {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	var opts []sigv4.PresignOption
+	if bind {
+		sum := sha256.Sum256([]byte(body))
+		opts = append(opts, sigv4.WithPayloadHash(hex.EncodeToString(sum[:])))
+	}
+	presigned, err := sigv4.Presign(sigv4.Request{Method: method, URL: url}, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+	require.NoError(t, err)
+	return s3.Request{Method: presigned.Method, URL: presigned.URL, Body: []byte(body)}
 }
 
 // signedRequestWith presigns a request carrying the given headers, of which
@@ -452,6 +470,55 @@ func TestAuthorize(t *testing.T) {
 		require.Equal(t, []auth.Requirement{{Bucket: "bucket", Permission: "s3:PutObject"}, {Bucket: "bucket", Permission: "s3:PutObjectLegalHold"}, {Bucket: "bucket", Permission: "s3:PutObjectTagging"}}, reqs)
 	})
 
+	t.Run("a DeleteObjects naming a version needs the version permission", func(t *testing.T) {
+		// S3 needs s3:DeleteObjectVersion for each entry that names a version;
+		// hilt reads the body, bound by the payload hash, and needs it for the
+		// whole request.
+		const deleteURL = "https://s3.fil.one/bucket?delete"
+		const versions = `<Delete><Object><Key>a</Key></Object><Object><Key>b</Key><VersionId>v1</VersionId></Object></Delete>`
+		const plain = `<Delete><Object><Key>a</Key></Object></Delete>`
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObject"}})
+		authz, err := az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, plain, region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, authz.Operation)
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObject", "s3:DeleteObjectVersion"}})
+		authz, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+
+		// The body is trusted only when the signature binds it.
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, false))
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+		req := signedBodyRequest(t, accessKey, "POST", deleteURL, plain, region, true)
+		req.Body = []byte(versions)
+		_, err = az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+		req = signedBodyRequest(t, accessKey, "POST", deleteURL, "", region, true)
+		_, err = az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+
+		// A body on an operation hilt reads none for is refused too.
+		req = signedObjectRequest(t, accessKey, "bucket", region)
+		req.Body = []byte(plain)
+		_, err = az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+
+		// An unparseable or oversized body is refused by name through
+		// Authorize as it is through RequirementsFor, never as an
+		// unsupported operation.
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, "<Delete><Object>", region, true))
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+		require.NotErrorIs(t, err, auth.ErrUnsupportedOperation)
+		huge := string(make([]byte, auth.MaxBodySize+1))
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, huge, region, true))
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+	})
+
 	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, nil)
 		authz, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
@@ -539,6 +606,24 @@ func TestAuthorize(t *testing.T) {
 		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
 		require.NoError(t, err)
 		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
+	t.Run("a principal's DeleteObjects naming a version needs the version action", func(t *testing.T) {
+		allow := func(actions ...string) s3bkt.Statement {
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
+		}
+		const versions = `<Delete><Object><Key>b</Key><VersionId>v1</VersionId></Object></Delete>`
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:DeleteObject"))
+		_, err := az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", "https://s3.fil.one/bucket?delete", versions, region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:DeleteObject", "s3:DeleteObjectVersion"))
+		authz, err := az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", "https://s3.fil.one/bucket?delete", versions, region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, authz.Operation)
 		require.Equal(t, bucketID, authz.Bucket.ID)
 	})
 

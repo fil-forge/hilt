@@ -214,7 +214,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	// handler can check it matches the operation it serves.
 	c, err := classifyRequest(req)
 	if err != nil {
-		if errors.Is(err, ErrConflictingQuery) || errors.Is(err, ErrUnsupportedOperation) {
+		if errors.Is(err, ErrConflictingQuery) || errors.Is(err, ErrUnsupportedOperation) || errors.Is(err, ErrInvalidBody) {
 			log.Debug("rejecting request", zap.Error(err))
 			return nil, err
 		}
@@ -231,6 +231,12 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	if h, ok := unsignedHeader(sr, c.headers); ok {
 		log.Debug("rejecting request whose header is not signed", zap.Stringer("operation", op), zap.String("header", h))
 		return nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
+	}
+	// A DeleteObjects is decided on its body too, forwarded for that
+	// operation alone: bound to the signature first, then read.
+	if err := c.bindBody(sr, req); err != nil {
+		log.Debug("rejecting request on its body", zap.Stringer("operation", op), zap.Error(err))
+		return nil, err
 	}
 
 	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, c)
