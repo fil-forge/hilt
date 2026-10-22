@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/xml"
 	"fmt"
 	"hash/crc32"
 	"hash/crc64"
@@ -23,18 +22,12 @@ import (
 // escaping, a version id as long, and the conditional fields, about 7.3 MB.
 const MaxBodySize = 8 << 20
 
-// maxDeleteObjectsEntries is the most keys a DeleteObjects may name, as S3
-// bounds it; a body naming more is malformed and refused, as the gateway
-// refuses it.
-const maxDeleteObjectsEntries = 1000
-
-// deleteObjectsBody is the shape of a DeleteObjects body hilt reads: the
-// entries, each of which may name the version it deletes.
-type deleteObjectsBody struct {
-	Objects []struct {
-		Key       string `xml:"Key"`
-		VersionID string `xml:"VersionId"`
-	} `xml:"Object"`
+// bodyReaders maps each operation whose body decides a permission to the
+// reader of that body, which returns the permissions the body adds or
+// refuses a malformed one as [ErrInvalidBody]. [Operation.ReadsBody] is
+// defined by this table, so a new reader registers here and nowhere else.
+var bodyReaders = map[Operation]func(body []byte) ([]string, error){
+	OpDeleteObjects: readDeleteObjectsBody,
 }
 
 // bindBody decides what the request's body adds, once it is bound: the
@@ -46,28 +39,19 @@ func (c *classification) bindBody(sr *sigv4.SignedRequest, req s3.Request) error
 	return c.readBody(req.Body)
 }
 
-// readBody adds the permission the request's body puts on the operation: a
-// DeleteObjects entry naming a version needs s3:DeleteObjectVersion beside
-// s3:DeleteObject, as S3 requires for each such entry (hilt requires it for
-// the whole request). It runs on a body boundBody accepted; an unparseable
-// one, or one naming more keys than S3 allows, is refused here.
+// readBody adds the permissions the request's body puts on the operation,
+// through the operation's reader in bodyReaders. It runs on a body
+// boundBody accepted; a malformed one is refused by the reader.
 func (c *classification) readBody(body []byte) error {
-	if !c.op.ReadsBody() || len(body) == 0 {
+	read, ok := bodyReaders[c.op]
+	if !ok || len(body) == 0 {
 		return nil
 	}
-	var del deleteObjectsBody
-	if err := xml.Unmarshal(body, &del); err != nil {
-		return fmt.Errorf("%w: unparseable DeleteObjects body: %v", ErrInvalidBody, err)
+	perms, err := read(body)
+	if err != nil {
+		return err
 	}
-	if len(del.Objects) > maxDeleteObjectsEntries {
-		return fmt.Errorf("%w: DeleteObjects body names %d keys, at most %d allowed", ErrInvalidBody, len(del.Objects), maxDeleteObjectsEntries)
-	}
-	for _, o := range del.Objects {
-		if o.VersionID != "" {
-			c.bodyPermissions = append(c.bodyPermissions, "s3:DeleteObjectVersion")
-			break
-		}
-	}
+	c.bodyPermissions = append(c.bodyPermissions, perms...)
 	return nil
 }
 
