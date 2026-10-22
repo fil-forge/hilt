@@ -337,7 +337,8 @@ func (a *Authorizer) authorizeOperation(
 		return []string{"s3:ListAllMyBuckets"}, nil, nil, nil
 	case OpCreateBucket, OpDeleteBucket, OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy, OpGetBucketPolicyStatus,
 		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
-		OpPutBucketTagging, OpDeleteBucketTagging, OpPutBucketVersioning, OpPutObjectLockConfiguration:
+		OpPutBucketTagging, OpDeleteBucketTagging, OpPutBucketVersioning, OpPutObjectLockConfiguration,
+		OpPutBucketCors, OpDeleteBucketCors:
 		// No policy grants them: a key holding them would act outside, or
 		// rewrite, the policy that granted it, or change the bucket's
 		// configuration for every principal.

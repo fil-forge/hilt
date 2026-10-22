@@ -50,7 +50,7 @@ var allPermissions = append(s3bkt.PolicyActions(), "s3:CreateBucket", "s3:Delete
 	"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
 	"s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
 	"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration",
-	"s3:GetBucketPolicyStatus")
+	"s3:PutBucketCORS", "s3:GetBucketPolicyStatus")
 
 // member is one scenario's fixture: a tenant with a service key that creates
 // its buckets and seeds objects, and one principal with an access key bound to
