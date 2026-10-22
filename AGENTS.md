@@ -192,6 +192,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   own bucket (`companionPermission`: GetObjectAttributes needs `s3:GetObject`
   too) is checked for both, and so is a header that adds one
   (`classification.readHeaders`: lock and tagging headers on a write,
+  `x-amz-bypass-governance-retention` on a delete or retention write,
   `x-amz-bucket-object-lock-enabled` on CreateBucket). Every header a
   decision is taken from must be a signed header, which `RequirementsFor`
   refuses too for the gateway's local check. A body is read only for the
