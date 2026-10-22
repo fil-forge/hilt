@@ -217,12 +217,16 @@ func (o Operation) addressesExistingBucket() bool {
 
 // ReadsBody reports whether the operation's body decides what the request
 // needs authorized, so a gateway attaches the body ([s3.Request.Body]) for
-// it and for no other: DeleteObjects, whose entries may name versions. The
-// body must be bound to the signature before it is read ([ErrInvalidBody])
-// and is refused over [MaxBodySize], which matches the codec's limit on it. The bucket policy PUT carries its
-// document on its own command instead. Never widen this to a write that
-// streams its body.
-func (o Operation) ReadsBody() bool { return o == OpDeleteObjects }
+// it and for no other: the operations with a reader in bodyReaders, today
+// DeleteObjects, whose entries may name versions. The body must be bound to
+// the signature before it is read ([ErrInvalidBody]) and is refused over
+// [MaxBodySize], which matches the codec's limit on it. The bucket policy
+// PUT carries its document on its own command instead. Never give a reader
+// to a write that streams its body.
+func (o Operation) ReadsBody() bool {
+	_, ok := bodyReaders[o]
+	return ok
+}
 
 // OperationFor classifies the S3 operation addressed by a request, with or
 // without its body. See [classifyRequest] for the method/path rules.
