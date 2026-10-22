@@ -507,12 +507,23 @@ func testDeleteObjectsVersionNeedsTheVersionAction(t *testing.T, net *forgeNet) 
 	require.NoError(t, err)
 	require.NotEmpty(t, aws.ToString(first.VersionId))
 
+	// A DeleteObjects answers 200 with per-entry errors, so the positive
+	// phase checks the entry was deleted rather than the call's error alone.
 	deleteFirst := func() error {
-		_, err := m.s3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		out, err := m.s3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(bucket),
 			Delete: &types.Delete{Objects: []types.ObjectIdentifier{{Key: aws.String("k"), VersionId: first.VersionId}}},
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if len(out.Errors) > 0 {
+			return fmt.Errorf("entry %s: %s: %s", aws.ToString(out.Errors[0].Key), aws.ToString(out.Errors[0].Code), aws.ToString(out.Errors[0].Message))
+		}
+		if len(out.Deleted) != 1 || aws.ToString(out.Deleted[0].VersionId) != aws.ToString(first.VersionId) {
+			return fmt.Errorf("deleted %d entries, want the first version", len(out.Deleted))
+		}
+		return nil
 	}
 
 	putPolicy(t, ctx, m.service, bucket, allow(bucket, s3bkt.Only(principal), "s3:DeleteObject", "s3:GetObject"))
