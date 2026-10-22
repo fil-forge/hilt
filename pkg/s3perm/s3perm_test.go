@@ -224,7 +224,7 @@ func TestPolicyActions(t *testing.T) {
 	}
 	for _, p := range []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
-		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration", s3bkt.PolicyWildcard} {
+		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketCORS", s3bkt.PolicyWildcard} {
 		require.NotContains(t, actions, p)
 	}
 	require.False(t, s3bkt.PolicyAction(s3bkt.PolicyWildcard))

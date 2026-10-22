@@ -23,7 +23,7 @@ func TestEveryPermissionIsClassified(t *testing.T) {
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
 		"s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
 		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration",
-		"s3:GetBucketPolicyStatus",
+		"s3:PutBucketCORS", "s3:GetBucketPolicyStatus",
 	}
 	policyActions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(policyActions), "policyActions must be sorted")

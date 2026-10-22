@@ -78,8 +78,8 @@ github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/codahale/rfc6979 v0.0.0-20141003034818-6a90f24967eb h1:EDmT6Q9Zs+SbUoc7Ik9EfrFqcylYqgPZ9ANSbTAntnE=
 github.com/codahale/rfc6979 v0.0.0-20141003034818-6a90f24967eb/go.mod h1:ZjrT6AXHbDs86ZSdt/osfBi5qfexBrKUdONk989Wnk4=
-github.com/compose-spec/compose-go/v2 v2.12.1 h1:+xBZNxcgSus4atQJwXPEdhHRgCEyZmj/BuqN5m33Ou0=
-github.com/compose-spec/compose-go/v2 v2.12.1/go.mod h1:ZU6zlcweCZKyiB7BVfCizQT9XmkEIMFE+PRZydVcsZg=
+github.com/compose-spec/compose-go/v2 v2.15.0 h1:tdQw+eMyT+P6ZIb09JfcIVvbMmIa+PjST7cWezVLf00=
+github.com/compose-spec/compose-go/v2 v2.15.0/go.mod h1:Q1+qtN4vhzEjGrnqRtzx1xa8raDZQlMUe3WJxndYNiQ=
 github.com/containerd/cgroups/v3 v3.1.3 h1:eUNflyMddm18+yrDmZPn3jI7C5hJ9ahABE5q6dyLYXQ=
 github.com/containerd/cgroups/v3 v3.1.3/go.mod h1:PKZ2AcWmSBsY/tJUVhtS/rluX0b1uq1GmPO1ElCmbOw=
 github.com/containerd/console v1.0.5 h1:R0ymNeydRqH2DmakFNdmjR2k0t7UPuiOV/N/27/qqsc=
@@ -164,8 +164,8 @@ github.com/felixge/httpsnoop v1.1.0 h1:3YtUj32ZZkqZtt3sZZsClsymw/QDuVfpNhoA31zeO
 github.com/felixge/httpsnoop v1.1.0/go.mod h1:Zqxgdd+1Rkcz8euOqdr7lqgCRJztwr5hp9vDSi5UZCE=
 github.com/fil-forge/libforge v0.0.0-20261022121207-bcdd5eacc465 h1:y7EPy1Fbn/LWQMy7iYKoZ1G0Pi88a4Z8tVw7uFOBjLA=
 github.com/fil-forge/libforge v0.0.0-20261022121207-bcdd5eacc465/go.mod h1:ZtPwUgXm7gqQSmjmIcfMy5AwWpFIR02WMZvbgNOwi/4=
-github.com/fil-forge/smelt v0.0.0-20260914083257-f594cf02655c h1:AEUEUEs/mDNksJIXdMgNMGJ03SHk6NlKjtDH58d1T04=
-github.com/fil-forge/smelt v0.0.0-20260914083257-f594cf02655c/go.mod h1:OUO2GxgUihmYfywNIfvWTQocg6jqaNiTd04cG5BbdII=
+github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40 h1:Meq7loWqQvwCVtlUGP173VfULpOM33YtSyej5507USU=
+github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40/go.mod h1:Zz67XgtRsLViFDCVMxpXwRcge9Y3dbUA9rvZqAF93vg=
 github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c h1:uzLK4I8rD2SXBTeb/qOMbnfD/oAr2RoFVP730abzzyo=
 github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c/go.mod h1:sSe3eJWknrWxnldIpU46aWI2Rvq9PwiA3nUiSFn9Rxk=
 github.com/fil-forge/ucantone v0.0.0-20260924160040-c31dec73d9b3 h1:Ta5ODMWR9mM4zMfRp/K1unAKvnt7f5dhehRA+YHiv7w=
@@ -423,8 +423,8 @@ github.com/package-url/packageurl-go v0.1.1 h1:KTRE0bK3sKbFKAk3yy63DpeskU7Cvs/x/
 github.com/package-url/packageurl-go v0.1.1/go.mod h1:uQd4a7Rh3ZsVg5j0lNyAfyxIeGde9yrlhjF78GzeW0c=
 github.com/patrickmn/go-cache v2.1.0+incompatible h1:HRMgzkcYKYpi3C8ajMPV8OFXaaRUnok+kx1WdO15EQc=
 github.com/patrickmn/go-cache v2.1.0+incompatible/go.mod h1:3Qf8kWWT7OJRJbdiICTKqZju1ZixQ/KpMGzzAfe6+WQ=
-github.com/pelletier/go-toml/v2 v2.4.1 h1:j5OMOImsH+j2k7GJ5YO+RxfWwohNiH6t5zB/+h3bagc=
-github.com/pelletier/go-toml/v2 v2.4.1/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
+github.com/pelletier/go-toml/v2 v2.4.3 h1:GTRvJQutkOSftxIFD5xw9aepkYNuPWmVJpffdDPYVpY=
+github.com/pelletier/go-toml/v2 v2.4.3/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 h1:GFCKgmp0tecUJ0sJuv4pzYCqS9+RGSn52M3FUwPs+uo=
@@ -475,8 +475,8 @@ github.com/sigstore/sigstore-go v1.2.1 h1:YWP/rDbBaEBvtbkj6xtwsSj38ZCFEhTVVadNOX
 github.com/sigstore/sigstore-go v1.2.1/go.mod h1:I8BqVwAb/SaQJ5pBu5IDFY+ksq8O/1/kCag8XUgrsko=
 github.com/sigstore/timestamp-authority/v2 v2.1.2 h1:7DDhnknLL4w8VwomyvW2W8qblOS9LDR8oihna+jc7Ls=
 github.com/sigstore/timestamp-authority/v2 v2.1.2/go.mod h1:o6rAVZceFyejClIj/uStRNIemP16bVMZtbMmhk6pr0U=
-github.com/sirupsen/logrus v1.9.4 h1:TsZE7l11zFCLZnZ+teH4Umoq5BhEIfIzfRDZ1Uzql2w=
-github.com/sirupsen/logrus v1.9.4/go.mod h1:ftWc9WdOfJ0a92nsE2jF5u5ZwH8Bv2zdeOC42RjbV2g=
+github.com/sirupsen/logrus v1.10.1 h1:xi4336Zh11WpU14fXR6I67V3yaTPQYwRx2WEtHbRg4Q=
+github.com/sirupsen/logrus v1.10.1/go.mod h1:vsQHnG7xzNsxk3NrwboUiWPnIC3dmbjcGPykD7+tiHk=
 github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966 h1:JIAuq3EEf9cgbU6AtGPK4CTG3Zf6CKMNqf0MHTggAUA=
 github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966/go.mod h1:sUM3LWHvSMaG192sy56D9F7CNvL7jUJVXoqM1QKLnog=
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 h1:+jumHNA0Wrelhe64i8F6HNlS8pkoyMv5sreGx2Ry5Rw=
