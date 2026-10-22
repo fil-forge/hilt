@@ -141,6 +141,11 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:GetBucketObjectLockConfiguration": nil,
 	"s3:PutBucketObjectLockConfiguration": nil,
 
+	// Bypassing governance retention rides on a delete or a retention write,
+	// which carries the commands; the bypass itself moves nothing. The
+	// gateway decides the bypass against the bucket's lock state.
+	"s3:BypassGovernanceRetention": nil,
+
 	// Object tags and attributes. Both reads go through the object's catalog
 	// entry, which may have to come back over the network.
 	"s3:GetObjectTagging":    cmdsRetrieve,

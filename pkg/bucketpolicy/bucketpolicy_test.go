@@ -216,6 +216,7 @@ func TestActionResources(t *testing.T) {
 		"s3:GetObject", "s3:GetObjectLegalHold", "s3:GetObjectRetention", "s3:GetObjectVersion",
 		"s3:ListMultipartUploadParts", "s3:PutObject", "s3:PutObjectLegalHold", "s3:PutObjectRetention",
 		"s3:GetObjectTagging", "s3:PutObjectTagging", "s3:DeleteObjectTagging", "s3:GetObjectAttributes",
+		"s3:BypassGovernanceRetention",
 	}
 	require.ElementsMatch(t, s3bkt.PolicyActions(), append(slices.Clone(bucketActions), objectActions...))
 

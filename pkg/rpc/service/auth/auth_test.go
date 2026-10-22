@@ -458,6 +458,23 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 	})
 
+	t.Run("bypassing governance retention needs its permission", func(t *testing.T) {
+		const objectURL = "https://s3.fil.one/bucket/object-key?versionId=v1"
+		bypass := map[string]string{"x-amz-bypass-governance-retention": "true"}
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObjectVersion"}})
+		_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", objectURL, bypass, region, "x-amz-bypass-governance-retention"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"}})
+		authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", objectURL, bypass, region, "x-amz-bypass-governance-retention"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjectVersion, authz.Operation)
+
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", objectURL, bypass, region))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+	})
+
 	t.Run("a request's requirements refuse an unsigned header as Authorize does", func(t *testing.T) {
 		headers := map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}
 		_, _, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging"))
@@ -755,6 +772,20 @@ func TestAuthorize(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, auth.SourceVersionPermission, authz.SourcePermission)
 			require.Equal(t, bucketID, authz.SourceBucket.ID)
+		})
+
+		t.Run("a bypass header needs the bypass action from the policy", func(t *testing.T) {
+			bypass := map[string]string{"x-amz-bypass-governance-retention": "true"}
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucketID, tenantID, allow("s3:DeleteObjectVersion"))
+			_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", "https://s3.fil.one/bucket/object-key?versionId=v1", bypass, region, "x-amz-bypass-governance-retention"))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucketID, tenantID, allow("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"))
+			authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", "https://s3.fil.one/bucket/object-key?versionId=v1", bypass, region, "x-amz-bypass-governance-retention"))
+			require.NoError(t, err)
+			require.Equal(t, bucketID, authz.Bucket.ID)
 		})
 
 		t.Run("a lock header needs the lock action from the destination's policy", func(t *testing.T) {

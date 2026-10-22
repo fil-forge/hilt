@@ -218,7 +218,7 @@ func TestPolicyAction(t *testing.T) {
 func TestPolicyActions(t *testing.T) {
 	actions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(actions))
-	require.Len(t, actions, 24)
+	require.Len(t, actions, 25)
 	for _, p := range actions {
 		require.True(t, s3bkt.PolicyAction(p), p)
 	}

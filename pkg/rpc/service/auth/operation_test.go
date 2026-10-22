@@ -663,6 +663,24 @@ func TestReadHeaders(t *testing.T) {
 			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "false, true"}},
 		{name: "put object ignores the bucket flag", method: "PUT", url: "https://s3.example.com/bkt/k",
 			headers: map[string]string{"x-amz-bucket-object-lock-enabled": "true"}},
+		// Bypassing governance retention is priced on the deletes and the
+		// retention write, on the header's first value, case-insensitively.
+		{name: "delete with bypass", method: "DELETE", url: "https://s3.example.com/bkt/k",
+			headers:   map[string]string{"x-amz-bypass-governance-retention": "true"},
+			wantPerms: []string{"s3:BypassGovernanceRetention"}, wantHeaders: []string{"x-amz-bypass-governance-retention"}},
+		{name: "delete of a version with bypass", method: "DELETE", url: "https://s3.example.com/bkt/k?versionId=v",
+			headers:   map[string]string{"X-Amz-Bypass-Governance-Retention": "TRUE"},
+			wantPerms: []string{"s3:BypassGovernanceRetention"}, wantHeaders: []string{"x-amz-bypass-governance-retention"}},
+		{name: "delete objects with bypass", method: "POST", url: "https://s3.example.com/bkt?delete",
+			headers:   map[string]string{"x-amz-bypass-governance-retention": "true,false"},
+			wantPerms: []string{"s3:BypassGovernanceRetention"}, wantHeaders: []string{"x-amz-bypass-governance-retention"}},
+		{name: "retention write with bypass", method: "PUT", url: "https://s3.example.com/bkt/k?retention",
+			headers:   map[string]string{"x-amz-bypass-governance-retention": "true"},
+			wantPerms: []string{"s3:BypassGovernanceRetention"}, wantHeaders: []string{"x-amz-bypass-governance-retention"}},
+		{name: "delete without bypass", method: "DELETE", url: "https://s3.example.com/bkt/k",
+			headers: map[string]string{"x-amz-bypass-governance-retention": "false"}},
+		{name: "a put ignores the bypass header", method: "PUT", url: "https://s3.example.com/bkt/k",
+			headers: map[string]string{"x-amz-bypass-governance-retention": "true"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c, err := classifyRequest(s3.Request{Method: tt.method, URL: tt.url, Headers: tt.headers})
