@@ -370,10 +370,29 @@ func TestRequirementsFor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OpDeleteObjects, op)
 	require.Len(t, reqs, 2)
+	// Every checksum header present must be signed, as S3 requires of every
+	// x-amz-* header, before any binding is accepted; every one present is
+	// verified.
+	sha := base64.StdEncoding.EncodeToString(sha256sum(versions))
+	op, reqs, err = RequirementsFor(withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc, "x-amz-checksum-sha256": sha}, versions, false))
+	require.NoError(t, err)
+	require.Equal(t, OpDeleteObjects, op)
+	require.Len(t, reqs, 2)
+	for name, req := range map[string]s3.Request{
+		"unsigned checksum header":                  presignedWithBody(t, "POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc}, versions),
+		"unsigned checksum beside a signed one":     presignedWithBody(t, "POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-sha256": sha}, versions, "x-amz-checksum-crc32", crc),
+		"unsigned checksum beside the payload hash": tamperHeader(withBody("POST", "https://s3.example.com/bkt?delete", nil, versions, true), "x-amz-checksum-sha256", sha),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := RequirementsFor(req)
+			require.ErrorIs(t, err, ErrUnsignedHeader)
+			require.NotErrorIs(t, err, ErrUnboundBody)
+		})
+	}
 	for name, req := range map[string]s3.Request{
 		"unsigned payload, no checksum":        withBody("POST", "https://s3.example.com/bkt?delete", nil, versions, false),
-		"unsigned checksum header":             presignedWithBody(t, "POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc}, versions),
 		"wrong checksum":                       withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": "AAAAAA=="}, versions, false),
+		"one of two signed checksums wrong":    withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc, "x-amz-checksum-sha256": "AAAAAA=="}, versions, false),
 		"wrong payload hash":                   tamper(withBody("POST", "https://s3.example.com/bkt?delete", nil, plain, true), versions),
 		"body missing":                         presigned("POST", "https://s3.example.com/bkt?delete", nil),
 		"body on an operation that reads none": withBody("GET", "https://s3.example.com/bkt/k", nil, plain, true),
@@ -439,14 +458,37 @@ func TestRequirementsFor(t *testing.T) {
 	require.ErrorIs(t, err, ErrConflictingQuery)
 }
 
-// presignedWithBody presigns a request whose headers are all left unsigned
-// and attaches body under an unsigned payload.
-func presignedWithBody(t *testing.T, method, url string, headers map[string]string, body string) s3.Request {
+// presignedWithBody presigns a request whose headers are all left unsigned,
+// beside an optional signed name/value pair, and attaches body under an
+// unsigned payload.
+func presignedWithBody(t *testing.T, method, url string, headers map[string]string, body string, signed ...string) s3.Request {
 	t.Helper()
-	req, err := sigv4.Presign(sigv4.Request{Method: method, URL: url, Headers: headers}, "AKIATEST", "secret", "us-east-1", sigv4.SchemeV4, time.Now(), time.Hour)
+	all := map[string]string{}
+	for k, v := range headers {
+		all[k] = v
+	}
+	var opts []sigv4.PresignOption
+	if len(signed) == 2 {
+		all[signed[0]] = signed[1]
+		opts = append(opts, sigv4.WithSignedHeaders(signed[0]))
+	}
+	req, err := sigv4.Presign(sigv4.Request{Method: method, URL: url, Headers: all}, "AKIATEST", "secret", "us-east-1", sigv4.SchemeV4, time.Now(), time.Hour, opts...)
 	require.NoError(t, err)
-	return s3.Request{Method: req.Method, URL: req.URL, Headers: headers, Body: []byte(body)}
+	return s3.Request{Method: req.Method, URL: req.URL, Headers: all, Body: []byte(body)}
 }
+
+// tamperHeader adds an unsigned header to a signed request.
+func tamperHeader(req s3.Request, name, value string) s3.Request {
+	h := map[string]string{}
+	for k, v := range req.Headers {
+		h[k] = v
+	}
+	h[name] = value
+	req.Headers = h
+	return req
+}
+
+func sha256sum(s string) []byte { sum := sha256.Sum256([]byte(s)); return sum[:] }
 
 // tamper swaps the body of a signed request for another.
 func tamper(req s3.Request, body string) s3.Request {
