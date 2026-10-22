@@ -276,7 +276,7 @@ func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 		if h, ok := unsignedHeader(sr, c.headers); ok {
 			return "", nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
 		}
-		if err := boundBody(sr, req, c.op); err != nil {
+		if err := c.bindBody(sr, req); err != nil {
 			return "", nil, err
 		}
 	}
@@ -581,18 +581,15 @@ var objectRoutes = map[string]map[string]Operation{
 // the header before consulting hilt.
 //
 // The lock, tagging and Object Lock headers add a permission to the write
-// they ride on (see the header constants), and a DeleteObjects body adds
-// one when it names a version; like the copy source, each is trusted only
-// once Authorize has confirmed it was signed, or the body bound.
+// they ride on (see the header constants); like the copy source, each is
+// trusted only once Authorize has confirmed it was signed. A DeleteObjects
+// body adds one when it names a version, read by bindBody once bound.
 func classifyRequest(req s3.Request) (classification, error) {
 	c, err := classifyRoute(req)
 	if err != nil {
 		return classification{}, err
 	}
 	c.readHeaders(req.Headers)
-	if err := c.readBody(req.Body); err != nil {
-		return classification{}, err
-	}
 	return c, nil
 }
 

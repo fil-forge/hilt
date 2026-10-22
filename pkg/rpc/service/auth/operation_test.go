@@ -392,12 +392,13 @@ func TestRequirementsFor(t *testing.T) {
 		})
 	}
 	for name, req := range map[string]s3.Request{
-		"unsigned payload, no checksum":        withBody("POST", "https://s3.example.com/bkt?delete", nil, versions, false),
-		"wrong checksum":                       withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": "AAAAAA=="}, versions, false),
-		"one of two signed checksums wrong":    withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc, "x-amz-checksum-sha256": "AAAAAA=="}, versions, false),
-		"wrong payload hash":                   tamper(withBody("POST", "https://s3.example.com/bkt?delete", nil, plain, true), versions),
-		"body missing":                         presigned("POST", "https://s3.example.com/bkt?delete", nil),
-		"body on an operation that reads none": withBody("GET", "https://s3.example.com/bkt/k", nil, plain, true),
+		"unsigned payload, no checksum":                       withBody("POST", "https://s3.example.com/bkt?delete", nil, versions, false),
+		"wrong checksum":                                      withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": "AAAAAA=="}, versions, false),
+		"one of two signed checksums wrong":                   withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": crc, "x-amz-checksum-sha256": "AAAAAA=="}, versions, false),
+		"wrong signed checksum beside a correct payload hash": withBody("POST", "https://s3.example.com/bkt?delete", map[string]string{"x-amz-checksum-crc32": "AAAAAA=="}, versions, true),
+		"wrong payload hash":                                  tamper(withBody("POST", "https://s3.example.com/bkt?delete", nil, plain, true), versions),
+		"body missing":                                        presigned("POST", "https://s3.example.com/bkt?delete", nil),
+		"body on an operation that reads none":                withBody("GET", "https://s3.example.com/bkt/k", nil, plain, true),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := RequirementsFor(req)
@@ -519,7 +520,11 @@ func TestReadsBody(t *testing.T) {
 // (boundBody refuses it) and refused when unparseable.
 func TestReadBody(t *testing.T) {
 	classify := func(method, url, body string) (classification, error) {
-		return classifyRequest(s3.Request{Method: method, URL: url, Body: []byte(body)})
+		c, err := classifyRequest(s3.Request{Method: method, URL: url})
+		if err != nil {
+			return classification{}, err
+		}
+		return c, c.readBody([]byte(body))
 	}
 	c, err := classify("POST", "https://s3.example.com/bkt?delete", `<Delete><Object><Key>a</Key><VersionId>v</VersionId></Object></Delete>`)
 	require.NoError(t, err)
