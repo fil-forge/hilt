@@ -127,10 +127,13 @@ var permissionCommands = map[string][]ucan.Command{
 	"s3:PutEncryptionConfiguration": nil,
 
 	// Bucket configuration other than the policy and encryption. Removing the
-	// bucket's tags needs s3:PutBucketTagging, as it does in S3.
+	// bucket's tags needs s3:PutBucketTagging and removing its CORS
+	// configuration s3:PutBucketCORS, as they do in S3. The CORS document
+	// lives in the gateway's registry, so it needs no Forge commands.
 	"s3:GetBucketLocation":                nil,
 	"s3:GetBucketAcl":                     nil,
 	"s3:GetBucketCORS":                    nil,
+	"s3:PutBucketCORS":                    nil,
 	"s3:GetBucketTagging":                 nil,
 	"s3:PutBucketTagging":                 nil,
 	"s3:GetBucketVersioning":              nil,

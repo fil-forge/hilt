@@ -116,6 +116,8 @@ func TestClassifyRequest(t *testing.T) {
 		{name: "get bucket location", method: "GET", url: "https://s3.example.com/bkt?location", want: OpGetBucketLocation, wantBucket: "bkt"},
 		{name: "get bucket acl", method: "GET", url: "https://s3.example.com/bkt?acl", want: OpGetBucketAcl, wantBucket: "bkt"},
 		{name: "get bucket cors", method: "GET", url: "https://s3.example.com/bkt?cors", want: OpGetBucketCors, wantBucket: "bkt"},
+		{name: "put bucket cors", method: "PUT", url: "https://s3.example.com/bkt?cors", want: OpPutBucketCors, wantBucket: "bkt"},
+		{name: "delete bucket cors", method: "DELETE", url: "https://s3.example.com/bkt?cors", want: OpDeleteBucketCors, wantBucket: "bkt"},
 		{name: "get bucket policy status", method: "GET", url: "https://s3.example.com/bkt?policyStatus", want: OpGetBucketPolicyStatus, wantBucket: "bkt"},
 		{name: "get bucket tagging", method: "GET", url: "https://s3.example.com/bkt?tagging", want: OpGetBucketTagging, wantBucket: "bkt"},
 		{name: "put bucket tagging", method: "PUT", url: "https://s3.example.com/bkt?tagging", want: OpPutBucketTagging, wantBucket: "bkt"},
@@ -243,8 +245,6 @@ func TestClassifyRequest(t *testing.T) {
 	// the gateway answers with an error.
 	t.Run("refuses a route Hilt does not authorize", func(t *testing.T) {
 		for _, req := range []s3.Request{
-			{Method: "PUT", URL: "https://s3.example.com/bkt?cors"},
-			{Method: "DELETE", URL: "https://s3.example.com/bkt?cors"},
 			{Method: "PUT", URL: "https://s3.example.com/bkt?acl"},
 			{Method: "GET", URL: "https://s3.example.com/bkt/k?acl"},
 			{Method: "PUT", URL: "https://s3.example.com/bkt/k?acl"},
@@ -687,7 +687,8 @@ func TestOperationPermission(t *testing.T) {
 		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
 		OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 		OpAbortMultipartUpload, OpListMultipartUploadParts, OpListBucketMultipartUploads,
-		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpGetBucketPolicyStatus,
+		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpPutBucketCors, OpDeleteBucketCors,
+		OpGetBucketPolicyStatus,
 		OpGetBucketTagging, OpPutBucketTagging, OpDeleteBucketTagging,
 		OpGetBucketVersioning, OpPutBucketVersioning,
 		OpGetObjectLockConfiguration, OpPutObjectLockConfiguration,

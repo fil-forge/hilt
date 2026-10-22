@@ -66,11 +66,14 @@ const (
 	OpListBucketMultipartUploads Operation = "ListBucketMultipartUploads" // GET, bucket, no key, ?uploads
 
 	// Bucket configuration operations, each distinguished from the plain
-	// bucket operations by its subresource. Removing the bucket's tags needs
-	// the same permission as writing them, as it does in S3.
+	// bucket operations by its subresource. Removing the bucket's tags or its
+	// CORS configuration needs the same permission as writing them, as it
+	// does in S3.
 	OpGetBucketLocation          Operation = "GetBucketLocation"          // GET, bucket, no key, ?location
 	OpGetBucketAcl               Operation = "GetBucketAcl"               // GET, bucket, no key, ?acl
 	OpGetBucketCors              Operation = "GetBucketCors"              // GET, bucket, no key, ?cors
+	OpPutBucketCors              Operation = "PutBucketCors"              // PUT, bucket, no key, ?cors
+	OpDeleteBucketCors           Operation = "DeleteBucketCors"           // DELETE, bucket, no key, ?cors
 	OpGetBucketPolicyStatus      Operation = "GetBucketPolicyStatus"      // GET, bucket, no key, ?policyStatus
 	OpGetBucketTagging           Operation = "GetBucketTagging"           // GET, bucket, no key, ?tagging
 	OpPutBucketTagging           Operation = "PutBucketTagging"           // PUT, bucket, no key, ?tagging
@@ -129,6 +132,8 @@ var operationPermission = map[Operation]string{
 	OpGetBucketLocation:          "s3:GetBucketLocation",
 	OpGetBucketAcl:               "s3:GetBucketAcl",
 	OpGetBucketCors:              "s3:GetBucketCORS",
+	OpPutBucketCors:              "s3:PutBucketCORS",
+	OpDeleteBucketCors:           "s3:PutBucketCORS",
 	OpGetBucketPolicyStatus:      "s3:GetBucketPolicyStatus",
 	OpGetBucketTagging:           "s3:GetBucketTagging",
 	OpPutBucketTagging:           "s3:PutBucketTagging",
@@ -202,7 +207,8 @@ func (o Operation) addressesExistingBucket() bool {
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpDeleteObjects, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
 		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
-		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpGetBucketPolicyStatus,
+		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpPutBucketCors, OpDeleteBucketCors,
+		OpGetBucketPolicyStatus,
 		OpGetBucketTagging, OpPutBucketTagging, OpDeleteBucketTagging,
 		OpGetBucketVersioning, OpPutBucketVersioning,
 		OpGetObjectLockConfiguration, OpPutObjectLockConfiguration,
@@ -420,7 +426,7 @@ var subresources = map[string]bool{
 	"acl":                   true, // GetBucketAcl only
 	"analytics":             false,
 	"attributes":            true,
-	"cors":                  true, // GetBucketCors only
+	"cors":                  true,
 	"delete":                true,
 	"encryption":            true,
 	"intelligent-tiering":   false,
@@ -479,7 +485,7 @@ var bucketRoutes = map[string]map[string]Operation{
 		"tagging":     OpPutBucketTagging,
 		"versioning":  OpPutBucketVersioning,
 		"object-lock": OpPutObjectLockConfiguration,
-		"cors":        "",
+		"cors":        OpPutBucketCors,
 		"policy":      OpPutBucketPolicy,
 		"acl":         "",
 		"encryption":  OpPutBucketEncryption,
@@ -487,7 +493,7 @@ var bucketRoutes = map[string]map[string]Operation{
 	http.MethodDelete: {
 		"tagging":    OpDeleteBucketTagging,
 		"policy":     OpDeleteBucketPolicy,
-		"cors":       "",
+		"cors":       OpDeleteBucketCors,
 		"encryption": OpDeleteBucketEncryption,
 	},
 	http.MethodPost: {
