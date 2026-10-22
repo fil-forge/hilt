@@ -305,9 +305,10 @@ const copySourceHeader = "x-amz-copy-source"
 // The request headers that put a permission on the operation they ride on,
 // as S3 requires. A write that sets a retention period or a legal hold on
 // the version it creates needs the lock permission beside the write, one
-// that tags it needs the tagging permission, and a bucket created with
-// Object Lock enabled is born versioned and locked, which needs both
-// configuration permissions beside s3:CreateBucket. The gateway acts on
+// that tags it needs the tagging permission, a delete or retention write
+// asking to bypass governance retention needs the bypass permission, and a
+// bucket created with Object Lock enabled is born versioned and locked,
+// which needs both configuration permissions beside s3:CreateBucket. The gateway acts on
 // these headers exactly as read here: it stamps the lock state and the tags
 // at commit (a copy's tags only under a REPLACE directive) and creates the
 // bucket versioned and locked, so a header that adds no permission here is
@@ -319,6 +320,11 @@ const (
 	taggingHeader                 = "x-amz-tagging"
 	taggingDirectiveHeader        = "x-amz-tagging-directive"
 	bucketObjectLockEnabledHeader = "x-amz-bucket-object-lock-enabled"
+	// bypassGovernanceHeader asks a delete or a retention write to act on a
+	// governance-locked version; S3 needs s3:BypassGovernanceRetention for
+	// it. The gateway decides the bypass itself against the bucket's lock
+	// state, and refuses it for now whatever the key holds.
+	bypassGovernanceHeader = "x-amz-bypass-governance-retention"
 )
 
 // classification is what classifyRequest derives from a request: the operation,
@@ -388,6 +394,10 @@ func (c *classification) readHeaders(headers map[string]string) {
 			}
 		} else if _, ok := HeaderValue(headers, taggingHeader); ok {
 			need(taggingHeader, "s3:PutObjectTagging")
+		}
+	case OpDeleteObject, OpDeleteObjectVersion, OpDeleteObjects, OpPutObjectRetention:
+		if v, ok := HeaderValue(headers, bypassGovernanceHeader); ok && strings.EqualFold(first(v), "true") {
+			need(bypassGovernanceHeader, "s3:BypassGovernanceRetention")
 		}
 	case OpCreateBucket:
 		if v, ok := HeaderValue(headers, bucketObjectLockEnabledHeader); ok && strings.EqualFold(first(v), "true") {
