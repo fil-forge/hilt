@@ -23,6 +23,11 @@ import (
 // escaping, a version id as long, and the conditional fields, about 7.3 MB.
 const MaxBodySize = 8 << 20
 
+// maxDeleteObjectsEntries is the most keys a DeleteObjects may name, as S3
+// bounds it; a body naming more is malformed and refused, as the gateway
+// refuses it.
+const maxDeleteObjectsEntries = 1000
+
 // deleteObjectsBody is the shape of a DeleteObjects body hilt reads: the
 // entries, each of which may name the version it deletes.
 type deleteObjectsBody struct {
@@ -37,7 +42,7 @@ type deleteObjectsBody struct {
 // s3:DeleteObject, as S3 requires for each such entry (hilt requires it for
 // the whole request). A body on an operation that reads none, or missing
 // from one that does, is refused by boundBody; an unparseable or oversized
-// one is refused here.
+// one, or one naming more keys than S3 allows, is refused here.
 func (c *classification) readBody(body []byte) error {
 	if !c.op.ReadsBody() || len(body) == 0 {
 		return nil
@@ -48,6 +53,9 @@ func (c *classification) readBody(body []byte) error {
 	var del deleteObjectsBody
 	if err := xml.Unmarshal(body, &del); err != nil {
 		return fmt.Errorf("%w: unparseable DeleteObjects body: %v", ErrUnboundBody, err)
+	}
+	if len(del.Objects) > maxDeleteObjectsEntries {
+		return fmt.Errorf("%w: DeleteObjects body names %d keys, at most %d allowed", ErrUnboundBody, len(del.Objects), maxDeleteObjectsEntries)
 	}
 	for _, o := range del.Objects {
 		if o.VersionID != "" {

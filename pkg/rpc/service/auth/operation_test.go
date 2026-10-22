@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"hash/crc32"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -539,6 +541,23 @@ func TestReadBody(t *testing.T) {
 
 	_, err = classify("POST", "https://s3.example.com/bkt?delete", `<Delete><Object>`)
 	require.ErrorIs(t, err, ErrUnboundBody)
+
+	// A thousand entries is the most S3 allows; one more is malformed.
+	entries := func(n int) string {
+		var b strings.Builder
+		b.WriteString("<Delete>")
+		for i := range n {
+			fmt.Fprintf(&b, "<Object><Key>k%d</Key></Object>", i)
+		}
+		b.WriteString("</Delete>")
+		return b.String()
+	}
+	c, err = classify("POST", "https://s3.example.com/bkt?delete", entries(maxDeleteObjectsEntries))
+	require.NoError(t, err)
+	require.Equal(t, OpDeleteObjects, c.op)
+	_, err = classify("POST", "https://s3.example.com/bkt?delete", entries(maxDeleteObjectsEntries+1))
+	require.ErrorIs(t, err, ErrUnboundBody)
+	require.ErrorContains(t, err, "1001 keys")
 
 	c, err = classify("POST", "https://s3.example.com/bkt?delete", "")
 	require.NoError(t, err, "a missing body is boundBody's refusal, not the classifier's")
