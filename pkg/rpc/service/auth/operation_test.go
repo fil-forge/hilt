@@ -388,7 +388,7 @@ func TestRequirementsFor(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := RequirementsFor(req)
 			require.ErrorIs(t, err, ErrUnsignedHeader)
-			require.NotErrorIs(t, err, ErrUnboundBody)
+			require.NotErrorIs(t, err, ErrInvalidBody)
 		})
 	}
 	for name, req := range map[string]s3.Request{
@@ -401,11 +401,11 @@ func TestRequirementsFor(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := RequirementsFor(req)
-			require.ErrorIs(t, err, ErrUnboundBody)
+			require.ErrorIs(t, err, ErrInvalidBody)
 		})
 	}
 	_, _, err = RequirementsFor(withBody("POST", "https://s3.example.com/bkt?delete", nil, "<Delete><Object>", true))
-	require.ErrorIs(t, err, ErrUnboundBody, "an unparseable body")
+	require.ErrorIs(t, err, ErrInvalidBody, "an unparseable body")
 
 	// CreateBucket addresses no existing bucket, so it yields no pair for
 	// the gateway to check locally, with or without the Object Lock flag.
@@ -540,7 +540,7 @@ func TestReadBody(t *testing.T) {
 	require.Empty(t, c.bodyPermissions)
 
 	_, err = classify("POST", "https://s3.example.com/bkt?delete", `<Delete><Object>`)
-	require.ErrorIs(t, err, ErrUnboundBody)
+	require.ErrorIs(t, err, ErrInvalidBody)
 
 	// A thousand entries is the most S3 allows; one more is malformed.
 	entries := func(n int) string {
@@ -556,7 +556,7 @@ func TestReadBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OpDeleteObjects, c.op)
 	_, err = classify("POST", "https://s3.example.com/bkt?delete", entries(maxDeleteObjectsEntries+1))
-	require.ErrorIs(t, err, ErrUnboundBody)
+	require.ErrorIs(t, err, ErrInvalidBody)
 	require.ErrorContains(t, err, "1001 keys")
 
 	c, err = classify("POST", "https://s3.example.com/bkt?delete", "")

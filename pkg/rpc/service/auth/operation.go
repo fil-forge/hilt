@@ -218,7 +218,7 @@ func (o Operation) addressesExistingBucket() bool {
 // ReadsBody reports whether the operation's body decides what the request
 // needs authorized, so a gateway attaches the body ([s3.Request.Body]) for
 // it and for no other: DeleteObjects, whose entries may name versions. The
-// body must be bound to the signature before it is read ([ErrUnboundBody])
+// body must be bound to the signature before it is read ([ErrInvalidBody])
 // and is refused over [MaxBodySize], which matches the codec's limit on it. The bucket policy PUT carries its
 // document on its own command instead. Never widen this to a write that
 // streams its body.
@@ -260,7 +260,7 @@ func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
 // gateway authorizing over cached delegations, and like Authorize it refuses
 // a request whose copy source or permission-adding header is not covered by
 // the signature, as [ErrUnsignedHeader] naming the header, or whose body is
-// not bound to it ([ErrUnboundBody]); the signature is parsed for that, not
+// not bound to it ([ErrInvalidBody]); the signature is parsed for that, not
 // verified. A classification error ([ErrConflictingQuery],
 // [ErrUnsupportedOperation]) comes first, as it needs no signature.
 func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {

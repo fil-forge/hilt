@@ -48,14 +48,14 @@ func (c *classification) readBody(body []byte) error {
 		return nil
 	}
 	if len(body) > MaxBodySize {
-		return fmt.Errorf("%w: a body of %d bytes exceeds %d", ErrUnboundBody, len(body), MaxBodySize)
+		return fmt.Errorf("%w: a body of %d bytes exceeds %d", ErrInvalidBody, len(body), MaxBodySize)
 	}
 	var del deleteObjectsBody
 	if err := xml.Unmarshal(body, &del); err != nil {
-		return fmt.Errorf("%w: unparseable DeleteObjects body: %v", ErrUnboundBody, err)
+		return fmt.Errorf("%w: unparseable DeleteObjects body: %v", ErrInvalidBody, err)
 	}
 	if len(del.Objects) > maxDeleteObjectsEntries {
-		return fmt.Errorf("%w: DeleteObjects body names %d keys, at most %d allowed", ErrUnboundBody, len(del.Objects), maxDeleteObjectsEntries)
+		return fmt.Errorf("%w: DeleteObjects body names %d keys, at most %d allowed", ErrInvalidBody, len(del.Objects), maxDeleteObjectsEntries)
 	}
 	for _, o := range del.Objects {
 		if o.VersionID != "" {
@@ -101,11 +101,11 @@ func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 	switch {
 	case !op.ReadsBody():
 		if len(req.Body) > 0 {
-			return fmt.Errorf("%w: %s carries a body hilt does not read", ErrUnboundBody, op)
+			return fmt.Errorf("%w: %s carries a body hilt does not read", ErrInvalidBody, op)
 		}
 		return nil
 	case len(req.Body) == 0:
-		return fmt.Errorf("%w: %s needs its body", ErrUnboundBody, op)
+		return fmt.Errorf("%w: %s needs its body", ErrInvalidBody, op)
 	}
 	for _, h := range bodyChecksumHeaders {
 		if _, ok := HeaderValue(req.Headers, h.name); ok && !sr.HeaderSigned(h.name) {
@@ -115,7 +115,7 @@ func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 	if want := sr.PayloadHash(); want != sigv4.UnsignedPayload {
 		sum := sha256.Sum256(req.Body)
 		if !strings.EqualFold(hex.EncodeToString(sum[:]), want) {
-			return fmt.Errorf("%w: body does not hash to the signed payload hash", ErrUnboundBody)
+			return fmt.Errorf("%w: body does not hash to the signed payload hash", ErrInvalidBody)
 		}
 		return nil
 	}
@@ -126,12 +126,12 @@ func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 			continue
 		}
 		if strings.TrimSpace(v) != base64.StdEncoding.EncodeToString(h.sum(req.Body)) {
-			return fmt.Errorf("%w: body does not match the signed %s", ErrUnboundBody, h.name)
+			return fmt.Errorf("%w: body does not match the signed %s", ErrInvalidBody, h.name)
 		}
 		bound = true
 	}
 	if !bound {
-		return fmt.Errorf("%w: body is covered by neither the payload hash nor a signed checksum header", ErrUnboundBody)
+		return fmt.Errorf("%w: body is covered by neither the payload hash nor a signed checksum header", ErrInvalidBody)
 	}
 	return nil
 }

@@ -493,30 +493,30 @@ func TestAuthorize(t *testing.T) {
 
 		// The body is trusted only when the signature binds it.
 		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, false))
-		require.ErrorIs(t, err, auth.ErrUnboundBody)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
 		req := signedBodyRequest(t, accessKey, "POST", deleteURL, plain, region, true)
 		req.Body = []byte(versions)
 		_, err = az.Authorize(ctx, providerID, req)
-		require.ErrorIs(t, err, auth.ErrUnboundBody)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
 		req = signedBodyRequest(t, accessKey, "POST", deleteURL, "", region, true)
 		_, err = az.Authorize(ctx, providerID, req)
-		require.ErrorIs(t, err, auth.ErrUnboundBody)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
 
 		// A body on an operation hilt reads none for is refused too.
 		req = signedObjectRequest(t, accessKey, "bucket", region)
 		req.Body = []byte(plain)
 		_, err = az.Authorize(ctx, providerID, req)
-		require.ErrorIs(t, err, auth.ErrUnboundBody)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
 
 		// An unparseable or oversized body is refused by name through
 		// Authorize as it is through RequirementsFor, never as an
 		// unsupported operation.
 		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, "<Delete><Object>", region, true))
-		require.ErrorIs(t, err, auth.ErrUnboundBody)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
 		require.NotErrorIs(t, err, auth.ErrUnsupportedOperation)
 		huge := string(make([]byte, auth.MaxBodySize+1))
 		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, huge, region, true))
-		require.ErrorIs(t, err, auth.ErrUnboundBody)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
 	})
 
 	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {
