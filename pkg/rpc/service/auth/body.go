@@ -91,7 +91,7 @@ func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 	switch {
 	case !op.ReadsBody():
 		if len(req.Body) > 0 {
-			return fmt.Errorf("%w: %s carries a body hilt does not read", ErrInvalidBody, op)
+			return fmt.Errorf("%w: %s is not decided on a body", ErrInvalidBody, op)
 		}
 		return nil
 	case len(req.Body) == 0:
