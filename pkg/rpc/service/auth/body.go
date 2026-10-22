@@ -84,9 +84,11 @@ func be64(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
 // boundBody confirms a body hilt decides from is the one the signer sent:
 // present exactly when the operation reads one, and covered by the
 // signature, as the signed payload hash or, under an unsigned payload, by a
-// signed checksum header. The gateway acts on the body it received, which
-// is the one forwarded here; what the binding settles is that the signer,
-// and not a holder of a presigned URL, chose it.
+// signed checksum header. As S3 does, it refuses a checksum header the
+// signature does not cover before any binding is accepted, and verifies
+// every one present. The gateway acts on the body it received, which is
+// the one forwarded here; what the binding settles is that the signer, and
+// not a holder of a presigned URL, chose it.
 func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 	switch {
 	case !op.ReadsBody():
@@ -97,6 +99,11 @@ func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 	case len(req.Body) == 0:
 		return fmt.Errorf("%w: %s needs its body", ErrUnboundBody, op)
 	}
+	for _, h := range bodyChecksumHeaders {
+		if _, ok := HeaderValue(req.Headers, h.name); ok && !sr.HeaderSigned(h.name) {
+			return fmt.Errorf("%w: %s", ErrUnsignedHeader, h.name)
+		}
+	}
 	if want := sr.PayloadHash(); want != sigv4.UnsignedPayload {
 		sum := sha256.Sum256(req.Body)
 		if !strings.EqualFold(hex.EncodeToString(sum[:]), want) {
@@ -104,15 +111,19 @@ func boundBody(sr *sigv4.SignedRequest, req s3.Request, op Operation) error {
 		}
 		return nil
 	}
+	bound := false
 	for _, h := range bodyChecksumHeaders {
 		v, ok := HeaderValue(req.Headers, h.name)
-		if !ok || !sr.HeaderSigned(h.name) {
+		if !ok {
 			continue
 		}
 		if strings.TrimSpace(v) != base64.StdEncoding.EncodeToString(h.sum(req.Body)) {
 			return fmt.Errorf("%w: body does not match the signed %s", ErrUnboundBody, h.name)
 		}
-		return nil
+		bound = true
 	}
-	return fmt.Errorf("%w: body is covered by neither the payload hash nor a signed checksum header", ErrUnboundBody)
+	if !bound {
+		return fmt.Errorf("%w: body is covered by neither the payload hash nor a signed checksum header", ErrUnboundBody)
+	}
+	return nil
 }
