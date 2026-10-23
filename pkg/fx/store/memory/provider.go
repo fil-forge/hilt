@@ -11,6 +11,8 @@ import (
 	membucketpolicy "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	memdelegation "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	memexportsession "github.com/fil-forge/hilt/pkg/store/exportsession/memory"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	memprincipal "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/provider"
@@ -32,6 +34,7 @@ var Module = fx.Module("memory-store",
 		}, fx.As(new(accesskey.Store))),
 		fx.Annotate(membucket.New, fx.As(new(bucket.Store)), fx.As(fx.Self())),
 		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
+		fx.Annotate(memexportsession.New, fx.As(new(exportsession.Store))),
 		// The policy store refuses a bucket the bucket store does not hold,
 		// as the Postgres backend's bucket lock does.
 		fx.Annotate(func(buckets *membucket.Store) *membucketpolicy.Store {
