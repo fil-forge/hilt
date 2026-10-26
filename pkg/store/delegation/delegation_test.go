@@ -115,6 +115,25 @@ func TestDelegationStore(t *testing.T) {
 				require.Empty(t, page.Results)
 			})
 
+			t.Run("Delete removes only the given delegations", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				gone := makeDelegation(t, issuer, audience, testutil.RandomDID(t), cmd)
+				kept := makeDelegation(t, issuer, audience, testutil.RandomDID(t), cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{gone, kept}))
+
+				// An unknown link is ignored alongside a known one.
+				unknown := makeDelegation(t, issuer, audience, testutil.RandomDID(t), cmd)
+				require.NoError(t, s.Delete(t.Context(), gone.Link(), unknown.Link()))
+				require.NoError(t, s.Delete(t.Context()))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, kept.Link().String(), page.Results[0].Link().String())
+			})
+
 			t.Run("Replace hands next the current set and stores its result", func(t *testing.T) {
 				issuer := testutil.RandomIssuer(t)
 				audience := testutil.RandomDID(t)
@@ -193,13 +212,16 @@ func TestDelegationStore(t *testing.T) {
 				require.Equal(t, fresh.Link(), page.Results[0].Link())
 			})
 
-			t.Run("PutBatch and DeleteByAudience wait for an in-flight Replace", func(t *testing.T) {
+			// Every write that changes an audience's set has to wait on a
+			// Replace of that audience, Delete included: a Replace that read the
+			// set before an unlocked Delete removed a row reinserts it, which on
+			// the unlock path brings a revoked write grant back to life.
+			t.Run("PutBatch, DeleteByAudience and Delete wait for an in-flight Replace", func(t *testing.T) {
 				issuer := testutil.RandomIssuer(t)
 				audience := testutil.RandomDID(t)
 				cmd := command.MustParse("/test/run")
-				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{
-					makeDelegation(t, issuer, audience, issuer.DID(), cmd),
-				}))
+				existing := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{existing}))
 				fresh := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
 				other := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
 
@@ -215,14 +237,18 @@ func TestDelegationStore(t *testing.T) {
 				<-entered
 
 				put, deleted := make(chan error, 1), make(chan error, 1)
+				deletedOne := make(chan error, 1)
 				go func() { put <- s.PutBatch(t.Context(), []ucan.Delegation{other}) }()
 				go func() { deleted <- s.DeleteByAudience(t.Context(), audience) }()
+				go func() { deletedOne <- s.Delete(t.Context(), existing.Link()) }()
 
 				select {
 				case err := <-put:
 					t.Fatalf("PutBatch completed while Replace held the audience: %v", err)
 				case err := <-deleted:
 					t.Fatalf("DeleteByAudience completed while Replace held the audience: %v", err)
+				case err := <-deletedOne:
+					t.Fatalf("Delete completed while Replace held the audience: %v", err)
 				case <-time.After(200 * time.Millisecond):
 				}
 
@@ -230,6 +256,7 @@ func TestDelegationStore(t *testing.T) {
 				require.NoError(t, <-replaced)
 				require.NoError(t, <-put)
 				require.NoError(t, <-deleted)
+				require.NoError(t, <-deletedOne)
 			})
 
 			t.Run("Replace swaps several audiences in one call", func(t *testing.T) {

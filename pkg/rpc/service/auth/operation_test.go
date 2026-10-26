@@ -5,8 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"hash/crc32"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -774,4 +778,116 @@ func TestRoutesAddressExistingBuckets(t *testing.T) {
 			}
 		}
 	}
+}
+
+// declaredOperations returns every Operation constant declared in
+// operation.go, read out of the source rather than from a list kept by hand,
+// so an operation added to that file cannot be missing from a test that says
+// it covers them all.
+func declaredOperations(t *testing.T) []Operation {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "operation.go", nil, 0)
+	require.NoError(t, err)
+
+	var ops []Operation
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "Operation" {
+				continue
+			}
+			for _, v := range vs.Values {
+				lit, ok := v.(*ast.BasicLit)
+				require.True(t, ok, "operation constant %s is not a string literal", vs.Names)
+				value, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+				ops = append(ops, Operation(value))
+			}
+		}
+	}
+	require.NotEmpty(t, ops, "no Operation constants found in operation.go")
+	return ops
+}
+
+// TestOperationMutatesIsExhaustive decides, for every operation declared in
+// operation.go, whether a write-locked tenant may perform it. The operations
+// come from the source, so this is the whole set and not a list that drifts
+// from it: the reads below are named with the reason they are reads, and
+// anything not named must mutate.
+//
+// It is the guard on [Operation.Mutates], which derives the verdict from the
+// operation's permission verb. A read added later is classified read, and
+// this test says so without being touched; a read whose permission does not
+// say "Get" or "List" is classified mutating, and this test fails until
+// someone looks. What went wrong before was the opposite of a leak: an
+// enumerated read list stayed at five entries while main grew the operations
+// to 46, so 41 were refused under a write lock and 15 of those only read.
+// FIL-1101 requires that a write-locked tenant can still read.
+func TestOperationMutatesIsExhaustive(t *testing.T) {
+	// Every read. Each is here because it returns state and changes none: the
+	// bucket's own configuration documents, an object's bytes, lock state,
+	// tags or attributes, and the listings. Everything absent mutates.
+	reads := map[Operation]string{
+		OpListBuckets:                "lists the tenant's buckets",
+		OpListBucket:                 "lists a bucket's objects",
+		OpGetObject:                  "reads an object's bytes",
+		OpGetObjectVersion:           "reads one version's bytes",
+		OpGetObjectRetention:         "reads a version's retention period",
+		OpGetObjectLegalHold:         "reads a version's legal hold",
+		OpListBucketVersions:         "lists a bucket's object versions",
+		OpGetBucketPolicy:            "reads the bucket policy document",
+		OpGetBucketPolicyStatus:      "reports whether the policy makes the bucket public",
+		OpGetBucketEncryption:        "reads the bucket's encryption configuration",
+		OpListMultipartUploadParts:   "lists the parts uploaded so far",
+		OpListBucketMultipartUploads: "lists the bucket's uploads in flight",
+		OpGetBucketLocation:          "reads the bucket's region",
+		OpGetBucketAcl:               "reads the bucket's ACL",
+		OpGetBucketCors:              "reads the bucket's CORS configuration",
+		OpGetBucketTagging:           "reads the bucket's tags",
+		OpGetBucketVersioning:        "reads the bucket's versioning state",
+		OpGetObjectLockConfiguration: "reads the bucket's Object Lock configuration",
+		OpGetObjectTagging:           "reads a version's tags",
+		OpGetObjectAttributes:        "reads an object's metadata",
+	}
+
+	declared := declaredOperations(t)
+	require.Len(t, declared, 46, "the operation set changed; classify the new operations above")
+	for _, op := range declared {
+		why, isRead := reads[op]
+		if isRead {
+			require.False(t, op.Mutates(), "%s only %s, so a write-locked tenant must keep it", op, why)
+			continue
+		}
+		require.True(t, op.Mutates(), "%s is not listed as a read, so it must be refused under a write lock", op)
+	}
+	for op := range reads {
+		require.Contains(t, declared, op, "%s is listed as a read but is not a declared operation", op)
+	}
+
+	// The three operations whose permission is not their own verb. Each
+	// removes a bucket subresource under the permission that writes it, as S3
+	// requires, so the derivation from the permission puts them on the
+	// mutating side — which is where a delete belongs.
+	for _, op := range []Operation{OpDeleteBucketCors, OpDeleteBucketTagging, OpDeleteBucketEncryption} {
+		require.True(t, strings.HasPrefix(op.Permission(), "s3:Put"), "%s", op)
+		require.True(t, op.Mutates(), "%s removes a bucket subresource", op)
+	}
+
+	// AbortMultipartUpload is the one read-shaped name that is not a read: it
+	// discards the parts uploaded so far. Whether a locked tenant should be
+	// allowed to clean up in flight uploads is an open product question on
+	// fil-forge/hilt#52; today it is refused.
+	require.True(t, OpAbortMultipartUpload.Mutates())
+
+	// Unrecognized operations fail closed, so a write-locked tenant is not
+	// opened up by an operation added without an operationPermission entry.
+	require.Empty(t, Operation("Unknown").Permission())
+	require.True(t, Operation("Unknown").Mutates())
 }

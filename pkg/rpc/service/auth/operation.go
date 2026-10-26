@@ -196,6 +196,34 @@ func (o Operation) CopiesSource() bool {
 
 func (o Operation) String() string { return string(o) }
 
+// Mutates reports whether the operation modifies tenant state — creating or
+// deleting a bucket, writing or deleting object data, or rewriting a bucket's
+// or an object's configuration. [Authorizer.Authorize] refuses these for a
+// write-locked tenant, which may still read.
+//
+// The verdict is derived from the operation's own permission
+// ([Operation.Permission]): s3:Get* and s3:List* name the reads, and every
+// other verb — Create, Put, Delete, Abort — names a write. Deriving it means a
+// read operation added later is readable under a write lock without anyone
+// having to remember a second list. An enumerated list of reads went stale
+// exactly that way: fifteen reads added beside it were being refused.
+//
+// It still fails closed. An operation with no entry in operationPermission,
+// including one added later, has an empty permission, which carries neither
+// verb and so counts as mutating.
+//
+// The derivation is sound only while an operation's permission names what the
+// operation does. Three operations remove a subresource under the permission
+// that writes it — DeleteBucketCors, DeleteBucketTagging and
+// DeleteBucketEncryption each carry an s3:Put*, as S3 requires — which lands
+// them on mutating, where they belong. TestOperationMutatesIsExhaustive pins
+// the verdict for every declared operation, so one whose permission does not
+// describe it cannot pass unnoticed.
+func (o Operation) Mutates() bool {
+	perm := o.Permission()
+	return !strings.HasPrefix(perm, "s3:Get") && !strings.HasPrefix(perm, "s3:List")
+}
+
 // addressesExistingBucket reports whether the operation acts on a bucket that must
 // already exist, so it can be resolved and scope-checked. ListBuckets addresses no
 // bucket; CreateBucket's bucket does not exist yet. Every multipart operation acts

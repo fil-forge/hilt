@@ -204,6 +204,7 @@ func TestForge(t *testing.T) {
 	iam("PresignedGetFollowsPolicy", testPresignedGetFollowsPolicy)
 	iam("PrincipalKeyCreateRejectsBadRequests", testPrincipalKeyCreateRejectsBadRequests)
 	iam("DeleteObjectsVersionNeedsTheVersionAction", testDeleteObjectsVersionNeedsTheVersionAction)
+	t.Run("WriteLockBlocksWrites", func(t *testing.T) { testWriteLockBlocksWrites(t, net) })
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot
