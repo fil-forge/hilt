@@ -980,8 +980,15 @@ func TestAuthorize(t *testing.T) {
 		// The access key holds every permission the requests below need, so the
 		// write lock is the only variable.
 		cfg := &setupConfig{
-			tenantStatus:         tenant.WriteLocked,
-			accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:CreateBucket", "s3:DeleteObject", "s3:DeleteBucket"},
+			tenantStatus: tenant.WriteLocked,
+			accessKeyPermissions: []string{
+				"s3:GetObject", "s3:PutObject", "s3:CreateBucket", "s3:DeleteObject", "s3:DeleteBucket",
+				"s3:ListBucket", "s3:ListAllMyBuckets", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads", "s3:ListMultipartUploadParts", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:GetObjectAttributes",
+				"s3:GetObjectRetention", "s3:GetObjectLegalHold",
+				"s3:GetBucketTagging", "s3:GetBucketVersioning", "s3:GetBucketLocation", "s3:GetBucketAcl",
+				"s3:GetBucketCORS", "s3:GetBucketPolicy", "s3:GetBucketPolicyStatus",
+				"s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration",
+			},
 		}
 		az, _, _ := setup(t, accessKey, cfg)
 
@@ -991,14 +998,47 @@ func TestAuthorize(t *testing.T) {
 			signedOpRequest(t, accessKey, "PUT", "/bucket/object-key?partNumber=1&uploadId=u", region), // UploadPart
 			signedOpRequest(t, accessKey, "DELETE", "/bucket/object-key", region),                      // DeleteObject
 			signedOpRequest(t, accessKey, "DELETE", "/bucket", region),                                 // DeleteBucket
+			signedOpRequest(t, accessKey, "PUT", "/bucket?tagging", region),                            // PutBucketTagging
+			signedOpRequest(t, accessKey, "DELETE", "/bucket?tagging", region),                         // DeleteBucketTagging
+			signedOpRequest(t, accessKey, "DELETE", "/bucket?cors", region),                            // DeleteBucketCors
+			signedOpRequest(t, accessKey, "DELETE", "/bucket?encryption", region),                      // DeleteBucketEncryption
 		} {
 			_, err := az.Authorize(ctx, providerID, req)
 			require.ErrorIs(t, err, auth.ErrTenantWriteLocked, req.URL)
 		}
 
-		// Reads stay authorized.
+		// Reads stay authorized — all of them, not only the three FIL-1101
+		// names. Every operation below was refused under the lock until
+		// [auth.Operation.Mutates] stopped enumerating the reads by hand: main
+		// kept adding read operations beside a five-entry list that nobody
+		// revisited. "Done when #2" on FIL-1101 is that a write-locked tenant
+		// can still read, and these are what reading means.
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
-		require.NoError(t, err)
+		require.NoError(t, err, "GetObject")
+		for _, path := range []string{
+			"/",                              // ListBuckets
+			"/bucket",                        // ListBucket
+			"/bucket?versions",               // ListBucketVersions
+			"/bucket?location",               // GetBucketLocation
+			"/bucket?acl",                    // GetBucketAcl
+			"/bucket?cors",                   // GetBucketCors
+			"/bucket?policy",                 // GetBucketPolicy
+			"/bucket?policyStatus",           // GetBucketPolicyStatus
+			"/bucket?encryption",             // GetBucketEncryption
+			"/bucket?tagging",                // GetBucketTagging
+			"/bucket?versioning",             // GetBucketVersioning
+			"/bucket?object-lock",            // GetObjectLockConfiguration
+			"/bucket?uploads",                // ListBucketMultipartUploads
+			"/bucket/object-key?tagging",     // GetObjectTagging
+			"/bucket/object-key?versionId=v", // GetObjectVersion
+			"/bucket/object-key?uploadId=u",  // ListMultipartUploadParts
+			"/bucket/object-key?retention",   // GetObjectRetention
+			"/bucket/object-key?legal-hold",  // GetObjectLegalHold
+			"/bucket/object-key?attributes",  // GetObjectAttributes
+		} {
+			_, err := az.Authorize(ctx, providerID, signedOpRequest(t, accessKey, "GET", path, region))
+			require.NoError(t, err, "GET %s must stay authorized for a write-locked tenant", path)
+		}
 	})
 }
 
