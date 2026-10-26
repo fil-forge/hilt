@@ -286,13 +286,46 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 	return store.Page[ucan.Delegation]{Cursor: cursor, Results: results}, nil
 }
 
-func (s *Store) Delete(ctx context.Context, links ...cid.Cid) error {
+// Delete removes the named delegations in one transaction holding the
+// advisory lock of every audience they belong to, so it does not interleave
+// with a [Store.Replace] of one of those audiences: a Replace that read the
+// audience's set before this delete would otherwise reinsert the rows it
+// removed, bringing a revoked grant back. The audiences are read inside the
+// transaction, before the locks are taken, which is safe because a
+// delegation's audience is fixed by its link.
+func (s *Store) Delete(ctx context.Context, links ...cid.Cid) (err error) {
+	if len(links) == 0 {
+		return nil
+	}
 	ids := make([]string, 0, len(links))
 	for _, l := range links {
 		ids = append(ids, l.String())
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM delegation WHERE id = ANY($1)`, ids); err != nil {
+
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	rows, err := tx.Query(ctx, `SELECT DISTINCT audience FROM delegation WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("querying delegation audiences: %w", err)
+	}
+	audiences, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("scanning delegation audiences: %w", err)
+	}
+	if err := lockAudiences(ctx, tx, audiences...); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE id = ANY($1)`, ids); err != nil {
 		return fmt.Errorf("deleting delegations: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }

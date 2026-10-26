@@ -325,7 +325,6 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	return rec, secretAccessKey, nil
 }
 
-
 // revokeWriteGrants publishes a revocation for each of dels that is for a
 // mutating command (see [s3perm.Mutates]).
 func (s *Service) revokeWriteGrants(ctx context.Context, issuer ucan.Issuer, dels []ucan.Delegation) error {

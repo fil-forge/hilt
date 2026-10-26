@@ -199,7 +199,16 @@ func page(dlgs []ucan.Delegation, opts []store.PaginationOption) store.Page[ucan
 	return store.Page[ucan.Delegation]{Cursor: cursor, Results: dlgs}
 }
 
+// Delete removes the named delegations. Like every other write that changes
+// an audience's set it takes the store's write hold first, so it does not
+// interleave with a [Store.Replace] that would otherwise reinsert the rows it
+// removed; the postgres store takes the audiences' advisory locks for the
+// same reason.
 func (s *Store) Delete(ctx context.Context, links ...cid.Cid) error {
+	if err := s.hold(ctx); err != nil {
+		return err
+	}
+	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
