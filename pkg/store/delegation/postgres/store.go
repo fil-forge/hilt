@@ -286,6 +286,17 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 	return store.Page[ucan.Delegation]{Cursor: cursor, Results: results}, nil
 }
 
+func (s *Store) Delete(ctx context.Context, links ...cid.Cid) error {
+	ids := make([]string, 0, len(links))
+	for _, l := range links {
+		ids = append(ids, l.String())
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM delegation WHERE id = ANY($1)`, ids); err != nil {
+		return fmt.Errorf("deleting delegations: %w", err)
+	}
+	return nil
+}
+
 // DeleteByAudience removes the audience's delegations in one transaction
 // holding its advisory lock, so a concurrent Replace of the audience does not
 // reinsert what this call deleted.
