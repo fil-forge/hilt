@@ -31,7 +31,10 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	require.NoError(t, err)
 
 	perms := []string{"s3:CreateBucket", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:DeleteBucket", "s3:ListAllMyBuckets"}
-	ak, err := net.console.CreateAccessKey(ctx, tenantID, "before-lock", perms, nil)
+	ak, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name:        "before-lock",
+		Permissions: perms,
+	})
 	require.NoError(t, err)
 
 	const bucket = "write-lock-bucket"
@@ -51,7 +54,7 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 			writeGrants++
 		}
 	}
-	require.NoError(t, net.console.SetTenantStatus(ctx, tenantID, api.TenantStatusWriteLocked))
+	require.NoError(t, net.console.UpdateTenantStatus(ctx, tenantID, api.TenantStatusWriteLocked))
 	net.awaitRevocations(t, ctx, writeGrants, "did:key:"+ak.AccessKeyID)
 
 	require.Eventually(t, func() bool {
@@ -83,7 +86,7 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	requireObject(t, s3c, bucket, "before-lock.txt", "written while active")
 
 	// Unlocking reissues the revoked write grants, so the same key writes again.
-	require.NoError(t, net.console.SetTenantStatus(ctx, tenantID, api.TenantStatusActive))
+	require.NoError(t, net.console.UpdateTenantStatus(ctx, tenantID, api.TenantStatusActive))
 	require.Eventually(t, func() bool {
 		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
