@@ -4,16 +4,55 @@ package itest
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"net/http"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/stretchr/testify/require"
 )
+
+// requireWriteLockRefusal asserts how a write-locked tenant's mutation comes
+// back to the client, not merely that it failed. The first version of this
+// test asserted err != nil, and passed for months while every refusal arrived
+// as a 500 InternalError: a write lock is a policy decision, and an SDK
+// retries a 5xx.
+//
+// Hilt names the refusal TenantWriteLocked. Ingot maps hilt's authorization
+// failures onto S3 errors in iam.mapAuthError, and until it learns that name
+// it falls through to 500-class. So the published ingot :main image, which is
+// what this suite boots by default, still answers 500; against a local ingot
+// that carries the mapping the refusal is the 403 AccessDenied it should
+// always have been. When :main carries it, drop the branch and keep the
+// strict arm — same as the IAM gate in stack_test.go.
+func requireWriteLockRefusal(t *testing.T, err error, op string) {
+	t.Helper()
+	require.Error(t, err, "%s must be refused while the tenant is write-locked", op)
+
+	var respErr *awshttp.ResponseError
+	require.ErrorAs(t, err, &respErr, "%s: want an HTTP response from the gateway, got %v", op, err)
+	status := respErr.HTTPStatusCode()
+	var code string
+	if apiErr := smithy.APIError(nil); errors.As(err, &apiErr) {
+		code = apiErr.ErrorCode()
+	}
+	t.Logf("%s on a write-locked tenant: HTTP %d %s", op, status, code)
+
+	if os.Getenv("HILT_ITEST_INGOT_BINARY") == "" && os.Getenv("HILT_ITEST_IAM") != "1" {
+		require.GreaterOrEqual(t, status, http.StatusBadRequest, "%s: want a refusal", op)
+		return
+	}
+	require.Equal(t, http.StatusForbidden, status, "%s: a write lock is a policy refusal, not a server fault", op)
+	require.Equal(t, "AccessDenied", code, "%s", op)
+}
 
 // testWriteLockBlocksWrites drives the write-lock through the real stack: an
 // active tenant creates a bucket and writes an object, then the tenant is
@@ -57,26 +96,28 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	require.NoError(t, net.console.UpdateTenantStatus(ctx, tenantID, api.TenantStatusWriteLocked))
 	net.awaitRevocations(t, ctx, writeGrants, "did:key:"+ak.AccessKeyID)
 
+	var putErr error
 	require.Eventually(t, func() bool {
-		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
+		_, putErr = s3c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("after-lock.txt"),
 			Body:   bytes.NewReader([]byte("should be refused")),
 		})
-		return err != nil
+		return putErr != nil
 	}, 30*time.Second, 500*time.Millisecond, "PutObject must be refused after revocation propagation")
+	requireWriteLockRefusal(t, putErr, "PutObject")
 
 	_, err = s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("write-lock-bucket-2")})
-	require.Error(t, err, "CreateBucket must be refused while the tenant is write-locked")
+	requireWriteLockRefusal(t, err, "CreateBucket")
 
 	_, err = s3c.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("before-lock.txt"),
 	})
-	require.Error(t, err, "DeleteObject must be refused while the tenant is write-locked")
+	requireWriteLockRefusal(t, err, "DeleteObject")
 
 	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
-	require.Error(t, err, "DeleteBucket must be refused while the tenant is write-locked")
+	requireWriteLockRefusal(t, err, "DeleteBucket")
 
 	// Reads stay available: listing the tenant's buckets still succeeds, and so
 	// does reading an object, which needs the key's (unrevoked) retrieve grant.
