@@ -297,10 +297,13 @@ func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc
 // caller's ctx lives. A bucket the store no longer has (deleted since the
 // lookup) is a missing bucket. A document the store refuses for naming a
 // principal the tenant no longer has (removed between the validation and the
-// write) is an invalid policy.
+// write) is an invalid policy. A failed precondition is logged with the
+// store's error, which names the stored ETag and the one sent, since the
+// mapped error the caller sees carries neither.
 func (s *Service) writeError(ctx context.Context, bucketName string, err error) error {
 	switch {
 	case errors.Is(err, store.ErrPreconditionFailed):
+		s.logger.Warn("bucket policy precondition failed", zap.String("bucket", bucketName), zap.Error(err))
 		return ErrPreconditionFailed
 	case store.Contended(ctx, err):
 		return ErrConcurrentChange

@@ -212,7 +212,7 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 		return store.ErrRecordNotFound
 	}
 	if ifMatch != "" && old.ETag != ifMatch {
-		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
+		return fmt.Errorf("policy ETag is %s, not %s: %w", old.ETag, ifMatch, store.ErrPreconditionFailed)
 	}
 	if beforeCommit != nil {
 		if err := beforeCommit(pglock.WithTx(ctx, tx), *old); err != nil {

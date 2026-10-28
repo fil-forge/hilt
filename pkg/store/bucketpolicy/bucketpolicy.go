@@ -130,7 +130,7 @@ func CheckPrecondition(old *Record, ifMatch *string) error {
 	case ifMatch != nil && old == nil:
 		return fmt.Errorf("bucket has no policy: %w", store.ErrPreconditionFailed)
 	case ifMatch != nil && old.ETag != *ifMatch:
-		return fmt.Errorf("policy ETag is %s: %w", old.ETag, store.ErrPreconditionFailed)
+		return fmt.Errorf("policy ETag is %s, not %s: %w", old.ETag, *ifMatch, store.ErrPreconditionFailed)
 	}
 	return nil
 }

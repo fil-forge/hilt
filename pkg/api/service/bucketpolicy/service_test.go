@@ -45,6 +45,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // blockingSwarf never answers a publish: it blocks until the context is done
@@ -375,6 +377,29 @@ func TestPutAndGet(t *testing.T) {
 		rec, err := d.policies.Get(ctx, d.photos)
 		require.NoError(t, err)
 		require.Equal(t, etag, rec.ETag)
+	})
+
+	t.Run("a replace with a stale ETag logs the stored ETag and the one sent", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+
+		tenants := tenantmemory.New()
+		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+		core, logs := observer.New(zapcore.WarnLevel)
+		svc := bucketpolicysvc.New(zap.New(core), tenants, d.buckets, d.principals, d.policies, d.rotator(d.swarf))
+
+		stale := `"any-stale-etag"`
+		_, _, err = svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(stale)))
+		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
+
+		entries := logs.FilterMessage("bucket policy precondition failed").All()
+		require.Len(t, entries, 1)
+		require.Equal(t, map[string]any{
+			"bucket": "photos",
+			"error":  fmt.Sprintf("policy ETag is %s, not %s: %s", etag, stale, store.ErrPreconditionFailed),
+		}, entries[0].ContextMap())
 	})
 
 	t.Run("a replace with a stale ETag fails and writes nothing", func(t *testing.T) {
