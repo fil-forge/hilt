@@ -32,16 +32,12 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 const selectColumns = `SELECT id, tenant_id, name, buckets, permissions, principal_id, expires_at, created_at FROM access_key`
 
-// Add inserts the row in a short transaction so its wait is bounded at
-// [store.LockTimeout]: the principal foreign key takes FOR KEY SHARE on the
-// principal row, which a removal in progress holds FOR UPDATE across its
-// callback. A longer wait returns [store.ErrLockTimeout] and nothing is
-// written.
-func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
+// Add checks the principal, when the key has one, and inserts the row in one
+// transaction.
+func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 	if err := in.Validate(); err != nil {
 		return err
 	}
-	defer func() { err = pglock.MapError(err) }()
 	// A service key stores its lists, an empty bucket list meaning every bucket
 	// of the tenant. A principal-bound key holds no authority of its own and
 	// stores NULL for both; the schema's CHECK constraint enforces the split.
@@ -67,19 +63,14 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
 	if in.Principal != nil {
-		// Lock the principal FOR SHARE so the insert waits for an in-flight
-		// removal and then sees its tombstone. The foreign key alone would let a
-		// key bind to a removed principal, which a later revive would make live.
+		// The foreign key alone would let a key bind to a removed principal,
+		// which a later revive would make live.
 		var removed bool
 		err := tx.QueryRow(ctx, `
 			SELECT deleted_at IS NOT NULL
 			FROM principal
 			WHERE tenant_id = $1 AND external_id = $2
-			FOR SHARE
 		`, in.Tenant.String(), *in.Principal).Scan(&removed)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("principal %q is not a principal of tenant %s: %w", *in.Principal, in.Tenant, store.ErrInvalidArgument)
@@ -119,27 +110,8 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	return nil
 }
 
-// Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
-// read waits on a Delete that holds the row FOR UPDATE. The share-locked read
-// runs in a short transaction of its own so its wait is bounded at
-// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
-func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (rec accesskey.Record, err error) {
-	defer func() { err = pglock.MapError(err) }()
-	query := selectColumns + ` WHERE id = $1`
-	if !store.NewReadConfig(opts...).Share {
-		rec, err = scanRecord(s.pool.QueryRow(ctx, query, id.String()))
-		return pglock.Found(rec, err, "access key")
-	}
-
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return accesskey.Record{}, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the lock
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return accesskey.Record{}, err
-	}
-	rec, err = scanRecord(tx.QueryRow(ctx, query+` FOR SHARE`, id.String()))
+func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
+	rec, err := scanRecord(s.pool.QueryRow(ctx, selectColumns+` WHERE id = $1`, id.String()))
 	return pglock.Found(rec, err, "access key")
 }
 
@@ -173,21 +145,14 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 	return recs, nil
 }
 
-// Delete removes the row in a short transaction so its wait on a row another
-// write holds is bounded at [store.LockTimeout]; a longer wait returns
-// [store.ErrLockTimeout] for the caller to retry rather than holding its pool
-// connection indefinitely.
-func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
-	defer func() { err = pglock.MapError(err) }()
+// Delete removes the row, inside the transaction ctx carries if any.
+func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(ctx, `DELETE FROM access_key WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting access key: %w", err)
 	}

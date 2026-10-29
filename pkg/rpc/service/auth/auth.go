@@ -119,10 +119,8 @@ func NewAuthorizer(
 // principal-bound key holds what the bucket's policy grants its principal: the
 // effective set is computed per request, an empty one hides the bucket
 // ([ErrUnknownBucket]) and an action outside a non-empty one is refused
-// ([ErrOperationNotPermitted]). The key, the principal and the policy rows are
-// read with a share lock, so a request arriving while a change to any of them
-// is committing waits for the outcome and is answered from the new state. A
-// key whose principal was removed is refused ([ErrUnknownAccessKey]).
+// ([ErrOperationNotPermitted]). A key whose principal was removed is refused
+// ([ErrUnknownAccessKey]).
 //
 // Note that the caller must still check the operation matches the handler's
 // operation, since Authorize is operation-agnostic.
@@ -145,7 +143,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrInvalidAccessKeyID
 	}
 
-	akRec, err := a.accessKeys.Get(ctx, accessKeyID, store.WithShareLock())
+	akRec, err := a.accessKeys.Get(ctx, accessKeyID)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		log.Debug("rejecting unknown access key")
 		return nil, ErrUnknownAccessKey
@@ -317,9 +315,7 @@ func (a *Authorizer) authorizeOperation(
 	principalID := *akRec.Principal
 	log = log.With(zap.String("principal", principalID))
 
-	// The share lock makes the read wait on a removal of this principal that is
-	// committing, so the request is answered from the settled state.
-	if _, err := a.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock()); err != nil {
+	if _, err := a.principals.Get(ctx, tenantRec.ID, principalID); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
 			// The key outlived its principal, which removal deletes it with. It
 			// is on its way out; report it as the unknown credential it is about
@@ -380,7 +376,7 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 	if err != nil {
 		return nil, nil, err
 	}
-	eff, _, err := a.effectiveActions(ctx, log, principalID, b.ID)
+	eff, err := a.effectiveActions(ctx, log, principalID, b.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -398,52 +394,36 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 }
 
 // EffectiveActions computes the actions the tenant's principal holds on the
-// bucket, for a caller that has resolved both: the principal is read with a
-// share lock, so a request arriving while it is being removed waits for the
-// outcome, and a removed principal is [ErrUnknownAccessKey], the key bound to
-// it being on its way out; the policy is read the same way. A wait the store
-// gave up on is [ErrTemporarilyUnavailable]. An empty set is a bucket the
-// principal cannot reach.
-//
-// It also returns the ETag of the policy the actions came from, so a caller
-// that goes on to read something the same policy write touches can tell
-// whether the two came from one revision. A bucket with no policy reports "".
-func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, string, error) {
+// bucket, for a caller that has resolved both. A removed principal is
+// [ErrUnknownAccessKey], the key bound to it being on its way out. An empty set
+// is a bucket the principal cannot reach.
+func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, error) {
 	log := a.logger.With(zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Stringer("bucket", bucketID))
-	if _, err := a.principals.Get(ctx, tenantID, principalID, store.WithShareLock()); err != nil {
+	if _, err := a.principals.Get(ctx, tenantID, principalID); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
-			return nil, "", fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
+			return nil, fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
 		}
-		return nil, "", lookupError(log, "principal", err)
+		return nil, lookupError(log, "principal", err)
 	}
 	return a.effectiveActions(ctx, log, principalID, bucketID)
 }
 
 // effectiveActions computes the actions the principal holds on a bucket from
-// that bucket's policy, which is read with a share lock so a request arriving
-// while the policy is being changed waits for the outcome. A bucket with no
-// policy grants nothing, and reports no ETag.
-func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, string, error) {
+// that bucket's policy. A bucket with no policy grants nothing.
+func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, error) {
 	var doc *s3bkt.PolicyDocument
-	var etag string
-	rec, err := a.policies.Get(ctx, bucketID, store.WithShareLock())
+	rec, err := a.policies.Get(ctx, bucketID)
 	if err == nil {
-		doc, etag = &rec.Policy, rec.ETag
+		doc = &rec.Policy
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
-		return nil, "", lookupError(log, "bucket policy", err)
+		return nil, lookupError(log, "bucket policy", err)
 	}
-	return bucketpolicy.Effective(doc, principalID), etag, nil
+	return bucketpolicy.Effective(doc, principalID), nil
 }
 
-// lookupError reports a failed share-locked read of the named record. A wait
-// the store gave up on, behind a write still committing, is
-// [ErrTemporarilyUnavailable], wrapping the store's timeout, and the caller
-// retries; anything else is an internal failure and is logged as such.
+// lookupError reports a failed read of the named record as an internal
+// failure, and logs it.
 func lookupError(log *zap.Logger, what string, err error) error {
-	if errors.Is(err, store.ErrLockTimeout) {
-		log.Info("share-locked read waited out a write in flight", zap.String("record", what), zap.Error(err))
-		return fmt.Errorf("%w: looking up %s: %w", ErrTemporarilyUnavailable, what, err)
-	}
 	log.Error("looking up "+what, zap.Error(err))
 	return fmt.Errorf("looking up %s: %w", what, err)
 }

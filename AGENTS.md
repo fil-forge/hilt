@@ -25,8 +25,8 @@ them. It exposes two APIs and talks to three external services:
   commands. `/s3/bucket/policy` carries the S3 GetBucketPolicy,
   PutBucketPolicy and DeleteBucketPolicy operations (the request's method
   selects), reached with a service key holding the matching permission; a
-  PUT's body must hash to the signed payload hash, and If-Match /
-  If-None-Match are optional signed headers (absent means unconditional).
+  PUT's body must hash to the signed payload hash. Policy writes are
+  unconditional, as on AWS: If-Match and If-None-Match are ignored.
   The admin commands are
   `/admin/provider/{add,list}` and `/admin/provider/nodes/set` (`hilt client admin`).
 - **Sprue** (the Forge upload service) — Hilt calls it to provision/inspect a
@@ -37,7 +37,8 @@ them. It exposes two APIs and talks to three external services:
   revoke delegations, every revocation of one write in a single request
   (`PublishBatch`): a deleted key's grants, a deleted bucket's, and the grants
   a policy change or a principal removal takes off a principal-bound key
-  (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate
+  (`pkg/grant`). Each write publishes inside its transaction before it writes
+  anything, so a failed publish leaves everything in place. No revocation carries a nonce, so a retry is a duplicate
   Swarf records once.
 - **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
   provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
@@ -102,7 +103,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/bucketpolicy` — bucket policy evaluation over libforge's
   `s3bkt.BucketPolicy` (`Decode`, `Validate`, `Canonical`, `Effective`,
   `Changed`); pure, no store or transport dependencies. The document type,
-  its JSON parsing and structural checks, ETag calculation, and the policy
+  its JSON parsing and structural checks, and the policy
   action allowlist live in libforge `commands/s3/bucket`. The package doc has
   the document shape.
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
@@ -110,8 +111,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   key's set as its policies change. See the package doc.
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy}` —
   each an interface with `memory` and `postgres` backends.
-- `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
-  lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
+- `pkg/store/pglock` — the Postgres transaction helpers the stores share: the
+  transaction a write's callback joins, and the single-row read mapping.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
 - `pkg/client` — clients for external services: the Sprue `UploadClient`, and
@@ -133,24 +134,27 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   implementations kept in lockstep and exercised by one backend-parametrized test
   suite (`<entity>_test.go`). Add a method to all three (interface + both backends)
   and cover it in that suite.
-- **Locking and callbacks**: a write that another service must learn about runs
-  in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
-  caller-supplied callback (`fn`, which runs inside the write before it takes
-  effect), commit. The callback's ctx carries
+- **Callbacks, no locks**: a write that another service must learn about runs
+  in one transaction: read the row, run the caller-supplied callback (`fn`,
+  which runs inside the write before it takes effect), commit. The callback's ctx carries
   the transaction (`pglock.WithTx`), and a store that opens its own through
   `pglock.Begin` joins it, so what the callback writes commits with the
-  caller's write or not at all. A policy write's callback rewrites the
-  affected keys' delegations and publishes the revocations before anything is
-  stored, so a failure before the commit, a failed publish included, rolls the
-  write and the rotation back together and leaves the principal with its old
-  access, never with more; a publish that succeeded followed by a commit that
-  failed leaves revoked grants without a replacement, the one window the
-  gateway's revoked set covers (`pkg/api/service/bucketpolicy` and
-  `grant.Rotator` document the sequence). A reader that
-  must not be answered from a snapshot older than an in-flight write passes
-  `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
-  `store.LockTimeout` and a statement that gives up returns
-  `store.ErrLockTimeout`, which the caller retries.
+  caller's write or not at all. A write that revokes delegations reads them,
+  publishes their revocations (`grant.PublishRevocations`, which
+  `Rotator.Rotate`, `Rotator.Revoke` and `Rotator.Publish` call), and only then
+  writes rows. Keep the publish before the transaction's first row write:
+  Postgres holds a written row until commit, so a write before the publish
+  would make every other write to that row wait on the revocation service. A
+  failed publish rolls the write back and leaves everything as it was; a
+  publish that succeeded followed by a commit that failed leaves revoked
+  grants still stored, the one window the gateway's revoked set covers
+  (`pkg/api/service/bucketpolicy` and `grant.Rotator` document the sequence).
+  No store takes an explicit row or advisory lock; a write waits only on the
+  rows another uncommitted write has already changed, as Postgres makes it. Of two concurrent policy writes to
+  one bucket, the one that commits last is stored, and the keys may hold both
+  writes' delegations over the bucket. A rotation replaces only a key's
+  delegations over the bucket it rotates (`ReplaceBySubject`), so rotations
+  over different buckets never undo each other.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an

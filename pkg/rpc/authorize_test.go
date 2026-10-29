@@ -143,7 +143,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	// grant stores a policy allowing "user-1" the given actions on the bucket.
 	grant := func(t *testing.T, policies *bucketpolicymemory.Store, actions ...string) {
 		t.Helper()
-		_, err := policies.Put(ctx, bucketpolicystore.Input{
+		err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
 			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
@@ -152,7 +152,6 @@ func TestAuthorizeRequest(t *testing.T) {
 				Actions:   s3bkt.NewStringSet(actions...),
 				Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
 			}}},
-			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 	}

@@ -3,6 +3,7 @@ package grant_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -92,14 +93,15 @@ func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issue
 	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
 }
 
-// deleteOnReplace runs del once the audiences are locked, before the callback.
+// deleteOnReplace runs del inside the replacement, before the callback, as a
+// key removal committing between the rotation's listing and its read would.
 type deleteOnReplace struct {
 	delegationstore.Store
 	del func(context.Context) error
 }
 
-func (s *deleteOnReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	return s.Store.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+func (s *deleteOnReplace) ReplaceBySubject(ctx context.Context, subject did.DID, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return s.Store.ReplaceBySubject(ctx, subject, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		if err := s.del(ctx); err != nil {
 			return nil, err
 		}
@@ -148,17 +150,39 @@ func links(dels []ucan.Delegation) []cid.Cid {
 func TestRotate(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("rewrites each key's delegations over the bucket and revokes the old ones in one request", func(t *testing.T) {
+	t.Run("revokes the delegations over the bucket it replaces in one request", func(t *testing.T) {
 		d := setup(t, nil)
 		var old []ucan.Delegation
 		for _, key := range d.alice {
 			old = append(old, d.held(t, key, d.photos)...)
 		}
-		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
 
-		require.Len(t, d.swarf.Batches(), 1, "every revocation of the write goes in one request")
-		require.Equal(t, d.tenant.DID(), d.swarf.Batches()[0][0].Revoker)
+		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+		require.Len(t, d.swarf.Batches(), 1)
 		require.ElementsMatch(t, links(old), d.swarf.Revoked())
+	})
+
+	t.Run("a publish failure returns the error and leaves every key's delegations unchanged", func(t *testing.T) {
+		d := setup(t, nil)
+		before := map[did.DID][]cid.Cid{}
+		for _, key := range d.alice {
+			before[key] = links(d.held(t, key, d.photos))
+		}
+		swarfDown := errors.New("swarf is down")
+		d.swarf.Err = swarfDown
+
+		require.ErrorIs(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}), swarfDown)
+		after := map[did.DID][]cid.Cid{}
+		for _, key := range d.alice {
+			after[key] = links(d.held(t, key, d.photos))
+		}
+		require.Equal(t, before, after)
+	})
+
+	t.Run("stores each key's delegations for the new actions over the bucket", func(t *testing.T) {
+		d := setup(t, nil)
+
+		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
 		for _, key := range d.alice {
 			held := d.held(t, key, d.photos)
 			require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(held))
@@ -167,9 +191,24 @@ func TestRotate(t *testing.T) {
 				require.Equal(t, key, m.Audience())
 				require.Nil(t, m.Expiration())
 			}
-			require.ElementsMatch(t, commandsFor("s3:GetObject"), commands(d.held(t, key, d.backups)), "other buckets are untouched")
 		}
-		require.ElementsMatch(t, commandsFor("s3:GetObject"), commands(d.held(t, d.bob[0], d.photos)), "bob's key is untouched")
+	})
+
+	t.Run("leaves a key's delegations over other buckets and other principals' keys untouched", func(t *testing.T) {
+		d := setup(t, nil)
+		untouched := map[did.DID][]cid.Cid{}
+		for _, key := range d.alice {
+			untouched[key] = links(d.held(t, key, d.backups))
+		}
+		untouched[d.bob[0]] = links(append(d.held(t, d.bob[0], d.photos), d.held(t, d.bob[0], d.backups)...))
+
+		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+		got := map[did.DID][]cid.Cid{}
+		for _, key := range d.alice {
+			got[key] = links(d.held(t, key, d.backups))
+		}
+		got[d.bob[0]] = links(append(d.held(t, d.bob[0], d.photos), d.held(t, d.bob[0], d.backups)...))
+		require.Equal(t, untouched, got)
 	})
 
 	t.Run("the fresh delegations expire with the key", func(t *testing.T) {
@@ -185,12 +224,12 @@ func TestRotate(t *testing.T) {
 		}
 	})
 
-	t.Run("a first grant over a bucket publishes nothing", func(t *testing.T) {
+	t.Run("revokes nothing for a first grant over a bucket", func(t *testing.T) {
 		d := setup(t, nil)
 		videos := testutil.RandomDID(t)
 		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), videos, map[string][]string{"alice": {"s3:GetObject"}, "bob": {"s3:GetObject"}}))
 
-		require.Empty(t, d.swarf.Batches())
+		require.Empty(t, d.swarf.Revoked())
 		for _, key := range append(d.alice, d.bob...) {
 			require.ElementsMatch(t, commandsFor("s3:GetObject"), commands(d.held(t, key, videos)))
 		}
@@ -206,35 +245,9 @@ func TestRotate(t *testing.T) {
 		require.NotEmpty(t, d.held(t, d.bob[0], d.backups))
 	})
 
-	t.Run("a publish failure leaves every key unchanged", func(t *testing.T) {
-		d := setup(t, nil)
-		d.swarf.Err = errors.New("swarf is down")
-		before := map[did.DID][]cid.Cid{}
-		for _, key := range append(d.alice, d.bob...) {
-			before[key] = links(d.held(t, key, d.photos))
-		}
-
-		err := d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}, "bob": nil})
-		require.ErrorContains(t, err, "swarf is down")
-		for key, want := range before {
-			require.Equal(t, want, links(d.held(t, key, d.photos)))
-		}
-	})
-
-	t.Run("an expired delegation is replaced without a revocation", func(t *testing.T) {
-		exp := time.Now().Add(-time.Hour)
-		d := setup(t, &exp)
-		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"bob": {"s3:PutObject"}}))
-
-		require.Empty(t, d.swarf.Batches())
-		require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(d.held(t, d.bob[0], d.photos)))
-	})
-
-	t.Run("a key deleted while the rotation waited on the lock gets nothing", func(t *testing.T) {
+	t.Run("a key deleted after the rotation listed it gets nothing", func(t *testing.T) {
 		d := setup(t, nil)
 		gone, kept := d.alice[0], d.alice[1]
-		// The key goes between the rotation's listing and its lock, as a
-		// concurrent removal holding the lock first would have it.
 		dels := &deleteOnReplace{Store: d.delegations, del: func(ctx context.Context) error { return d.accessKeys.Delete(ctx, gone) }}
 		rotator := grant.NewRotator(zap.NewNop(), dels, d.accessKeys, d.secrets, d.swarf)
 		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
@@ -243,7 +256,7 @@ func TestRotate(t *testing.T) {
 		require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(d.held(t, kept, d.photos)))
 	})
 
-	t.Run("a principal without keys is a no-op", func(t *testing.T) {
+	t.Run("revokes nothing for a principal without keys", func(t *testing.T) {
 		d := setup(t, nil)
 		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"ghost": {"s3:GetObject"}}))
 		require.Empty(t, d.swarf.Batches())
@@ -261,49 +274,89 @@ func TestRevoke(t *testing.T) {
 			require.NoError(t, err)
 			old = append(old, page.Results...)
 		}
-		require.NoError(t, d.rotator.Revoke(ctx, d.tenant.DID(), "alice"))
 
+		require.NoError(t, d.rotator.Revoke(ctx, d.tenant.DID(), "alice"))
 		require.Len(t, d.swarf.Batches(), 1)
-		require.Equal(t, d.tenant.DID(), d.swarf.Batches()[0][0].Revoker)
 		require.ElementsMatch(t, links(old), d.swarf.Revoked())
 		for _, key := range d.alice {
 			page, err := d.delegations.ListByAudience(ctx, key)
 			require.NoError(t, err)
-			require.Empty(t, page.Results)
+			require.Empty(t, page.Results, key)
 		}
 		require.NotEmpty(t, d.held(t, d.bob[0], d.photos))
 	})
 
-	t.Run("a publish failure leaves the delegations in place", func(t *testing.T) {
+	t.Run("a publish failure returns the error and leaves the keys' delegations in place", func(t *testing.T) {
 		d := setup(t, nil)
-		d.swarf.Err = errors.New("swarf is down")
-
-		require.ErrorContains(t, d.rotator.Revoke(ctx, d.tenant.DID(), "alice"), "swarf is down")
+		before := map[did.DID][]cid.Cid{}
 		for _, key := range d.alice {
-			require.NotEmpty(t, d.held(t, key, d.photos))
+			page, err := d.delegations.ListByAudience(ctx, key)
+			require.NoError(t, err)
+			before[key] = links(page.Results)
 		}
+		swarfDown := errors.New("swarf is down")
+		d.swarf.Err = swarfDown
+
+		require.ErrorIs(t, d.rotator.Revoke(ctx, d.tenant.DID(), "alice"), swarfDown)
+		after := map[did.DID][]cid.Cid{}
+		for _, key := range d.alice {
+			page, err := d.delegations.ListByAudience(ctx, key)
+			require.NoError(t, err)
+			after[key] = links(page.Results)
+		}
+		require.Equal(t, before, after)
 	})
 }
 
-// The rotator bounds each rotation and revocation at BatchTimeout itself, so a
-// caller without a deadline cannot hold the delegation locks behind a stalled
-// publish.
-func TestRotatorPublishesUnderBatchTimeout(t *testing.T) {
+func TestPublish(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("revokes the delegations in one request signed by the tenant", func(t *testing.T) {
+		d := setup(t, nil)
+		dels := append(d.held(t, d.alice[0], d.photos), d.held(t, d.bob[0], d.backups)...)
+
+		require.NoError(t, d.rotator.Publish(ctx, d.tenant.DID(), dels))
+		require.Len(t, d.swarf.Batches(), 1)
+		var revokers []did.DID
+		for _, r := range d.swarf.Revocations() {
+			revokers = append(revokers, r.Revoker)
+		}
+		require.Equal(t, slices.Repeat([]did.DID{d.tenant.DID()}, len(dels)), revokers)
+		require.ElementsMatch(t, links(dels), d.swarf.Revoked())
+	})
+
+	t.Run("skips expired delegations", func(t *testing.T) {
+		exp := time.Now().Add(-time.Hour)
+		d := setup(t, &exp)
+
+		require.NoError(t, d.rotator.Publish(ctx, d.tenant.DID(), d.held(t, d.bob[0], d.photos)))
+		require.Empty(t, d.swarf.Batches())
+	})
+
+	t.Run("returns the revocation service's error", func(t *testing.T) {
+		d := setup(t, nil)
+		down := errors.New("swarf is down")
+		d.swarf.Err = down
+
+		require.ErrorIs(t, d.rotator.Publish(ctx, d.tenant.DID(), d.held(t, d.bob[0], d.photos)), down)
+	})
+}
+
+// Publish bounds its request at BatchTimeout itself, so a caller without a
+// deadline cannot hang behind a stalled revocation service.
+func TestPublishUnderBatchTimeout(t *testing.T) {
 	d := setup(t, nil)
 	pub := &deadlinePublisher{FakeSwarf: d.swarf}
 	rotator := grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, pub)
 
-	require.NoError(t, rotator.Rotate(context.Background(), d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:ListBucket"}}))
-	require.NoError(t, rotator.Revoke(context.Background(), d.tenant.DID(), "bob"))
-	require.Len(t, pub.remaining, 2)
-	for _, left := range pub.remaining {
-		require.Greater(t, left, time.Duration(0))
-		require.LessOrEqual(t, left, grant.BatchTimeout)
-	}
+	require.NoError(t, rotator.Publish(context.Background(), d.tenant.DID(), d.held(t, d.alice[0], d.photos)))
+	require.Len(t, pub.remaining, 1)
+	require.Greater(t, pub.remaining[0], time.Duration(0))
+	require.LessOrEqual(t, pub.remaining[0], grant.BatchTimeout)
 }
 
-// PublishRevocations bounds its own publish, so a caller that holds a
-// delegation lock with no deadline of its own still releases it at BatchTimeout.
+// PublishRevocations bounds its own publish, so a caller with no deadline of
+// its own still gives up at BatchTimeout.
 func TestPublishRevocationsUnderBatchTimeout(t *testing.T) {
 	d := setup(t, nil)
 	pub := &deadlinePublisher{FakeSwarf: d.swarf}

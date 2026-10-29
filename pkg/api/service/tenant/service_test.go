@@ -227,16 +227,19 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type deleteEnv struct {
-	svc        *tenantsvc.Service
-	tenants    *tenantmemory.Store
-	buckets    *bucketmemory.Store
-	policies   *bucketpolicymemory.Store
-	principals *principalmemory.Store
-	swarf      *testutil.FakeSwarf
+	svc         *tenantsvc.Service
+	tenants     *tenantmemory.Store
+	buckets     *bucketmemory.Store
+	policies    *bucketpolicymemory.Store
+	principals  *principalmemory.Store
+	delegations *delegationmemory.Store
+	swarf       *testutil.FakeSwarf
 	// publisher is swarf as the service sees it, recording each publish's deadline.
 	publisher *deadlinePublisher
 	bucketID  did.DID
 	tenantID  did.DID
+	// keyID is the tenant's one access key.
+	keyID did.DID
 	// grants are the delegations the tenant's one access key holds.
 	grants    []cid.Cid
 	directory *plcDirectory
@@ -286,13 +289,10 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	buckets, policies := bucketmemory.New(), bucketpolicymemory.New()
 	bucketID := testutil.RandomDID(t)
 	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "tenant-1-bucket"))
-	_, err = policies.Put(ctx, bucketpolicystore.Input{
+	require.NoError(t, policies.Put(ctx, bucketpolicystore.Input{
 		Bucket: bucketID, Tenant: tenantID,
 		Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
-
-		Conditional: true,
-	}, nil)
-	require.NoError(t, err)
+	}, nil))
 
 	// One access key holding a grant over the bucket, so the revocations the
 	// removal publishes are observable.
@@ -312,7 +312,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
 		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, publisher)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
-		principals: principals, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
+		principals: principals, delegations: delegations, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, keyID: keyID, grants: grants, directory: directory,
 		tombstone: tombstoneJSON.Bytes()}
 }
 
@@ -330,6 +330,18 @@ func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issue
 	}
 	p.remaining = append(p.remaining, left)
 	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
+}
+
+// heldGrants lists the links of the delegations the tenant's access key holds.
+func heldGrants(t *testing.T, env deleteEnv) []cid.Cid {
+	t.Helper()
+	page, err := env.delegations.ListByAudience(t.Context(), env.keyID)
+	require.NoError(t, err)
+	var links []cid.Cid
+	for _, d := range page.Results {
+		links = append(links, d.Link())
+	}
+	return links
 }
 
 func TestDelete(t *testing.T) {
@@ -358,17 +370,40 @@ func TestDelete(t *testing.T) {
 		env := deleteSetup(t, tenant.Disabled)
 		require.NoError(t, env.svc.Delete(context.Background(), "tenant-1"))
 		require.Len(t, env.publisher.remaining, 1)
-		require.Greater(t, env.publisher.remaining[0], time.Duration(0), "a stalled publish must not hold the keys' delegation locks past the batch deadline")
+		require.Greater(t, env.publisher.remaining[0], time.Duration(0), "a stalled publish must not outlast the batch deadline")
 		require.LessOrEqual(t, env.publisher.remaining[0], grant.BatchTimeout)
 	})
 
-	t.Run("a publish failure leaves the tenant and its DID in place", func(t *testing.T) {
+	t.Run("returns the publish error and leaves the tenant and its DID in place when the revocation publish fails", func(t *testing.T) {
 		env := deleteSetup(t, tenant.Disabled)
-		env.swarf.Err = errors.New("swarf unreachable")
-		require.ErrorContains(t, env.svc.Delete(ctx, "tenant-1"), "swarf unreachable")
+		swarfDown := errors.New("swarf unreachable")
+		env.swarf.Err = swarfDown
+		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), swarfDown)
 		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)
 		require.Zero(t, env.directory.deactivations)
+	})
+
+	t.Run("keeps the keys' delegations in place when the revocation publish fails", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		swarfDown := errors.New("swarf unreachable")
+		env.swarf.Err = swarfDown
+		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), swarfDown)
+		require.ElementsMatch(t, env.grants, heldGrants(t, env))
+	})
+
+	t.Run("revokes the keys' delegations once and deletes the tenant when a delete retries after a failed revocation publish", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		swarfDown := errors.New("swarf unreachable")
+		env.swarf.Err = swarfDown
+		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), swarfDown)
+		env.swarf.Err = nil
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		require.Equal(t, 1, env.swarf.Calls())
+		require.ElementsMatch(t, env.grants, env.swarf.Revoked())
+		require.Empty(t, heldGrants(t, env))
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("an already deactivated DID publishes nothing and finishes the cascade", func(t *testing.T) {

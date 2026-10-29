@@ -19,20 +19,9 @@ import (
 )
 
 // BatchTimeout caps one Rotate or Revoke call, which covers every key the
-// write touches. A policy write rotates the keys of each principal whose
-// actions changed, the wildcard fanning out to all of the tenant's, and a
-// principal removal revokes each of its keys' delegations; both hold a row
-// lock throughout, while a share-locked reader of that row gives up after
-// [store.LockTimeout]. Each call shortens its ctx to this deadline, below the
-// reader's bound (an earlier caller deadline still wins), so a large batch or
-// a stalled publish cannot lock the data path out. [PublishRevocations] applies
-// the same bound, so every publish made under a delegation lock, a key or
-// bucket deletion's and a tenant removal's included, has it.
+// write touches, and every [PublishRevocations]. An earlier caller deadline
+// still wins.
 const BatchTimeout = 8 * time.Second
-
-// The batch bound must stay below the reader's; a negative difference fails
-// to compile.
-const _ = uint(store.LockTimeout - BatchTimeout)
 
 // RevocationPublisher is the subset of the revocation service (Swarf) Hilt
 // needs. It is satisfied by [*swarfclient.Client]; the interface lets the logic
@@ -47,9 +36,10 @@ type RevocationPublisher interface {
 
 // Rotator rewrites the stored delegations of principal-bound access keys as
 // the bucket policies change. The delegations a change replaces are revoked
-// through the revocation service, which makes the gateway drop what it cached
-// for the key, and the whole rewrite runs under the keys' delegation locks so
-// a concurrent rotation or deletion of one of the keys serializes behind it.
+// through the revocation service before the write that replaces them stores
+// anything, which makes the gateway drop what it cached for the key. A rotation takes no
+// lock: it replaces only the keys' delegations over the bucket it rotates, so
+// rotations over different buckets never undo each other.
 type Rotator struct {
 	logger      *zap.Logger
 	delegations delegationstore.Store
@@ -78,10 +68,14 @@ func NewRotator(
 
 // Rotate sets, for every key of each principal in actions, the key's
 // delegations over bucket to those the principal's actions map to, and leaves
-// its delegations over other buckets alone. The delegations replaced are
-// revoked in one request before anything is stored, so a publish failure
-// leaves every key unchanged; a key that held nothing over the bucket costs no
-// revocation. An empty action set leaves the key with nothing over the bucket.
+// its delegations over other buckets alone. The delegations it replaces are
+// revoked in one request before anything is written (see
+// [PublishRevocations]), so a publish failure leaves every key unchanged; a key
+// that held nothing over the bucket costs no revocation. An empty action set
+// leaves the key with nothing over the bucket.
+// Two concurrent rotations over the same bucket each delete what they read and
+// insert their own set, so the keys may end up holding both sets, and a set
+// the other write deleted is never revoked.
 func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) error {
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()
@@ -93,25 +87,19 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 	for _, key := range keys {
 		principalOf[key.ID] = *key.Principal
 	}
-	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
 
-	return r.delegations.Replace(ctx, audiences(keys), func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
+	return r.delegations.ReplaceBySubject(ctx, bucket, audiences(keys), func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		var revoked []ucan.Delegation
 		next := make(map[did.DID][]ucan.Delegation, len(keys))
 		for _, key := range keys {
-			// The listing above is a snapshot: a key deleted while this waited
-			// on the lock is left with nothing rather than issued fresh grants.
+			revoked = append(revoked, current[key.ID]...)
+			// The listing above is a snapshot: a key deleted since is left with
+			// nothing rather than issued fresh grants.
 			if _, err := r.accessKeys.Get(ctx, key.ID); errors.Is(err, store.ErrRecordNotFound) {
 				continue
 			} else if err != nil {
 				return nil, fmt.Errorf("looking up key %s: %w", key.ID, err)
-			}
-			for _, d := range current[key.ID] {
-				if d.Subject() == bucket {
-					revoked = append(revoked, d)
-				} else {
-					next[key.ID] = append(next[key.ID], d)
-				}
 			}
 			fresh, err := Issue(issuer, key.ID, []did.DID{bucket}, actions[principalOf[key.ID]], key.ExpiresAt)
 			if err != nil {
@@ -127,7 +115,8 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 }
 
 // Revoke revokes every delegation of every key bound to the principal, in one
-// request, and leaves the keys with none, for a principal being removed.
+// request before anything is written, and leaves the keys with none, for a
+// principal being removed.
 func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) error {
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()
@@ -136,7 +125,6 @@ func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) 
 		return err
 	}
 	log := r.logger.With(zap.Stringer("tenant", tenant), zap.String("principal", principal))
-
 	return r.delegations.Replace(ctx, audiences(keys), func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		var all []ucan.Delegation
 		for _, key := range keys {
@@ -144,6 +132,20 @@ func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) 
 		}
 		return nil, PublishRevocations(ctx, log, r.revocations, issuer, all)
 	})
+}
+
+// Publish revokes dels, which the tenant issued, in one request (see
+// [PublishRevocations]), for a caller that removes them in its own write. It
+// reads the tenant's key only when there is something to revoke.
+func (r *Rotator) Publish(ctx context.Context, tenant did.DID, dels []ucan.Delegation) error {
+	if len(dels) == 0 {
+		return nil
+	}
+	issuer, err := vault.TenantIssuer(ctx, r.secrets, tenant)
+	if err != nil {
+		return err
+	}
+	return PublishRevocations(ctx, r.logger.With(zap.Stringer("tenant", tenant)), r.revocations, issuer, dels)
 }
 
 // load lists the keys bound to the principals, in principal order, and, when
@@ -176,11 +178,13 @@ func audiences(keys []accesskeystore.Record) []did.DID {
 }
 
 // PublishRevocations publishes a revocation for each unexpired delegation in
-// one request, signed by the tenant that issued them. It is the callback body
-// of a [delegationstore.Store.Replace] that removes or replaces what keys hold,
-// so it runs while their delegations are locked, and it shortens its ctx to
-// [BatchTimeout] itself: whoever calls it, a stalled publish releases the locks
-// at the bound. An earlier caller deadline still wins.
+// one request, signed by the tenant that issued them. Every caller runs it
+// inside the write that removes or replaces the delegations, after that
+// write's reads and before its first row write: a failed publish then rolls
+// the write back and leaves the delegations in place, and the transaction
+// holds no row lock while it waits for the revocation service, so no other
+// write waits on Swarf. Keep it before the first row write. It shortens its
+// ctx to [BatchTimeout] itself; an earlier caller deadline still wins.
 func PublishRevocations(ctx context.Context, log *zap.Logger, publisher RevocationPublisher, issuer ucan.Issuer, dels []ucan.Delegation) error {
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()

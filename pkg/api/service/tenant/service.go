@@ -305,8 +305,9 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 	// request and one delegation-store write, before the did:plc goes: the
 	// tenant signs the revocations and Swarf verifies them against its DID. A
 	// warm key would otherwise keep serving from the gateway's cache until the
-	// next UTC midnight. A failed publish leaves everything in place for a
-	// retry. A DID an earlier attempt already deactivated skips both: that
+	// next UTC midnight. A failed publish leaves the delegations, the tenant
+	// and its DID in place for a retry. A DID an earlier attempt already
+	// deactivated skips both: that
 	// attempt published first, and Swarf could not verify a new publish against
 	// the tombstone anyway. A tenant tombstoned by a removal that predates the
 	// publish, and that then failed in its cascade, is the one case nothing
@@ -417,8 +418,9 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 
 // revokeKeyDelegations publishes, in one request signed by the tenant, a
 // revocation for every delegation the keys hold, and removes them in the same
-// delegation-store write, so a failed publish leaves every key's delegations
-// in place. Nothing is published when they hold none.
+// delegation-store write, publishing before it writes anything, so a failed
+// publish leaves every key's delegations in place. Nothing is published when
+// they hold none.
 func (s *Service) revokeKeyDelegations(ctx context.Context, log *zap.Logger, tenantID did.DID, keys []accesskey.Record) error {
 	if len(keys) == 0 {
 		return nil
@@ -431,10 +433,6 @@ func (s *Service) revokeKeyDelegations(ctx context.Context, log *zap.Logger, ten
 	if err != nil {
 		return err
 	}
-	// The publish runs while the keys' delegations are locked, so the whole
-	// write is bounded at the batch deadline, as the rotator's is.
-	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
-	defer cancel()
 	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		var all []ucan.Delegation
 		for _, held := range current {

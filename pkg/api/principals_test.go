@@ -28,6 +28,7 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/ipfs/go-cid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -68,7 +69,7 @@ func setupPrincipals(t *testing.T) (*echo.Echo, *principalDeps) {
 	deps.tenant = multikey.NewIssuer(deps.tenantID, signer)
 
 	grants := grant.NewRotator(zap.NewNop(), deps.delegations, deps.accessKeys, deps.vault, deps.revocations)
-	svc := principalsvc.New(zap.NewNop(), tenants, deps.principals, deps.policies, deps.accessKeys, deps.delegations, deps.vault, deps.revocations, grants)
+	svc := principalsvc.New(zap.NewNop(), tenants, deps.principals, deps.policies, deps.accessKeys, deps.delegations, deps.vault, grants)
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreatePrincipalHandler(zap.NewNop(), svc),
@@ -245,13 +246,12 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		createPrincipal(t, e, "user-1")
 		keyID := addPrincipalKey(t, deps, "user-1", "laptop")
 		bucket := testutil.RandomDID(t)
-		_, err := deps.policies.Put(ctx, bucketpolicystore.Input{
+		err := deps.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucket,
 			Tenant: deps.tenantID,
 			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 			}},
-			Conditional: true,
 		}, nil)
 		require.NoError(t, err)
 
@@ -273,10 +273,16 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		require.Equal(t, http.StatusNoContent, again.Code, "a principal already gone is 204")
 	})
 
-	t.Run("a failed revocation is 500 and changes nothing", func(t *testing.T) {
+	t.Run("is 500 and keeps the principal, its key and the key's delegations when the revocation publish fails, and a retry removes them", func(t *testing.T) {
 		e, deps := setupPrincipals(t)
 		createPrincipal(t, e, "user-1")
 		keyID := addPrincipalKey(t, deps, "user-1", "laptop")
+		principalBefore := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/user-1", nil).Body.String()
+		keyBefore, err := deps.accessKeys.Get(ctx, keyID)
+		require.NoError(t, err)
+		delsBefore, err := deps.delegations.ListByAudience(ctx, keyID)
+		require.NoError(t, err)
+		require.NotEmpty(t, delsBefore.Results)
 		deps.revocations.Err = errors.New("swarf unreachable")
 
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/principals/user-1", nil)
@@ -284,11 +290,28 @@ func TestDeletePrincipalHandler(t *testing.T) {
 
 		get := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/user-1", nil)
 		require.Equal(t, http.StatusOK, get.Code)
-		_, err := deps.accessKeys.Get(ctx, keyID)
-		require.NoError(t, err, "the key must survive")
+		require.JSONEq(t, principalBefore, get.Body.String())
+		key, err := deps.accessKeys.Get(ctx, keyID)
+		require.NoError(t, err)
+		require.Equal(t, keyBefore, key)
 		dels, err := deps.delegations.ListByAudience(ctx, keyID)
 		require.NoError(t, err)
-		require.Len(t, dels.Results, 1, "its delegation must survive")
+		require.Equal(t, delsBefore.Results, dels.Results)
+		require.Empty(t, deps.revocations.Revoked())
+
+		deps.revocations.Err = nil
+		retry := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/principals/user-1", nil)
+		require.Equal(t, http.StatusNoContent, retry.Code)
+		want := make([]cid.Cid, len(delsBefore.Results))
+		for i, d := range delsBefore.Results {
+			want[i] = d.Link()
+		}
+		require.Equal(t, want, deps.revocations.Revoked())
+		_, err = deps.accessKeys.Get(ctx, keyID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		dels, err = deps.delegations.ListByAudience(ctx, keyID)
+		require.NoError(t, err)
+		require.Empty(t, dels.Results)
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {

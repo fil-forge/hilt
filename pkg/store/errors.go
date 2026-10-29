@@ -1,10 +1,6 @@
 package store
 
-import (
-	"context"
-
-	"github.com/fil-forge/ucantone/errors"
-)
+import "github.com/fil-forge/ucantone/errors"
 
 const (
 	// RecordExistsErrorName is the name given to an error where the record
@@ -16,13 +12,6 @@ const (
 	// InvalidArgumentErrorName is the name given to an error where an argument
 	// passed to a store operation is invalid.
 	InvalidArgumentErrorName = "InvalidArgument"
-	// PreconditionFailedErrorName is the name given to an error where a
-	// compare-and-set write finds the record in a state other than the one the
-	// caller conditioned on.
-	PreconditionFailedErrorName = "PreconditionFailed"
-	// LockTimeoutErrorName is the name given to an error where a statement gave
-	// up waiting for a conflicting row or advisory lock.
-	LockTimeoutErrorName = "LockTimeout"
 )
 
 var (
@@ -33,21 +22,4 @@ var (
 	// ErrInvalidArgument is returned when an argument passed to a store
 	// operation is invalid.
 	ErrInvalidArgument = errors.New(InvalidArgumentErrorName, "invalid argument")
-	// ErrPreconditionFailed is returned when a conditional write does not match
-	// the stored record: an If-Match tag differs from the current one, or a
-	// create finds a record already present. Nothing is written.
-	ErrPreconditionFailed = errors.New(PreconditionFailedErrorName, "precondition failed")
-	// ErrLockTimeout is returned when a statement waited [LockTimeout] for a
-	// lock another transaction holds and gave up. Nothing is written. The call
-	// is retryable: the conflicting write either commits or rolls back, and the
-	// retry proceeds from whichever state it leaves.
-	ErrLockTimeout = errors.New(LockTimeoutErrorName, "timed out waiting for a lock")
 )
-
-// Contended reports whether a write lost a race with another: it gave up on a
-// lock ([ErrLockTimeout]), or its own deadline ran out while the caller's ctx
-// is still live, which is how a write bounded below the lock timeout reports
-// the same wait. The caller repeats the call.
-func Contended(ctx context.Context, err error) bool {
-	return errors.Is(err, ErrLockTimeout) || (errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil)
-}

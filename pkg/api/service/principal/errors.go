@@ -8,7 +8,6 @@ const (
 	TenantNotFoundErrorName     = "TenantNotFound"
 	PrincipalNotFoundErrorName  = "PrincipalNotFound"
 	InvalidPrincipalIDErrorName = "InvalidPrincipalID"
-	ConcurrentChangeErrorName   = "ConcurrentChange"
 )
 
 // Known errors returned by the principal [Service]. Handlers map these to HTTP
@@ -23,8 +22,4 @@ var (
 	// ErrInvalidPrincipalID is returned when the principalId is not one
 	// [ValidID] accepts.
 	ErrInvalidPrincipalID = errors.New(InvalidPrincipalIDErrorName, `principalId must be between 1 and 255 bytes of valid UTF-8 without NUL, "/", ";", ",", "?" or "%", and must not be ".", "..", or "*", which is reserved for the policy wildcard`)
-	// ErrConcurrentChange is returned when another write to the principal or to
-	// one of its bucket policies was in flight and this call gave up rather
-	// than wait on it. Nothing was changed and the call can be repeated.
-	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the principal is being changed concurrently, retry the request")
 )

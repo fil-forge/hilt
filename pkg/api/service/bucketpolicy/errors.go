@@ -5,13 +5,10 @@ import "github.com/fil-forge/ucantone/errors"
 // Error names for the policy service's known errors, exported so callers can
 // match on the stable Name() of a serialized failure.
 const (
-	TenantNotFoundErrorName     = "TenantNotFound"
-	BucketNotFoundErrorName     = "BucketNotFound"
-	PolicyNotFoundErrorName     = "PolicyNotFound"
-	PrincipalNotFoundErrorName  = "PrincipalNotFound"
-	InvalidPreconditionName     = "InvalidPrecondition"
-	PreconditionFailedErrorName = "PreconditionFailed"
-	ConcurrentChangeErrorName   = "ConcurrentChange"
+	TenantNotFoundErrorName    = "TenantNotFound"
+	BucketNotFoundErrorName    = "BucketNotFound"
+	PolicyNotFoundErrorName    = "PolicyNotFound"
+	PrincipalNotFoundErrorName = "PrincipalNotFound"
 )
 
 // Known errors returned by the policy [Service]. Handlers map these to HTTP
@@ -31,16 +28,4 @@ var (
 	// ErrPrincipalNotFound is returned when the tenant has no principal with
 	// that principalId.
 	ErrPrincipalNotFound = errors.New(PrincipalNotFoundErrorName, "principal not found")
-	// ErrInvalidPrecondition is returned when the request carries neither
-	// If-Match nor If-None-Match: *, or carries both, or carries an
-	// If-None-Match other than *. Every write to a policy states the version it
-	// expects.
-	ErrInvalidPrecondition = errors.New(InvalidPreconditionName,
-		"a policy write must carry either If-Match with the current ETag or If-None-Match: *")
-	// ErrPreconditionFailed is returned when the bucket's policy is not in the
-	// state the request conditioned on. Nothing is written.
-	ErrPreconditionFailed = errors.New(PreconditionFailedErrorName, "the bucket's policy has changed")
-	// ErrConcurrentChange is returned when another write held a lock this call
-	// gave up waiting for. Nothing was written and the call can be repeated.
-	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the policy is being changed concurrently, retry the request")
 )

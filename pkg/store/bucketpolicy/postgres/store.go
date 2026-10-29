@@ -15,7 +15,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/pglock"
-	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -36,183 +35,94 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-const selectColumns = `SELECT bucket_id, document, etag, updated_at FROM bucket_policy`
+const selectColumns = `SELECT bucket_id, document, updated_at FROM bucket_policy`
 
-// lockNamespace is the first of the two 32-bit keys of the advisory lock this
-// store takes per bucket with [pglock.Advisory]; the second is the bucket DID.
-// A writer holds it, exclusive, across its row lock, precondition check,
-// beforeCommit callback and writes; a share-locked reader takes it shared.
-//
-// The lock exists because a row lock cannot cover a create: there is no row
-// to lock until the INSERT commits, and an uncommitted INSERT is invisible to
-// a FOR SHARE reader, so without it a reader arriving between the publish and
-// the commit would answer "no policy" from the old state.
-const lockNamespace int32 = 0x504f4c49 // "POLI"
-
-// Get reads the row. With [store.WithShareLock] the read runs in a short
-// transaction that waits on the bucket's advisory lock (held by an in-flight
-// Put or Delete until it commits or rolls back) and then reads the row FOR
-// SHARE, so it is answered from the settled state; a wait longer than
-// [store.LockTimeout] returns [store.ErrLockTimeout].
-func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (rec bucketpolicystore.Record, err error) {
-	defer func() { err = pglock.MapError(err) }()
-	query := selectColumns + ` WHERE bucket_id = $1`
-	if !store.NewReadConfig(opts...).Share {
-		rec, err = scanRecord(s.pool.QueryRow(ctx, query, bucket.String()))
-		return pglock.Found(rec, err, "policy")
-	}
-
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return bucketpolicystore.Record{}, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the locks
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return bucketpolicystore.Record{}, err
-	}
-	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), true); err != nil {
-		return bucketpolicystore.Record{}, err
-	}
-	rec, err = scanRecord(tx.QueryRow(ctx, fmt.Sprintf(`%s FOR SHARE`, query), bucket.String()))
+func (s *Store) Get(ctx context.Context, bucket did.DID) (bucketpolicystore.Record, error) {
+	rec, err := scanRecord(s.pool.QueryRow(ctx, selectColumns+` WHERE bucket_id = $1`, bucket.String()))
 	return pglock.Found(rec, err, "policy")
 }
 
-// Put runs in one transaction: it takes the tenant's advisory lock shared
-// ([tenant.LockNamespace]), checks the named principals (see
-// [requireLivePrincipals]), takes the bucket's advisory lock, locks the
-// current row FOR UPDATE when there is one, checks the precondition, runs
-// beforeCommit while holding the locks, writes the row and rewrites its index
-// rows, and commits. A share-locked read of the bucket (see [Store.Get])
-// waits for the commit or the rollback, on a create as much as on a replace.
-// Two concurrent creates serialize on the bucket's advisory lock; the second
-// finds the first's row and fails its precondition. The tenant lock holds off
-// a principal add for the whole transaction, so the tenant's principals do not
-// change between what beforeCommit lists and what is committed; concurrent
-// writes under one tenant share it and do not wait on each other.
+// Put runs in one transaction: it checks the bucket and the named principals
+// (see [requireLivePrincipals]), reads the current row, runs beforeCommit,
+// writes the row and rewrites its index rows, and commits. It takes no lock of
+// its own. Writing the row waits only on another write to the same bucket that
+// has already written its row and not yet committed, and then replaces it, so
+// the index rows the later write leaves are its own.
 //
 // A bucket with no row fails with store.ErrRecordNotFound before beforeCommit
 // runs. beforeCommit runs before the row and index writes, so a callback that
 // has published can still see a later write fail; the RFC treats such a record
 // as harmless.
-//
-// Every index row write takes a FOR KEY SHARE lock on the bucket row, which its
-// foreign key onto (id, tenant_id) requires: the write waits on an in-flight
-// change to that pair and is refused when the bucket is not the tenant's.
-// Every lock the transaction takes is bounded at [store.LockTimeout]. The
-// index rows reference the principal table, so writing them waits on any
-// principal removal holding one of the named rows; without the bound that
-// wait is an application-level cycle Postgres cannot break.
-func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(ctx context.Context, old *bucketpolicystore.Record) error) (etag string, err error) {
-	defer func() { err = pglock.MapError(err) }()
+func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommit func(ctx context.Context, old *bucketpolicystore.Record) error) error {
 	if in.Bucket == did.Undef {
-		return "", fmt.Errorf("policy bucket is required: %w", store.ErrInvalidArgument)
+		return fmt.Errorf("policy bucket is required: %w", store.ErrInvalidArgument)
 	}
 	if in.Tenant == did.Undef {
-		return "", fmt.Errorf("policy tenant is required: %w", store.ErrInvalidArgument)
+		return fmt.Errorf("policy tenant is required: %w", store.ErrInvalidArgument)
 	}
 
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return "", fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return "", err
-	}
-	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, in.Tenant.String(), true); err != nil {
-		return "", err
-	}
-	named, _ := bucketpolicy.Named(in.Policy)
-	if err := requireLivePrincipals(ctx, tx, in.Tenant, named); err != nil {
-		return "", err
-	}
-	if err := pglock.Advisory(ctx, tx, lockNamespace, in.Bucket.String(), false); err != nil {
-		return "", err
-	}
-	// A bucket deletion locks the bucket row and then cascades to the policy
-	// row; the index writes below key-share lock the bucket row after this
-	// locks the policy row. Taking the bucket first keeps the two in one order.
-	var one int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM bucket WHERE id = $1 FOR KEY SHARE`, in.Bucket.String()).Scan(&one); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrRecordNotFound)
-		}
-		return "", fmt.Errorf("locking bucket: %w", err)
-	}
-	old, err := lockRow(ctx, tx, in.Bucket)
-	if err != nil {
-		return "", err
-	}
-	if err := bucketpolicystore.CheckInputPrecondition(in, old); err != nil {
-		return "", err
-	}
-	if beforeCommit != nil {
-		if err := beforeCommit(pglock.WithTx(ctx, tx), old); err != nil {
-			return "", fmt.Errorf("before writing policy: %w", err)
-		}
-	}
-
-	canonical := bucketpolicy.Canonical(in.Policy)
-	etag = s3bkt.ETag(in.Policy)
-	if old == nil {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO bucket_policy (bucket_id, document, etag)
-			VALUES ($1, $2, $3)
-		`, in.Bucket.String(), canonical, etag)
-	} else {
-		_, err = tx.Exec(ctx, `
-			UPDATE bucket_policy
-			SET document = $2, etag = $3, updated_at = NOW()
-			WHERE bucket_id = $1
-		`, in.Bucket.String(), canonical, etag)
-	}
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case pgerrcode.UniqueViolation:
-				return "", fmt.Errorf("policy was created concurrently: %w", store.ErrPreconditionFailed)
-			case pgerrcode.ForeignKeyViolation:
-				return "", fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrInvalidArgument)
-			}
-		}
-		return "", fmt.Errorf("writing policy: %w", err)
-	}
-
-	if err := writeIndex(ctx, tx, in.Bucket, in.Tenant, in.Policy); err != nil {
-		return "", err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("committing transaction: %w", err)
-	}
-	return etag, nil
-}
-
-// Delete runs in one transaction under the same contract as [Store.Put].
-func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, beforeCommit func(ctx context.Context, old bucketpolicystore.Record) error) (err error) {
-	defer func() { err = pglock.MapError(err) }()
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
+	named, _ := bucketpolicy.Named(in.Policy)
+	if err := requireLivePrincipals(ctx, tx, in.Tenant, named); err != nil {
 		return err
 	}
-	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), false); err != nil {
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM bucket WHERE id = $1`, in.Bucket.String()).Scan(&one); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrRecordNotFound)
+		}
+		return fmt.Errorf("looking up bucket: %w", err)
+	}
+	old, err := readRow(ctx, tx, in.Bucket)
+	if err != nil {
 		return err
 	}
-	old, err := lockRow(ctx, tx, bucket)
+	if beforeCommit != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx), old); err != nil {
+			return fmt.Errorf("before writing policy: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO bucket_policy (bucket_id, document)
+		VALUES ($1, $2)
+		ON CONFLICT (bucket_id) DO UPDATE SET document = EXCLUDED.document, updated_at = NOW()
+	`, in.Bucket.String(), bucketpolicy.Canonical(in.Policy)); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
+			return fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrInvalidArgument)
+		}
+		return fmt.Errorf("writing policy: %w", err)
+	}
+
+	if err := writeIndex(ctx, tx, in.Bucket, in.Tenant, in.Policy); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+	return nil
+}
+
+// Delete runs in one transaction under the same contract as [Store.Put].
+func (s *Store) Delete(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context, old bucketpolicystore.Record) error) error {
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+
+	old, err := readRow(ctx, tx, bucket)
 	if err != nil {
 		return err
 	}
 	if old == nil {
 		return store.ErrRecordNotFound
-	}
-	if ifMatch != "" && old.ETag != ifMatch {
-		return fmt.Errorf("policy ETag is %s, not %s: %w", old.ETag, ifMatch, store.ErrPreconditionFailed)
 	}
 	if beforeCommit != nil {
 		if err := beforeCommit(pglock.WithTx(ctx, tx), *old); err != nil {
@@ -228,23 +138,15 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 	return nil
 }
 
-// DeleteByBucket removes the bucket's policy unconditionally, under the
-// bucket's advisory lock so it serializes with a Put or Delete in flight the
-// way the memory backend's mutex does, and runs beforeCommit while holding it.
-func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) (err error) {
-	defer func() { err = pglock.MapError(err) }()
+// DeleteByBucket removes the bucket's policy unconditionally, running
+// beforeCommit inside the same transaction first.
+func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) error {
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	if err := pglock.Advisory(ctx, tx, lockNamespace, bucket.String(), false); err != nil {
-		return err
-	}
 	if beforeCommit != nil {
 		if err := beforeCommit(pglock.WithTx(ctx, tx)); err != nil {
 			return err
@@ -261,44 +163,20 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit
 
 // ListByPrincipal answers from the index: a policy is listed when
 // bucket_policy_principal holds a row for the principal or a wildcard row
-// (NULL principal) under the tenant. With [store.WithShareLock] the rows are read
-// FOR SHARE in a short transaction, so the read waits on an in-flight Put or
-// Delete of a policy that already has a row; a concurrent create is not
-// covered, since no row exists to lock until it commits (Get takes the bucket's
-// advisory lock for that, which a listing across buckets cannot). The wait is
-// bounded at [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
-func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) (recs []bucketpolicystore.Record, err error) {
-	defer func() { err = pglock.MapError(err) }()
-	query := selectColumns + ` p
+// (NULL principal) under the tenant.
+func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]bucketpolicystore.Record, error) {
+	rows, err := s.pool.Query(ctx, selectColumns+` p
 		WHERE EXISTS (
 			SELECT 1 FROM bucket_policy_principal i
 			WHERE i.bucket_id = p.bucket_id
 			  AND i.tenant_id = $1
 			  AND (i.principal_id = $2 OR i.principal_id IS NULL)
 		)
-		ORDER BY bucket_id ASC`
-	if !store.NewReadConfig(opts...).Share {
-		rows, err := s.pool.Query(ctx, query, tenant.String(), principal)
-		if err != nil {
-			return nil, fmt.Errorf("listing policies by principal: %w", err)
-		}
-		defer rows.Close()
-		return collectRecords(rows)
-	}
-
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return nil, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the locks
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return nil, err
-	}
-	rows, err := tx.Query(ctx, query+` FOR SHARE`, tenant.String(), principal)
+		ORDER BY bucket_id ASC`, tenant.String(), principal)
 	if err != nil {
 		return nil, fmt.Errorf("listing policies by principal: %w", err)
 	}
-	defer rows.Close() // runs before the deferred rollback
+	defer rows.Close()
 	return collectRecords(rows)
 }
 
@@ -318,15 +196,15 @@ func collectRecords(rows pgx.Rows) ([]bucketpolicystore.Record, error) {
 	return recs, nil
 }
 
-// lockRow reads the bucket's policy row FOR UPDATE within tx. It returns nil
-// when the bucket has no policy.
-func lockRow(ctx context.Context, tx pgx.Tx, bucket did.DID) (*bucketpolicystore.Record, error) {
-	rec, err := scanRecord(tx.QueryRow(ctx, selectColumns+` WHERE bucket_id = $1 FOR UPDATE`, bucket.String()))
+// readRow reads the bucket's policy row within tx. It returns nil when the
+// bucket has no policy.
+func readRow(ctx context.Context, tx pgx.Tx, bucket did.DID) (*bucketpolicystore.Record, error) {
+	rec, err := scanRecord(tx.QueryRow(ctx, selectColumns+` WHERE bucket_id = $1`, bucket.String()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("locking policy: %w", err)
+		return nil, fmt.Errorf("reading policy: %w", err)
 	}
 	return &rec, nil
 }
@@ -373,12 +251,16 @@ func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bk
 
 // deleteRows removes the bucket's policy and index rows. The index rows
 // reference the bucket, not the policy, so they are removed explicitly.
+//
+// The policy row goes first, the order [Store.Put] writes the two tables in,
+// so a Put and a Delete of one bucket wait on each other's rows in the same
+// order and cannot deadlock.
 func deleteRows(ctx context.Context, tx pgx.Tx, bucket did.DID) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`, bucket.String()); err != nil {
-		return fmt.Errorf("deleting policy index: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy WHERE bucket_id = $1`, bucket.String()); err != nil {
 		return fmt.Errorf("deleting policy: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`, bucket.String()); err != nil {
+		return fmt.Errorf("deleting policy index: %w", err)
 	}
 	return nil
 }
@@ -387,10 +269,9 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 	var (
 		bucketStr string
 		document  []byte
-		etag      string
 		updatedAt time.Time
 	)
-	if err := row.Scan(&bucketStr, &document, &etag, &updatedAt); err != nil {
+	if err := row.Scan(&bucketStr, &document, &updatedAt); err != nil {
 		return bucketpolicystore.Record{}, err
 	}
 	bucket, err := did.Parse(bucketStr)
@@ -401,21 +282,13 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 	if err := json.Unmarshal(document, &doc); err != nil {
 		return bucketpolicystore.Record{}, fmt.Errorf("decoding policy document: %w", err)
 	}
-	return bucketpolicystore.Record{Bucket: bucket, Policy: doc, ETag: etag, UpdatedAt: updatedAt}, nil
+	return bucketpolicystore.Record{Bucket: bucket, Policy: doc, UpdatedAt: updatedAt}, nil
 }
 
-// requireLivePrincipals locks the named principals FOR KEY SHARE inside tx and
-// refuses the write when one is missing or removed. A removal holds the row FOR
-// UPDATE while it strips its policies, so this read waits for it to commit and
-// then sees the tombstone, and a removal that starts later waits for tx: the
-// caller's validation ran against live rows, but only this check, inside the
-// writing transaction, keeps a statement naming a removed principal out of the
-// store. The row's foreign key cannot, because a tombstone still satisfies it.
-//
-// Put takes it before any other lock, so a removal whose callback rewrites
-// this bucket's policy never waits on a Put that waits on the removal. FOR KEY
-// SHARE conflicts only with FOR UPDATE, so it does not block the FOR NO KEY
-// UPDATE the principal store's WithLock takes from inside beforeCommit.
+// requireLivePrincipals refuses the write when a named principal is missing
+// or removed. The row's foreign key cannot, because a tombstone still
+// satisfies it. A principal removed after this read can still end up named in
+// the committed document; evaluation skips a removed principal.
 func requireLivePrincipals(ctx context.Context, tx pgx.Tx, tenant did.DID, named []string) error {
 	if len(named) == 0 {
 		return nil
@@ -424,7 +297,6 @@ func requireLivePrincipals(ctx context.Context, tx pgx.Tx, tenant did.DID, named
 		SELECT external_id, deleted_at IS NOT NULL
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = ANY($2)
-		FOR KEY SHARE
 	`, tenant.String(), named)
 	if err != nil {
 		return fmt.Errorf("checking policy principals: %w", err)

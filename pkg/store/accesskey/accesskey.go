@@ -129,17 +129,12 @@ type Store interface {
 	// the name, or if the principal already holds a key of the name.
 	Add(ctx context.Context, in Input) error
 	// Get retrieves the record for a given ID. It returns
-	// [store.ErrRecordNotFound] if no record exists for the specified ID. With
-	// [store.WithShareLock] the read waits for a transaction holding the row to
-	// commit or roll back; on Postgres the wait is bounded at
-	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
-	Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (Record, error)
+	// [store.ErrRecordNotFound] if no record exists for the specified ID.
+	Get(ctx context.Context, id did.DID) (Record, error)
 	// ListByTenant retrieves the tenant's records, optionally restricted to one
 	// principal's keys (see [WithPrincipal]).
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) ([]Record, error)
 	// Delete removes the access key record for a given ID. It is idempotent:
-	// deleting an absent record returns nil. On Postgres the wait for a row
-	// another write holds is bounded at [store.LockTimeout] and returns
-	// [store.ErrLockTimeout].
+	// deleting an absent record returns nil.
 	Delete(ctx context.Context, id did.DID) error
 }

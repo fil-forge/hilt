@@ -58,9 +58,7 @@ func New(opts ...Option) *Store {
 	return s
 }
 
-// Get ignores the lock mode: reads and writes are serialized by the store
-// mutex, so a read already waits for an in-flight write.
-func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOption) (bucketpolicystore.Record, error) {
+func (s *Store) Get(ctx context.Context, bucket did.DID) (bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -71,97 +69,85 @@ func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOptio
 	return cloneRecord(e.rec), nil
 }
 
-// Put runs fn under the store mutex, so a concurrent Get waits for
-// the callback to finish and observes either the old policy or the new one.
-func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx context.Context, old *bucketpolicystore.Record) error) (string, error) {
+// Put reads the current policy, runs fn without holding the store mutex, and
+// stores the new policy, so a concurrent write is never held up by fn and the
+// last write to store wins.
+func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx context.Context, old *bucketpolicystore.Record) error) error {
 	if in.Bucket == did.Undef {
-		return "", fmt.Errorf("policy bucket is required: %w", store.ErrInvalidArgument)
+		return fmt.Errorf("policy bucket is required: %w", store.ErrInvalidArgument)
 	}
 	if in.Tenant == did.Undef {
-		return "", fmt.Errorf("policy tenant is required: %w", store.ErrInvalidArgument)
+		return fmt.Errorf("policy tenant is required: %w", store.ErrInvalidArgument)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
 	if s.hasBucket != nil && !s.hasBucket(in.Bucket) {
-		return "", fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrRecordNotFound)
+		return fmt.Errorf("bucket %s does not exist: %w", in.Bucket, store.ErrRecordNotFound)
 	}
 	var old *bucketpolicystore.Record
-	if e, ok := s.policies[in.Bucket]; ok {
-		rec := cloneRecord(e.rec)
+	if rec, err := s.Get(ctx, in.Bucket); err == nil {
 		old = &rec
-	}
-	if err := bucketpolicystore.CheckInputPrecondition(in, old); err != nil {
-		return "", err
 	}
 	if fn != nil {
 		if err := fn(ctx, old); err != nil {
-			return "", fmt.Errorf("before writing policy: %w", err)
+			return fmt.Errorf("before writing policy: %w", err)
 		}
 	}
 
 	// Store the normalized document, as the Postgres backend does.
 	var doc s3bkt.PolicyDocument
 	if err := json.Unmarshal(bucketpolicy.Canonical(in.Policy), &doc); err != nil {
-		return "", fmt.Errorf("normalizing policy: %w", err)
+		return fmt.Errorf("normalizing policy: %w", err)
 	}
 	named, wildcard := bucketpolicy.Named(doc)
 	namedSet := make(map[string]bool, len(named))
 	for _, p := range named {
 		namedSet[p] = true
 	}
-	etag := s3bkt.ETag(doc)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	s.policies[in.Bucket] = entry{
 		tenant: in.Tenant,
 		rec: bucketpolicystore.Record{
 			Bucket:    in.Bucket,
 			Policy:    doc,
-			ETag:      etag,
 			UpdatedAt: time.Now().UTC(),
 		},
 		named:    namedSet,
 		wildcard: wildcard,
 	}
-	return etag, nil
+	return nil
 }
 
-func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, fn func(ctx context.Context, old bucketpolicystore.Record) error) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	e, ok := s.policies[bucket]
-	if !ok {
-		return store.ErrRecordNotFound
-	}
-	if ifMatch != "" && e.rec.ETag != ifMatch {
-		return fmt.Errorf("policy ETag is %s, not %s: %w", e.rec.ETag, ifMatch, store.ErrPreconditionFailed)
+// Delete runs fn without holding the store mutex, as Put does.
+func (s *Store) Delete(ctx context.Context, bucket did.DID, fn func(ctx context.Context, old bucketpolicystore.Record) error) error {
+	old, err := s.Get(ctx, bucket)
+	if err != nil {
+		return err
 	}
 	if fn != nil {
-		if err := fn(ctx, cloneRecord(e.rec)); err != nil {
+		if err := fn(ctx, old); err != nil {
 			return fmt.Errorf("before deleting policy: %w", err)
 		}
 	}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	delete(s.policies, bucket)
 	return nil
 }
 
-// DeleteByBucket runs fn under the store mutex, as Put does, so a
-// policy write waits for it.
+// DeleteByBucket runs fn without holding the store mutex, as Put does.
 func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, fn func(ctx context.Context) error) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
 	if fn != nil {
 		if err := fn(ctx); err != nil {
 			return err
 		}
 	}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	delete(s.policies, bucket)
 	return nil
 }
 
-func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
+func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 

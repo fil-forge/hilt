@@ -122,7 +122,7 @@ func allow(bucket string, p s3bkt.Principal, actions ...string) s3bkt.PolicyDocu
 }
 
 // putPolicy writes the bucket's policy over S3 with the service key, as the
-// console does, unconditionally: the preconditions are covered by unit tests.
+// console does. Policy writes are unconditional.
 func putPolicy(t *testing.T, ctx context.Context, service *s3.Client, bucket string, doc s3bkt.PolicyDocument) {
 	t.Helper()
 	raw, err := json.Marshal(doc)

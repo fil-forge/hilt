@@ -1,14 +1,14 @@
 // Package bucketpolicy provides the business logic for bucket policies: the
-// compare-and-set writes of a bucket's policy document, and the two
-// principal reads computed from it, the policies naming a principal and its
-// effective actions per bucket.
+// writes of a bucket's policy document, and the two principal reads computed
+// from it, the policies naming a principal and its effective actions per
+// bucket.
 //
 // Every write rewrites the delegations over the bucket of every key of each
 // principal whose effective set the write changes, inside the store
-// transaction that commits the document, while the affected principal rows
-// are locked, and under one deadline for the whole batch. The store commits
-// only when the rotation succeeded, so a principal never keeps access the
-// gateway has not been told to re-read.
+// transaction that commits the document, revoking the replaced delegations
+// before that transaction writes anything. Writes are unconditional and take no
+// lock: of two concurrent writes to one bucket, the one that commits last is
+// the stored policy.
 //
 // Known errors are in errors.go so handlers can map them to HTTP responses;
 // unexpected failures are returned wrapped for the handler to log.
@@ -34,11 +34,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// Record is a bucket's policy as the service reports it: the policy, its strong
-// ETag, and the name the bucket is addressed by.
+// Record is a bucket's policy as the service reports it: the policy and the
+// name the bucket is addressed by.
 type Record struct {
 	BucketName string
-	ETag       string
 	Policy     s3bkt.PolicyDocument
 }
 
@@ -78,84 +77,33 @@ func New(
 	}
 }
 
-// Condition is a write's precondition on the bucket's current policy, as
-// If-Match and If-None-Match state it.
-type Condition struct {
-	// Negate requires that no current policy matches Match (If-None-Match).
-	// Only "*" is accepted with it: the bucket must have no policy.
-	Negate bool
-	// Match is the ETag the current policy must carry, or "*".
-	Match string
-}
-
-// IfMatch is the condition that the bucket's current policy carries etag.
-func IfMatch(etag string) Condition { return Condition{Match: etag} }
-
-// IfNoneMatch is the condition that no current policy matches v; with "*",
-// that the bucket has no policy.
-func IfNoneMatch(v string) Condition { return Condition{Negate: true, Match: v} }
-
-// WriteOption configures a [Service.Write]. Without one the write is
-// unconditional, as a PutBucketPolicy without If-Match or If-None-Match is.
-type WriteOption func(*bucketpolicystore.Input) error
-
-// WithCondition makes the write check c. A second condition on the same
-// write, or a negated one other than "*", is [ErrInvalidPrecondition].
-func WithCondition(c Condition) WriteOption {
-	return func(in *bucketpolicystore.Input) error {
-		if in.Conditional {
-			return fmt.Errorf("a write takes one condition: %w", ErrInvalidPrecondition)
-		}
-		if c.Negate && c.Match != "*" {
-			return fmt.Errorf("If-None-Match must be *: %w", ErrInvalidPrecondition)
-		}
-		in.Conditional = true
-		if !c.Negate {
-			in.IfMatch = &c.Match
-		}
-		return nil
-	}
-}
-
 // Write creates or replaces the bucket's policy, for a caller that has
 // resolved the tenant and the bucket. It validates doc against the bucket
-// (every resource must name bucketName) and the tenant's principals, and
-// checks the condition [WithCondition] sets. bucketName also
-// names the bucket in errors. It returns the new ETag and whether the bucket
-// had no policy before.
+// (every resource must name bucketName) and the tenant's principals.
+// bucketName also names the bucket in errors.
 //
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
-func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc s3bkt.PolicyDocument, opts ...WriteOption) (string, bool, error) {
+func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc s3bkt.PolicyDocument) error {
 	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
-		return "", false, err
+		return err
 	}
 	if err := bucketpolicy.Validate(doc, bucketName, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
-		return "", false, err
+		return err
 	}
 	in := bucketpolicystore.Input{
 		Bucket: bucketID,
 		Tenant: tenantID,
 		Policy: doc,
 	}
-	for _, opt := range opts {
-		if err := opt(&in); err != nil {
-			return "", false, err
-		}
-	}
-	var created bool
-	etag, err := s.policies.Put(ctx, in, func(ctx context.Context, old *bucketpolicystore.Record) error {
-		created = old == nil
+	err = s.policies.Put(ctx, in, func(ctx context.Context, old *bucketpolicystore.Record) error {
 		var oldDoc *s3bkt.PolicyDocument
 		if old != nil {
 			oldDoc = &old.Policy
 		}
-		// Re-list under the bucket lock: a principal created since the list above
-		// is one the wildcard now reaches, so its keys are rotated here. One
-		// created after this list commits after the write does, since the add
-		// waits on the tenant lock the write holds, and its keys are created
-		// from the committed policy.
+		// Re-list inside the write: a principal created since the list above is
+		// one the wildcard now reaches, so its keys are rotated here.
 		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 		if err != nil {
 			return err
@@ -171,24 +119,17 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 		return s.rotate(ctx, tenantID, bucketID, oldDoc, &doc, principals)
 	})
 	if err != nil {
-		return "", false, s.writeError(ctx, bucketName, err)
+		return s.writeError(bucketName, err)
 	}
-	return etag, created, nil
+	return nil
 }
 
 // Remove removes the bucket's policy, for a caller that has resolved the
-// tenant and the bucket. A non-nil ifMatch must equal the current ETag; nil
-// removes whatever is stored (a DeleteBucketPolicy without If-Match). Every principal
-// the policy reached loses its access, so each one's keys lose their
-// delegations over the bucket inside the store's transaction. bucketName names
-// the bucket in errors and logs.
-func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName string, ifMatch *string) error {
-	var tag string
-	if ifMatch != nil {
-		tag = *ifMatch
-	}
-	err := s.policies.Delete(ctx, bucketID, tag, func(ctx context.Context, old bucketpolicystore.Record) error {
-		// Re-list under the bucket lock, as Write does.
+// tenant and the bucket. Every principal the policy reached loses its access,
+// so each one's keys lose their delegations over the bucket inside the
+// store's transaction. bucketName names the bucket in errors and logs.
+func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName string) error {
+	err := s.policies.Delete(ctx, bucketID, func(ctx context.Context, old bucketpolicystore.Record) error {
 		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 		if err != nil {
 			return err
@@ -198,7 +139,7 @@ func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucket
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return ErrPolicyNotFound
 	} else if err != nil {
-		return s.writeError(ctx, bucketName, err)
+		return s.writeError(bucketName, err)
 	}
 	s.logger.Info("deleted bucket policy", zap.Stringer("tenant", tenantID), zap.String("bucket", bucketName))
 	return nil
@@ -221,7 +162,7 @@ func (s *Service) ListByPrincipal(ctx context.Context, externalID, principalID s
 		if !ok {
 			continue // the bucket went away between the two reads
 		}
-		out = append(out, Record{BucketName: name, Policy: rec.Policy, ETag: rec.ETag})
+		out = append(out, Record{BucketName: name, Policy: rec.Policy})
 	}
 	slices.SortFunc(out, func(a, b Record) int { return strings.Compare(a.BucketName, b.BucketName) })
 	return out, nil
@@ -265,48 +206,31 @@ func (s *Service) principalPolicies(ctx context.Context, externalID, principalID
 
 // rotate rewrites the delegations over the bucket of every key of each
 // principal whose effective actions the change from oldDoc to newDoc alters,
-// holding those principals' rows so a key created for one of them meanwhile
-// is either included or created from the committed policy. It runs inside the
-// store's write transaction while the bucket is locked, so the whole of it is
-// bounded at [grant.BatchTimeout] (see there). Any failure, the deadline
-// included, fails the write and rolls it back.
+// revoking the ones it replaces first. It runs inside the store's write
+// transaction, bounded at [grant.BatchTimeout]. Any failure, the deadline and
+// a failed publish included, fails the write and rolls it back.
 func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc, newDoc *s3bkt.PolicyDocument, principals []string) error {
 	affected := bucketpolicy.Changed(oldDoc, newDoc, principals)
 	if len(affected) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
-	defer cancel()
-	return s.principals.WithLock(ctx, tenantID, affected, func(ctx context.Context) error {
-		actions := make(map[string][]string, len(affected))
-		for _, p := range affected {
-			actions[p] = bucketpolicy.Effective(newDoc, p)
-		}
-		if err := s.grants.Rotate(ctx, tenantID, bucketID, actions); err != nil {
-			return fmt.Errorf("rotating the delegations of the affected principals: %w", err)
-		}
-		return nil
-	})
+	actions := make(map[string][]string, len(affected))
+	for _, p := range affected {
+		actions[p] = bucketpolicy.Effective(newDoc, p)
+	}
+	if err := s.grants.Rotate(ctx, tenantID, bucketID, actions); err != nil {
+		return fmt.Errorf("rotating the delegations of the affected principals: %w", err)
+	}
+	return nil
 }
 
-// writeError maps the store's compare-and-set and locking failures to the
-// service's own; anything else is wrapped for the handler to log. The batch
-// deadline of the rotation is a locking failure too: it fires before the lock
-// timeout it runs under, and the write is retried the same way; the caller's
-// own deadline running out is not, so the context error counts only while the
-// caller's ctx lives. A bucket the store no longer has (deleted since the
-// lookup) is a missing bucket. A document the store refuses for naming a
-// principal the tenant no longer has (removed between the validation and the
-// write) is an invalid policy. A failed precondition is logged with the
-// store's error, which names the stored ETag and the one sent, since the
-// mapped error the caller sees carries neither.
-func (s *Service) writeError(ctx context.Context, bucketName string, err error) error {
+// writeError maps the store's failures to the service's own; anything else is
+// wrapped for the handler to log. A bucket the store no longer has (deleted
+// since the lookup) is a missing bucket. A document the store refuses for
+// naming a principal the tenant no longer has (removed between the validation
+// and the write) is an invalid policy.
+func (s *Service) writeError(bucketName string, err error) error {
 	switch {
-	case errors.Is(err, store.ErrPreconditionFailed):
-		s.logger.Warn("bucket policy precondition failed", zap.String("bucket", bucketName), zap.Error(err))
-		return ErrPreconditionFailed
-	case store.Contended(ctx, err):
-		return ErrConcurrentChange
 	case errors.Is(err, store.ErrRecordNotFound):
 		return ErrBucketNotFound
 	case errors.Is(err, store.ErrInvalidArgument):

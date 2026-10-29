@@ -38,8 +38,7 @@ func authFailure(res failer, err error) error {
 		errors.Is(err, auth.ErrForeignBucket),
 		errors.Is(err, auth.ErrBucketNotPermitted),
 		errors.Is(err, auth.ErrUnsignedHeader),
-		errors.Is(err, auth.ErrInvalidBody),
-		errors.Is(err, auth.ErrTemporarilyUnavailable):
+		errors.Is(err, auth.ErrInvalidBody):
 		return res.SetFailure(err)
 	default:
 		return err
@@ -79,10 +78,7 @@ func bucketFailure(res failer, err error) error {
 		// under InvalidBucketPolicy.
 		errors.Is(err, s3bkt.ErrInvalidPolicy),
 		// The policy operations' own rejections.
-		errors.Is(err, bucketpolicysvc.ErrPolicyNotFound),
-		errors.Is(err, bucketpolicysvc.ErrInvalidPrecondition),
-		errors.Is(err, bucketpolicysvc.ErrPreconditionFailed),
-		errors.Is(err, bucketpolicysvc.ErrConcurrentChange):
+		errors.Is(err, bucketpolicysvc.ErrPolicyNotFound):
 		return res.SetFailure(err)
 	default:
 		return authFailure(res, err)

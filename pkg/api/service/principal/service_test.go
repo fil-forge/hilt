@@ -3,10 +3,8 @@ package principal_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
@@ -40,6 +38,7 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -88,18 +87,32 @@ func setup(t *testing.T) deps {
 	require.NoError(t, d.secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	d.tenant = multikey.NewIssuer(tenantID, signer)
 	d.grants = grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf)
-	d.svc = principalsvc.New(zap.NewNop(), d.tenants, d.principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
+	d.svc = principalsvc.New(zap.NewNop(), d.tenants, d.principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.grants)
 	return d
 }
 
-// putPolicy stores a bucket policy for the tenant and returns the bucket and
-// the stored ETag.
-func (d deps) putPolicy(t *testing.T, tenantID did.DID, doc s3bkt.PolicyDocument) (did.DID, string) {
+// putPolicy stores a bucket policy for the tenant and returns the bucket.
+func (d deps) putPolicy(t *testing.T, tenantID did.DID, doc s3bkt.PolicyDocument) did.DID {
 	t.Helper()
 	bucket := testutil.RandomDID(t)
-	etag, err := d.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: doc, Conditional: true}, nil)
-	require.NoError(t, err)
-	return bucket, etag
+	require.NoError(t, d.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: doc}, nil))
+	return bucket
+}
+
+// policyOf builds a policy of one statement over the "photos" bucket.
+func policyOf(effect s3bkt.Effect, principal s3bkt.Principal, action string) s3bkt.PolicyDocument {
+	return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+		{Effect: effect, Principal: principal, Actions: s3bkt.NewStringSet(action), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+	}}
+}
+
+// links returns the CID of each delegation.
+func links(dels []ucan.Delegation) []cid.Cid {
+	out := make([]cid.Cid, len(dels))
+	for i, d := range dels {
+		out[i] = d.Link()
+	}
+	return out
 }
 
 // addKey stores a principal-bound access key, its vault entry and, for
@@ -159,13 +172,6 @@ func TestCreate(t *testing.T) {
 		require.Equal(t, d.otherTenant, rec.Tenant)
 	})
 
-	t.Run("a lock timeout recording the principal is a retryable conflict", func(t *testing.T) {
-		d := setup(t)
-		svc := principalsvc.New(zap.NewNop(), d.tenants, &lockTimeoutPrincipals{Store: d.principals}, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
-		_, _, err := svc.Create(ctx, "tenant-1", "user-1")
-		require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
-	})
-
 	t.Run("rejects an unknown tenant", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "missing", "user-1")
@@ -192,14 +198,14 @@ func TestCreate(t *testing.T) {
 		}
 	})
 
-	t.Run("a removal landing between the record and its read is a retryable conflict", func(t *testing.T) {
+	t.Run("returns not found when a removal commits between the record and its read", func(t *testing.T) {
 		d := setup(t)
 		principals := &vanishingPrincipals{Store: d.principals, remove: func() {
 			require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
 		}}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
+		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.grants)
 		_, _, err := svc.Create(ctx, "tenant-1", "user-1")
-		require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
 	t.Run("rejects the reserved policy wildcard", func(t *testing.T) {
@@ -262,7 +268,7 @@ func TestListGet(t *testing.T) {
 func TestDelete(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("revokes its keys' delegations, strips the principal from policies, and deletes its keys", func(t *testing.T) {
+	t.Run("strips the principal from policies and deletes its keys, leaving other principals' alone", func(t *testing.T) {
 		d := setup(t)
 		for _, id := range []string{"user-1", "user-2"} {
 			_, _, err := d.svc.Create(ctx, "tenant-1", id)
@@ -270,45 +276,38 @@ func TestDelete(t *testing.T) {
 		}
 		key := d.addKey(t, d.tenantID, "user-1", "laptop")
 		kept := d.addKey(t, d.tenantID, "user-2", "desktop")
+		keptHeld := d.held(t, kept)
 
 		// A policy the principal shares, one it holds alone, and one that reaches
 		// it only through the wildcard.
-		shared, _ := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1", "user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-			{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:DeleteObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+		shared := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+			policyOf(s3bkt.Allow, s3bkt.Only("user-1", "user-2"), "s3:GetObject").Statements[0],
+			policyOf(s3bkt.Deny, s3bkt.Only("user-1"), "s3:DeleteObject").Statements[0],
 		}})
-		alone, _ := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:PutObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}})
-		everyone, everyoneETag := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:ListBucket"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}})
+		alone := d.putPolicy(t, d.tenantID, policyOf(s3bkt.Allow, s3bkt.Only("user-1"), "s3:PutObject"))
+		everyone := d.putPolicy(t, d.tenantID, policyOf(s3bkt.Allow, s3bkt.Everyone(), "s3:ListBucket"))
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
-
-		require.Len(t, d.swarf.Revoked(), 1, "one revocation per key of the principal")
 
 		_, err := d.svc.Get(ctx, "tenant-1", "user-1")
 		require.ErrorIs(t, err, principalsvc.ErrPrincipalNotFound)
 
-		// Its keys, their delegations and their vault entries are gone; another
+		// Its key, its delegations and its vault entry are gone; another
 		// principal's are not.
 		_, err = d.accessKeys.Get(ctx, key)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		require.Empty(t, d.held(t, key))
-		require.Len(t, d.held(t, kept), 1)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, key))
 		require.ErrorIs(t, err, vault.ErrNotFound)
 		_, err = d.accessKeys.Get(ctx, kept)
 		require.NoError(t, err)
+		require.Equal(t, keptHeld, d.held(t, kept))
 
 		// The shared policy keeps the other principal and loses the statement the
 		// removed one held alone.
 		rec, err := d.policies.Get(ctx, shared)
 		require.NoError(t, err)
-		require.Equal(t, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}}, rec.Policy)
+		require.Equal(t, policyOf(s3bkt.Allow, s3bkt.Only("user-2"), "s3:GetObject"), rec.Policy)
 
 		// The policy naming it alone is deleted with its last statement.
 		_, err = d.policies.Get(ctx, alone)
@@ -318,7 +317,25 @@ func TestDelete(t *testing.T) {
 		// this one is no longer among them.
 		rec, err = d.policies.Get(ctx, everyone)
 		require.NoError(t, err)
-		require.Equal(t, everyoneETag, rec.ETag)
+		require.Equal(t, policyOf(s3bkt.Allow, s3bkt.Everyone(), "s3:ListBucket"), rec.Policy)
+	})
+
+	t.Run("revokes every delegation of the principal's keys once, while the store still holds them", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+		first := d.addKey(t, d.tenantID, "user-1", "key-a")
+		second := d.addKey(t, d.tenantID, "user-1", "key-b")
+		want := links(append(d.held(t, first), d.held(t, second)...))
+
+		var heldAtPublish []ucan.Delegation
+		d.swarf.OnPublish = func() {
+			heldAtPublish = append(d.held(t, first), d.held(t, second)...)
+		}
+		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
+
+		require.ElementsMatch(t, want, d.swarf.Revoked())
+		require.ElementsMatch(t, want, links(heldAtPublish), "the revocations go out before the delegations are removed")
 	})
 
 	t.Run("a removed principal is revived by Create with nothing attached", func(t *testing.T) {
@@ -326,9 +343,7 @@ func TestDelete(t *testing.T) {
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		d.addKey(t, d.tenantID, "user-1", "laptop")
-		alone, _ := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}})
+		alone := d.putPolicy(t, d.tenantID, policyOf(s3bkt.Allow, s3bkt.Only("user-1"), "s3:GetObject"))
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
 
 		rec, created, err := d.svc.Create(ctx, "tenant-1", "user-1")
@@ -349,34 +364,56 @@ func TestDelete(t *testing.T) {
 		require.Empty(t, d.swarf.Revoked(), "nothing to revoke")
 	})
 
-	t.Run("a publish failure leaves the principal, its keys and its policies intact", func(t *testing.T) {
+	t.Run("returns the publish error and leaves the principal, its keys and its policies unchanged when publishing their revocations fails", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 		key := d.addKey(t, d.tenantID, "user-1", "laptop")
-		bucket, etag := d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}})
-		d.swarf.Err = errors.New("swarf unreachable")
+		keyHeld := d.held(t, key)
+		bucket := d.putPolicy(t, d.tenantID, policyOf(s3bkt.Allow, s3bkt.Only("user-1"), "s3:GetObject"))
+		unreachable := errors.New("swarf unreachable")
+		d.swarf.Err = unreachable
 
-		err = d.svc.Delete(ctx, "tenant-1", "user-1")
-		require.ErrorContains(t, err, "swarf unreachable")
+		require.ErrorIs(t, d.svc.Delete(ctx, "tenant-1", "user-1"), unreachable)
 
-		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
-		require.NoError(t, err, "the principal row must survive")
-		require.Equal(t, "user-1", rec.ExternalID)
-
-		keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID, accesskeystore.WithPrincipal("user-1"))
+		require.Equal(t, keyHeld, d.held(t, key), "the revoke rolled back with its publish")
+		_, err = d.svc.Get(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
-		require.Len(t, keys, 1, "its keys must survive")
-		require.Equal(t, key, keys[0].ID)
-		require.Len(t, d.held(t, key), 1, "its delegation must survive")
+		_, err = d.accessKeys.Get(ctx, key)
+		require.NoError(t, err)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, key))
-		require.NoError(t, err, "its vault entry must survive so the key still signs")
-
-		policyRec, err := d.policies.Get(ctx, bucket)
+		require.NoError(t, err, "the key still signs")
+		rec, err := d.policies.Get(ctx, bucket)
 		require.NoError(t, err)
-		require.Equal(t, etag, policyRec.ETag, "its access must be unchanged")
+		require.Equal(t, policyOf(s3bkt.Allow, s3bkt.Only("user-1"), "s3:GetObject"), rec.Policy)
+	})
+
+	t.Run("returns the publish error and keeps the principal and its keys when publishing what its keys gained fails", func(t *testing.T) {
+		d := setup(t)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+		key := d.addKey(t, d.tenantID, "user-1", "laptop")
+		revokedFirst := links(d.held(t, key))
+		unreachable := errors.New("swarf unreachable")
+		// After the first revocation went out, the key gains a delegation, and
+		// Swarf becomes unreachable before the removal publishes its revocation.
+		var gained []ucan.Delegation
+		principals := &renamingPrincipals{Store: d.principals, write: func() {
+			gained, err = grant.Issue(d.tenant, key, []did.DID{testutil.RandomDID(t)}, []string{"s3:GetObject"}, nil)
+			require.NoError(t, err)
+			require.NoError(t, d.delegations.PutBatch(ctx, gained))
+			d.swarf.Err = unreachable
+		}}
+		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.grants)
+
+		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), unreachable)
+
+		_, err = d.svc.Get(ctx, "tenant-1", "user-1")
+		require.NoError(t, err)
+		_, err = d.accessKeys.Get(ctx, key)
+		require.NoError(t, err)
+		require.Equal(t, links(gained), links(d.held(t, key)), "the gained delegation is neither revoked nor removed")
+		require.Equal(t, revokedFirst, d.swarf.Revoked())
 	})
 
 	t.Run("rejects an unknown tenant", func(t *testing.T) {
@@ -384,37 +421,26 @@ func TestDelete(t *testing.T) {
 		require.ErrorIs(t, d.svc.Delete(ctx, "missing", "user-1"), principalsvc.ErrTenantNotFound)
 	})
 
-	t.Run("a key created after the removal fails is deleted by the retry", func(t *testing.T) {
+	t.Run("revokes and deletes every key, including one created since, when repeated after a failed publish", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
-		d.addKey(t, d.tenantID, "user-1", "laptop")
-		d.swarf.Err = errors.New("swarf unreachable")
-		require.Error(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
+		first := d.addKey(t, d.tenantID, "user-1", "laptop")
+		firstHeld := d.held(t, first)
+		unreachable := errors.New("swarf unreachable")
+		d.swarf.Err = unreachable
+		require.ErrorIs(t, d.svc.Delete(ctx, "tenant-1", "user-1"), unreachable)
 
 		d.swarf.Err = nil
+		later := d.addKey(t, d.tenantID, "user-1", "desktop")
+		want := links(append(firstHeld, d.held(t, later)...))
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
-		require.Len(t, d.swarf.Revoked(), 1)
+
+		require.ElementsMatch(t, want, d.swarf.Revoked())
 		recs, err := d.accessKeys.ListByTenant(ctx, d.tenantID, accesskeystore.WithPrincipal("user-1"))
 		require.NoError(t, err)
 		require.Empty(t, recs)
 	})
-}
-
-// flakyPolicies fails the first Put with err, standing in for a policy edited
-// between the removal's listing and its rewrite.
-type flakyPolicies struct {
-	bucketpolicystore.Store
-	err error
-}
-
-func (f *flakyPolicies) Put(ctx context.Context, in bucketpolicystore.Input, fn func(context.Context, *bucketpolicystore.Record) error) (string, error) {
-	if f.err != nil {
-		err := f.err
-		f.err = nil
-		return "", err
-	}
-	return f.Store.Put(ctx, in, fn)
 }
 
 // vanishingPrincipals runs remove before the first Get, standing in for a
@@ -424,37 +450,17 @@ type vanishingPrincipals struct {
 	remove func()
 }
 
-func (v *vanishingPrincipals) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (principalstore.Record, error) {
+func (v *vanishingPrincipals) Get(ctx context.Context, tenant did.DID, externalID string) (principalstore.Record, error) {
 	if v.remove != nil {
 		remove := v.remove
 		v.remove = nil
 		remove()
 	}
-	return v.Store.Get(ctx, tenant, externalID, opts...)
+	return v.Store.Get(ctx, tenant, externalID)
 }
 
-// lockedPrincipals fails Delete with err, standing in for the store giving up
-// on a row another write holds.
-type lockedPrincipals struct {
-	principalstore.Store
-	err error
-}
-
-func (l *lockedPrincipals) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(context.Context) error) error {
-	return l.err
-}
-
-// lockTimeoutPrincipals answers Add with the store's lock timeout.
-type lockTimeoutPrincipals struct {
-	principalstore.Store
-}
-
-func (l *lockTimeoutPrincipals) Add(context.Context, did.DID, string) error {
-	return fmt.Errorf("adding principal: %w", store.ErrLockTimeout)
-}
-
-// renamingPrincipals runs write before Tombstone locks the row, standing in for a
-// policy write that names the principal between the strip and the lock.
+// renamingPrincipals runs write before Tombstone, standing in for a write that
+// lands between the removal's revoke and its tombstone.
 type renamingPrincipals struct {
 	principalstore.Store
 	write func()
@@ -463,76 +469,6 @@ type renamingPrincipals struct {
 func (r *renamingPrincipals) Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(context.Context) error) error {
 	r.write()
 	return r.Store.Tombstone(ctx, tenant, externalID, fn)
-}
-
-func TestDeleteConcurrentChange(t *testing.T) {
-	ctx := t.Context()
-
-	t.Run("a policy edited during the removal is a retryable conflict", func(t *testing.T) {
-		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
-		require.NoError(t, err)
-		// Two principals, so stripping one rewrites the policy rather than
-		// deleting it.
-		_, _, err = d.svc.Create(ctx, "tenant-1", "user-2")
-		require.NoError(t, err)
-		d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1", "user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}})
-
-		policies := &flakyPolicies{Store: d.policies, err: store.ErrPreconditionFailed}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, d.principals, policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
-		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
-
-		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
-		require.NoError(t, err, "the principal row must survive")
-		require.Equal(t, "user-1", rec.ExternalID)
-	})
-
-	t.Run("the batch deadline hit while waiting is a retryable conflict", func(t *testing.T) {
-		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
-		require.NoError(t, err)
-		_, _, err = d.svc.Create(ctx, "tenant-1", "user-2")
-		require.NoError(t, err)
-		d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1", "user-2"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-		}})
-
-		// The removal's deadline is below the stores' lock timeout, so a wait
-		// long enough reaches the caller as the context error.
-		policies := &flakyPolicies{Store: d.policies, err: context.DeadlineExceeded}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, d.principals, policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
-		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
-
-		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
-		require.NoError(t, err, "the principal row must survive")
-		require.Equal(t, "user-1", rec.ExternalID)
-	})
-
-	t.Run("a policy naming the principal again before its row is locked is a retryable conflict", func(t *testing.T) {
-		d := setup(t)
-		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
-		require.NoError(t, err)
-		principals := &renamingPrincipals{Store: d.principals, write: func() {
-			d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-			}})
-		}}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
-		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
-
-		rec, err := d.svc.Get(ctx, "tenant-1", "user-1")
-		require.NoError(t, err, "the principal row must survive")
-		require.Equal(t, "user-1", rec.ExternalID)
-	})
-
-	t.Run("a lock the store gave up on is a retryable conflict", func(t *testing.T) {
-		d := setup(t)
-		principals := &lockedPrincipals{Store: d.principals, err: store.ErrLockTimeout}
-		svc := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf, d.grants)
-		require.ErrorIs(t, svc.Delete(ctx, "tenant-1", "user-1"), principalsvc.ErrConcurrentChange)
-	})
 }
 
 // racingKeys runs race once, after the first Add commits, standing in for a
@@ -573,8 +509,9 @@ func (r *removeBeforeAdd) Add(ctx context.Context, in accesskeystore.Input) erro
 }
 
 // pausingDelegations closes revoked once the first Replace made while armed
-// returns, and parks there until released: a removal that has revoked under
-// the principal's row lock and has not yet deleted the key rows.
+// returns, and parks there until released: a removal that has deleted the
+// key rows and their delegations inside its tombstone write, which has not
+// yet committed.
 type pausingDelegations struct {
 	delegationstore.Store
 	armed    bool
@@ -606,12 +543,12 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		}})
 
 		// The removal starts once the key row is committed, and the creation
-		// stores the key's grants while the removal, having revoked under the
-		// principal's row lock, has not yet deleted the row.
+		// stores the key's grants while the removal's tombstone write, having
+		// deleted the key, has not yet returned.
 		delegations := &pausingDelegations{Store: d.delegations, revoked: make(chan struct{}), released: make(chan struct{})}
 		principals := &renamingPrincipals{Store: d.principals, write: func() { delegations.armed = true }}
 		grants := grant.NewRotator(zap.NewNop(), delegations, d.accessKeys, d.secrets, d.swarf)
-		removal := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, delegations, d.secrets, d.swarf, grants)
+		removal := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, delegations, d.secrets, grants)
 		removed := make(chan error, 1)
 		keys := &racingKeys{Store: d.accessKeys, race: func() {
 			go func() { removed <- removal.Delete(ctx, "tenant-1", "user-1") }()
@@ -649,13 +586,8 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 	})
 }
 
-// TestDeleteDuringPolicyWritePostgres removes a principal while a policy write
-// that drops it is in flight, on Postgres. The write holds the bucket and then
-// locks the principal, as its delegation rotation does. The removal rewrites
-// the bucket's policy before it locks the principal, so neither waits on the
-// other: the removal returns at once when the write commits, with the work
-// done or a conflict the caller repeats.
-func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
+// TestDeletePostgres removes a principal on Postgres.
+func TestDeletePostgres(t *testing.T) {
 	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
 	tenants, principals, policies := tenantpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool)
@@ -668,49 +600,35 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	issuer := multikey.NewIssuer(tenantID, signer)
 	delegations := delegationpostgres.New(pool)
 	grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
-	svc := principalsvc.New(zap.NewNop(), tenants, principals, policies, accessKeys, delegations, secrets, swarf, grants)
+	svc := principalsvc.New(zap.NewNop(), tenants, principals, policies, accessKeys, delegations, secrets, grants)
 
-	_, _, err = svc.Create(ctx, "tenant-pg", "alice")
-	require.NoError(t, err)
-	_, _, err = svc.Create(ctx, "tenant-pg", "bob")
-	require.NoError(t, err)
-	statement := func(ids ...string) s3bkt.PolicyDocument {
-		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only(ids...), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
+	for _, id := range []string{"any-user", "other-user"} {
+		_, _, err = svc.Create(ctx, "tenant-pg", id)
+		require.NoError(t, err)
 	}
-	etag, err := policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("alice", "bob"), Conditional: true}, nil)
+	require.NoError(t, policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: policyOf(s3bkt.Allow, s3bkt.Only("any-user", "other-user"), "s3:GetObject")}, nil))
+	keySigner, err := ed25519.Generate()
 	require.NoError(t, err)
+	key := keySigner.KeyDID()
+	require.NoError(t, accessKeys.Add(ctx, accesskeystore.Input{ID: key, Tenant: tenantID, Name: "laptop", Principal: new("any-user")}))
+	dels, err := grant.Issue(issuer, key, []did.DID{bucketID}, []string{"s3:GetObject"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, delegations.PutBatch(ctx, dels))
 
-	var released, returned time.Time
-	written, removed := testutil.RequireWaitsForWriter(t,
-		func(entered chan<- struct{}, release <-chan struct{}) error {
-			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
-				Bucket: bucketID, Tenant: tenantID, Policy: statement("bob"), IfMatch: &etag,
-				Conditional: true,
-			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
-				close(entered)
-				<-release
-				released = time.Now()
-				return principals.WithLock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
-			})
-			return err
-		},
-		func() error {
-			err := svc.Delete(context.Background(), "tenant-pg", "alice")
-			returned = time.Now()
-			return err
-		})
-	require.NoError(t, written)
-	if removed != nil {
-		require.ErrorIs(t, removed, principalsvc.ErrConcurrentChange)
-	}
-	require.Less(t, returned.Sub(released), grant.BatchTimeout/2, "the removal must not wait out the write")
+	require.NoError(t, svc.Delete(ctx, "tenant-pg", "any-user"))
 
-	require.NoError(t, svc.Delete(ctx, "tenant-pg", "alice"), "a repeat finishes the removal")
-	_, err = svc.Get(ctx, "tenant-pg", "alice")
+	_, err = svc.Get(ctx, "tenant-pg", "any-user")
 	require.ErrorIs(t, err, principalsvc.ErrPrincipalNotFound)
+	_, err = accessKeys.Get(ctx, key)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	page, err := delegations.ListByAudience(ctx, key)
+	require.NoError(t, err)
+	require.Empty(t, page.Results)
+	require.ElementsMatch(t, links(dels), swarf.Revoked())
 	rec, err := policies.Get(ctx, bucketID)
 	require.NoError(t, err)
-	require.Equal(t, statement("bob"), rec.Policy)
+	require.Equal(t, policyOf(s3bkt.Allow, s3bkt.Only("other-user"), "s3:GetObject"), rec.Policy)
 }

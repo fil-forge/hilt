@@ -26,14 +26,14 @@ import (
 var Module = fx.Module("memory-store",
 	fx.Provide(
 		// The key store refuses a principal the principal store has removed,
-		// as the Postgres insert's lock on the principal row does.
+		// as the Postgres insert's check of the principal row does.
 		fx.Annotate(func(principals *memprincipal.Store) *memaccesskey.Store {
 			return memaccesskey.New(memaccesskey.WithPrincipals(principals.WithLive))
 		}, fx.As(new(accesskey.Store))),
 		fx.Annotate(membucket.New, fx.As(new(bucket.Store)), fx.As(fx.Self())),
 		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
 		// The policy store refuses a bucket the bucket store does not hold,
-		// as the Postgres backend's bucket lock does.
+		// as the Postgres backend's bucket check does.
 		fx.Annotate(func(buckets *membucket.Store) *membucketpolicy.Store {
 			return membucketpolicy.New(membucketpolicy.WithBuckets(buckets.Has))
 		}, fx.As(new(bucketpolicy.Store))),
