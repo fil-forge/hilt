@@ -135,7 +135,7 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, fn f
 		return store.ErrRecordNotFound
 	}
 	if ifMatch != "" && e.rec.ETag != ifMatch {
-		return fmt.Errorf("policy ETag is %s: %w", e.rec.ETag, store.ErrPreconditionFailed)
+		return fmt.Errorf("policy ETag is %s, not %s: %w", e.rec.ETag, ifMatch, store.ErrPreconditionFailed)
 	}
 	if fn != nil {
 		if err := fn(ctx, cloneRecord(e.rec)); err != nil {
