@@ -155,10 +155,10 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   (`idle_in_transaction_session_timeout`). Every Postgres store statement
   outside `pglock.Begin` runs on `pglock.ResolveDBTX(ctx, s.pool)`, so a
   read inside a write's callback uses that write's connection: taking a second
-  one from the pool deadlocks once concurrent writes hold them all. Reads that
-  must agree with each other run in one `bucketpolicy.Store.Snapshot`, a
-  read-only `REPEATABLE READ` transaction on Postgres (`/s3/bucket/info` reads
-  a key's effective actions and its grants that way). Of two concurrent policy writes to
+  one from the pool deadlocks once concurrent writes hold them all.
+  `/s3/bucket/info` reads a key's grants and chains before the policy: a write
+  revokes what it replaces before it writes, so the policy read last is never
+  older than the chains. Of two concurrent policy writes to
   one bucket, the one that commits last is stored, and the keys may hold both
   writes' delegations over the bucket. A rotation replaces only a key's
   delegations over the bucket it rotates (`ReplaceBySubject`), so rotations

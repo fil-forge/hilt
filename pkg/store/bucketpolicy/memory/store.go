@@ -147,11 +147,6 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, fn func(ctx 
 	return nil
 }
 
-// Snapshot runs fn as it is: the memory store keeps no transactions.
-func (s *Store) Snapshot(ctx context.Context, fn func(ctx context.Context) error) error {
-	return fn(ctx)
-}
-
 func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]bucketpolicystore.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()

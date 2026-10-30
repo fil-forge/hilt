@@ -688,32 +688,6 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.Empty(t, principals)
 	})
 
-	t.Run("Snapshot reads the policy as of its first read while a write commits", func(t *testing.T) {
-		tenantID := fx.tenant(t)
-		fx.principal(t, tenantID, "any-user")
-		bucketID := fx.bucket(t, tenantID)
-		before := doc(allow(only("any-user"), "s3:GetObject"))
-		after := doc(allow(only("any-user"), "s3:ListBucket"))
-		require.NoError(t, s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: before}, nil))
-
-		var first, second s3bkt.PolicyDocument
-		require.NoError(t, s.Snapshot(t.Context(), func(ctx context.Context) error {
-			rec, err := s.Get(ctx, bucketID)
-			if err != nil {
-				return err
-			}
-			first = rec.Policy
-			// Committed outside the snapshot, after its first read.
-			if err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: after}, nil); err != nil {
-				return err
-			}
-			rec, err = s.Get(ctx, bucketID)
-			second = rec.Policy
-			return err
-		}))
-		require.Equal(t, [2]s3bkt.PolicyDocument{before, before}, [2]s3bkt.PolicyDocument{first, second})
-	})
-
 	t.Run("concurrent Puts and Deletes of one bucket never deadlock", func(t *testing.T) {
 		tenantID := fx.tenant(t)
 		fx.principal(t, tenantID, "any-user")

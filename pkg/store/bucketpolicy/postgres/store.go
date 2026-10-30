@@ -180,20 +180,6 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 	return collectRecords(rows)
 }
 
-// Snapshot runs fn in a read-only REPEATABLE READ transaction that ctx
-// carries (see [pglock.WithTx]), so every store read fn makes is answered from
-// the database as it was at fn's first read. A read-only transaction takes no
-// row locks and cannot fail serialization, so it neither waits on writers nor
-// makes them wait.
-func (s *Store) Snapshot(ctx context.Context, fn func(ctx context.Context) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return fmt.Errorf("beginning snapshot: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read-only transaction has nothing to commit
-	return fn(pglock.WithTx(ctx, tx))
-}
-
 // collectRecords scans every row of a policy listing.
 func collectRecords(rows pgx.Rows) ([]bucketpolicystore.Record, error) {
 	var recs []bucketpolicystore.Record

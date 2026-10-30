@@ -440,26 +440,16 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 // what it checks is the caller, which must be the provider acting for the
 // bucket's tenant, and the access key, which must belong to that tenant.
 //
-// Every read runs in one snapshot. A policy write rotates a key's grants and
-// stores the policy in one transaction, and several actions map to one Forge
-// command, so a policy read before a write and grants read after it would
-// report an action the write removed over a chain its revocation never names,
-// and the gateway would cache that pair until it expires.
+// It reads the key's grants and builds their chains before it reads the
+// policy. A policy write publishes the revocations of the grants it replaces
+// before it writes anything, then commits the policy and the new grants
+// together, so the policy Info reads is never older than the chains: either
+// the policy those chains came from, or a newer one whose write had already
+// revoked them. Reading the policy first could pair an action a later write
+// removed with a chain that write stored, which its revocation never names;
+// several actions map to one Forge command, so the gateway would serve the
+// removed action from that pair until it expires.
 func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
-	var (
-		ok     *s3bkt.InfoOK
-		blocks []ucan.Delegation
-	)
-	err := s.policies.Snapshot(ctx, func(ctx context.Context) error {
-		var err error
-		ok, blocks, err = s.info(ctx, issuer, args)
-		return err
-	})
-	return ok, blocks, err
-}
-
-// info is [Service.Info] inside its snapshot.
-func (s *Service) info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
 	b, err := s.buckets.GetByName(ctx, args.Name)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, args.Name)
@@ -497,24 +487,6 @@ func (s *Service) info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, auth.ErrForeignBucket
 	}
 
-	// A service key carries its own permission set; a principal-bound key its
-	// principal's effective actions on the bucket, whose stored grants over the
-	// bucket are the commands those actions map to. A removed principal is an
-	// unknown key, and a bucket the principal cannot reach is unknown.
-	permissions := akRec.Permissions
-	if akRec.Principal != nil {
-		eff, err := s.authorizer.EffectiveActions(ctx, b.Tenant, *akRec.Principal, b.ID)
-		if errors.Is(err, auth.ErrUnknownAccessKey) {
-			return nil, nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
-		} else if err != nil {
-			return nil, nil, err
-		}
-		if len(eff) == 0 {
-			return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
-		}
-		permissions = eff
-	}
-
 	// Build the proof chains from the bucket to the access key: for each grant to
 	// the access key that reaches this bucket (scoped to it or powerline), resolve
 	// its chain up to the bucket→tenant root.
@@ -548,6 +520,24 @@ func (s *Service) info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 				blocks = append(blocks, p)
 			}
 		}
+	}
+
+	// A service key carries its own permission set; a principal-bound key its
+	// principal's effective actions on the bucket, whose stored grants over the
+	// bucket are the commands those actions map to. A removed principal is an
+	// unknown key, and a bucket the principal cannot reach is unknown.
+	permissions := akRec.Permissions
+	if akRec.Principal != nil {
+		eff, err := s.authorizer.EffectiveActions(ctx, b.Tenant, *akRec.Principal, b.ID)
+		if errors.Is(err, auth.ErrUnknownAccessKey) {
+			return nil, nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
+		} else if err != nil {
+			return nil, nil, err
+		}
+		if len(eff) == 0 {
+			return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+		}
+		permissions = eff
 	}
 
 	s.logger.Debug("bucket info",

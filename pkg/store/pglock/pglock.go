@@ -55,10 +55,10 @@ type DBTX interface {
 
 // ResolveDBTX returns the transaction ctx carries (see [WithTx]), or pool
 // when it carries none. A store runs every statement outside [Begin] on it, so
-// a read inside a write's callback, or inside a read-only snapshot, uses the
-// connection that transaction already holds. Taking a second connection from
-// the pool instead would deadlock once concurrent writes hold every pooled
-// connection and each waits for another.
+// a read inside a write's callback uses the connection that write's
+// transaction already holds. Taking a second connection from the pool instead
+// would deadlock once concurrent writes hold every pooled connection and each
+// waits for another.
 func ResolveDBTX(ctx context.Context, pool *pgxpool.Pool) DBTX {
 	if tx, ok := TxFrom(ctx); ok {
 		return tx

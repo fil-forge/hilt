@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
@@ -764,32 +765,31 @@ func TestInfo(t *testing.T) {
 	})
 }
 
-// writeOnFirstGet commits write, once, right after the policy read it wraps
-// returns, so a policy write lands between Info's read of the policy and its
-// read of the key's grants.
-type writeOnFirstGet struct {
-	bucketpolicystore.Store
+// writeAfterFirstList commits write, once, right after the grant listing it
+// wraps returns, so a policy write lands between Info's read of the key's
+// grants and its later reads.
+type writeAfterFirstList struct {
+	delegationstore.Store
 	write func()
 	done  bool
 }
 
-func (w *writeOnFirstGet) Get(ctx context.Context, bucket did.DID) (bucketpolicystore.Record, error) {
-	rec, err := w.Store.Get(ctx, bucket)
+func (w *writeAfterFirstList) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
+	page, err := w.Store.ListByAudience(ctx, audience, opts...)
 	if !w.done {
 		w.done = true
 		w.write()
 	}
-	return rec, err
+	return page, err
 }
 
 func TestInfoPostgres(t *testing.T) {
-	t.Run("reports the actions and grants of one policy when a write commits between its reads", func(t *testing.T) {
+	t.Run("reports chains the key holds now or that were revoked, with the actions the stored policy grants, when a policy write commits between its reads", func(t *testing.T) {
 		ctx := t.Context()
 		pool := htestutil.PostgresOrSkip(t)
 		tenantSigner, err := secp256k1.Generate()
 		require.NoError(t, err)
 		tenantID := tenantSigner.KeyDID()
-		tenantIssuer := multikey.NewIssuer(tenantID, tenantSigner)
 		bucketSigner, err := ed25519.Generate()
 		require.NoError(t, err)
 		bucketID := bucketSigner.KeyDID()
@@ -802,6 +802,8 @@ func TestInfoPostgres(t *testing.T) {
 		tenants, buckets := tenantpostgres.New(pool), bucketpostgres.New(pool)
 		principals, accessKeys := principalpostgres.New(pool), accesskeypostgres.New(pool)
 		delegations, policies := delegationpostgres.New(pool), bucketpolicypostgres.New(pool)
+		secrets, swarf := vaultmemory.New(), &htestutil.FakeSwarf{}
+		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "photos"))
@@ -811,43 +813,45 @@ func TestInfoPostgres(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 
+		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies,
+			grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf))
 		// GetObject and ListBucket both map to /content/retrieve, so only the
 		// action set tells the two policies apart.
-		policyFor := func(actions ...string) bucketpolicystore.Input {
-			return bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+		writePolicy := func(ctx context.Context, actions ...string) {
+			require.NoError(t, policyWrites.Write(ctx, tenantID, bucketID, "photos", s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
 				Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet(actions...),
 				Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
-			}}}}
+			}}}))
 		}
-		// writePolicy stores the policy and the key's grants it maps to in one
-		// transaction, as a policy write does.
-		writePolicy := func(ctx context.Context, actions ...string) []ucan.Delegation {
-			grants, err := grant.Issue(tenantIssuer, akDID, []did.DID{bucketID}, actions, nil)
-			require.NoError(t, err)
-			require.NoError(t, policies.Put(ctx, policyFor(actions...), func(ctx context.Context, _ *bucketpolicystore.Record) error {
-				return delegations.ReplaceBySubject(ctx, bucketID, []did.DID{akDID}, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-					return map[did.DID][]ucan.Delegation{akDID: grants}, nil
-				})
-			}))
-			return grants
-		}
-		before := writePolicy(ctx, "s3:GetObject", "s3:ListBucket")
+		writePolicy(ctx, "s3:GetObject", "s3:ListBucket")
 
-		racing := &writeOnFirstGet{Store: policies, write: func() { writePolicy(context.WithoutCancel(ctx), "s3:ListBucket") }}
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, racing, vaultmemory.New())
-		svc := bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil)
+		racing := &writeAfterFirstList{Store: delegations, write: func() { writePolicy(context.WithoutCancel(ctx), "s3:ListBucket") }}
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, policies, vaultmemory.New())
+		svc := bucketsvc.New(zap.NewNop(), az, buckets, racing, accessKeys, tenants, policies, &fakeSprue{}, swarf, nil)
 
 		ok, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: "photos", AccessKey: akDID})
 		require.NoError(t, err)
-		var reported []cid.Cid
-		for link := range ok.Delegations.Entries {
-			reported = append(reported, link)
+
+		page, err := delegations.ListByAudience(ctx, akDID)
+		require.NoError(t, err)
+		current := map[cid.Cid]bool{}
+		for _, d := range page.Results {
+			current[d.Link()] = true
 		}
-		var held []cid.Cid
-		for _, d := range before {
-			held = append(held, d.Link())
+		revoked := map[cid.Cid]bool{}
+		for _, link := range swarf.Revoked() {
+			revoked[link] = true
 		}
-		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, ok.Permissions.Entries[akDID])
-		require.ElementsMatch(t, held, reported, "the grants are the ones the reported policy rotated in")
+		// A chain runs root first, so its last link is the key's grant: the
+		// delegation the gateway's cache is keyed on and a revocation names.
+		reportsCurrent := false
+		for _, chain := range ok.Delegations.Entries {
+			leaf := chain[len(chain)-1]
+			require.True(t, current[leaf] || revoked[leaf], "grant %s is neither held nor revoked", leaf)
+			reportsCurrent = reportsCurrent || current[leaf]
+		}
+		if reportsCurrent {
+			require.Equal(t, []string{"s3:ListBucket"}, ok.Permissions.Entries[akDID], "a usable chain comes with the stored policy's actions")
+		}
 	})
 }
