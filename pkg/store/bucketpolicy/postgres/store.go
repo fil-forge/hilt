@@ -38,7 +38,7 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 const selectColumns = `SELECT bucket_id, document, updated_at FROM bucket_policy`
 
 func (s *Store) Get(ctx context.Context, bucket did.DID) (bucketpolicystore.Record, error) {
-	rec, err := scanRecord(pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, selectColumns+` WHERE bucket_id = $1`, bucket.String()))
+	rec, err := scanRecord(pglock.ResolveConn(ctx, s.pool).QueryRow(ctx, selectColumns+` WHERE bucket_id = $1`, bucket.String()))
 	return pglock.Found(rec, err, "policy")
 }
 
@@ -165,7 +165,7 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit
 // bucket_policy_principal holds a row for the principal or a wildcard row
 // (NULL principal) under the tenant.
 func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]bucketpolicystore.Record, error) {
-	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, selectColumns+` p
+	rows, err := pglock.ResolveConn(ctx, s.pool).Query(ctx, selectColumns+` p
 		WHERE EXISTS (
 			SELECT 1 FROM bucket_policy_principal i
 			WHERE i.bucket_id = p.bucket_id

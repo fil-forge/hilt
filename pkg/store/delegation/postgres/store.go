@@ -223,7 +223,7 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 	}
 	query += ` ORDER BY id ASC LIMIT $2`
 
-	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, query, args...)
+	rows, err := pglock.ResolveConn(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
 		return store.Page[ucan.Delegation]{}, fmt.Errorf("querying delegations by %s: %w", column, err)
 	}
@@ -342,7 +342,7 @@ SELECT datas FROM chain WHERE complete ORDER BY depth ASC LIMIT 1
 `
 
 	var datas [][]byte
-	err := pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, query, aud.String(), cmd.String(), sub.String()).Scan(&datas)
+	err := pglock.ResolveConn(ctx, s.pool).QueryRow(ctx, query, aud.String(), cmd.String(), sub.String()).Scan(&datas)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil

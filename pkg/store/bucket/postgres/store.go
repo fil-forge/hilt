@@ -40,7 +40,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 	if err := bucket.ValidateName(name); err != nil {
 		return err
 	}
-	_, err := pglock.ResolveQuerier(ctx, s.pool).Exec(ctx, `
+	_, err := pglock.ResolveConn(ctx, s.pool).Exec(ctx, `
 		INSERT INTO bucket (id, tenant_id, name)
 		VALUES ($1, $2, $3)
 	`, id.String(), tenant.String(), name)
@@ -55,7 +55,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 }
 
 func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, error) {
-	row := pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, `
+	row := pglock.ResolveConn(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, tenant_id, name, created_at
 		FROM bucket
 		WHERE name = $1
@@ -116,7 +116,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	}
 	query += ` ORDER BY name ASC LIMIT $2`
 
-	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, query, args...)
+	rows, err := pglock.ResolveConn(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
 		return store.Page[bucket.Record]{}, fmt.Errorf("listing buckets by tenant: %w", err)
 	}

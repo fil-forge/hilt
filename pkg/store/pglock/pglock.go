@@ -44,20 +44,22 @@ func TxFrom(ctx context.Context) (pgx.Tx, bool) {
 	return tx, ok
 }
 
-// Querier runs one statement. Both a [pgx.Tx] and a [pgxpool.Pool] are one.
-type Querier interface {
+// Conn is what a store runs one statement on: a [pgx.Tx], whose statements run
+// on the connection the transaction holds, or a [pgxpool.Pool], which lends
+// each statement a connection of its own.
+type Conn interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// ResolveQuerier returns the transaction ctx carries (see [WithTx]), or pool
+// ResolveConn returns the transaction ctx carries (see [WithTx]), or pool
 // when it carries none. A store runs every statement outside [Begin] on it, so
 // a read inside a write's callback, or inside a read-only snapshot, uses the
 // connection that transaction already holds. Taking a second connection from
 // the pool instead would deadlock once concurrent writes hold every pooled
 // connection and each waits for another.
-func ResolveQuerier(ctx context.Context, pool *pgxpool.Pool) Querier {
+func ResolveConn(ctx context.Context, pool *pgxpool.Pool) Conn {
 	if tx, ok := TxFrom(ctx); ok {
 		return tx
 	}

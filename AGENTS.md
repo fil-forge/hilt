@@ -153,7 +153,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   rows another uncommitted write has already changed, as Postgres makes it,
   and the pool bounds that wait (`lock_timeout`) and an idle transaction
   (`idle_in_transaction_session_timeout`). Every Postgres store statement
-  outside `pglock.Begin` runs on `pglock.ResolveQuerier(ctx, s.pool)`, so a
+  outside `pglock.Begin` runs on `pglock.ResolveConn(ctx, s.pool)`, so a
   read inside a write's callback uses that write's connection: taking a second
   one from the pool deadlocks once concurrent writes hold them all. Reads that
   must agree with each other run in one `store.Snapshotter` snapshot, a
