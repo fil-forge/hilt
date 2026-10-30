@@ -44,22 +44,22 @@ func TxFrom(ctx context.Context) (pgx.Tx, bool) {
 	return tx, ok
 }
 
-// Conn is what a store runs one statement on: a [pgx.Tx], whose statements run
+// DBTX is what a store runs one statement on: a [pgx.Tx], whose statements run
 // on the connection the transaction holds, or a [pgxpool.Pool], which lends
 // each statement a connection of its own.
-type Conn interface {
+type DBTX interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// ResolveConn returns the transaction ctx carries (see [WithTx]), or pool
+// ResolveDBTX returns the transaction ctx carries (see [WithTx]), or pool
 // when it carries none. A store runs every statement outside [Begin] on it, so
 // a read inside a write's callback, or inside a read-only snapshot, uses the
 // connection that transaction already holds. Taking a second connection from
 // the pool instead would deadlock once concurrent writes hold every pooled
 // connection and each waits for another.
-func ResolveConn(ctx context.Context, pool *pgxpool.Pool) Conn {
+func ResolveDBTX(ctx context.Context, pool *pgxpool.Pool) DBTX {
 	if tx, ok := TxFrom(ctx); ok {
 		return tx
 	}
@@ -76,24 +76,4 @@ func Begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
 		return tx.Begin(ctx)
 	}
 	return pool.Begin(ctx)
-}
-
-// Snapshots is the Postgres [store.Snapshotter]. It runs fn in a read-only
-// REPEATABLE READ transaction that ctx carries (see [WithTx]), so every store
-// read fn makes is answered from the database as it was at fn's first read. A
-// read-only transaction takes no row locks and cannot fail serialization, so
-// it neither waits on writers nor makes them wait.
-type Snapshots struct {
-	Pool *pgxpool.Pool
-}
-
-var _ store.Snapshotter = Snapshots{}
-
-func (s Snapshots) Snapshot(ctx context.Context, fn func(ctx context.Context) error) error {
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return fmt.Errorf("beginning snapshot: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read-only transaction has nothing to commit
-	return fn(WithTx(ctx, tx))
 }

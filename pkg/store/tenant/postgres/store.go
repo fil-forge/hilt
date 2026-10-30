@@ -41,7 +41,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 	if !status.Valid() {
 		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
 	}
-	_, err := pglock.ResolveConn(ctx, s.pool).Exec(ctx, `
+	_, err := pglock.ResolveDBTX(ctx, s.pool).Exec(ctx, `
 		INSERT INTO tenant (id, external_id, provider_id, status)
 		VALUES ($1, $2, $3, $4)
 	`, id.String(), externalID, provider.String(), string(status))
@@ -56,7 +56,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 }
 
 func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
-	row := pglock.ResolveConn(ctx, s.pool).QueryRow(ctx, `
+	row := pglock.ResolveDBTX(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, external_id, provider_id, status, created_at, updated_at
 		FROM tenant
 		WHERE id = $1
@@ -72,7 +72,7 @@ func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 }
 
 func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
-	row := pglock.ResolveConn(ctx, s.pool).QueryRow(ctx, `
+	row := pglock.ResolveDBTX(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, external_id, provider_id, status, created_at, updated_at
 		FROM tenant
 		WHERE external_id = $1
@@ -91,7 +91,7 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 	if !status.Valid() {
 		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
 	}
-	tag, err := pglock.ResolveConn(ctx, s.pool).Exec(ctx, `
+	tag, err := pglock.ResolveDBTX(ctx, s.pool).Exec(ctx, `
 		UPDATE tenant
 		SET status = $1, updated_at = NOW()
 		WHERE id = $2
@@ -106,7 +106,7 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 }
 
 func (s *Store) Delete(ctx context.Context, id did.DID) error {
-	if _, err := pglock.ResolveConn(ctx, s.pool).Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
+	if _, err := pglock.ResolveDBTX(ctx, s.pool).Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting tenant: %w", err)
 	}
 	return nil

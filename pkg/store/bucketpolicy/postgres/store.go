@@ -38,7 +38,7 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 const selectColumns = `SELECT bucket_id, document, updated_at FROM bucket_policy`
 
 func (s *Store) Get(ctx context.Context, bucket did.DID) (bucketpolicystore.Record, error) {
-	rec, err := scanRecord(pglock.ResolveConn(ctx, s.pool).QueryRow(ctx, selectColumns+` WHERE bucket_id = $1`, bucket.String()))
+	rec, err := scanRecord(pglock.ResolveDBTX(ctx, s.pool).QueryRow(ctx, selectColumns+` WHERE bucket_id = $1`, bucket.String()))
 	return pglock.Found(rec, err, "policy")
 }
 
@@ -165,7 +165,7 @@ func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit
 // bucket_policy_principal holds a row for the principal or a wildcard row
 // (NULL principal) under the tenant.
 func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]bucketpolicystore.Record, error) {
-	rows, err := pglock.ResolveConn(ctx, s.pool).Query(ctx, selectColumns+` p
+	rows, err := pglock.ResolveDBTX(ctx, s.pool).Query(ctx, selectColumns+` p
 		WHERE EXISTS (
 			SELECT 1 FROM bucket_policy_principal i
 			WHERE i.bucket_id = p.bucket_id
@@ -178,6 +178,20 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 	}
 	defer rows.Close()
 	return collectRecords(rows)
+}
+
+// Snapshot runs fn in a read-only REPEATABLE READ transaction that ctx
+// carries (see [pglock.WithTx]), so every store read fn makes is answered from
+// the database as it was at fn's first read. A read-only transaction takes no
+// row locks and cannot fail serialization, so it neither waits on writers nor
+// makes them wait.
+func (s *Store) Snapshot(ctx context.Context, fn func(ctx context.Context) error) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("beginning snapshot: %w", err)
+	}
+	defer tx.Rollback(ctx) // a read-only transaction has nothing to commit
+	return fn(pglock.WithTx(ctx, tx))
 }
 
 // collectRecords scans every row of a policy listing.

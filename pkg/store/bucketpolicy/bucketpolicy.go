@@ -76,4 +76,12 @@ type Store interface {
 	// Principal removal must strip the principal from each listed policy
 	// itself and must not rely on the cascade.
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]Record, error)
+	// Snapshot runs fn so that every store read fn makes with the ctx it is
+	// handed sees the stores as of one moment: a write that commits while fn
+	// runs is either wholly visible to fn or not at all. It is for reads that
+	// must agree with each other, such as a policy and the delegations a write
+	// rotated from it. On Postgres fn runs in a read-only REPEATABLE READ
+	// transaction, which ctx carries; the memory backend keeps no
+	// transactions and runs fn as it is. fn must not write.
+	Snapshot(ctx context.Context, fn func(ctx context.Context) error) error
 }

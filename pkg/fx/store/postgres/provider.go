@@ -7,9 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/fil-forge/hilt/pkg/store/pglock"
-
 	"github.com/exaring/otelpgx"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/migrations"
@@ -47,15 +44,8 @@ var Module = fx.Module("postgres-store",
 		NewProviderStore,
 		NewTenantStore,
 		NewWrapKeyStore,
-		NewSnapshotter,
 	),
 )
-
-// NewSnapshotter provides the snapshots /s3/bucket/info reads a key's
-// effective actions and grants from.
-func NewSnapshotter(mdb *MigratedPool) store.Snapshotter {
-	return pglock.Snapshots{Pool: mdb.Pool}
-}
 
 // MigratedPool is a *pgxpool.Pool whose schema is guaranteed to be at the head
 // migration revision by the time any store that depends on it is used. Store

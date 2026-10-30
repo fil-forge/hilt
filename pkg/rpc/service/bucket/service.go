@@ -66,9 +66,6 @@ type Service struct {
 	revocations grant.RevocationPublisher
 	// policyWrites stores a policy as the management API stores a policy PUT.
 	policyWrites *bucketpolicysvc.Service
-	// snapshots makes Info read a key's effective actions and its grants from
-	// one view of the stores.
-	snapshots store.Snapshotter
 }
 
 // New constructs the bucket service.
@@ -83,7 +80,6 @@ func New(
 	uploads UploadClient,
 	revocations grant.RevocationPublisher,
 	policyWrites *bucketpolicysvc.Service,
-	snapshots store.Snapshotter,
 ) *Service {
 	return &Service{
 		logger:       logger,
@@ -96,7 +92,6 @@ func New(
 		uploads:      uploads,
 		revocations:  revocations,
 		policyWrites: policyWrites,
-		snapshots:    snapshots,
 	}
 }
 
@@ -455,7 +450,7 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		ok     *s3bkt.InfoOK
 		blocks []ucan.Delegation
 	)
-	err := s.snapshots.Snapshot(ctx, func(ctx context.Context) error {
+	err := s.policies.Snapshot(ctx, func(ctx context.Context) error {
 		var err error
 		ok, blocks, err = s.info(ctx, issuer, args)
 		return err
