@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store/pglock"
+
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/ucantone/did"
@@ -27,7 +29,7 @@ func New(pool *pgxpool.Pool) *Store {
 }
 
 func (s *Store) Add(ctx context.Context, input wrapkey.Input) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := pglock.ResolveQuerier(ctx, s.pool).Exec(ctx, `
 		INSERT INTO wrap_key (tenant_id, version, kid, status, epoch, vault_key)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`, input.Tenant.String(), input.Version, input.KID, wrapkey.Active, input.Epoch, input.VaultKey)
@@ -44,7 +46,7 @@ func (s *Store) Add(ctx context.Context, input wrapkey.Input) error {
 }
 
 func (s *Store) Get(ctx context.Context, tenant did.DID) (wrapkey.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, `
 		SELECT tenant_id, version, kid, status, epoch, vault_key, created_at, archived_at
 		FROM wrap_key
 		WHERE tenant_id = $1 AND status = 'active'
@@ -60,7 +62,7 @@ func (s *Store) Get(ctx context.Context, tenant did.DID) (wrapkey.Record, error)
 }
 
 func (s *Store) GetVersion(ctx context.Context, tenant did.DID, version int) (wrapkey.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, `
 		SELECT tenant_id, version, kid, status, epoch, vault_key, created_at, archived_at
 		FROM wrap_key
 		WHERE tenant_id = $1 AND version = $2
@@ -76,7 +78,7 @@ func (s *Store) GetVersion(ctx context.Context, tenant did.DID, version int) (wr
 }
 
 func (s *Store) GetByKID(ctx context.Context, kid string) (wrapkey.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, `
 		SELECT tenant_id, version, kid, status, epoch, vault_key, created_at, archived_at
 		FROM wrap_key
 		WHERE kid = $1
@@ -92,7 +94,7 @@ func (s *Store) GetByKID(ctx context.Context, kid string) (wrapkey.Record, error
 }
 
 func (s *Store) List(ctx context.Context, tenant did.DID) ([]wrapkey.Record, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, `
 		SELECT tenant_id, version, kid, status, epoch, vault_key, created_at, archived_at
 		FROM wrap_key
 		WHERE tenant_id = $1
@@ -118,7 +120,7 @@ func (s *Store) List(ctx context.Context, tenant did.DID) ([]wrapkey.Record, err
 }
 
 func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error {
-	tag, err := s.pool.Exec(ctx, `
+	tag, err := pglock.ResolveQuerier(ctx, s.pool).Exec(ctx, `
 		UPDATE wrap_key
 		SET status = 'archived', archived_at = $1
 		WHERE tenant_id = $2 AND version = $3 AND status = 'active'
@@ -133,7 +135,7 @@ func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error 
 }
 
 func (s *Store) Delete(ctx context.Context, tenant did.DID) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := pglock.ResolveQuerier(ctx, s.pool).Exec(ctx, `
 		DELETE FROM wrap_key
 		WHERE tenant_id = $1
 	`, tenant.String())

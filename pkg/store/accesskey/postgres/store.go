@@ -111,7 +111,7 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 }
 
 func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
-	rec, err := scanRecord(s.pool.QueryRow(ctx, selectColumns+` WHERE id = $1`, id.String()))
+	rec, err := scanRecord(pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, selectColumns+` WHERE id = $1`, id.String()))
 	return pglock.Found(rec, err, "access key")
 }
 
@@ -125,7 +125,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 	}
 	query += ` ORDER BY id ASC`
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing access keys by tenant: %w", err)
 	}

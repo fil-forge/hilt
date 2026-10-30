@@ -66,6 +66,9 @@ type Service struct {
 	revocations grant.RevocationPublisher
 	// policyWrites stores a policy as the management API stores a policy PUT.
 	policyWrites *bucketpolicysvc.Service
+	// snapshots makes Info read a key's effective actions and its grants from
+	// one view of the stores.
+	snapshots store.Snapshotter
 }
 
 // New constructs the bucket service.
@@ -80,6 +83,7 @@ func New(
 	uploads UploadClient,
 	revocations grant.RevocationPublisher,
 	policyWrites *bucketpolicysvc.Service,
+	snapshots store.Snapshotter,
 ) *Service {
 	return &Service{
 		logger:       logger,
@@ -92,6 +96,7 @@ func New(
 		uploads:      uploads,
 		revocations:  revocations,
 		policyWrites: policyWrites,
+		snapshots:    snapshots,
 	}
 }
 
@@ -439,7 +444,27 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 // It carries no signed S3 request, so there is no signature to authenticate:
 // what it checks is the caller, which must be the provider acting for the
 // bucket's tenant, and the access key, which must belong to that tenant.
+//
+// Every read runs in one snapshot. A policy write rotates a key's grants and
+// stores the policy in one transaction, and several actions map to one Forge
+// command, so a policy read before a write and grants read after it would
+// report an action the write removed over a chain its revocation never names,
+// and the gateway would cache that pair until it expires.
 func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
+	var (
+		ok     *s3bkt.InfoOK
+		blocks []ucan.Delegation
+	)
+	err := s.snapshots.Snapshot(ctx, func(ctx context.Context) error {
+		var err error
+		ok, blocks, err = s.info(ctx, issuer, args)
+		return err
+	})
+	return ok, blocks, err
+}
+
+// info is [Service.Info] inside its snapshot.
+func (s *Service) info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
 	b, err := s.buckets.GetByName(ctx, args.Name)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, args.Name)

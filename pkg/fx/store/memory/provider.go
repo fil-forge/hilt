@@ -3,6 +3,7 @@
 package memory
 
 import (
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	memaccesskey "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -25,6 +26,8 @@ import (
 // Module provides the in-memory store implementations.
 var Module = fx.Module("memory-store",
 	fx.Provide(
+		// The memory stores keep no transactions, so a snapshot is a plain run.
+		func() store.Snapshotter { return store.NoSnapshot{} },
 		// The key store refuses a principal the principal store has removed,
 		// as the Postgres insert's check of the principal row does.
 		fx.Annotate(func(principals *memprincipal.Store) *memaccesskey.Store {

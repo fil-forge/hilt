@@ -150,7 +150,15 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   grants still stored, the one window the gateway's revoked set covers
   (`pkg/api/service/bucketpolicy` and `grant.Rotator` document the sequence).
   No store takes an explicit row or advisory lock; a write waits only on the
-  rows another uncommitted write has already changed, as Postgres makes it. Of two concurrent policy writes to
+  rows another uncommitted write has already changed, as Postgres makes it,
+  and the pool bounds that wait (`lock_timeout`) and an idle transaction
+  (`idle_in_transaction_session_timeout`). Every Postgres store statement
+  outside `pglock.Begin` runs on `pglock.ResolveQuerier(ctx, s.pool)`, so a
+  read inside a write's callback uses that write's connection: taking a second
+  one from the pool deadlocks once concurrent writes hold them all. Reads that
+  must agree with each other run in one `store.Snapshotter` snapshot, a
+  read-only `REPEATABLE READ` transaction on Postgres (`/s3/bucket/info` reads
+  a key's effective actions and its grants that way). Of two concurrent policy writes to
   one bucket, the one that commits last is stored, and the keys may hold both
   writes' delegations over the bucket. A rotation replaces only a key's
   delegations over the bucket it rotates (`ReplaceBySubject`), so rotations

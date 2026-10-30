@@ -7,6 +7,15 @@ import (
 	"testing"
 	"time"
 
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/ipfs/go-cid"
 
@@ -156,7 +165,7 @@ func TestCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{powerline}))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &htestutil.FakeSwarf{}, nil), buckets
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, &htestutil.FakeSwarf{}, nil, store.NoSnapshot{}), buckets
 	}
 
 	args := func() *s3bkt.CreateArguments {
@@ -327,7 +336,7 @@ func TestDelete(t *testing.T) {
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
 		swarf := &htestutil.FakeSwarf{}
 		return deleteDeps{
-			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, nil),
+			svc:         bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, sprue, swarf, nil, store.NoSnapshot{}),
 			buckets:     buckets,
 			delegations: delegations,
 			policies:    policies,
@@ -517,7 +526,7 @@ func TestList(t *testing.T) {
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
 		seedKey(t, accessKeys, secrets, delegations, principals, signer, tenantID, perms, principalBound)
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil), buckets, tenantID
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil, store.NoSnapshot{}), buckets, tenantID
 	}
 
 	// listArgs presigns a ListBuckets request; extra ListBuckets query params
@@ -661,7 +670,7 @@ func TestInfo(t *testing.T) {
 		// Info reads a principal-bound key's principal and policy through the
 		// authorizer, so it shares the stores the test seeds.
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, policies, vaultmemory.New())
-		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil), policies, root, accessKeys
+		return bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil, store.NoSnapshot{}), policies, root, accessKeys
 	}
 
 	// grantPolicy stores a policy allowing "user-1" the given actions on the bucket.
@@ -753,5 +762,93 @@ func TestInfo(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, ok.Delegations.Entries)
 		require.Empty(t, blocks)
+	})
+}
+
+// writeOnFirstGet commits write, once, right after the policy read it wraps
+// returns, so a policy write lands between Info's read of the policy and its
+// read of the key's grants.
+type writeOnFirstGet struct {
+	bucketpolicystore.Store
+	write func()
+	done  bool
+}
+
+func (w *writeOnFirstGet) Get(ctx context.Context, bucket did.DID) (bucketpolicystore.Record, error) {
+	rec, err := w.Store.Get(ctx, bucket)
+	if !w.done {
+		w.done = true
+		w.write()
+	}
+	return rec, err
+}
+
+func TestInfoPostgres(t *testing.T) {
+	t.Run("reports the actions and grants of one policy when a write commits between its reads", func(t *testing.T) {
+		ctx := t.Context()
+		pool := htestutil.PostgresOrSkip(t)
+		tenantSigner, err := secp256k1.Generate()
+		require.NoError(t, err)
+		tenantID := tenantSigner.KeyDID()
+		tenantIssuer := multikey.NewIssuer(tenantID, tenantSigner)
+		bucketSigner, err := ed25519.Generate()
+		require.NoError(t, err)
+		bucketID := bucketSigner.KeyDID()
+		akSigner, err := ed25519.Generate()
+		require.NoError(t, err)
+		akDID := akSigner.KeyDID()
+		providerID := testutil.RandomDID(t)
+		const principal = "any-principal"
+
+		tenants, buckets := tenantpostgres.New(pool), bucketpostgres.New(pool)
+		principals, accessKeys := principalpostgres.New(pool), accesskeypostgres.New(pool)
+		delegations, policies := delegationpostgres.New(pool), bucketpolicypostgres.New(pool)
+		require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "photos"))
+		require.NoError(t, principals.Add(ctx, tenantID, principal))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Principal: new(principal)}))
+		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
+		require.NoError(t, err)
+		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
+
+		// GetObject and ListBucket both map to /content/retrieve, so only the
+		// action set tells the two policies apart.
+		policyFor := func(actions ...string) bucketpolicystore.Input {
+			return bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+				Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet(actions...),
+				Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
+			}}}}
+		}
+		// writePolicy stores the policy and the key's grants it maps to in one
+		// transaction, as a policy write does.
+		writePolicy := func(ctx context.Context, actions ...string) []ucan.Delegation {
+			grants, err := grant.Issue(tenantIssuer, akDID, []did.DID{bucketID}, actions, nil)
+			require.NoError(t, err)
+			require.NoError(t, policies.Put(ctx, policyFor(actions...), func(ctx context.Context, _ *bucketpolicystore.Record) error {
+				return delegations.ReplaceBySubject(ctx, bucketID, []did.DID{akDID}, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					return map[did.DID][]ucan.Delegation{akDID: grants}, nil
+				})
+			}))
+			return grants
+		}
+		before := writePolicy(ctx, "s3:GetObject", "s3:ListBucket")
+
+		racing := &writeOnFirstGet{Store: policies, write: func() { writePolicy(context.WithoutCancel(ctx), "s3:ListBucket") }}
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providermemory.New(), buckets, principals, racing, vaultmemory.New())
+		svc := bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, &htestutil.FakeSwarf{}, nil, pglock.Snapshots{Pool: pool})
+
+		ok, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: "photos", AccessKey: akDID})
+		require.NoError(t, err)
+		var reported []cid.Cid
+		for link := range ok.Delegations.Entries {
+			reported = append(reported, link)
+		}
+		var held []cid.Cid
+		for _, d := range before {
+			held = append(held, d.Link())
+		}
+		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, ok.Permissions.Entries[akDID])
+		require.ElementsMatch(t, held, reported, "the grants are the ones the reported policy rotated in")
 	})
 }

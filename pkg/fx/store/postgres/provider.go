@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
+
 	"github.com/exaring/otelpgx"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/migrations"
@@ -44,8 +47,15 @@ var Module = fx.Module("postgres-store",
 		NewProviderStore,
 		NewTenantStore,
 		NewWrapKeyStore,
+		NewSnapshotter,
 	),
 )
+
+// NewSnapshotter provides the snapshots /s3/bucket/info reads a key's
+// effective actions and grants from.
+func NewSnapshotter(mdb *MigratedPool) store.Snapshotter {
+	return pglock.Snapshots{Pool: mdb.Pool}
+}
 
 // MigratedPool is a *pgxpool.Pool whose schema is guaranteed to be at the head
 // migration revision by the time any store that depends on it is used. Store
@@ -74,6 +84,13 @@ func NewPostgresPool(cfg config.PostgresConfig, lc fx.Lifecycle, logger *zap.Log
 	}
 	// Every query is a span on the caller's trace.
 	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
+	// No store takes a lock of its own, but Postgres still makes a write wait
+	// for an uncommitted write to the same rows. Both bounds turn a stalled
+	// transaction into an error instead of an indefinite wait. A write's
+	// transaction sits idle while it publishes to Swarf, for up to
+	// grant.BatchTimeout, so the idle bound is well above that.
+	poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = "10s"
+	poolCfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "30s"
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {

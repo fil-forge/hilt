@@ -924,7 +924,14 @@ var backends = []struct {
 		}
 	}},
 	{"postgres", func(t *testing.T, d deps) policyStores {
-		pool := testutil.PostgresOrSkip(t)
+		// Fewer connections than the concurrent tests run writes, so a write
+		// that takes a second connection while it holds its first waits
+		// forever and the test fails.
+		cfg := testutil.PostgresOrSkip(t).Config()
+		cfg.MaxConns = 2
+		pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
 		pg := d.postgres(t, pool)
 		buckets := bucketpostgres.New(pool)
 		return policyStores{
@@ -982,7 +989,8 @@ func TestConcurrentPolicyWrites(t *testing.T) {
 	for _, b := range backends {
 		t.Run(b.name, func(t *testing.T) {
 			t.Run("concurrent writes to different buckets naming one principal all succeed and leave each key with the delegations the stored policies grant", func(t *testing.T) {
-				ctx := t.Context()
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				defer cancel()
 				d := setup(t)
 				s := b.stores(t, d)
 				const principal = "any-principal"

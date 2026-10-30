@@ -1,6 +1,6 @@
 // Package pglock holds the Postgres transaction helpers the stores share: the
-// transaction a write's callback joins, and the mapping of a single-row read's
-// result.
+// transaction a write's callback joins, the connection a statement runs on,
+// and the mapping of a single-row read's result.
 package pglock
 
 import (
@@ -10,6 +10,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,6 +44,26 @@ func TxFrom(ctx context.Context) (pgx.Tx, bool) {
 	return tx, ok
 }
 
+// Querier runs one statement. Both a [pgx.Tx] and a [pgxpool.Pool] are one.
+type Querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// ResolveQuerier returns the transaction ctx carries (see [WithTx]), or pool
+// when it carries none. A store runs every statement outside [Begin] on it, so
+// a read inside a write's callback, or inside a read-only snapshot, uses the
+// connection that transaction already holds. Taking a second connection from
+// the pool instead would deadlock once concurrent writes hold every pooled
+// connection and each waits for another.
+func ResolveQuerier(ctx context.Context, pool *pgxpool.Pool) Querier {
+	if tx, ok := TxFrom(ctx); ok {
+		return tx
+	}
+	return pool
+}
+
 // Begin starts a store call's transaction. When ctx carries one (see [WithTx])
 // it opens a savepoint inside it: Commit releases the savepoint, Rollback
 // returns to it, and the enclosing write owns the commit. Otherwise it begins
@@ -53,4 +74,24 @@ func Begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
 		return tx.Begin(ctx)
 	}
 	return pool.Begin(ctx)
+}
+
+// Snapshots is the Postgres [store.Snapshotter]. It runs fn in a read-only
+// REPEATABLE READ transaction that ctx carries (see [WithTx]), so every store
+// read fn makes is answered from the database as it was at fn's first read. A
+// read-only transaction takes no row locks and cannot fail serialization, so
+// it neither waits on writers nor makes them wait.
+type Snapshots struct {
+	Pool *pgxpool.Pool
+}
+
+var _ store.Snapshotter = Snapshots{}
+
+func (s Snapshots) Snapshot(ctx context.Context, fn func(ctx context.Context) error) error {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("beginning snapshot: %w", err)
+	}
+	defer tx.Rollback(ctx) // a read-only transaction has nothing to commit
+	return fn(WithTx(ctx, tx))
 }

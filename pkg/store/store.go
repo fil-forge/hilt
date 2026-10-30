@@ -55,3 +55,22 @@ func Collect[T any](ctx context.Context, getPage GetPageFunc[T]) ([]T, error) {
 	}
 	return items, nil
 }
+
+// Snapshotter runs reads that must agree with each other, such as a bucket
+// policy and the delegations a write rotated from it, against one consistent
+// view of the stores.
+type Snapshotter interface {
+	// Snapshot runs fn. Every store read fn makes with the ctx it is handed
+	// sees the stores as of one moment: a write that commits while fn runs is
+	// either wholly visible or not visible at all. fn must not write.
+	Snapshot(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
+// NoSnapshot is the [Snapshotter] of the memory backends, which run fn as it
+// is: they keep no transactions, so reads see each write as it lands.
+type NoSnapshot struct{}
+
+// Snapshot runs fn with ctx unchanged.
+func (NoSnapshot) Snapshot(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
+}

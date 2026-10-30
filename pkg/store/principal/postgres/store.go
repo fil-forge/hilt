@@ -65,7 +65,7 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) erro
 }
 
 func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string) (principal.Record, error) {
-	rec, err := scanRecord(s.pool.QueryRow(ctx, `
+	rec, err := scanRecord(pglock.ResolveQuerier(ctx, s.pool).QueryRow(ctx, `
 		SELECT tenant_id, external_id, created_at
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
@@ -74,7 +74,7 @@ func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string) (pri
 }
 
 func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.Record, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, `
 		SELECT tenant_id, external_id, created_at
 		FROM principal
 		WHERE tenant_id = $1 AND deleted_at IS NULL
@@ -100,7 +100,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 }
 
 func (s *Store) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := pglock.ResolveQuerier(ctx, s.pool).Query(ctx, `
 		SELECT external_id
 		FROM principal
 		WHERE tenant_id = $1 AND deleted_at IS NULL
