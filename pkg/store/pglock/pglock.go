@@ -1,73 +1,18 @@
-// Package pglock holds the Postgres locking and transaction helpers the stores
-// share: the bounded wait every locking statement takes, the mapping of the
-// server's lock_not_available back to [store.ErrLockTimeout], and the
-// transaction a write's callback joins.
+// Package pglock holds the Postgres transaction helpers the stores share: the
+// transaction a write's callback joins, the connection a statement runs on,
+// and the mapping of a single-row read's result.
 package pglock
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// timeoutSetting is [store.LockTimeout] as Postgres spells it: a unitless
-// lock_timeout is milliseconds.
-var timeoutSetting = strconv.FormatInt(store.LockTimeout.Milliseconds(), 10)
-
-// SetTimeout bounds every lock tx goes on to take at [store.LockTimeout].
-// set_config with is_local is SET LOCAL, which SET itself cannot express with
-// a bound parameter. The setting lasts until the outermost transaction ends,
-// or until a savepoint tx rolls back.
-func SetTimeout(ctx context.Context, tx pgx.Tx) error {
-	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, timeoutSetting); err != nil {
-		return fmt.Errorf("setting lock timeout: %w", err)
-	}
-	return nil
-}
-
-// MapError returns [store.ErrLockTimeout] for the error Postgres raises when a
-// statement gives up waiting for a lock, and for a deadlock it broke by
-// aborting this transaction (a principal row held FOR UPDATE against the
-// policy index's FOR KEY SHARE on it can form one; Postgres reports it within
-// its deadlock_timeout, before lock_timeout), and err unchanged otherwise.
-// Either way nothing was committed and the caller retries.
-func MapError(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case pgerrcode.LockNotAvailable:
-			return fmt.Errorf("waited %s for a lock another write holds: %w", store.LockTimeout, store.ErrLockTimeout)
-		case pgerrcode.DeadlockDetected:
-			return fmt.Errorf("deadlocked with another write and was aborted: %w", store.ErrLockTimeout)
-		}
-	}
-	return err
-}
-
-// Advisory takes the transaction-scoped advisory lock identified by
-// (namespace, hashtext(key)) inside tx: pg_advisory_xact_lock, exclusive, for a
-// writer; pg_advisory_xact_lock_shared for a reader. Postgres identifies an
-// advisory lock by its key pair and nothing else, so each caller passes its own
-// namespace to keep its locks apart from every other advisory lock taken on the
-// same database. The lock is released when tx commits or rolls back, and there
-// is nothing to unlock.
-func Advisory(ctx context.Context, tx pgx.Tx, namespace int32, key string, shared bool) error {
-	fn := "pg_advisory_xact_lock"
-	if shared {
-		fn = "pg_advisory_xact_lock_shared"
-	}
-	if _, err := tx.Exec(ctx, fmt.Sprintf(`SELECT %s($1, hashtext($2))`, fn), namespace, key); err != nil {
-		return fmt.Errorf("taking advisory lock: %w", err)
-	}
-	return nil
-}
 
 // Found maps a single-row read's result: no row is [store.ErrRecordNotFound],
 // any other error is wrapped as "getting <recordType>", and a found row is returned
@@ -97,6 +42,28 @@ func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
 func TxFrom(ctx context.Context) (pgx.Tx, bool) {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	return tx, ok
+}
+
+// DBTX is what a store runs one statement on: a [pgx.Tx], whose statements run
+// on the connection the transaction holds, or a [pgxpool.Pool], which lends
+// each statement a connection of its own.
+type DBTX interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// ResolveDBTX returns the transaction ctx carries (see [WithTx]), or pool
+// when it carries none. A store runs every statement outside [Begin] on it, so
+// a read inside a write's callback uses the connection that write's
+// transaction already holds. Taking a second connection from the pool instead
+// would deadlock once concurrent writes hold every pooled connection and each
+// waits for another.
+func ResolveDBTX(ctx context.Context, pool *pgxpool.Pool) DBTX {
+	if tx, ok := TxFrom(ctx); ok {
+		return tx
+	}
+	return pool
 }
 
 // Begin starts a store call's transaction. When ctx carries one (see [WithTx])

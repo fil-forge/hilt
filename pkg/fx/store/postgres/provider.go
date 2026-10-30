@@ -74,6 +74,13 @@ func NewPostgresPool(cfg config.PostgresConfig, lc fx.Lifecycle, logger *zap.Log
 	}
 	// Every query is a span on the caller's trace.
 	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
+	// No store takes a lock of its own, but Postgres still makes a write wait
+	// for an uncommitted write to the same rows. Both bounds turn a stalled
+	// transaction into an error instead of an indefinite wait. A write's
+	// transaction sits idle while it publishes to Swarf, for up to
+	// grant.BatchTimeout, so the idle bound is well above that.
+	poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = "10s"
+	poolCfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "30s"
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {

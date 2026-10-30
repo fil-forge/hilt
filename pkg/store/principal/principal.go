@@ -12,7 +12,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
 
@@ -32,16 +31,11 @@ type Store interface {
 	// Add records a principal, or revives a removed one under the same external
 	// ID with a fresh CreatedAt. It returns [store.ErrInvalidArgument] if the
 	// tenant is undef or the external ID is empty, and [store.ErrRecordExists]
-	// if the tenant already has a live principal with that external ID. The
-	// wait for a row an in-flight [Store.Delete] or [Store.Lock] holds is
-	// bounded at [store.LockTimeout] and returns [store.ErrLockTimeout].
+	// if the tenant already has a live principal with that external ID.
 	Add(ctx context.Context, tenant did.DID, externalID string) error
 	// Get returns the tenant's principal with the given external ID. It returns
-	// [store.ErrRecordNotFound] if there is none or it was removed. With
-	// [store.WithShareLock] the read waits for an in-flight [Store.Tombstone] of
-	// the same row to commit or roll back; the wait is bounded at
-	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
-	Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (Record, error)
+	// [store.ErrRecordNotFound] if there is none or it was removed.
+	Get(ctx context.Context, tenant did.DID, externalID string) (Record, error)
 	// ListByTenant returns every live principal of the tenant, ordered by
 	// external ID.
 	ListByTenant(ctx context.Context, tenant did.DID) ([]Record, error)
@@ -50,33 +44,13 @@ type Store interface {
 	// caller checks a policy document's principals against.
 	ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error)
 	// Tombstone marks a principal's row removed; the row stays, so that Add
-	// can revive it. It excludes concurrent removals and revives of the same
-	// row for the whole call, runs fn (nil allowed) inside the write, before
-	// it takes effect, then marks the row. An error from fn is returned and
-	// leaves the principal live. It is idempotent: when no live row exists it
-	// returns nil without running fn. The wait for the row lock is bounded at
-	// [store.LockTimeout] and returns [store.ErrLockTimeout], which the caller
-	// retries.
-	//
-	// fn must not read or write this store: a share-locked read or a write of
-	// the same row waits on the lock the call itself holds. It may write other
-	// stores, including ones whose own writes read this one: only the removed
-	// row is held while it runs, and ListByTenant does not wait on it. On
-	// Postgres fn's ctx carries the transaction, so a store that opens with
-	// pglock.Begin writes inside it.
+	// can revive it. It runs fn (nil allowed) inside the write, before it takes
+	// effect, then marks the row. An error from fn is returned and leaves the
+	// principal live. It is idempotent: when no live row exists it returns nil
+	// without running fn. On Postgres fn's ctx carries the transaction, so a
+	// store that opens with pglock.Begin writes inside it.
 	Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(ctx context.Context) error) error
-	// WithLock runs fn while holding the tenant's live principals with the
-	// given external IDs against concurrent removals, revives and share-locked
-	// reads, and releases them when fn returns. A policy write uses it so that
-	// a key created for one of the principals meanwhile is either included in
-	// the write's rotation or created from the committed policy. IDs with no
-	// live row are skipped. fn follows the contract of [Store.Tombstone]'s fn.
-	// The wait for the rows is bounded at [store.LockTimeout] and returns
-	// [store.ErrLockTimeout].
-	WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error
 	// DeleteByTenant deletes the rows of every principal of the tenant,
-	// tombstones included. It is idempotent. It waits for calls that hold any
-	// of the tenant's principals, bounded at [store.LockTimeout], and returns
-	// [store.ErrLockTimeout] when the wait runs out.
+	// tombstones included. It is idempotent.
 	DeleteByTenant(ctx context.Context, tenant did.DID) error
 }

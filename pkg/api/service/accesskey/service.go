@@ -114,16 +114,9 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
 
 	if principalID != nil {
-		// The share lock waits for an in-flight removal of the principal, or a
-		// policy write holding the principal's row while it rotates its keys.
-		// A principal added while a policy is being written is ordered by the
-		// tenant lock its add took: it is committed before the write rotates
-		// or after the write commits, so the policies read below are settled.
-		_, err := s.principals.Get(ctx, tenantRec.ID, *principalID, store.WithShareLock())
+		_, err := s.principals.Get(ctx, tenantRec.ID, *principalID)
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
-		} else if errors.Is(err, store.ErrLockTimeout) {
-			return accesskeystore.Record{}, "", ErrConcurrentChange
 		} else if err != nil {
 			return accesskeystore.Record{}, "", fmt.Errorf("looking up principal: %w", err)
 		}
@@ -227,31 +220,19 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		if principalID != nil && errors.Is(err, store.ErrInvalidArgument) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
 		}
-		// A removal or a policy write holding the principal row past the
-		// store's lock timeout leaves nothing written, and the call can be
-		// repeated.
-		if errors.Is(err, store.ErrLockTimeout) {
-			return accesskeystore.Record{}, "", ErrConcurrentChange
-		}
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
 	}
 
 	// Issue the tenant→access-key delegations: one per (command × subject),
 	// where subject is each bucket DID or a single powerline (undefined subject).
 	// A service key's come from its permissions and buckets. A principal-bound
-	// key's come from the bucket policies naming its principal, read under a
-	// share lock so that a write holding one of those rows commits first; a
-	// policy created meanwhile has no row to wait on, and the tenant lock the
-	// principal's add took is what keeps the key behind it. A write that
+	// key's come from the bucket policies naming its principal. A write that
 	// starts after the key row exists rotates the key like any other.
 	var dels []ucan.Delegation
 	if principalID != nil {
-		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID, store.WithShareLock())
+		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID)
 		if err != nil {
 			rollback()
-			if errors.Is(err, store.ErrLockTimeout) {
-				return accesskeystore.Record{}, "", ErrConcurrentChange
-			}
 			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
 		}
 		for _, p := range policies {
@@ -274,13 +255,13 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		}
 	}
 	if len(dels) > 0 {
-		// Store the delegations under the access key's delegation lock rather
-		// than with PutBatch: a policy write rotating the principal's keys
-		// between the key record's commit and this write has already stored
-		// the key's delegations from the new policy, and the ones issued above
-		// may predate it. The access-key DID is freshly generated, so a key
-		// holding anything was rotated meanwhile, and the creation fails and
-		// rolls back rather than store stale grants beside it.
+		// Store the delegations with Replace rather than PutBatch: a policy
+		// write that rotated the principal's keys and committed between the key
+		// record's commit and this write has stored the key's delegations from
+		// the new policy, and the ones issued above may predate it. The
+		// access-key DID is freshly generated, so a key holding anything was
+		// rotated meanwhile, and the creation fails and rolls back. A rotation
+		// still uncommitted here is not seen.
 		if err := s.delegations.Replace(ctx, []did.DID{accessKeyID}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 			if len(current[accessKeyID]) > 0 {
 				return nil, fmt.Errorf("access key already holds delegations: %w", store.ErrInvalidArgument)
@@ -288,9 +269,6 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			return map[did.DID][]ucan.Delegation{accessKeyID: dels}, nil
 		}); err != nil {
 			rollback()
-			if errors.Is(err, store.ErrLockTimeout) {
-				return accesskeystore.Record{}, "", ErrConcurrentChange
-			}
 			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)
 		}
 	}
@@ -362,15 +340,9 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 }
 
 // Delete removes an access key belonging to the tenant. Its delegations are
-// revoked first, in one request and under the key's delegation lock, so a
-// rotation of the same key in flight waits for the outcome: publishing before
-// anything is removed leaves the key intact when the revocation service fails,
-// so the call is cleanly retryable — otherwise the delegations would live on
-// with nothing for a verifier to check. The record goes under the same lock,
-// so a rotation that listed the key and is waiting on the lock finds it gone
-// rather than issuing it fresh delegations. Both kinds of key are deleted the
-// same way. A row another write holds past the store's lock timeout is
-// [ErrConcurrentChange].
+// revoked in one request before anything is removed, so a revocation service
+// failure leaves the key intact and the call cleanly retryable. Both kinds of
+// key are deleted the same way.
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -390,12 +362,11 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
-	// The key's delegations are revoked and removed, and its record deleted,
-	// under the key's delegation lock and, on Postgres, in its transaction. A
-	// policy write rotating the key meanwhile serializes with it, and a failure
-	// after the row's delete leaves the record, its delegations and its secret
-	// in place for a retry. The tenant key is read only when there is
-	// something to revoke: a key holding no delegations is deleted without it.
+	// The key's delegations are revoked, then removed and its record deleted,
+	// in one write (on Postgres, one transaction). The publish runs before
+	// anything is deleted, so a failure leaves the record, its delegations and
+	// its secret in place for a retry. The tenant key is read only when there
+	// is something to revoke.
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID), zap.Stringer("access_key", id))
 	err = s.delegations.Replace(ctx, []did.DID{id}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		if len(current[id]) > 0 {
@@ -407,19 +378,13 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 				return nil, err
 			}
 		}
-		// A lock the delete waited on means another writer holds the row;
-		// nothing is committed and the caller repeats the call.
 		if err := s.accessKeys.Delete(ctx, id); err != nil {
 			return nil, fmt.Errorf("deleting access key: %w", err)
 		}
 		return nil, nil
 	})
-	if errors.Is(err, store.ErrLockTimeout) {
-		log.Info("access key removal lost a race with a concurrent write", zap.Error(err))
-		return ErrConcurrentChange
-	}
 	if err != nil {
-		return fmt.Errorf("revoking access key: %w", err)
+		return fmt.Errorf("deleting access key: %w", err)
 	}
 	// The row went first, so a key whose vault entry outlives it is unreachable
 	// rather than present but unusable.

@@ -70,13 +70,12 @@ func allowUser1(actions ...string) s3bkt.Statement {
 	return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
-// createPolicy writes the photos bucket's first policy through the service,
-// as the S3 PutBucketPolicy path does, and returns its ETag.
-func createPolicy(t *testing.T, deps *policyDeps, statements ...s3bkt.Statement) string {
+// createPolicy writes the photos bucket's policy through the service, as the
+// S3 PutBucketPolicy path does.
+func createPolicy(t *testing.T, deps *policyDeps, statements ...s3bkt.Statement) {
 	t.Helper()
-	etag, _, err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}, bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*")))
+	err := deps.policies.Write(t.Context(), deps.tenantID, deps.photos, "photos", s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements})
 	require.NoError(t, err)
-	return etag
 }
 
 func TestPrincipalPolicyReadHandlers(t *testing.T) {

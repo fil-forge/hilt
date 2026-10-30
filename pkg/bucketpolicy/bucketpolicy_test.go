@@ -106,7 +106,6 @@ func TestDecode(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, d.Statements, 2)
 		require.Equal(t, bucketpolicy.Canonical(*doc(allow(everyone, "s3:GetObject"))), bucketpolicy.Canonical(d))
-		require.Equal(t, s3bkt.ETag(*doc(allow(everyone, "s3:GetObject"))), s3bkt.ETag(d))
 	})
 
 	t.Run("round-trips the canonical form", func(t *testing.T) {
@@ -114,7 +113,6 @@ func TestDecode(t *testing.T) {
 		back, err := bucketpolicy.Decode(bucketpolicy.Canonical(d))
 		require.NoError(t, err)
 		require.Equal(t, bucketpolicy.Canonical(d), bucketpolicy.Canonical(back))
-		require.Equal(t, s3bkt.ETag(d), s3bkt.ETag(back))
 		require.ElementsMatch(t, d.Statements, back.Statements)
 	})
 
@@ -344,7 +342,6 @@ func TestCanonical(t *testing.T) {
 		reversed.Resources = s3bkt.NewStringSet(objectsARN, bucketARN, objectsARN)
 		b := *doc(reversed, allow(only("bob", "alice", "bob"), "s3:PutObject", "s3:GetObject", "s3:PutObject"))
 		require.Equal(t, bucketpolicy.Canonical(a), bucketpolicy.Canonical(b))
-		require.Equal(t, s3bkt.ETag(a), s3bkt.ETag(b))
 	})
 
 	t.Run("does not alias the input", func(t *testing.T) {

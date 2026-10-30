@@ -24,9 +24,8 @@ var _ accesskey.Store = (*Store)(nil)
 type Option func(*Store)
 
 // WithPrincipals makes Add run a principal-bound key's insert inside guard,
-// which holds the principal against a removal and refuses one that is not
-// live with [store.ErrInvalidArgument], as the Postgres insert's FOR SHARE on
-// the principal row does. The memory principal store's WithLive is the guard.
+// which refuses a principal that is not live with [store.ErrInvalidArgument],
+// as the Postgres insert's check of the principal row does. The memory principal store's WithLive is the guard.
 // Without it any principal may be named.
 func WithPrincipals(guard func(ctx context.Context, tenant did.DID, principal string, fn func() error) error) Option {
 	return func(s *Store) { s.principals = guard }
@@ -97,9 +96,7 @@ func (s *Store) add(in accesskey.Input) error {
 	return nil
 }
 
-// Get ignores the lock mode: reads and writes are serialized by the store
-// mutex, so a read already waits for an in-flight Delete.
-func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
+func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 

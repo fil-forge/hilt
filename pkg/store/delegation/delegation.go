@@ -11,8 +11,7 @@ import (
 )
 
 type Store interface {
-	// DeleteByAudience removes all delegation records for a given audience,
-	// under that audience's lock.
+	// DeleteByAudience removes all delegation records for a given audience.
 	DeleteByAudience(ctx context.Context, audience did.DID) error
 	// DeleteBySubject removes all delegation records for a given subject.
 	// The undefined DID (powerline) is not removed by this method: it returns
@@ -33,30 +32,35 @@ type Store interface {
 	// of the next Delegation. It returns [store.ErrInvalidArgument] for an undef
 	// subject.
 	ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error)
-	// PutBatch stores a batch of delegation records. It takes the lock of
-	// every audience the batch touches, so it does not interleave with a
-	// Replace of any of them. It returns [store.ErrInvalidArgument] if the
-	// batch contains a nil delegation.
+	// PutBatch stores a batch of delegation records. It returns
+	// [store.ErrInvalidArgument] if the batch contains a nil delegation.
 	PutBatch(ctx context.Context, delegation []ucan.Delegation) error
-	// Replace atomically swaps the delegations of every listed audience in one
-	// transaction: it locks the audiences, hands next the current set of each,
-	// deletes them, stores what next returns, and commits. An audience missing
-	// from next's result, or mapped to nil, is left with none; an error from
-	// next rolls everything back and is returned. An audience holding nothing
-	// is handed a nil set, so Replace also stores a first delegation. next runs
-	// while the audiences are locked and must not call back into the store. It
-	// returns [store.ErrInvalidArgument] if next returns a nil delegation or
-	// one whose audience is not the audience it is filed under; entries for
-	// audiences not listed are ignored. On Postgres next's
-	// ctx carries the transaction, so a store that opens with pglock.Begin
-	// writes inside it. The lock wait is bounded at [store.LockTimeout] and
-	// returns [store.ErrLockTimeout] when it runs out.
+	// Replace swaps the delegations of every listed audience in one
+	// transaction: it hands next the current set of each, deletes them,
+	// stores what next returns, and commits. An audience missing from next's
+	// result, or mapped to nil, is left with none; an error from next rolls
+	// everything back and is returned. An audience holding nothing is handed a
+	// nil set, so Replace also stores a first delegation. next must not call
+	// back into the store. It returns [store.ErrInvalidArgument] if next
+	// returns a nil delegation or one whose audience is not the audience it is
+	// filed under; entries for audiences not listed are ignored. On Postgres
+	// next's ctx carries the transaction, so a store that opens with
+	// pglock.Begin writes inside it. Replace takes no lock: a concurrent
+	// write's delegations stored after the read are deleted with the rest.
 	Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
+	// ReplaceBySubject is [Store.Replace] over the audiences' delegations
+	// whose subject is subject: next is handed only those, only those are
+	// deleted, and every delegation next returns must be over subject. The
+	// audiences' delegations over other subjects are left alone, so two
+	// replacements over different subjects never undo each other. It returns
+	// [store.ErrInvalidArgument] for an undef subject or a returned delegation
+	// over another subject.
+	ReplaceBySubject(ctx context.Context, subject did.DID, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
 }
 
 // CheckReplacement refuses a replacement that holds a nil delegation or one
 // filed under an audience other than its own, which would be written under an
-// audience the call did not lock. Both backends call it after next returns.
+// audience the call did not read. Both backends call it after next returns.
 func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delegation) error {
 	for _, aud := range audiences {
 		for _, d := range replacement[aud] {
@@ -65,6 +69,21 @@ func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delega
 			}
 			if d.Audience() != aud {
 				return fmt.Errorf("delegation %s is for %s, filed under %s: %w", d.Link(), d.Audience(), aud, store.ErrInvalidArgument)
+			}
+		}
+	}
+	return nil
+}
+
+// CheckSubject refuses a replacement holding, under one of the audiences, a
+// delegation over a subject other than subject, which
+// [Store.ReplaceBySubject] would store outside the rows it replaces. Both
+// backends call it after [CheckReplacement], which refuses a nil delegation.
+func CheckSubject(audiences []did.DID, subject string, replacement map[did.DID][]ucan.Delegation) error {
+	for _, aud := range audiences {
+		for _, d := range replacement[aud] {
+			if d.Subject().String() != subject {
+				return fmt.Errorf("delegation %s is over %s, not %s: %w", d.Link(), d.Subject(), subject, store.ErrInvalidArgument)
 			}
 		}
 	}

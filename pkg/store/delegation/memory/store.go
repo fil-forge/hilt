@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	dlgstore "github.com/fil-forge/hilt/pkg/store/delegation"
@@ -19,45 +18,20 @@ import (
 
 const defaultListLimit = 1000
 
-// Store holds two locks. mutex guards the map and is held for one read or one
-// write at a time, never across Replace's callback. writes serializes the
-// writers, as the per-audience advisory locks do on Postgres, and is the lock
-// Replace holds while next runs; it is a one-slot channel rather than a mutex
-// so [Store.hold] can bound its wait.
+// Store guards its map with mutex, held for one read or one write at a time
+// and never across Replace's callback, so writes run side by side as they do
+// on Postgres.
 type Store struct {
-	mutex  sync.RWMutex
-	writes chan struct{}
+	mutex sync.RWMutex
 	// audience DID -> delegations (sorted by link string)
 	byAudience map[did.DID][]ucan.Delegation
 }
 
-// LockWait bounds how long a writer waits for a write in flight before giving
-// up with [store.ErrLockTimeout], as lock_timeout bounds the wait a Postgres
-// advisory lock gives. It is a variable so a test can shorten it.
-var LockWait = store.LockTimeout
-
 var _ dlgstore.Store = (*Store)(nil)
 
 func New() *Store {
-	return &Store{writes: make(chan struct{}, 1), byAudience: map[did.DID][]ucan.Delegation{}}
+	return &Store{byAudience: map[did.DID][]ucan.Delegation{}}
 }
-
-// hold takes the write lock, waiting at most [LockWait] or until ctx is done,
-// and release gives it back.
-func (s *Store) hold(ctx context.Context) error {
-	timer := time.NewTimer(LockWait)
-	defer timer.Stop()
-	select {
-	case s.writes <- struct{}{}:
-		return nil
-	case <-timer.C:
-		return fmt.Errorf("waited %s for an audience a write holds: %w", LockWait, store.ErrLockTimeout)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (s *Store) release() { <-s.writes }
 
 func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) error {
 	// Validate the whole batch before storing anything.
@@ -65,10 +39,6 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
 	}
 
-	if err := s.hold(ctx); err != nil {
-		return err
-	}
-	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -76,21 +46,41 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 	return nil
 }
 
-// Replace swaps the audiences' delegations holding the write lock for the
-// whole call, which serializes it against every other write: next sees the
-// settled current sets and its result is in place before the lock is
-// released. Another writer waits at most [LockWait] for it. Reads take the
-// map alone and are answered while next runs, as on Postgres.
+// Replace reads the audiences' sets, runs next without holding the map, and
+// swaps the sets for next's result.
 func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	if err := s.hold(ctx); err != nil {
-		return err
-	}
-	defer s.release()
+	return s.replace(ctx, audiences, func(ucan.Delegation) bool { return true }, next)
+}
 
+// ReplaceBySubject runs as Replace does over the audiences' delegations over
+// subject.
+func (s *Store) ReplaceBySubject(ctx context.Context, subject did.DID, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	if !subject.Defined() {
+		return fmt.Errorf("cannot replace powerline delegations by subject: %w", store.ErrInvalidArgument)
+	}
+	return s.replace(ctx, audiences, func(d ucan.Delegation) bool { return d.Subject() == subject }, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		replacement, err := next(ctx, current)
+		if err != nil {
+			return nil, err
+		}
+		if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
+			return nil, err
+		}
+		return replacement, dlgstore.CheckSubject(audiences, subject.String(), replacement)
+	})
+}
+
+// replace swaps the audiences' delegations that inScope selects for next's
+// result and keeps the rest.
+func (s *Store) replace(ctx context.Context, audiences []did.DID, inScope func(ucan.Delegation) bool, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
 	s.mutex.RLock()
 	current := make(map[did.DID][]ucan.Delegation, len(audiences))
 	for _, aud := range audiences {
-		current[aud] = slices.Clone(s.byAudience[aud])
+		for _, d := range s.byAudience[aud] {
+			if inScope(d) {
+				current[aud] = append(current[aud], d)
+			}
+		}
 	}
 	s.mutex.RUnlock()
 
@@ -105,14 +95,19 @@ func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	for _, aud := range audiences {
-		delete(s.byAudience, aud)
+		kept := slices.DeleteFunc(slices.Clone(s.byAudience[aud]), inScope)
+		if len(kept) == 0 {
+			delete(s.byAudience, aud)
+		} else {
+			s.byAudience[aud] = kept
+		}
 		s.put(replacement[aud])
 	}
 	return nil
 }
 
 // put stores the delegations, skipping any already held. The caller holds
-// both locks.
+// the mutex.
 func (s *Store) put(delegations []ucan.Delegation) {
 	for _, d := range delegations {
 		aud := d.Audience()
@@ -200,10 +195,6 @@ func page(dlgs []ucan.Delegation, opts []store.PaginationOption) store.Page[ucan
 }
 
 func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) error {
-	if err := s.hold(ctx); err != nil {
-		return err
-	}
-	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -215,11 +206,6 @@ func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) error {
 	if !subject.Defined() {
 		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
 	}
-
-	if err := s.hold(ctx); err != nil {
-		return err
-	}
-	defer s.release()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

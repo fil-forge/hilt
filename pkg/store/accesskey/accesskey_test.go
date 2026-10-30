@@ -1,7 +1,6 @@
 package accesskey_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -160,20 +159,6 @@ func TestAccessKeyStore(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, rec.Principal)
 				require.Equal(t, "user-1", *rec.Principal)
-			})
-
-			t.Run("Get honours the share lock option", func(t *testing.T) {
-				id := testutil.RandomDID(t)
-				tenantID := testutil.RandomDID(t)
-				seed.tenant(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "locked", nil, "s3:GetObject")))
-
-				rec, err := s.Get(t.Context(), id, store.WithShareLock())
-				require.NoError(t, err)
-				require.Equal(t, id, rec.ID)
-
-				_, err = s.Get(t.Context(), testutil.RandomDID(t), store.WithShareLock())
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
 			})
 
 			t.Run("persists an expiry that round-trips", func(t *testing.T) {
@@ -367,49 +352,6 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "k"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
-}
-
-// TestAccessKeyStorePostgresLocking pins the locking contract the authorizer
-// relies on: a share-locked Get waits for a transaction that holds the row FOR
-// UPDATE, and is answered once that transaction ends. Postgres only: the
-// memory store cannot hold a row across calls.
-func TestAccessKeyStorePostgresLocking(t *testing.T) {
-	pool := htestutil.PostgresOrSkip(t)
-	s := accesskeypostgres.New(pool)
-	seed := postgresSeeder(pool)
-
-	id := testutil.RandomDID(t)
-	tenantID := testutil.RandomDID(t)
-	seed.tenant(t, tenantID)
-	require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "k", nil, "s3:GetObject")))
-
-	tx, err := pool.Begin(t.Context())
-	require.NoError(t, err)
-	defer tx.Rollback(t.Context())
-
-	var rec accesskey.Record
-	committed, got := htestutil.RequireWaitsForWriter(t,
-		func(entered chan<- struct{}, release <-chan struct{}) error {
-			var found bool
-			if err := tx.QueryRow(t.Context(), `SELECT TRUE FROM access_key WHERE id = $1 FOR UPDATE`, id.String()).Scan(&found); err != nil {
-				return err
-			}
-			// An unlocked read is answered from the snapshot and never waits.
-			if _, err := s.Get(t.Context(), id); err != nil {
-				return fmt.Errorf("unlocked Get during the hold: %w", err)
-			}
-			close(entered)
-			<-release
-			return tx.Commit(t.Context())
-		},
-		func() error {
-			var err error
-			rec, err = s.Get(context.Background(), id, store.WithShareLock())
-			return err
-		})
-	require.NoError(t, committed)
-	require.NoError(t, got)
-	require.Equal(t, id, rec.ID)
 }
 
 func TestNewServiceKey(t *testing.T) {

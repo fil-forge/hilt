@@ -36,7 +36,7 @@ import (
 
 // TestPolicy covers /s3/bucket/policy: the three S3 bucket policy operations,
 // reached with a service key holding the operation's permission, with the
-// PUT body covered by the signature and the preconditions as signed headers.
+// PUT body covered by the signature.
 func TestPolicy(t *testing.T) {
 	ctx := t.Context()
 	const region, bucketName = "us-west-2", "photos"
@@ -82,15 +82,13 @@ func TestPolicy(t *testing.T) {
 
 	type reqOpts struct {
 		headers      map[string]string // sent with the request
-		unsigned     []string          // headers sent but left out of the signature
 		body         []byte
 		unsignedBody bool   // sign with UNSIGNED-PAYLOAD
 		signedBody   []byte // when set, the signature covers this body instead
 		bucket       string
 	}
 	// request presigns a policy operation on the bucket. The body is covered
-	// by the signature unless unsignedBody is set; every header is signed
-	// unless listed in unsigned.
+	// by the signature unless unsignedBody is set; every header is signed.
 	request := func(t *testing.T, method string, o reqOpts) *s3bkt.PolicyArguments {
 		t.Helper()
 		secret, err := multibase.Encode(multibase.Base64url, akSigner.Bytes())
@@ -101,15 +99,7 @@ func TestPolicy(t *testing.T) {
 		}
 		var opts []sigv4.PresignOption
 		for name := range o.headers {
-			signed := true
-			for _, u := range o.unsigned {
-				if u == name {
-					signed = false
-				}
-			}
-			if signed {
-				opts = append(opts, sigv4.WithSignedHeaders(name))
-			}
+			opts = append(opts, sigv4.WithSignedHeaders(name))
 		}
 		if !o.unsignedBody {
 			signed := o.body
@@ -137,15 +127,14 @@ func TestPolicy(t *testing.T) {
 		{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:PutObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 	}}
 
-	t.Run("a PUT without a precondition creates the policy and stores it under its ETag", func(t *testing.T) {
+	t.Run("a PUT stores the policy on a bucket without one", func(t *testing.T) {
 		f := setup(t, policyPerms, false)
 		ok, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
 		require.NoError(t, err)
-		require.Empty(t, ok.Policy)
+		require.Equal(t, &s3bkt.PolicyOK{}, ok)
 		stored, err := f.policies.Get(ctx, f.bucketID)
 		require.NoError(t, err)
 		require.Equal(t, read, stored.Policy)
-		require.Equal(t, s3bkt.ETag(read), stored.ETag)
 	})
 
 	t.Run("a GET returns the canonical document", func(t *testing.T) {
@@ -157,7 +146,7 @@ func TestPolicy(t *testing.T) {
 		require.Equal(t, &read, ok.Policy)
 	})
 
-	t.Run("a PUT without a precondition replaces whatever is stored", func(t *testing.T) {
+	t.Run("a PUT replaces the stored policy", func(t *testing.T) {
 		f := setup(t, policyPerms, false)
 		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
 		require.NoError(t, err)
@@ -165,47 +154,27 @@ func TestPolicy(t *testing.T) {
 		require.NoError(t, err)
 		stored, err := f.policies.Get(ctx, f.bucketID)
 		require.NoError(t, err)
-		require.Equal(t, s3bkt.ETag(write), stored.ETag)
+		require.Equal(t, write, stored.Policy)
 	})
 
-	t.Run("If-Match replaces on the current tag and is refused on a stale one", func(t *testing.T) {
-		f := setup(t, policyPerms, false)
-		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
-		require.NoError(t, err)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, write), headers: map[string]string{"If-Match": `"stale"`}}))
-		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, write), headers: map[string]string{"If-Match": s3bkt.ETag(read)}}))
-		require.NoError(t, err)
-		stored, err := f.policies.Get(ctx, f.bucketID)
-		require.NoError(t, err)
-		require.Equal(t, s3bkt.ETag(write), stored.ETag)
-	})
-
-	t.Run("If-None-Match: * creates only the first policy", func(t *testing.T) {
-		f := setup(t, policyPerms, false)
-		create := map[string]string{"If-None-Match": "*"}
-		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read), headers: create}))
-		require.NoError(t, err)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, write), headers: create}))
-		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
-	})
-
-	t.Run("a precondition the signature does not cover, both at once, or another If-None-Match is invalid", func(t *testing.T) {
-		f := setup(t, policyPerms, false)
-		for name, o := range map[string]reqOpts{
-			"unsigned If-Match":      {headers: map[string]string{"If-Match": `"x"`}, unsigned: []string{"If-Match"}},
-			"both headers":           {headers: map[string]string{"If-Match": `"x"`, "If-None-Match": "*"}},
-			"If-None-Match not star": {headers: map[string]string{"If-None-Match": `"x"`}},
-			"empty If-Match":         {headers: map[string]string{"If-Match": ""}},
-			"blank If-Match":         {headers: map[string]string{"If-Match": "  "}},
-			"empty If-None-Match":    {headers: map[string]string{"If-None-Match": ""}},
+	// Writes are unconditional, as on AWS: a conditional header neither
+	// guards the write nor makes it invalid.
+	t.Run("a PUT replaces the stored policy whatever conditional header it carries", func(t *testing.T) {
+		for name, headers := range map[string]map[string]string{
+			"If-Match with any tag": {"If-Match": `"any-tag"`},
+			"If-None-Match: *":      {"If-None-Match": "*"},
 		} {
-			o.body = encode(t, read)
-			_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", o))
-			require.ErrorIs(t, err, bucketpolicysvc.ErrInvalidPrecondition, name)
+			t.Run(name, func(t *testing.T) {
+				f := setup(t, policyPerms, false)
+				_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
+				require.NoError(t, err)
+				_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, write), headers: headers}))
+				require.NoError(t, err)
+				stored, err := f.policies.Get(ctx, f.bucketID)
+				require.NoError(t, err)
+				require.Equal(t, write, stored.Policy)
+			})
 		}
-		_, err := f.policies.Get(ctx, f.bucketID)
-		require.Error(t, err, "nothing was written")
 	})
 
 	t.Run("a PUT whose body the signature does not cover, or does not match, is a signature mismatch", func(t *testing.T) {
@@ -227,27 +196,19 @@ func TestPolicy(t *testing.T) {
 		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
 	})
 
-	t.Run("a DELETE removes the policy, conditionally or not, and a bucket without one is PolicyNotFound", func(t *testing.T) {
+	t.Run("a DELETE on a bucket without a policy is PolicyNotFound", func(t *testing.T) {
 		f := setup(t, policyPerms, false)
 		_, err := f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{}))
 		require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound)
+	})
 
-		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
+	t.Run("a DELETE removes the stored policy", func(t *testing.T) {
+		f := setup(t, policyPerms, false)
+		_, err := f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
 		require.NoError(t, err)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-Match": `"stale"`}}))
-		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-None-Match": "*"}}))
-		require.ErrorIs(t, err, bucketpolicysvc.ErrInvalidPrecondition)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-Match": "  "}}))
-		require.ErrorIs(t, err, bucketpolicysvc.ErrInvalidPrecondition, "a blank tag is not an unconditional delete")
-		ok, err := f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{headers: map[string]string{"If-Match": s3bkt.ETag(read)}}))
+		ok, err := f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{}))
 		require.NoError(t, err)
-		require.Empty(t, ok.Policy)
-
-		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
-		require.NoError(t, err)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{}))
-		require.NoError(t, err)
+		require.Equal(t, &s3bkt.PolicyOK{}, ok)
 		_, err = f.svc.Policy(ctx, providerID, request(t, "GET", reqOpts{}))
 		require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound)
 	})

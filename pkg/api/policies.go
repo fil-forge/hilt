@@ -23,12 +23,6 @@ func policyHTTPError(log *zap.Logger, err error) error {
 		errors.Is(err, bucketpolicysvc.ErrPolicyNotFound),
 		errors.Is(err, bucketpolicysvc.ErrPrincipalNotFound):
 		return httpError(http.StatusNotFound, err)
-	case errors.Is(err, bucketpolicysvc.ErrInvalidPrecondition):
-		return httpError(http.StatusBadRequest, err)
-	case errors.Is(err, bucketpolicysvc.ErrPreconditionFailed):
-		return httpError(http.StatusPreconditionFailed, err)
-	case errors.Is(err, bucketpolicysvc.ErrConcurrentChange):
-		return httpError(http.StatusConflict, err)
 	case errors.Is(err, s3bkt.ErrInvalidPolicy):
 		return httpError(http.StatusUnprocessableEntity, err)
 	default:

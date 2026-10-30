@@ -3,7 +3,6 @@ package accesskey_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -41,12 +40,10 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
-	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
-// revocation records one published revocation.
 // failReadBack wraps an access-key store and fails its first Get, standing in
 // for a read-back that cannot see the row the call just wrote. It records the ID
 // it was asked for, so the test can check what the rollback cleaned up.
@@ -56,12 +53,12 @@ type failReadBack struct {
 	failed bool
 }
 
-func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
+func (f *failReadBack) Get(ctx context.Context, id did.DID) (accesskeystore.Record, error) {
 	if !f.failed {
 		f.failed, f.id = true, id
 		return accesskeystore.Record{}, errors.New("read-back failed")
 	}
-	return f.Store.Get(ctx, id, opts...)
+	return f.Store.Get(ctx, id)
 }
 
 type deps struct {
@@ -154,10 +151,9 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	require.NoError(t, err)
 	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 	// alice may read bucket-a; her keys hold the matching delegations.
-	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
+	require.NoError(t, policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
 		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
-	}, Conditional: true}, nil)
-	require.NoError(t, err)
+	}}, nil))
 
 	swarf := &testutil.FakeSwarf{}
 	return deps{
@@ -446,7 +442,7 @@ func TestListGetDelete(t *testing.T) {
 func TestDeleteRevokes(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("revokes every bucket-scoped delegation in one request, with no witness path", func(t *testing.T) {
+	t.Run("revokes exactly the key's bucket-scoped delegations in one request, signed by the tenant", func(t *testing.T) {
 		d := setup(t)
 		// s3:PutObject maps to several commands, so the key gets several delegations.
 		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:PutObject"}, []string{"bucket-a"}, nil, nil)
@@ -457,20 +453,15 @@ func TestDeleteRevokes(t *testing.T) {
 
 		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
 
-		require.Len(t, d.swarf.Revocations(), len(issued.Results))
-		require.Equal(t, 1, d.swarf.Calls(), "every revocation goes in one request")
-		revoked := map[cid.Cid]bool{}
-		for _, r := range d.swarf.Revocations() {
-			// The tenant issued the delegations, so the tenant revokes them directly:
-			// no witness path is needed to prove its authority over them.
-			require.Equal(t, d.tenantID, r.Revoker)
-			revoked[r.Revoked] = true
-		}
+		// The tenant issued the delegations, so the tenant revokes them directly:
+		// no witness path is needed to prove its authority over them. The
+		// bucket→tenant root is the tenant's own, so it is not among them.
+		want := make([]testutil.Revocation, 0, len(issued.Results))
 		for _, dlg := range issued.Results {
-			require.True(t, revoked[dlg.Link()], "delegation %s was not revoked", dlg.Link())
+			want = append(want, testutil.Revocation{Revoker: d.tenantID, Revoked: dlg.Link(), Delegation: dlg})
 		}
-		// The bucket→tenant root is the tenant's own, not the access key's.
-		require.False(t, revoked[d.bucketRoot.Link()], "the bucket root must not be revoked")
+		require.Len(t, d.swarf.Batches(), 1, "every revocation goes in one request")
+		require.ElementsMatch(t, want, d.swarf.Batches()[0])
 	})
 
 	t.Run("revokes a powerline delegation", func(t *testing.T) {
@@ -532,23 +523,46 @@ func TestDeleteRevokes(t *testing.T) {
 		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 	})
 
-	t.Run("a revocation failure leaves the key intact", func(t *testing.T) {
+	t.Run("returns the publish error and keeps the key, its delegations and its secret when publishing its revocations fails", func(t *testing.T) {
 		d := setup(t)
 		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, nil, nil)
 		require.NoError(t, err)
-		d.swarf.Err = errors.New("swarf is down")
-
-		err = d.svc.Delete(ctx, "tenant-1", created.ID.Identifier())
-		require.ErrorContains(t, err, "publishing revocation")
-
-		// Nothing was removed, so the call can simply be retried.
-		_, _, err = d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
+		held, err := d.delegations.ListByAudience(ctx, created.ID)
 		require.NoError(t, err)
+		swarfDown := errors.New("swarf is down")
+		d.swarf.Err = swarfDown
+
+		require.ErrorIs(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()), swarfDown)
+
+		got, _, err := d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
+		require.NoError(t, err)
+		require.Equal(t, created.ID, got.ID)
 		remaining, err := d.delegations.ListByAudience(ctx, created.ID)
 		require.NoError(t, err)
-		require.NotEmpty(t, remaining.Results)
+		require.ElementsMatch(t, held.Results, remaining.Results)
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, created.ID))
 		require.NoError(t, err)
+	})
+
+	t.Run("a repeat after a failed publish revokes the key's delegations and deletes it", func(t *testing.T) {
+		d := setup(t)
+		created, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, []string{"bucket-a"}, nil, nil)
+		require.NoError(t, err)
+		held, err := d.delegations.ListByAudience(ctx, created.ID)
+		require.NoError(t, err)
+		d.swarf.Err = errors.New("swarf is down")
+		require.Error(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
+		d.swarf.Err = nil
+
+		require.NoError(t, d.svc.Delete(ctx, "tenant-1", created.ID.Identifier()))
+
+		want := make([]testutil.Revocation, 0, len(held.Results))
+		for _, dlg := range held.Results {
+			want = append(want, testutil.Revocation{Revoker: d.tenantID, Revoked: dlg.Link(), Delegation: dlg})
+		}
+		require.ElementsMatch(t, want, d.swarf.Revocations())
+		_, _, err = d.svc.Get(ctx, "tenant-1", created.ID.Identifier())
+		require.ErrorIs(t, err, accesskeysvc.ErrAccessKeyNotFound)
 	})
 }
 
@@ -598,59 +612,4 @@ func TestDeletePostgresRollsBackAfterRowDelete(t *testing.T) {
 	require.Empty(t, page.Results)
 	_, err = d.secrets.Read(t.Context(), vault.AccessKeyPath(d.tenantID, rec.ID))
 	require.Error(t, err)
-}
-
-// lockTimeoutPrincipals answers a share-locked Get with the store's lock timeout.
-type lockTimeoutPrincipals struct{ principal.Store }
-
-func (l *lockTimeoutPrincipals) Get(ctx context.Context, tenant did.DID, id string, opts ...store.ReadOption) (principal.Record, error) {
-	if store.NewReadConfig(opts...).Share {
-		return principal.Record{}, fmt.Errorf("locking principal: %w", store.ErrLockTimeout)
-	}
-	return l.Store.Get(ctx, tenant, id, opts...)
-}
-
-// lockTimeoutPolicies answers a share-locked ListByPrincipal with the lock timeout.
-type lockTimeoutPolicies struct{ bucketpolicystore.Store }
-
-func (l *lockTimeoutPolicies) ListByPrincipal(ctx context.Context, tenant did.DID, id string, opts ...store.ReadOption) ([]bucketpolicystore.Record, error) {
-	if store.NewReadConfig(opts...).Share {
-		return nil, fmt.Errorf("listing policies: %w", store.ErrLockTimeout)
-	}
-	return l.Store.ListByPrincipal(ctx, tenant, id, opts...)
-}
-
-// lockTimeoutKeys answers Add with the lock timeout.
-type lockTimeoutKeys struct{ accesskeystore.Store }
-
-func (l *lockTimeoutKeys) Add(context.Context, accesskeystore.Input) error {
-	return fmt.Errorf("locking principal: %w", store.ErrLockTimeout)
-}
-
-// lockTimeoutDelegations answers Replace with the lock timeout.
-type lockTimeoutDelegations struct{ delegationstore.Store }
-
-func (l *lockTimeoutDelegations) Replace(context.Context, []did.DID, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	return fmt.Errorf("locking audiences: %w", store.ErrLockTimeout)
-}
-
-// TestCreateLockTimeoutsAreConcurrentChanges checks that every lock a
-// principal-bound key's creation waits on is bounded, and that a wait running
-// out is reported as a concurrent change for the caller to retry.
-func TestCreateLockTimeoutsAreConcurrentChanges(t *testing.T) {
-	cases := map[string]func(b *backend){
-		"looking the principal up": func(b *backend) { b.principals = &lockTimeoutPrincipals{b.principals} },
-		"storing the key":          func(b *backend) { b.accessKeys = &lockTimeoutKeys{b.accessKeys} },
-		"listing its policies":     func(b *backend) { b.policies = &lockTimeoutPolicies{b.policies} },
-		"storing the delegations":  func(b *backend) { b.delegations = &lockTimeoutDelegations{b.delegations} },
-	}
-	for name, wrap := range cases {
-		t.Run(name, func(t *testing.T) {
-			b := memoryBackend(t)
-			wrap(&b)
-			d := setupWith(t, b)
-			_, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, new("alice"), nil)
-			require.ErrorIs(t, err, accesskeysvc.ErrConcurrentChange)
-		})
-	}
 }

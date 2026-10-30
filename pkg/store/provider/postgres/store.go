@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store/pglock"
+
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/ucantone/did"
@@ -44,7 +46,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string, policy *did.
 		str := policy.String()
 		policyStr = &str
 	}
-	_, err := s.pool.Exec(ctx, `
+	_, err := pglock.ResolveDBTX(ctx, s.pool).Exec(ctx, `
 		INSERT INTO provider (id, region, policy)
 		VALUES ($1, $2, $3)
 	`, id.String(), region, policyStr)
@@ -59,7 +61,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string, policy *did.
 }
 
 func (s *Store) Get(ctx context.Context, id did.DID) (provider.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.ResolveDBTX(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, region, policy, created_at, updated_at
 		FROM provider
 		WHERE id = $1
@@ -78,7 +80,7 @@ func (s *Store) SetPolicy(ctx context.Context, id did.DID, policy did.DID) error
 	if policy == did.Undef {
 		return fmt.Errorf("provider policy is required: %w", store.ErrInvalidArgument)
 	}
-	tag, err := s.pool.Exec(ctx, `
+	tag, err := pglock.ResolveDBTX(ctx, s.pool).Exec(ctx, `
 		UPDATE provider
 		SET policy = $2, updated_at = NOW()
 		WHERE id = $1
@@ -93,7 +95,7 @@ func (s *Store) SetPolicy(ctx context.Context, id did.DID, policy did.DID) error
 }
 
 func (s *Store) GetByRegion(ctx context.Context, region string) (provider.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.ResolveDBTX(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, region, policy, created_at, updated_at
 		FROM provider
 		WHERE region = $1
@@ -112,7 +114,7 @@ func (s *Store) List(ctx context.Context) ([]provider.Record, error) {
 	// COLLATE "C" orders by bytes. The database's default collation is locale
 	// aware and case-insensitive at its primary level, which would order the
 	// mixed-case base58 of did:key strings differently from the memory store.
-	rows, err := s.pool.Query(ctx, `
+	rows, err := pglock.ResolveDBTX(ctx, s.pool).Query(ctx, `
 		SELECT id, region, policy, created_at, updated_at
 		FROM provider
 		ORDER BY id COLLATE "C" ASC

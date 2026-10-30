@@ -1,7 +1,6 @@
 package auth_test
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
@@ -12,7 +11,6 @@ import (
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
-	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -21,7 +19,6 @@ import (
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -221,14 +218,11 @@ func TestAuthorize(t *testing.T) {
 	// grant stores a policy on the bucket. statements are applied as given.
 	grant := func(t *testing.T, policies *bucketpolicymemory.Store, bucketID, tenantID did.DID, statements ...s3bkt.Statement) {
 		t.Helper()
-		_, err := policies.Put(ctx, bucketpolicystore.Input{
+		require.NoError(t, policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
 			Tenant: tenantID,
 			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements},
-
-			Conditional: true,
-		}, nil)
-		require.NoError(t, err)
+		}, nil))
 	}
 
 	t.Run("authorizes a validly-signed request", func(t *testing.T) {
@@ -965,81 +959,6 @@ func TestAuthorize(t *testing.T) {
 	})
 }
 
-// lockedAccessKeys, lockedPrincipals and lockedPolicies fail every Get with
-// err, standing in for a share-locked read the store gave up on behind a write
-// still holding the row.
-type lockedAccessKeys struct {
-	accesskey.Store
-	err error
-}
-
-func (l *lockedAccessKeys) Get(context.Context, did.DID, ...store.ReadOption) (accesskey.Record, error) {
-	return accesskey.Record{}, l.err
-}
-
-type lockedPrincipals struct {
-	principalstore.Store
-	err error
-}
-
-func (l *lockedPrincipals) Get(context.Context, did.DID, string, ...store.ReadOption) (principalstore.Record, error) {
-	return principalstore.Record{}, l.err
-}
-
-type lockedPolicies struct {
-	bucketpolicystore.Store
-	err error
-}
-
-func (l *lockedPolicies) Get(context.Context, did.DID, ...store.ReadOption) (bucketpolicystore.Record, error) {
-	return bucketpolicystore.Record{}, l.err
-}
-
-// TestAuthorizeLockTimeout pins that a share-locked read the store gave up on
-// is the named, retryable failure rather than an internal error, at each of
-// the three reads that take the lock.
-func TestAuthorizeLockTimeout(t *testing.T) {
-	ctx := t.Context()
-	const region = "us-west-2"
-	providerID := testutil.RandomDID(t)
-	accessKey, err := ed25519.GenerateIssuer()
-	require.NoError(t, err)
-
-	accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-	providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
-	principals, policies, delegations := principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New()
-	require.NoError(t, providers.Add(ctx, providerID, region, nil))
-	tenantID := testutil.RandomDID(t)
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-	bucketID := testutil.RandomDID(t)
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
-	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
-	seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
-	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
-		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
-	}, Conditional: true}, nil)
-	require.NoError(t, err)
-
-	// With every read answered, the request is authorized.
-	az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
-	_, err = az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
-	require.NoError(t, err)
-
-	timeout := store.ErrLockTimeout
-	cases := map[string]*auth.Authorizer{
-		"access key":    auth.NewAuthorizer(zap.NewNop(), &lockedAccessKeys{accessKeys, timeout}, tenants, providers, buckets, principals, policies, secrets),
-		"principal":     auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, &lockedPrincipals{principals, timeout}, policies, secrets),
-		"bucket policy": auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, &lockedPolicies{policies, timeout}, secrets),
-	}
-	for name, az := range cases {
-		t.Run(name+" read waited out the lock timeout", func(t *testing.T) {
-			_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
-			require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
-			require.ErrorIs(t, err, store.ErrLockTimeout, "the failure must carry the store's timeout")
-		})
-	}
-}
-
 func TestTenantIssuer(t *testing.T) {
 	ctx := t.Context()
 	buckets, secrets := bucketmemory.New(), vaultmemory.New()
@@ -1062,13 +981,8 @@ func TestTenantIssuer(t *testing.T) {
 	})
 }
 
-// TestEffectiveActionsDuringPolicyWrite runs the principal-bound read path
-// against Postgres while a policy write is in flight. The write holds the
-// policy row and then locks the principal, as its delegation rotation does;
-// the read takes the principal and then the policy. Each read runs in its own
-// short transaction, so the read waits for the write and neither waits on the
-// other.
-func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
+// TestEffectiveActions runs the principal-bound read path against Postgres.
+func TestEffectiveActions(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	principals := principalpostgres.New(pool)
 	policies := bucketpolicypostgres.New(pool)
@@ -1077,35 +991,28 @@ func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
 	tenantID, providerID, bucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, tenantID.String(), nil))
 	require.NoError(t, tenantpostgres.New(pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
-	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "effective-actions"))
-	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
-	statement := func(actions ...string) s3bkt.PolicyDocument {
-		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
-	}
-	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
-	require.NoError(t, err)
+	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, "any-bucket"))
+	require.NoError(t, principals.Add(t.Context(), tenantID, "any-user"))
 
-	var actions []string
-	var readETag string
-	written, read := htestutil.RequireWaitsForWriter(t,
-		func(entered chan<- struct{}, release <-chan struct{}) error {
-			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
-				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:PutObject"), IfMatch: &etag,
-				Conditional: true,
-			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
-				close(entered)
-				<-release
-				return principals.WithLock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
-			})
-			return err
-		},
-		func() error {
-			var err error
-			actions, readETag, err = az.EffectiveActions(context.Background(), tenantID, "alice", bucketID)
-			return err
-		})
-	require.NoError(t, written)
-	require.NoError(t, read)
-	require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions, "the read is answered from the committed write")
-	require.Equal(t, s3bkt.ETag(statement("s3:GetObject", "s3:PutObject")), readETag)
+	t.Run("returns no actions for a bucket with no policy", func(t *testing.T) {
+		actions, err := az.EffectiveActions(t.Context(), tenantID, "any-user", bucketID)
+		require.NoError(t, err)
+		require.Empty(t, actions)
+	})
+
+	t.Run("returns the actions the stored policy grants the principal", func(t *testing.T) {
+		require.NoError(t, policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
+			Version: s3bkt.Version2012,
+			Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("any-user"), Actions: s3bkt.NewStringSet("s3:GetObject", "s3:PutObject"),
+				Resources: s3bkt.NewStringSet(s3bkt.BucketARN("any-bucket"), s3bkt.ObjectsARN("any-bucket"))}},
+		}}, nil))
+		actions, err := az.EffectiveActions(t.Context(), tenantID, "any-user", bucketID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions)
+	})
+
+	t.Run("returns an unknown access key for a principal that is not in the tenant", func(t *testing.T) {
+		_, err := az.EffectiveActions(t.Context(), tenantID, "other-user", bucketID)
+		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
+	})
 }

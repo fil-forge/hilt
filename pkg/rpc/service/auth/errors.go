@@ -6,33 +6,30 @@ import "github.com/fil-forge/ucantone/errors"
 // mapping to canonical S3 error responses) can match on the stable Name() of a
 // serialized failure.
 const (
-	MalformedSignatureErrorName     = "MalformedSignature"
-	InvalidAccessKeyIDErrorName     = "InvalidAccessKeyID"
-	UnknownAccessKeyErrorName       = "UnknownAccessKey"
-	SignatureMismatchErrorName      = "SignatureMismatch"
-	SignatureExpiredErrorName       = "SignatureExpired"
-	AccessKeyExpiredErrorName       = "AccessKeyExpired"
-	TenantDisabledErrorName         = "TenantDisabled"
-	IssuerForbiddenErrorName        = "IssuerForbidden"
-	RegionNotServedErrorName        = "RegionNotServed"
-	UnsupportedOperationErrorName   = "UnsupportedOperation"
-	ConflictingQueryErrorName       = "ConflictingQuery"
-	OperationNotPermittedErrorName  = "OperationNotPermitted"
-	UnknownBucketErrorName          = "UnknownBucket"
-	ForeignBucketErrorName          = "ForeignBucket"
-	BucketNotPermittedErrorName     = "BucketNotPermitted"
-	UnsignedHeaderErrorName         = "UnsignedHeader"
-	InvalidBodyErrorName            = "InvalidBody"
-	TemporarilyUnavailableErrorName = "TemporarilyUnavailable"
+	MalformedSignatureErrorName    = "MalformedSignature"
+	InvalidAccessKeyIDErrorName    = "InvalidAccessKeyID"
+	UnknownAccessKeyErrorName      = "UnknownAccessKey"
+	SignatureMismatchErrorName     = "SignatureMismatch"
+	SignatureExpiredErrorName      = "SignatureExpired"
+	AccessKeyExpiredErrorName      = "AccessKeyExpired"
+	TenantDisabledErrorName        = "TenantDisabled"
+	IssuerForbiddenErrorName       = "IssuerForbidden"
+	RegionNotServedErrorName       = "RegionNotServed"
+	UnsupportedOperationErrorName  = "UnsupportedOperation"
+	ConflictingQueryErrorName      = "ConflictingQuery"
+	OperationNotPermittedErrorName = "OperationNotPermitted"
+	UnknownBucketErrorName         = "UnknownBucket"
+	ForeignBucketErrorName         = "ForeignBucket"
+	BucketNotPermittedErrorName    = "BucketNotPermitted"
+	UnsignedHeaderErrorName        = "UnsignedHeader"
+	InvalidBodyErrorName           = "InvalidBody"
 )
 
 // Named rejection errors returned by [Authorizer.Authorize]. Each is a sentinel
 // carrying a stable Name(), wrapped with per-request context at the return site,
 // so callers can branch on the reason with errors.Is. Unexpected/internal
 // failures (store or vault errors) are intentionally not named — they are
-// 500-class, not authorization rejections. The one store failure that is named
-// is the lock timeout, [ErrTemporarilyUnavailable], because the caller can
-// retry it.
+// 500-class, not authorization rejections.
 var (
 	// ErrMalformedSignature is returned when the request carries no parseable
 	// signature — absent entirely, or present but unparseable (unsupported
@@ -99,12 +96,4 @@ var (
 	// allows, or not covered by the signature as the payload hash or a
 	// signed checksum header. The wrapped message says which.
 	ErrInvalidBody = errors.New(InvalidBodyErrorName, "the request body cannot be authorized on")
-	// ErrTemporarilyUnavailable is returned when the share-locked read of the
-	// key, its principal or the bucket's policy waited out the store's lock
-	// timeout behind a write still committing. Nothing about the request was
-	// decided; a retry is answered from whichever state the write leaves. The
-	// returned error wraps [store.ErrLockTimeout] as well. Bucket info also
-	// returns it, without the store's timeout, when the policy or the key's
-	// grants moved between its reads.
-	ErrTemporarilyUnavailable = errors.New(TemporarilyUnavailableErrorName, "authorization state is being changed, retry the request")
 )

@@ -20,8 +20,6 @@ func principalHTTPError(log *zap.Logger, err error) error {
 		return httpError(http.StatusNotFound, err)
 	case errors.Is(err, principalsvc.ErrInvalidPrincipalID):
 		return httpError(http.StatusUnprocessableEntity, err)
-	case errors.Is(err, principalsvc.ErrConcurrentChange):
-		return httpError(http.StatusConflict, err)
 	default:
 		log.Error("request failed", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
