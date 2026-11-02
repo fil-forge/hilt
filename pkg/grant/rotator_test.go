@@ -304,6 +304,15 @@ func TestRotate(t *testing.T) {
 		require.Equal(t, map[string]int{"ListByTenant": 2}, keys.reads)
 	})
 
+	t.Run("a rotation with no principals reads nothing", func(t *testing.T) {
+		d := setup(t, nil)
+		keys := &countReads{Store: d.accessKeys, reads: map[string]int{}}
+		rotator := grant.NewRotator(zap.NewNop(), d.delegations, keys, d.secrets, d.swarf)
+		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{}))
+
+		require.Empty(t, keys.reads)
+	})
+
 	t.Run("reads only the keys' delegations over the bucket", func(t *testing.T) {
 		d := setup(t, nil)
 		dels := &recordCurrent{Store: d.delegations}
