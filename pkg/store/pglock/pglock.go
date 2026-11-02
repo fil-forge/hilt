@@ -70,11 +70,14 @@ func Advisory(ctx context.Context, tx pgx.Tx, namespace int32, key string, share
 }
 
 // AdvisoryAll takes the exclusive transaction-scoped advisory lock of each key
-// inside tx, as [Advisory] does for one, in a single statement. The locks are
-// taken in the order of keys: Postgres evaluates the volatile lock function
-// after sorting the rows by their position in the array, so a caller that
-// passes its keys sorted keeps the ordering that stops two writers from
-// deadlocking on overlapping sets.
+// inside tx, as [Advisory] does for one, in a single statement. Callers pass
+// their keys sorted, so that two writers locking overlapping sets queue for
+// the shared keys in the same sequence. The statement orders the rows by
+// their position in the array, and Postgres's planner evaluates a volatile
+// target-list function such as the lock after that sort, but SQL does not
+// promise that order. If two writers did lock out of order and deadlock,
+// Postgres aborts one of them, which [MapError] reports as
+// [store.ErrLockTimeout] for the caller to retry.
 func AdvisoryAll(ctx context.Context, tx pgx.Tx, namespace int32, keys []string) error {
 	if len(keys) == 0 {
 		return nil

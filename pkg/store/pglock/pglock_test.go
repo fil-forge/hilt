@@ -75,14 +75,19 @@ func TestAdvisoryAllHoldsEveryKey(t *testing.T) {
 	probe, err := pool.Acquire(ctx)
 	require.NoError(t, err)
 	defer probe.Release()
+	// Release whatever the probe still holds if an assertion stops the test
+	// between taking a lock and releasing it, so the pooled connection goes
+	// back clean.
+	defer probe.Exec(ctx, `SELECT pg_advisory_unlock_all()`)
 	held := func(key string) bool {
-		var free bool
-		require.NoError(t, probe.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, hashtext($2))`, namespace, key).Scan(&free))
-		if free {
-			_, err := probe.Exec(ctx, `SELECT pg_advisory_unlock($1, hashtext($2))`, namespace, key)
-			require.NoError(t, err)
+		var acquired bool
+		require.NoError(t, probe.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, hashtext($2))`, namespace, key).Scan(&acquired))
+		if !acquired {
+			return true
 		}
-		return !free
+		_, err := probe.Exec(ctx, `SELECT pg_advisory_unlock($1, hashtext($2))`, namespace, key)
+		require.NoError(t, err)
+		return false
 	}
 	heldAll := func() map[string]bool {
 		out := map[string]bool{}
@@ -94,6 +99,7 @@ func TestAdvisoryAllHoldsEveryKey(t *testing.T) {
 
 	tx, err := pool.Begin(ctx)
 	require.NoError(t, err)
+	defer tx.Rollback(ctx) // no-op once committed
 	require.NoError(t, pglock.AdvisoryAll(ctx, tx, namespace, keys))
 	require.Equal(t, map[string]bool{"a": true, "b": true, "c": true}, heldAll())
 
