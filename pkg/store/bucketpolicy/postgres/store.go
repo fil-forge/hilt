@@ -357,7 +357,7 @@ func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bk
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
-		SELECT $1, $2, principal_id FROM unnest($3::text[]) AS principal_id
+		SELECT $1::text, $2::text, p.principal_id FROM unnest($3::text[]) AS p(principal_id)
 	`, bucket.String(), tenant.String(), ids); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
