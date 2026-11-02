@@ -124,17 +124,16 @@ const lockNamespace int32 = 0x44454c47 // "DELG"
 // lockAudiences bounds tx's lock waits at [store.LockTimeout] and takes the
 // exclusive advisory lock of each distinct audience, in sorted order. The
 // order is what keeps two transactions locking overlapping audiences from
-// deadlocking: they queue for the shared audiences in the same sequence. The
-// locks are released when tx commits or rolls back.
+// deadlocking: they queue for the shared audiences in the same sequence. All
+// of them are taken in one statement, so a rotation over many keys waits on
+// one round trip. The locks are released when tx commits or rolls back.
 func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
 		return err
 	}
 	slices.Sort(audiences)
-	for _, aud := range slices.Compact(audiences) {
-		if err := pglock.Advisory(ctx, tx, lockNamespace, aud, false); err != nil {
-			return fmt.Errorf("locking delegation audience: %w", err)
-		}
+	if err := pglock.AdvisoryAll(ctx, tx, lockNamespace, slices.Compact(audiences)); err != nil {
+		return fmt.Errorf("locking delegation audiences: %w", err)
 	}
 	return nil
 }

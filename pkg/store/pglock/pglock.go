@@ -69,6 +69,26 @@ func Advisory(ctx context.Context, tx pgx.Tx, namespace int32, key string, share
 	return nil
 }
 
+// AdvisoryAll takes the exclusive transaction-scoped advisory lock of each key
+// inside tx, as [Advisory] does for one, in a single statement. The locks are
+// taken in the order of keys: Postgres evaluates the volatile lock function
+// after sorting the rows by their position in the array, so a caller that
+// passes its keys sorted keeps the ordering that stops two writers from
+// deadlocking on overlapping sets.
+func AdvisoryAll(ctx context.Context, tx pgx.Tx, namespace int32, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock($1, hashtext(k.name))
+		FROM unnest($2::text[]) WITH ORDINALITY AS k(name, ord)
+		ORDER BY k.ord
+	`, namespace, keys); err != nil {
+		return fmt.Errorf("taking advisory locks: %w", err)
+	}
+	return nil
+}
+
 // Found maps a single-row read's result: no row is [store.ErrRecordNotFound],
 // any other error is wrapped as "getting <recordType>", and a found row is returned
 // as is.

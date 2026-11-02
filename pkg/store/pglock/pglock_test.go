@@ -61,3 +61,42 @@ func TestBeginJoinsTheTransactionInContext(t *testing.T) {
 		require.Equal(t, 1, count("own"))
 	})
 }
+
+// AdvisoryAll takes every key's lock in one statement and holds them until
+// the transaction ends.
+func TestAdvisoryAllHoldsEveryKey(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := context.Background()
+	const namespace int32 = 0x54455354 // "TEST"
+	keys := []string{"a", "b", "c"}
+
+	// held probes the key from a connection of its own, which a session lock
+	// needs: it must be released on the connection that took it.
+	probe, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer probe.Release()
+	held := func(key string) bool {
+		var free bool
+		require.NoError(t, probe.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, hashtext($2))`, namespace, key).Scan(&free))
+		if free {
+			_, err := probe.Exec(ctx, `SELECT pg_advisory_unlock($1, hashtext($2))`, namespace, key)
+			require.NoError(t, err)
+		}
+		return !free
+	}
+	heldAll := func() map[string]bool {
+		out := map[string]bool{}
+		for _, k := range keys {
+			out[k] = held(k)
+		}
+		return out
+	}
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	require.NoError(t, pglock.AdvisoryAll(ctx, tx, namespace, keys))
+	require.Equal(t, map[string]bool{"a": true, "b": true, "c": true}, heldAll())
+
+	require.NoError(t, tx.Commit(ctx))
+	require.Equal(t, map[string]bool{"a": false, "b": false, "c": false}, heldAll())
+}
