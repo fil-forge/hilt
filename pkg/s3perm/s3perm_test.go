@@ -165,11 +165,6 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 		{"s3:GetObject", "s3:GetObjectRetention"},
 		{"s3:GetObject", "s3:GetObjectLegalHold"},
 		{"s3:ListBucket", "s3:ListBucketVersions"},
-		// A write that tags the version it creates is authorized under the
-		// write's re-delegation, with s3:PutObjectTagging checked beside it
-		// (auth.classification.readHeaders); the lock pairs above cover the
-		// lock headers the same way.
-		{"s3:PutObject", "s3:PutObjectTagging"},
 	} {
 		// Guard against the check going vacuous if a set is ever emptied.
 		require.NotEmpty(t, strs(c.specialized), c.specialized)
@@ -177,21 +172,6 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 			require.Contains(t, strs(c.classified), cmd,
 				"%s classifies as %s, which must therefore grant %s", c.specialized, c.classified, cmd)
 		}
-	}
-}
-
-// TestOperationPermissionCoversCompanion pins that an operation's own
-// permission grants every command its companion does. The authorize handler
-// re-delegates the commands of the operation's own permission alone, so a
-// companion that mapped to a command outside that set would leave the gateway
-// a command short at runtime.
-func TestOperationPermissionCoversCompanion(t *testing.T) {
-	perms := auth.OpGetObjectAttributes.Permissions()
-	require.Len(t, perms, 2)
-	own, companion := perms[0], perms[1]
-	require.NotEmpty(t, strs(companion), companion)
-	for _, cmd := range strs(companion) {
-		require.Contains(t, strs(own), cmd, "%s needs %s, which must therefore grant %s", own, companion, cmd)
 	}
 }
 
@@ -218,13 +198,13 @@ func TestPolicyAction(t *testing.T) {
 func TestPolicyActions(t *testing.T) {
 	actions := s3bkt.PolicyActions()
 	require.True(t, slices.IsSorted(actions))
-	require.Len(t, actions, 25)
+	require.Len(t, actions, 24)
 	for _, p := range actions {
 		require.True(t, s3bkt.PolicyAction(p), p)
 	}
 	for _, p := range []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
 		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
-		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketCORS", s3bkt.PolicyWildcard} {
+		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration", s3bkt.PolicyWildcard} {
 		require.NotContains(t, actions, p)
 	}
 	require.False(t, s3bkt.PolicyAction(s3bkt.PolicyWildcard))
@@ -298,5 +278,4 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 	require.Equal(t, auth.OpUploadPartCopy, op)
 	require.True(t, s3perm.Valid(op.Permission()))
 	require.True(t, s3perm.Valid(auth.SourcePermission))
-	require.True(t, s3perm.Valid(auth.SourceVersionPermission))
 }

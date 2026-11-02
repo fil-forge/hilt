@@ -21,8 +21,7 @@ const (
 	UnknownBucketErrorName          = "UnknownBucket"
 	ForeignBucketErrorName          = "ForeignBucket"
 	BucketNotPermittedErrorName     = "BucketNotPermitted"
-	UnsignedHeaderErrorName         = "UnsignedHeader"
-	InvalidBodyErrorName            = "InvalidBody"
+	UnsignedCopySourceErrorName     = "UnsignedCopySource"
 	TemporarilyUnavailableErrorName = "TemporarilyUnavailable"
 )
 
@@ -86,19 +85,10 @@ var (
 	// ErrBucketNotPermitted is returned when a service key's bucket scope does
 	// not include a bucket the request addresses.
 	ErrBucketNotPermitted = errors.New(BucketNotPermittedErrorName, "access key is not permitted to use this bucket")
-	// ErrUnsignedHeader is returned when a header the request is authorized
-	// on (a copy's x-amz-copy-source, or a header that adds a permission to
-	// the operation, see [Requirements.Headers]) is not covered by the request
-	// signature, so what it says cannot be trusted and the request cannot be
-	// authorized. The wrapped message names the header.
-	ErrUnsignedHeader = errors.New(UnsignedHeaderErrorName, "a header the request is authorized on is not covered by the request signature")
-	// ErrInvalidBody is returned when the body a request is authorized on
-	// (a DeleteObjects' entries, see [Operation.ReadsBody]) cannot be
-	// decided on: missing, carried by an operation hilt does not read one
-	// for, unparseable, over [MaxBodySize], naming more keys than S3
-	// allows, or not covered by the signature as the payload hash or a
-	// signed checksum header. The wrapped message says which.
-	ErrInvalidBody = errors.New(InvalidBodyErrorName, "the request body cannot be authorized on")
+	// ErrUnsignedCopySource is returned when a copy request's x-amz-copy-source
+	// header is not covered by the request signature, so the source it names
+	// cannot be trusted and the copy cannot be authorized.
+	ErrUnsignedCopySource = errors.New(UnsignedCopySourceErrorName, "x-amz-copy-source is not covered by the request signature")
 	// ErrTemporarilyUnavailable is returned when the share-locked read of the
 	// key, its principal or the bucket's policy waited out the store's lock
 	// timeout behind a write still committing. Nothing about the request was

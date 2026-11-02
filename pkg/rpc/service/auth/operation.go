@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/fil-forge/hilt/pkg/sigv4"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 )
 
@@ -66,14 +65,11 @@ const (
 	OpListBucketMultipartUploads Operation = "ListBucketMultipartUploads" // GET, bucket, no key, ?uploads
 
 	// Bucket configuration operations, each distinguished from the plain
-	// bucket operations by its subresource. Removing the bucket's tags or its
-	// CORS configuration needs the same permission as writing them, as it
-	// does in S3.
+	// bucket operations by its subresource. Removing the bucket's tags needs
+	// the same permission as writing them, as it does in S3.
 	OpGetBucketLocation          Operation = "GetBucketLocation"          // GET, bucket, no key, ?location
 	OpGetBucketAcl               Operation = "GetBucketAcl"               // GET, bucket, no key, ?acl
 	OpGetBucketCors              Operation = "GetBucketCors"              // GET, bucket, no key, ?cors
-	OpPutBucketCors              Operation = "PutBucketCors"              // PUT, bucket, no key, ?cors
-	OpDeleteBucketCors           Operation = "DeleteBucketCors"           // DELETE, bucket, no key, ?cors
 	OpGetBucketPolicyStatus      Operation = "GetBucketPolicyStatus"      // GET, bucket, no key, ?policyStatus
 	OpGetBucketTagging           Operation = "GetBucketTagging"           // GET, bucket, no key, ?tagging
 	OpPutBucketTagging           Operation = "PutBucketTagging"           // PUT, bucket, no key, ?tagging
@@ -132,8 +128,6 @@ var operationPermission = map[Operation]string{
 	OpGetBucketLocation:          "s3:GetBucketLocation",
 	OpGetBucketAcl:               "s3:GetBucketAcl",
 	OpGetBucketCors:              "s3:GetBucketCORS",
-	OpPutBucketCors:              "s3:PutBucketCORS",
-	OpDeleteBucketCors:           "s3:PutBucketCORS",
 	OpGetBucketPolicyStatus:      "s3:GetBucketPolicyStatus",
 	OpGetBucketTagging:           "s3:GetBucketTagging",
 	OpPutBucketTagging:           "s3:PutBucketTagging",
@@ -149,44 +143,17 @@ var operationPermission = map[Operation]string{
 	OpGetObjectAttributes: "s3:GetObjectAttributes",
 }
 
-// Permission returns the S3 permission that names the operation: the one an
-// access key must hold to perform it on the bucket it addresses, and the one
-// whose Forge commands the `/s3/request/authorize` handler re-delegates. An
-// operation with a companion permission ([Permissions]) needs that too. For
-// the copy operations this is the destination's permission; the source's is
-// [SourcePermission].
+// Permission returns the S3 permission an access key must hold to perform the
+// operation on the bucket it addresses. Callers that map permissions to Forge
+// commands (see the `/s3/request/authorize` handler) use it to avoid re-deriving
+// the permission. For the copy operations this is the destination's permission;
+// the source's is [SourcePermission].
 func (o Operation) Permission() string { return operationPermission[o] }
 
-// companionPermission is a second S3 permission an access key must hold on
-// the addressed bucket beside the operation's own, as S3 requires. Reading an
-// object's attributes needs read access to the object, so GetObjectAttributes
-// needs s3:GetObject as well as s3:GetObjectAttributes. Only the operation's
-// own permission is re-delegated, so it must grant every command its
-// companion does, which s3perm's TestOperationPermissionCoversCompanion pins.
-var companionPermission = map[Operation]string{
-	OpGetObjectAttributes: "s3:GetObject",
-}
-
-// Permissions returns every S3 permission an access key must hold on the
-// bucket the operation addresses: [Permission], then the companion for an
-// operation that has one. The copy source's permission is separate.
-func (o Operation) Permissions() []string {
-	perms := []string{operationPermission[o]}
-	if companion, ok := companionPermission[o]; ok {
-		perms = append(perms, companion)
-	}
-	return perms
-}
-
-// SourcePermission and SourceVersionPermission are the S3 permissions an
-// access key must additionally hold, on the copy source's bucket, to perform
-// CopyObject or UploadPartCopy: S3 requires read access to the object being
-// copied, and to the version when x-amz-copy-source names one. Which applies
-// is [classification.sourcePermission].
-const (
-	SourcePermission        = "s3:GetObject"
-	SourceVersionPermission = "s3:GetObjectVersion"
-)
+// SourcePermission is the S3 permission an access key must additionally hold,
+// on the copy source's bucket, to perform CopyObject or UploadPartCopy: S3
+// requires read access to the object being copied.
+const SourcePermission = "s3:GetObject"
 
 // CopiesSource reports whether the operation reads a copy source named by the
 // x-amz-copy-source header, and so needs [SourcePermission] on that bucket.
@@ -207,8 +174,7 @@ func (o Operation) addressesExistingBucket() bool {
 		OpPutObjectRetention, OpPutObjectLegalHold, OpDeleteObjectVersion, OpDeleteObjects, OpListBucketVersions,
 		OpGetBucketPolicy, OpPutBucketPolicy, OpDeleteBucketPolicy,
 		OpGetBucketEncryption, OpPutBucketEncryption, OpDeleteBucketEncryption,
-		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpPutBucketCors, OpDeleteBucketCors,
-		OpGetBucketPolicyStatus,
+		OpGetBucketLocation, OpGetBucketAcl, OpGetBucketCors, OpGetBucketPolicyStatus,
 		OpGetBucketTagging, OpPutBucketTagging, OpDeleteBucketTagging,
 		OpGetBucketVersioning, OpPutBucketVersioning,
 		OpGetObjectLockConfiguration, OpPutObjectLockConfiguration,
@@ -221,21 +187,8 @@ func (o Operation) addressesExistingBucket() bool {
 	}
 }
 
-// ReadsBody reports whether the operation's body decides what the request
-// needs authorized, so a gateway attaches the body ([s3.Request.Body]) for
-// it and for no other: the operations with a reader in bodyReaders, today
-// DeleteObjects, whose entries may name versions. The body must be bound to
-// the signature before it is read ([ErrInvalidBody]) and is refused over
-// [MaxBodySize], which matches the codec's limit on it. The bucket policy
-// PUT carries its document on its own command instead. Never give a reader
-// to a write that streams its body.
-func (o Operation) ReadsBody() bool {
-	_, ok := bodyReaders[o]
-	return ok
-}
-
-// OperationFor classifies the S3 operation addressed by a request, with or
-// without its body. See [classifyRequest] for the method/path rules.
+// OperationFor classifies the S3 operation addressed by a request. See
+// [classifyRequest] for the method/path rules.
 func OperationFor(req s3.Request) (Operation, error) {
 	c, err := classifyRequest(req)
 	return c.op, err
@@ -248,57 +201,25 @@ type Requirement struct {
 	Permission string
 }
 
-// unsignedHeader names the first of headers the signature does not cover,
-// if any. A copy's source and the headers that add a permission decide
-// what a request needs; the path is always signed, a header only when
-// listed, so nothing decided from one is trusted until it is covered.
-func unsignedHeader(sr *sigv4.SignedRequest, headers []string) (string, bool) {
-	for _, h := range headers {
-		if !sr.HeaderSigned(h) {
-			return h, true
-		}
-	}
-	return "", false
-}
-
-// RequirementsFor classifies a request and returns every bucket/permission
-// pair it needs: the addressed bucket with each permission the operation and
-// its headers put on it, then, for the copy operations, the copy source's
-// bucket with [SourcePermission] or [SourceVersionPermission]. Operations
-// that address no existing bucket (ListBuckets, CreateBucket) yield none. It
-// is the local mirror of the checks [Authorizer.Authorize] performs, for a
-// gateway authorizing over cached delegations, and like Authorize it refuses
-// a request whose copy source or permission-adding header is not covered by
-// the signature, as [ErrUnsignedHeader] naming the header, or whose body is
-// not bound to it ([ErrInvalidBody]); the signature is parsed for that, not
-// verified. A classification error ([ErrConflictingQuery],
-// [ErrUnsupportedOperation]) comes first, as it needs no signature.
+// RequirementsFor classifies a request and returns every bucket/permission pair
+// it needs: the addressed bucket with the operation's permission, plus, for the
+// copy operations, the copy source's bucket with [SourcePermission]. Operations
+// that address no existing bucket (ListBuckets, CreateBucket) yield none. It is
+// the local mirror of the checks [Authorizer.Authorize] performs, for a gateway
+// authorizing over cached delegations; such a caller must also confirm the
+// x-amz-copy-source header is covered by the signature (see
+// [sigv4.SignedRequest.HeaderSigned]), as Authorize does.
 func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 	c, err := classifyRequest(req)
 	if err != nil {
 		return "", nil, err
 	}
-	if len(c.headers) > 0 || c.op.ReadsBody() || len(req.Body) > 0 {
-		sr, err := sigv4.Parse(sigv4.Request{Method: req.Method, URL: req.URL, Headers: req.Headers})
-		if err != nil {
-			return "", nil, fmt.Errorf("parsing request signature: %w", err)
-		}
-		if h, ok := unsignedHeader(sr, c.headers); ok {
-			return "", nil, fmt.Errorf("%w: %s", ErrUnsignedHeader, h)
-		}
-		if err := c.bindBody(sr, req); err != nil {
-			return "", nil, err
-		}
-	}
 	if !c.op.addressesExistingBucket() {
 		return c.op, nil, nil
 	}
-	var reqs []Requirement
-	for _, perm := range c.permissions() {
-		reqs = append(reqs, Requirement{Bucket: c.bucket, Permission: perm})
-	}
+	reqs := []Requirement{{Bucket: c.bucket, Permission: c.op.Permission()}}
 	if c.op.CopiesSource() {
-		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: c.sourcePermission()})
+		reqs = append(reqs, Requirement{Bucket: c.srcBucket, Permission: SourcePermission})
 	}
 	return c.op, reqs, nil
 }
@@ -308,118 +229,14 @@ func RequirementsFor(req s3.Request) (Operation, []Requirement, error) {
 // optional "?versionId=" suffix.
 const copySourceHeader = "x-amz-copy-source"
 
-// The request headers that put a permission on the operation they ride on,
-// as S3 requires. A write that sets a retention period or a legal hold on
-// the version it creates needs the lock permission beside the write, one
-// that tags it needs the tagging permission, a delete or retention write
-// asking to bypass governance retention needs the bypass permission, and a
-// bucket created with Object Lock enabled is born versioned and locked,
-// which needs both configuration permissions beside s3:CreateBucket. The gateway acts on
-// these headers exactly as read here: it stamps the lock state and the tags
-// at commit (a copy's tags only under a REPLACE directive) and creates the
-// bucket versioned and locked, so a header that adds no permission here is
-// one the gateway does not act on either.
-const (
-	objectLockModeHeader          = "x-amz-object-lock-mode"
-	objectLockRetainUntilHeader   = "x-amz-object-lock-retain-until-date"
-	objectLockLegalHoldHeader     = "x-amz-object-lock-legal-hold"
-	taggingHeader                 = "x-amz-tagging"
-	taggingDirectiveHeader        = "x-amz-tagging-directive"
-	bucketObjectLockEnabledHeader = "x-amz-bucket-object-lock-enabled"
-	// bypassGovernanceHeader asks a delete or a retention write to act on a
-	// governance-locked version; S3 needs s3:BypassGovernanceRetention for
-	// it. The gateway decides the bypass itself against the bucket's lock
-	// state, and refuses it for now whatever the key holds.
-	bypassGovernanceHeader = "x-amz-bypass-governance-retention"
-)
-
 // classification is what classifyRequest derives from a request: the operation,
-// the bucket and key it addresses, for the copy operations the bucket, key
-// and version named by x-amz-copy-source, and the permissions the request's
-// headers add.
+// the bucket and key it addresses, and for the copy operations the bucket and
+// key named by x-amz-copy-source.
 type classification struct {
 	op          Operation
 	bucket, key string
-	// srcBucket, srcKey and srcVersionID are set only when op.CopiesSource();
-	// srcVersionID is empty when the source names no version.
-	srcBucket, srcKey, srcVersionID string
-	// headerPermissions are the permissions the request's headers put on the
-	// operation, beside its own, and headers names every header a decision
-	// was taken from: the copy source and each of those. bodyPermissions are
-	// those its body puts on it (readBody).
-	headerPermissions, headers []string
-	bodyPermissions            []string
-}
-
-// permissions is every S3 permission the credential needs on the bucket the
-// request addresses: the operation's own, then those its headers add, then
-// those its body adds.
-func (c classification) permissions() []string {
-	return append(append(c.op.Permissions(), c.headerPermissions...), c.bodyPermissions...)
-}
-
-// readHeaders adds the permissions the request's headers put on the
-// operation (see the header constants) and records each header it decided
-// from, with any header the gateway then writes the version from. A header
-// is present when it has a value; the directive is compared exactly and the
-// enabled flag case-insensitively, as the gateway reads them. A repeated
-// header reaches hilt comma-joined and the gateway acts on its first value
-// alone, so a value is decided on its first comma-separated part; the
-// signature covers them all.
-func (c *classification) readHeaders(headers map[string]string) {
-	first := func(v string) string {
-		v, _, _ = strings.Cut(v, ",")
-		return strings.TrimSpace(v)
-	}
-	need := func(header string, perms ...string) {
-		c.headers = append(c.headers, header)
-		for _, p := range perms {
-			if !slices.Contains(c.headerPermissions, p) {
-				c.headerPermissions = append(c.headerPermissions, p)
-			}
-		}
-	}
-	switch c.op {
-	case OpPutObject, OpCopyObject, OpCreateMultipartUpload:
-		for _, h := range []string{objectLockModeHeader, objectLockRetainUntilHeader} {
-			if _, ok := HeaderValue(headers, h); ok {
-				need(h, "s3:PutObjectRetention")
-			}
-		}
-		if _, ok := HeaderValue(headers, objectLockLegalHoldHeader); ok {
-			need(objectLockLegalHoldHeader, "s3:PutObjectLegalHold")
-		}
-		if c.op == OpCopyObject {
-			// The directive decides the permission; the tags the gateway then
-			// writes come from the tagging header, so that must be signed too.
-			if v, ok := HeaderValue(headers, taggingDirectiveHeader); ok && first(v) == "REPLACE" {
-				need(taggingDirectiveHeader, "s3:PutObjectTagging")
-				if _, ok := HeaderValue(headers, taggingHeader); ok {
-					need(taggingHeader)
-				}
-			}
-		} else if _, ok := HeaderValue(headers, taggingHeader); ok {
-			need(taggingHeader, "s3:PutObjectTagging")
-		}
-	case OpDeleteObject, OpDeleteObjectVersion, OpDeleteObjects, OpPutObjectRetention:
-		if v, ok := HeaderValue(headers, bypassGovernanceHeader); ok && strings.EqualFold(first(v), "true") {
-			need(bypassGovernanceHeader, "s3:BypassGovernanceRetention")
-		}
-	case OpCreateBucket:
-		if v, ok := HeaderValue(headers, bucketObjectLockEnabledHeader); ok && strings.EqualFold(first(v), "true") {
-			need(bucketObjectLockEnabledHeader, "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration")
-		}
-	}
-}
-
-// sourcePermission is the S3 permission the copy's source needs: the version
-// read when the source names a version, the object read otherwise, as S3
-// decides it.
-func (c classification) sourcePermission() string {
-	if c.srcVersionID != "" {
-		return SourceVersionPermission
-	}
-	return SourcePermission
+	// srcBucket and srcKey are set only when op.CopiesSource().
+	srcBucket, srcKey string
 }
 
 // subresources is every query parameter S3 treats as a subresource: one that
@@ -436,7 +253,7 @@ var subresources = map[string]bool{
 	"acl":                   true, // GetBucketAcl only
 	"analytics":             false,
 	"attributes":            true,
-	"cors":                  true,
+	"cors":                  true, // GetBucketCors only
 	"delete":                true,
 	"encryption":            true,
 	"intelligent-tiering":   false,
@@ -495,7 +312,7 @@ var bucketRoutes = map[string]map[string]Operation{
 		"tagging":     OpPutBucketTagging,
 		"versioning":  OpPutBucketVersioning,
 		"object-lock": OpPutObjectLockConfiguration,
-		"cors":        OpPutBucketCors,
+		"cors":        "",
 		"policy":      OpPutBucketPolicy,
 		"acl":         "",
 		"encryption":  OpPutBucketEncryption,
@@ -503,7 +320,7 @@ var bucketRoutes = map[string]map[string]Operation{
 	http.MethodDelete: {
 		"tagging":    OpDeleteBucketTagging,
 		"policy":     OpDeleteBucketPolicy,
-		"cors":       OpDeleteBucketCors,
+		"cors":       "",
 		"encryption": OpDeleteBucketEncryption,
 	},
 	http.MethodPost: {
@@ -580,9 +397,8 @@ var objectRoutes = map[string]map[string]Operation{
 // write.
 //
 // DeleteObjects (`POST /bucket?delete`) deletes the keys its body names and
-// needs s3:DeleteObject on the bucket, as each single delete does, and
-// s3:DeleteObjectVersion as well when any entry names a version: the body
-// is read for that (readBody), once bound to the signature.
+// needs s3:DeleteObject on the bucket, as each single delete does; the
+// gateway checks s3:DeleteObjectVersion for each entry that names a version.
 //
 // A PUT of an object or a part that carries a parseable x-amz-copy-source header
 // is a copy (OpCopyObject / OpUploadPartCopy) and also names the source bucket
@@ -599,23 +415,7 @@ var objectRoutes = map[string]map[string]Operation{
 // the gateway's own validation of the value rejects the request. Which error
 // the caller sees for a malformed value is the gateway's call; it validates
 // the header before consulting hilt.
-//
-// The lock, tagging and Object Lock headers add a permission to the write
-// they ride on (see the header constants); like the copy source, each is
-// trusted only once Authorize has confirmed it was signed. A DeleteObjects
-// body adds one when it names a version, read by bindBody once bound.
 func classifyRequest(req s3.Request) (classification, error) {
-	c, err := classifyRoute(req)
-	if err != nil {
-		return classification{}, err
-	}
-	c.readHeaders(req.Headers)
-	return c, nil
-}
-
-// classifyRoute derives the operation, the bucket and key, and the copy
-// source from the request's method, path, query and copy-source header.
-func classifyRoute(req s3.Request) (classification, error) {
 	u, err := url.Parse(req.URL)
 	if err != nil {
 		return classification{}, fmt.Errorf("parsing request URL: %w", err)
@@ -648,12 +448,11 @@ func classifyRoute(req s3.Request) (classification, error) {
 		if !ok {
 			return plain
 		}
-		srcBucket, srcKey, srcVersionID, ok := parseCopySource(src)
+		srcBucket, srcKey, ok := parseCopySource(src)
 		if !ok {
 			return plain
 		}
-		c.srcBucket, c.srcKey, c.srcVersionID = srcBucket, srcKey, srcVersionID
-		c.headers = append(c.headers, copySourceHeader)
+		c.srcBucket, c.srcKey = srcBucket, srcKey
 		return copied
 	}
 
@@ -750,22 +549,21 @@ func HeaderValue(headers map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-// parseCopySource splits an x-amz-copy-source value into its bucket, key and
-// version exactly as the gateway's backend parser does: an optional leading
-// slash, URL-decoding of the whole value, an optional "?versionId=<id>"
-// suffix, then bucket/key at the first slash. ok is false only for bad
-// percent-encoding or a missing separator; an empty bucket or key is returned
-// as such, and an absent or empty versionId names no version.
-func parseCopySource(v string) (bucket, key, versionID string, ok bool) {
+// parseCopySource splits an x-amz-copy-source value into its bucket and key
+// exactly as the gateway's backend parser does: an optional leading slash,
+// URL-decoding of the whole value, an optional "?versionId=<id>" suffix, then
+// bucket/key at the first slash. ok is false only for bad percent-encoding or
+// a missing separator; an empty bucket or key is returned as such.
+func parseCopySource(v string) (bucket, key string, ok bool) {
 	v = strings.TrimPrefix(v, "/")
 	decoded, err := url.QueryUnescape(v)
 	if err != nil {
-		return "", "", "", false
+		return "", "", false
 	}
-	decoded, versionID, _ = strings.Cut(decoded, "?versionId=")
+	decoded, _, _ = strings.Cut(decoded, "?versionId=")
 	bucket, key, ok = strings.Cut(decoded, "/")
 	if !ok {
-		return "", "", "", false
+		return "", "", false
 	}
-	return bucket, key, versionID, true
+	return bucket, key, true
 }
