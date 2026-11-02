@@ -1,7 +1,7 @@
 // Package postgres provides a PostgreSQL-backed implementation of
 // delegation.Store. Encoded delegation payloads are stored directly in the
 // delegation table's data column. Every write that mutates an audience's set
-// (PutBatch, Replace, DeleteByAudience) runs in a transaction holding that
+// (PutBatch, Replace, ReplaceOver, DeleteByAudience) runs in a transaction holding that
 // audience's advisory lock, so the writes of one audience serialize.
 package postgres
 

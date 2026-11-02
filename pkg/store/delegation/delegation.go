@@ -55,8 +55,8 @@ type Store interface {
 	// ReplaceOver is Replace narrowed to the delegations over subject: next is
 	// handed each audience's delegations over subject alone, and its result
 	// replaces those, leaving the audiences' delegations over every other
-	// subject as they are. Its cost follows what the audiences hold over
-	// subject, not everything they hold. It takes the same locks as Replace,
+	// subject as they are. On Postgres its cost follows what the audiences
+	// hold over subject, not everything they hold. It takes the same locks as Replace,
 	// so the two serialize. Besides Replace's checks, it returns
 	// [store.ErrInvalidArgument] for an undef subject and for a delegation from
 	// next over another subject, which would be written beside the set it

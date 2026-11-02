@@ -113,7 +113,13 @@ func (s *Store) replace(
 
 	s.mutex.RLock()
 	current := make(map[did.DID][]ucan.Delegation, len(audiences))
+	// Each audience once, as Postgres's ANY($1) reads it.
+	seen := make(map[did.DID]bool, len(audiences))
 	for _, aud := range audiences {
+		if seen[aud] {
+			continue
+		}
+		seen[aud] = true
 		for _, d := range s.byAudience[aud] {
 			if in(d) {
 				current[aud] = append(current[aud], d)

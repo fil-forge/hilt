@@ -306,6 +306,17 @@ func TestRotate(t *testing.T) {
 		require.Contains(t, fields, "took")
 	})
 
+	t.Run("a rotation that fails before its keys are listed is logged too", func(t *testing.T) {
+		d := setup(t, nil)
+		core, logs := observer.New(zapcore.WarnLevel)
+		rotator := grant.NewRotator(zap.New(core), d.delegations, d.accessKeys, d.secrets, d.swarf)
+		// Without the tenant's key, loading the issuer fails.
+		require.NoError(t, d.secrets.Delete(ctx, vault.TenantKeyPath(d.tenant.DID())))
+		require.Error(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+
+		require.Len(t, logs.FilterMessage("rotating delegations failed").All(), 1)
+	})
+
 	t.Run("a principal without keys is a no-op", func(t *testing.T) {
 		d := setup(t, nil)
 		require.NoError(t, d.rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"ghost": {"s3:GetObject"}}))

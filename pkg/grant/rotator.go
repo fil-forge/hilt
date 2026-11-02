@@ -84,6 +84,20 @@ func NewRotator(
 // revocation. An empty action set leaves the key with nothing over the bucket.
 func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) (err error) {
 	start := time.Now()
+	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
+	var keys []accesskeystore.Record
+	defer func() {
+		// The key count is what a rotation's cost follows, and [BatchTimeout]
+		// is what it runs out against, so both go in the log. The handler
+		// reports a deadline only as a concurrent change, so every failure is
+		// logged here, the listing's included.
+		fields := []zap.Field{zap.Int("keys", len(keys)), zap.Duration("took", time.Since(start))}
+		if err != nil {
+			log.Warn("rotating delegations failed", append(fields, zap.Error(err))...)
+		} else if len(keys) > 0 {
+			log.Info("rotated delegations", fields...)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()
 	keys, issuer, err := r.load(ctx, tenant, slices.Sorted(maps.Keys(actions))...)
@@ -94,17 +108,6 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 	for _, key := range keys {
 		principalOf[key.ID] = *key.Principal
 	}
-	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
-	defer func() {
-		// The key count is what a rotation's cost follows, and the bound above
-		// is what it runs out against, so both go in the log.
-		fields := []zap.Field{zap.Int("keys", len(keys)), zap.Duration("took", time.Since(start))}
-		if err != nil {
-			log.Warn("rotating delegations failed", append(fields, zap.Error(err))...)
-			return
-		}
-		log.Info("rotated delegations", fields...)
-	}()
 
 	// Only the delegations over bucket are read and rewritten: a key's grants
 	// over the principal's other buckets are not this write's to touch, and
@@ -186,10 +189,11 @@ func audiences(keys []accesskeystore.Record) []did.DID {
 
 // PublishRevocations publishes a revocation for each unexpired delegation in
 // one request, signed by the tenant that issued them. It is the callback body
-// of a [delegationstore.Store.Replace] that removes or replaces what keys hold,
-// so it runs while their delegations are locked, and it shortens its ctx to
-// [BatchTimeout] itself: whoever calls it, a stalled publish releases the locks
-// at the bound. An earlier caller deadline still wins.
+// of a [delegationstore.Store.Replace] or ReplaceOver that removes or replaces
+// what keys hold, so it runs while their delegations are locked, and it
+// shortens its ctx to [BatchTimeout] itself: whoever calls it, a stalled
+// publish releases the locks at the bound. An earlier caller deadline still
+// wins.
 func PublishRevocations(ctx context.Context, log *zap.Logger, publisher RevocationPublisher, issuer ucan.Issuer, dels []ucan.Delegation) error {
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()
