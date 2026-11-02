@@ -33,8 +33,8 @@ them. It exposes two APIs and talks to three external services:
   bucket's storage space and to manage routing policies (`pkg/client`): each
   provider owns a policy whose candidates are its storage nodes, and every
   bucket's space is pointed at its provider's policy on creation.
-- **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke` to
-  revoke delegations, every revocation of one write in a single request
+- **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke/batch` to
+  revoke delegations, every revocation of one write in a single invocation
   (`PublishBatch`): a deleted key's grants, a deleted bucket's, and the grants
   a policy change or a principal removal takes off a principal-bound key
   (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate

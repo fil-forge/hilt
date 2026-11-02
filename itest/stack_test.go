@@ -188,7 +188,7 @@ func TestForge(t *testing.T) {
 	// Until the published :main image carries it, they run only against the
 	// binary override (or when HILT_ITEST_IAM=1 says the image does); drop this
 	// guard then. Swarf needs nothing: the keys' grants are revoked through
-	// the /ucan/revoke it already serves.
+	// the /ucan/revoke/batch it already serves.
 	iam := func(name string, fn func(*testing.T, *forgeNet)) {
 		t.Run(name, func(t *testing.T) {
 			if os.Getenv("HILT_ITEST_IAM") != "1" && os.Getenv("HILT_ITEST_INGOT_BINARY") == "" {

@@ -38,9 +38,10 @@ const _ = uint(store.LockTimeout - BatchTimeout)
 // needs. It is satisfied by [*swarfclient.Client]; the interface lets the logic
 // be unit tested without a live revocation service.
 type RevocationPublisher interface {
-	// PublishBatch submits one /ucan/revoke invocation per revoked delegation,
-	// self-signed by revoker, which must have issued every one of them, in a
-	// single request. A repeat for a delegation already revoked is a duplicate
+	// PublishBatch submits one /ucan/revoke/batch invocation revoking every
+	// delegation in revoked, self-signed by revoker, which must have issued
+	// every one of them. The service stores all revocations or, when any is
+	// invalid, none. A repeat for a delegation already revoked is a duplicate
 	// the service records once.
 	PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error
 }

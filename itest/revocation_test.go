@@ -17,10 +17,10 @@ import (
 )
 
 // testDeleteAccessKeyRevokes drives access-key deletion end to end: the
-// console deletes a key over the REST API, hilt publishes a /ucan/revoke
-// invocation to the real swarf for every delegation the key held, and swarf —
-// which verifies the tenant's signature and that the tenant issued what it is
-// revoking — records each one.
+// console deletes a key over the REST API, hilt publishes a
+// /ucan/revoke/batch invocation to the real swarf revoking every delegation
+// the key held, and swarf — which verifies the tenant's signature and that
+// the tenant issued what it is revoking — records each one.
 func testDeleteAccessKeyRevokes(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
@@ -58,9 +58,9 @@ func testDeleteAccessKeyRevokes(t *testing.T, net *forgeNet) {
 
 // testDeleteBucketRevokes drives bucket deletion end to end: a real S3 SDK
 // DeleteBucket reaches hilt through the real ingot, and hilt publishes a
-// /ucan/revoke to the real swarf for the bucket-scoped delegation it issued
-// to an access key — but not for the bucket→tenant root, which it cannot
-// revoke. Deleting while an object is still in the bucket must fail: hilt
+// /ucan/revoke/batch to the real swarf for the bucket-scoped delegation it
+// issued to an access key — but not for the bucket→tenant root, which it
+// cannot revoke. Deleting while an object is still in the bucket must fail: hilt
 // checks the space is empty against the real sprue.
 func testDeleteBucketRevokes(t *testing.T, net *forgeNet) {
 	ctx := t.Context()

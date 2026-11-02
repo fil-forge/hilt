@@ -11,10 +11,10 @@ require (
 	github.com/aws/smithy-go v1.27.2
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/exaring/otelpgx v0.12.0
-	github.com/fil-forge/libforge v0.0.0-20261022121207-bcdd5eacc465
+	github.com/fil-forge/libforge v0.0.0-20261102162712-c76976875477
 	github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40
-	github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c
-	github.com/fil-forge/ucantone v0.0.0-20260924160040-c31dec73d9b3
+	github.com/fil-forge/swarf v0.0.1-0.20261102171957-ecefe9167dfa
+	github.com/fil-forge/ucantone v0.0.0-20261009233513-d0abe2ce473c
 	github.com/ipfs/go-cid v0.6.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
