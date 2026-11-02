@@ -651,6 +651,28 @@ func TestRotations(t *testing.T) {
 		require.Equal(t, etag, rec.ETag)
 	})
 
+	t.Run("a contended write logs the store's error", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+
+		tenants := tenantmemory.New()
+		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+		core, logs := observer.New(zapcore.WarnLevel)
+		svc := bucketpolicysvc.New(zap.New(core), tenants, d.buckets, d.principals, d.policies, d.rotator(blockingSwarf{}))
+
+		// user-1's actions change, so the write has revocations to publish,
+		// and the publish that never answers runs into the batch deadline.
+		_, _, err = svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
+		require.ErrorIs(t, err, bucketpolicysvc.ErrConcurrentChange)
+
+		entries := logs.FilterMessage("bucket policy write contended").All()
+		require.Len(t, entries, 1)
+		require.Equal(t, "photos", entries[0].ContextMap()["bucket"])
+		require.Contains(t, entries[0].ContextMap()["error"], context.DeadlineExceeded.Error())
+	})
+
 	t.Run("a principal removed between validation and the write is an invalid policy", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")

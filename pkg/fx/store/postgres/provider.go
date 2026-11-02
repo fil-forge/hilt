@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/exaring/otelpgx"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/migrations"
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	pgaccesskey "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -74,6 +76,11 @@ func NewPostgresPool(cfg config.PostgresConfig, lc fx.Lifecycle, logger *zap.Log
 	}
 	// Every query is a span on the caller's trace.
 	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer()
+	// A transaction left open with nothing running is ended after
+	// [store.IdleTransactionTimeout], so it can't hold its locks for the life
+	// of the process. A unitless setting is milliseconds.
+	poolCfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] =
+		strconv.FormatInt(store.IdleTransactionTimeout.Milliseconds(), 10)
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {

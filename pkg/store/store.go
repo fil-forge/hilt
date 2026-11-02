@@ -99,3 +99,16 @@ func NewReadConfig(opts ...ReadOption) ReadConfig {
 // graph, and an unbounded wait would hang both and pin their pool connections.
 // The bound turns that into an error the caller can retry.
 const LockTimeout = 10 * time.Second
+
+// IdleTransactionTimeout is how long Postgres lets a store's connection sit in
+// an open transaction with no statement running before it ends the session,
+// rolling the transaction back and releasing its locks.
+//
+// A write's transaction stays open across its callback, which is bounded (see
+// [LockTimeout] and the rotation's own deadline), so a healthy write is never
+// idle this long. One that is (a transaction never committed or rolled back,
+// or a callback that hangs) would otherwise hold its row and advisory locks
+// until the connection closes, and every write needing them would fail with
+// [ErrLockTimeout] for as long as the process runs. The bound turns that into
+// one failed write.
+const IdleTransactionTimeout = time.Minute
