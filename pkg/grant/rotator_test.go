@@ -314,7 +314,9 @@ func TestRotate(t *testing.T) {
 		require.NoError(t, d.secrets.Delete(ctx, vault.TenantKeyPath(d.tenant.DID())))
 		require.Error(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
 
-		require.Len(t, logs.FilterMessage("rotating delegations failed").All(), 1)
+		entries := logs.FilterMessage("rotating delegations failed").All()
+		require.Len(t, entries, 1)
+		require.EqualValues(t, len(d.alice), entries[0].ContextMap()["keys"], "the keys listed before the failure are counted")
 	})
 
 	t.Run("a principal without keys is a no-op", func(t *testing.T) {

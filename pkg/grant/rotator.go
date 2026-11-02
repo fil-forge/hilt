@@ -90,12 +90,14 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 		// The key count is what a rotation's cost follows, and [BatchTimeout]
 		// is what it runs out against, so both go in the log. The handler
 		// reports a deadline only as a concurrent change, so every failure is
-		// logged here, the listing's included.
+		// logged here, the listing's included. A policy write runs Rotate
+		// inside its own transaction, which commits after this returns, so
+		// success is logged as prepared: the write can still roll it back.
 		fields := []zap.Field{zap.Int("keys", len(keys)), zap.Duration("took", time.Since(start))}
 		if err != nil {
 			log.Warn("rotating delegations failed", append(fields, zap.Error(err))...)
 		} else if len(keys) > 0 {
-			log.Info("rotated delegations", fields...)
+			log.Info("prepared delegation rotation", fields...)
 		}
 	}()
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
@@ -159,13 +161,14 @@ func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) 
 }
 
 // load lists the keys bound to the principals, in principal order, and, when
-// there are any, the tenant's issuer.
+// there are any, the tenant's issuer. On an error it still returns the keys it
+// listed, so the caller's log counts them.
 func (r *Rotator) load(ctx context.Context, tenant did.DID, principals ...string) ([]accesskeystore.Record, ucan.Issuer, error) {
 	var keys []accesskeystore.Record
 	for _, p := range principals {
 		recs, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipal(p))
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing keys of principal %q: %w", p, err)
+			return keys, nil, fmt.Errorf("listing keys of principal %q: %w", p, err)
 		}
 		keys = append(keys, recs...)
 	}
@@ -174,7 +177,7 @@ func (r *Rotator) load(ctx context.Context, tenant did.DID, principals ...string
 	}
 	issuer, err := vault.TenantIssuer(ctx, r.secrets, tenant)
 	if err != nil {
-		return nil, nil, err
+		return keys, nil, err
 	}
 	return keys, issuer, nil
 }
