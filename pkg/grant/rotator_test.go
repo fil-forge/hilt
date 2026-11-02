@@ -300,8 +300,8 @@ func TestRotate(t *testing.T) {
 		rotator := grant.NewRotator(zap.NewNop(), d.delegations, keys, d.secrets, d.swarf)
 		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}, "bob": {"s3:PutObject"}}))
 
-		// One listing per principal, then one read of every listed key.
-		require.Equal(t, map[string]int{"ListByTenant": 3}, keys.reads)
+		// One listing of both principals' keys, then one read of every listed key.
+		require.Equal(t, map[string]int{"ListByTenant": 2}, keys.reads)
 	})
 
 	t.Run("reads only the keys' delegations over the bucket", func(t *testing.T) {

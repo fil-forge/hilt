@@ -166,17 +166,13 @@ func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) 
 	})
 }
 
-// load lists the keys bound to the principals, in principal order, and, when
-// there are any, the tenant's issuer. On an error it still returns the keys it
-// listed, so the caller's log counts them.
+// load lists the keys bound to the principals, in one read, and, when there
+// are any, the tenant's issuer. When reading the issuer fails it still returns
+// the keys it listed, so the caller's log counts them.
 func (r *Rotator) load(ctx context.Context, tenant did.DID, principals ...string) ([]accesskeystore.Record, ucan.Issuer, error) {
-	var keys []accesskeystore.Record
-	for _, p := range principals {
-		recs, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipal(p))
-		if err != nil {
-			return keys, nil, fmt.Errorf("listing keys of principal %q: %w", p, err)
-		}
-		keys = append(keys, recs...)
+	keys, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipals(principals...))
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing keys of principals %q: %w", principals, err)
 	}
 	if len(keys) == 0 {
 		return nil, nil, nil

@@ -133,6 +133,9 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 		if cfg.Principal != nil && (rec.Principal == nil || *rec.Principal != *cfg.Principal) {
 			continue
 		}
+		if cfg.Principals != nil && (rec.Principal == nil || !slices.Contains(cfg.Principals, *rec.Principal)) {
+			continue
+		}
 		if ids != nil && !ids[rec.ID] {
 			continue
 		}
