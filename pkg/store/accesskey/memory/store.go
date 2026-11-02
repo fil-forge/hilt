@@ -113,12 +113,20 @@ func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (
 func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...accesskey.ListOption) ([]accesskey.Record, error) {
 	cfg := accesskey.NewListConfig(opts...)
 
-	// A set, so the filter costs the same per record however many IDs it names.
+	// Sets, so each filter costs the same per record however many IDs or
+	// principals it names.
 	var ids map[did.DID]bool
 	if cfg.IDs != nil {
 		ids = make(map[did.DID]bool, len(cfg.IDs))
 		for _, id := range cfg.IDs {
 			ids[id] = true
+		}
+	}
+	var principals map[string]bool
+	if cfg.Principals != nil {
+		principals = make(map[string]bool, len(cfg.Principals))
+		for _, p := range cfg.Principals {
+			principals[p] = true
 		}
 	}
 
@@ -133,7 +141,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 		if cfg.Principal != nil && (rec.Principal == nil || *rec.Principal != *cfg.Principal) {
 			continue
 		}
-		if cfg.Principals != nil && (rec.Principal == nil || !slices.Contains(cfg.Principals, *rec.Principal)) {
+		if principals != nil && (rec.Principal == nil || !principals[*rec.Principal]) {
 			continue
 		}
 		if ids != nil && !ids[rec.ID] {
