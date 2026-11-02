@@ -124,6 +124,9 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 		if cfg.Principal != nil && (rec.Principal == nil || *rec.Principal != *cfg.Principal) {
 			continue
 		}
+		if cfg.IDs != nil && !slices.Contains(cfg.IDs, rec.ID) {
+			continue
+		}
 		recs = append(recs, rec)
 	}
 	return recs, nil

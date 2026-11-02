@@ -151,6 +151,14 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 		args = append(args, *cfg.Principal)
 		query += fmt.Sprintf(` AND principal_id = $%d`, len(args))
 	}
+	if cfg.IDs != nil {
+		ids := make([]string, len(cfg.IDs))
+		for i, id := range cfg.IDs {
+			ids[i] = id.String()
+		}
+		args = append(args, ids)
+		query += fmt.Sprintf(` AND id = ANY($%d)`, len(args))
+	}
 	query += ` ORDER BY id ASC`
 
 	rows, err := s.pool.Query(ctx, query, args...)

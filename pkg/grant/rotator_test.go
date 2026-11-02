@@ -11,6 +11,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
+	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
@@ -139,6 +140,22 @@ func (s *recordCurrent) Replace(ctx context.Context, audiences []did.DID, next f
 
 func (s *recordCurrent) ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
 	return s.Store.ReplaceOver(ctx, audiences, subject, s.record(next))
+}
+
+// countReads counts the reads a rotation makes of the access key store.
+type countReads struct {
+	accesskeystore.Store
+	reads map[string]int
+}
+
+func (s *countReads) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
+	s.reads["Get"]++
+	return s.Store.Get(ctx, id, opts...)
+}
+
+func (s *countReads) ListByTenant(ctx context.Context, tenant did.DID, opts ...accesskeystore.ListOption) ([]accesskeystore.Record, error) {
+	s.reads["ListByTenant"]++
+	return s.Store.ListByTenant(ctx, tenant, opts...)
 }
 
 // held returns the key's delegations over the bucket.
@@ -275,6 +292,16 @@ func TestRotate(t *testing.T) {
 
 		require.Empty(t, d.held(t, gone, d.photos))
 		require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(d.held(t, kept, d.photos)))
+	})
+
+	t.Run("reads the access keys a fixed number of times, whatever their count", func(t *testing.T) {
+		d := setup(t, nil)
+		keys := &countReads{Store: d.accessKeys, reads: map[string]int{}}
+		rotator := grant.NewRotator(zap.NewNop(), d.delegations, keys, d.secrets, d.swarf)
+		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}, "bob": {"s3:PutObject"}}))
+
+		// One listing per principal, then one read of every listed key.
+		require.Equal(t, map[string]int{"ListByTenant": 3}, keys.reads)
 	})
 
 	t.Run("reads only the keys' delegations over the bucket", func(t *testing.T) {
