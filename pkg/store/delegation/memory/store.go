@@ -82,6 +82,30 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) err
 // released. Another writer waits at most [LockWait] for it. Reads take the
 // map alone and are answered while next runs, as on Postgres.
 func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return s.replace(ctx, audiences, func(ucan.Delegation) bool { return true }, next, func(replacement map[did.DID][]ucan.Delegation) error {
+		return dlgstore.CheckReplacement(audiences, replacement)
+	})
+}
+
+// ReplaceOver is Replace over the delegations whose subject is subject.
+func (s *Store) ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	if !subject.Defined() {
+		return fmt.Errorf("cannot replace powerline delegations: %w", store.ErrInvalidArgument)
+	}
+	return s.replace(ctx, audiences, func(d ucan.Delegation) bool { return d.Subject() == subject }, next, func(replacement map[did.DID][]ucan.Delegation) error {
+		return dlgstore.CheckReplacementOver(audiences, subject, replacement)
+	})
+}
+
+// replace swaps the audiences' delegations that in selects for next's result,
+// once check accepts it, and keeps the rest.
+func (s *Store) replace(
+	ctx context.Context,
+	audiences []did.DID,
+	in func(ucan.Delegation) bool,
+	next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error),
+	check func(replacement map[did.DID][]ucan.Delegation) error,
+) error {
 	if err := s.hold(ctx); err != nil {
 		return err
 	}
@@ -90,7 +114,11 @@ func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx 
 	s.mutex.RLock()
 	current := make(map[did.DID][]ucan.Delegation, len(audiences))
 	for _, aud := range audiences {
-		current[aud] = slices.Clone(s.byAudience[aud])
+		for _, d := range s.byAudience[aud] {
+			if in(d) {
+				current[aud] = append(current[aud], d)
+			}
+		}
 	}
 	s.mutex.RUnlock()
 
@@ -98,14 +126,19 @@ func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx 
 	if err != nil {
 		return err
 	}
-	if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
+	if err := check(replacement); err != nil {
 		return err
 	}
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	for _, aud := range audiences {
-		delete(s.byAudience, aud)
+		kept := slices.DeleteFunc(slices.Clone(s.byAudience[aud]), in)
+		if len(kept) == 0 {
+			delete(s.byAudience, aud)
+		} else {
+			s.byAudience[aud] = kept
+		}
 		s.put(replacement[aud])
 	}
 	return nil

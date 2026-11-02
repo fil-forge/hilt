@@ -82,7 +82,8 @@ func NewRotator(
 // revoked in one request before anything is stored, so a publish failure
 // leaves every key unchanged; a key that held nothing over the bucket costs no
 // revocation. An empty action set leaves the key with nothing over the bucket.
-func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) error {
+func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) (err error) {
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()
 	keys, issuer, err := r.load(ctx, tenant, slices.Sorted(maps.Keys(actions))...)
@@ -94,8 +95,22 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 		principalOf[key.ID] = *key.Principal
 	}
 	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
+	defer func() {
+		// The key count is what a rotation's cost follows, and the bound above
+		// is what it runs out against, so both go in the log.
+		fields := []zap.Field{zap.Int("keys", len(keys)), zap.Duration("took", time.Since(start))}
+		if err != nil {
+			log.Warn("rotating delegations failed", append(fields, zap.Error(err))...)
+			return
+		}
+		log.Info("rotated delegations", fields...)
+	}()
 
-	return r.delegations.Replace(ctx, audiences(keys), func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+	// Only the delegations over bucket are read and rewritten: a key's grants
+	// over the principal's other buckets are not this write's to touch, and
+	// reading them too would make every write cost what the keys hold across
+	// all of those buckets.
+	return r.delegations.ReplaceOver(ctx, audiences(keys), bucket, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 		var revoked []ucan.Delegation
 		next := make(map[did.DID][]ucan.Delegation, len(keys))
 		for _, key := range keys {
@@ -106,18 +121,12 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 			} else if err != nil {
 				return nil, fmt.Errorf("looking up key %s: %w", key.ID, err)
 			}
-			for _, d := range current[key.ID] {
-				if d.Subject() == bucket {
-					revoked = append(revoked, d)
-				} else {
-					next[key.ID] = append(next[key.ID], d)
-				}
-			}
+			revoked = append(revoked, current[key.ID]...)
 			fresh, err := Issue(issuer, key.ID, []did.DID{bucket}, actions[principalOf[key.ID]], key.ExpiresAt)
 			if err != nil {
 				return nil, fmt.Errorf("issuing delegations of %s: %w", key.ID, err)
 			}
-			next[key.ID] = append(next[key.ID], fresh...)
+			next[key.ID] = fresh
 		}
 		if err := PublishRevocations(ctx, log, r.revocations, issuer, revoked); err != nil {
 			return nil, err

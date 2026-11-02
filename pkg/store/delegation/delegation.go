@@ -52,6 +52,16 @@ type Store interface {
 	// writes inside it. The lock wait is bounded at [store.LockTimeout] and
 	// returns [store.ErrLockTimeout] when it runs out.
 	Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
+	// ReplaceOver is Replace narrowed to the delegations over subject: next is
+	// handed each audience's delegations over subject alone, and its result
+	// replaces those, leaving the audiences' delegations over every other
+	// subject as they are. Its cost follows what the audiences hold over
+	// subject, not everything they hold. It takes the same locks as Replace,
+	// so the two serialize. Besides Replace's checks, it returns
+	// [store.ErrInvalidArgument] for an undef subject and for a delegation from
+	// next over another subject, which would be written beside the set it
+	// leaves alone.
+	ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
 }
 
 // CheckReplacement refuses a replacement that holds a nil delegation or one
@@ -65,6 +75,22 @@ func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delega
 			}
 			if d.Audience() != aud {
 				return fmt.Errorf("delegation %s is for %s, filed under %s: %w", d.Link(), d.Audience(), aud, store.ErrInvalidArgument)
+			}
+		}
+	}
+	return nil
+}
+
+// CheckReplacementOver is [CheckReplacement] for a ReplaceOver of subject: it
+// also refuses a delegation over another subject.
+func CheckReplacementOver(audiences []did.DID, subject did.DID, replacement map[did.DID][]ucan.Delegation) error {
+	if err := CheckReplacement(audiences, replacement); err != nil {
+		return err
+	}
+	for _, aud := range audiences {
+		for _, d := range replacement[aud] {
+			if d.Subject() != subject {
+				return fmt.Errorf("delegation %s is over %s, replacing those over %s: %w", d.Link(), d.Subject(), subject, store.ErrInvalidArgument)
 			}
 		}
 	}
