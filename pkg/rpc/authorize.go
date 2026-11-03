@@ -57,7 +57,8 @@ func NewAuthorizeRequestHandler(
 // verification key, and issues delegations for the action's Forge commands to the
 // invocation issuer (TTL ≤ 24h + clock skew + AsyncOverhang), signed by the
 // credential for either kind of key. The cleanup commands among them are also
-// issued by the tenant, for CleanupLifetime, with the bucket's root delegation
+// issued by the tenant, lasting CleanupLifetime past the request delegations'
+// day, with the bucket's root delegation
 // (see issueCleanupDelegations). It returns the result and the delegation
 // blocks to attach to the response. It is factored out of the handler so it can
 // be unit tested without constructing a UCAN invocation.
@@ -192,9 +193,10 @@ func AuthorizeRequest(
 // version's registration.
 var cleanupCommands = []ucan.Command{blob.Remove.Command, blob.Abort.Command, upload.Remove.Command}
 
-// CleanupLifetime is how long the cleanup delegations last. The gateway's
-// longest delay before a cleanup is the abort of a multipart upload abandoned
-// for a week; a day more covers its retries.
+// CleanupLifetime is how long the cleanup delegations last, counted from the
+// end of the day the gateway reuses them for. The gateway's longest delay
+// before a cleanup is the abort of a multipart upload abandoned for a week; a
+// day more covers its retries.
 const CleanupLifetime = 8 * 24 * time.Hour
 
 // permissionCleanupCommands returns the cleanup commands among the
@@ -213,7 +215,8 @@ func hasCleanupCommands(perm string) bool { return len(permissionCleanupCommands
 
 // issueCleanupDelegations issues, for each cleanup command the permission's
 // commands include, a delegation from the tenant to audience over the bucket
-// that lasts CleanupLifetime, and returns them with the bucket's root
+// that lasts CleanupLifetime past the next UTC midnight plus the max clock
+// skew, and returns them with the bucket's root
 // delegation, which their chains go through. It issues nothing, and returns
 // no root, when the permission has no cleanup commands or the bucket has no
 // root.
@@ -243,7 +246,13 @@ func issueCleanupDelegations(ctx context.Context, authorizer *auth.Authorizer, d
 	if err != nil {
 		return nil, nil, err
 	}
-	exp := ucan.UnixTimestamp(time.Now().Add(CleanupLifetime).Unix())
+	// The gateway keeps using what one authorize returned, without asking
+	// again, until the derived key expires at the next UTC midnight, and
+	// schedules cleanup for requests it authorized from that cache with the
+	// cleanup delegations it already holds. Counting the lifetime from that
+	// midnight gives cleanup scheduled at any point in the day its full
+	// CleanupLifetime.
+	exp := ucan.UnixTimestamp(nextUTCMidnight(time.Now()).Add(sigv4.MaxClockSkew).Add(CleanupLifetime).Unix())
 	out := make([]ucan.Delegation, 0, len(cmds))
 	for _, cmd := range cmds {
 		d, err := delegation.Delegate(tenant, audience, bucketID, cmd, delegation.WithExpiration(exp))

@@ -402,8 +402,16 @@ func TestAuthorizeRequest(t *testing.T) {
 			require.Equal(t, bucketID, d.Subject())
 			exp := d.Expiration()
 			require.NotNil(t, exp)
-			require.InDelta(t, time.Now().Add(rpc.CleanupLifetime).Unix(), int64(*exp), 60,
-				"a cleanup delegation lasts CleanupLifetime")
+			// CleanupLifetime past the next UTC midnight plus the clock skew,
+			// when the gateway stops using this response's delegations.
+			skew := int64(sigv4.MaxClockSkew / time.Second)
+			lifetime := int64(rpc.CleanupLifetime / time.Second)
+			require.Zero(t, (int64(*exp)-skew-lifetime)%86400,
+				"a cleanup delegation's lifetime runs from a UTC midnight plus the clock skew")
+			require.GreaterOrEqual(t, int64(*exp), time.Now().Add(rpc.CleanupLifetime).Unix(),
+				"and lasts at least CleanupLifetime")
+			require.LessOrEqual(t, int64(*exp), time.Now().Add(rpc.CleanupLifetime+24*time.Hour+sigv4.MaxClockSkew).Unix(),
+				"from the next one")
 			require.Greater(t, int64(*exp), keyExpiry.Unix(), "and outlives the key")
 		}
 		require.ElementsMatch(t, []string{blob.Remove.Command.String(), blob.Abort.Command.String(), upload.Remove.Command.String()}, cmds)

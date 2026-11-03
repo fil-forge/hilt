@@ -206,7 +206,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
   each per-request delegation keyed to itself. The cleanup commands among
   them (`/blob/remove`, `/blob/abort`, `/upload/remove`) are also issued by
-  the tenant for `CleanupLifetime` (8 days), keyed to the chain through the
+  the tenant for `CleanupLifetime` (8 days) past the next UTC midnight plus
+  the clock skew, when the gateway stops reusing the response, keyed to the
+  chain through the
   bucket's root, which rides back with them, so cleanup the gateway schedules
   outlives the key. The gateway must authorize requests locally only on
   chains the access key issued, or these would stand in for a request's
