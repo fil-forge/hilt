@@ -122,7 +122,7 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 	// The invocation span wraps the authorization checks too, so a rejected
 	// invocation shows as a failure receipt on it.
 	for _, r := range routes {
-		srv.Handle(r.Command, tracing.Handler(r.Command, r.Handler))
+		srv.HandleBatch(r.Command, tracing.Handler(r.Command, r.Handler))
 	}
 	return srv, nil
 }

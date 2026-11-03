@@ -301,6 +301,35 @@ func TestAccessKeyStore(t *testing.T) {
 				require.Empty(t, none)
 			})
 
+			t.Run("ListByTenant with IDs returns the tenant's keys among them", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				other := testutil.RandomDID(t)
+				seed.tenant(t, tenantID)
+				seed.tenant(t, other)
+				seed.principal(t, tenantID, "alice")
+
+				svc, alice, unlisted := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), service(t, svc, tenantID, "svc", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), bound(t, alice, tenantID, "alice", "alice-0")))
+				require.NoError(t, s.Add(t.Context(), bound(t, unlisted, tenantID, "alice", "alice-1")))
+				foreign := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), service(t, foreign, other, "svc", nil, "s3:GetObject")))
+
+				got, err := s.ListByTenant(t.Context(), tenantID, accesskey.WithIDs(svc, alice, foreign, testutil.RandomDID(t)))
+				require.NoError(t, err)
+				require.ElementsMatch(t, []did.DID{svc, alice}, ids(got))
+			})
+
+			t.Run("ListByTenant with no IDs returns no key", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed.tenant(t, tenantID)
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "svc", nil, "s3:GetObject")))
+
+				got, err := s.ListByTenant(t.Context(), tenantID, accesskey.WithIDs())
+				require.NoError(t, err)
+				require.Empty(t, got)
+			})
+
 			t.Run("Delete removes the row and is idempotent", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)

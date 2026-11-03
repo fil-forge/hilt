@@ -11,6 +11,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
+	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
@@ -24,6 +25,8 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type deps struct {
@@ -105,6 +108,54 @@ func (s *deleteOnReplace) Replace(ctx context.Context, audiences []did.DID, next
 		}
 		return next(ctx, current)
 	})
+}
+
+func (s *deleteOnReplace) ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return s.Store.ReplaceOver(ctx, audiences, subject, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		if err := s.del(ctx); err != nil {
+			return nil, err
+		}
+		return next(ctx, current)
+	})
+}
+
+// recordCurrent records every delegation a replace hands its callback.
+type recordCurrent struct {
+	delegationstore.Store
+	seen []ucan.Delegation
+}
+
+func (s *recordCurrent) record(next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+	return func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		for _, dels := range current {
+			s.seen = append(s.seen, dels...)
+		}
+		return next(ctx, current)
+	}
+}
+
+func (s *recordCurrent) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return s.Store.Replace(ctx, audiences, s.record(next))
+}
+
+func (s *recordCurrent) ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	return s.Store.ReplaceOver(ctx, audiences, subject, s.record(next))
+}
+
+// countReads counts the reads a rotation makes of the access key store.
+type countReads struct {
+	accesskeystore.Store
+	reads map[string]int
+}
+
+func (s *countReads) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
+	s.reads["Get"]++
+	return s.Store.Get(ctx, id, opts...)
+}
+
+func (s *countReads) ListByTenant(ctx context.Context, tenant did.DID, opts ...accesskeystore.ListOption) ([]accesskeystore.Record, error) {
+	s.reads["ListByTenant"]++
+	return s.Store.ListByTenant(ctx, tenant, opts...)
 }
 
 // held returns the key's delegations over the bucket.
@@ -241,6 +292,58 @@ func TestRotate(t *testing.T) {
 
 		require.Empty(t, d.held(t, gone, d.photos))
 		require.ElementsMatch(t, commandsFor("s3:PutObject"), commands(d.held(t, kept, d.photos)))
+	})
+
+	t.Run("reads the access keys a fixed number of times, whatever their count", func(t *testing.T) {
+		d := setup(t, nil)
+		keys := &countReads{Store: d.accessKeys, reads: map[string]int{}}
+		rotator := grant.NewRotator(zap.NewNop(), d.delegations, keys, d.secrets, d.swarf)
+		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}, "bob": {"s3:PutObject"}}))
+
+		// One listing per principal, then one read of every listed key.
+		require.Equal(t, map[string]int{"ListByTenant": 3}, keys.reads)
+	})
+
+	t.Run("reads only the keys' delegations over the bucket", func(t *testing.T) {
+		d := setup(t, nil)
+		dels := &recordCurrent{Store: d.delegations}
+		rotator := grant.NewRotator(zap.NewNop(), dels, d.accessKeys, d.secrets, d.swarf)
+		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+
+		require.NotEmpty(t, dels.seen)
+		for _, dlg := range dels.seen {
+			require.Equal(t, d.photos, dlg.Subject(), "a write's cost must not grow with the keys' grants over other buckets")
+		}
+	})
+
+	t.Run("a failed rotation logs its key count and the error", func(t *testing.T) {
+		d := setup(t, nil)
+		core, logs := observer.New(zapcore.WarnLevel)
+		boom := errors.New("swarf unavailable")
+		d.swarf.Err = boom
+		rotator := grant.NewRotator(zap.New(core), d.delegations, d.accessKeys, d.secrets, d.swarf)
+		require.ErrorIs(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}), boom)
+
+		entries := logs.FilterMessage("rotating delegations failed").All()
+		require.Len(t, entries, 1)
+		fields := entries[0].ContextMap()
+		require.EqualValues(t, len(d.alice), fields["keys"])
+		require.Equal(t, d.photos.String(), fields["bucket"])
+		require.Contains(t, fields["error"], boom.Error())
+		require.Contains(t, fields, "took")
+	})
+
+	t.Run("a rotation that fails before its keys are listed is logged too", func(t *testing.T) {
+		d := setup(t, nil)
+		core, logs := observer.New(zapcore.WarnLevel)
+		rotator := grant.NewRotator(zap.New(core), d.delegations, d.accessKeys, d.secrets, d.swarf)
+		// Without the tenant's key, loading the issuer fails.
+		require.NoError(t, d.secrets.Delete(ctx, vault.TenantKeyPath(d.tenant.DID())))
+		require.Error(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+
+		entries := logs.FilterMessage("rotating delegations failed").All()
+		require.Len(t, entries, 1)
+		require.EqualValues(t, len(d.alice), entries[0].ContextMap()["keys"], "the keys listed before the failure are counted")
 	})
 
 	t.Run("a principal without keys is a no-op", func(t *testing.T) {
