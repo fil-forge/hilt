@@ -168,8 +168,8 @@ github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40 h1:Meq7loWqQvwCVtl
 github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40/go.mod h1:Zz67XgtRsLViFDCVMxpXwRcge9Y3dbUA9rvZqAF93vg=
 github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c h1:uzLK4I8rD2SXBTeb/qOMbnfD/oAr2RoFVP730abzzyo=
 github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c/go.mod h1:sSe3eJWknrWxnldIpU46aWI2Rvq9PwiA3nUiSFn9Rxk=
-github.com/fil-forge/ucantone v0.0.0-20261103133028-6757b7886577 h1:Ibju2Px8HT3P1f2amacgTuAIzFUVQOHyH2HfJV9q8K0=
-github.com/fil-forge/ucantone v0.0.0-20261103133028-6757b7886577/go.mod h1:430/+X2LtJhgc4yMsoRhMImJ4fdWDpaaubS3v55F6kA=
+github.com/fil-forge/ucantone v0.0.0-20261103134646-342e8488c56a h1:RmV9ClZWftnSW5jDMC6Xtb55wNkdz2j07+pR6eiaQbg=
+github.com/fil-forge/ucantone v0.0.0-20261103134646-342e8488c56a/go.mod h1:430/+X2LtJhgc4yMsoRhMImJ4fdWDpaaubS3v55F6kA=
 github.com/filecoin-project/go-data-segment v0.0.1 h1:1wmDxOG4ubWQm3ZC1XI5nCon5qgSq7Ra3Rb6Dbu10Gs=
 github.com/filecoin-project/go-data-segment v0.0.1/go.mod h1:H0/NKbsRxmRFBcLibmABv+yFNHdmtl5AyplYLnb0Zv4=
 github.com/filecoin-project/go-fil-commcid v0.3.1 h1:4EfxpHSlvtkOqa9weG2Yt5kxFmPib2xU7Uc9Lbqk7fs=
