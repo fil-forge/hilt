@@ -38,7 +38,7 @@ func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), tenantmemory.New(), bucketpolicymemory.New(), up, revocations, nil)
 
 	return []server.Route{
-		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az),
+		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, delegationmemory.New()),
 		rpc.NewCreateBucketHandler(zap.NewNop(), buckets),
 		rpc.NewDeleteBucketHandler(zap.NewNop(), buckets),
 		rpc.NewBucketInfoHandler(zap.NewNop(), buckets),
