@@ -16,6 +16,7 @@ import (
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -23,15 +24,19 @@ import (
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/libforge/commands/blob"
 	"github.com/fil-forge/libforge/commands/content"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
+	"github.com/fil-forge/libforge/commands/upload"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/command"
+	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multibase"
 	"github.com/stretchr/testify/require"
@@ -95,7 +100,9 @@ func TestAuthorizeRequest(t *testing.T) {
 	// providerID is both the tenant's provider and the only legitimate invocation
 	// issuer. bucketID/tenantID are opaque DIDs — the handler no longer reads any
 	// stored delegation chain.
-	bucketID := testutil.RandomDID(t)
+	bucketSigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	bucketID := bucketSigner.KeyDID()
 	tenantID := testutil.RandomDID(t)
 	providerID := testutil.RandomDID(t)
 
@@ -110,6 +117,8 @@ func TestAuthorizeRequest(t *testing.T) {
 	// carrying perms unless principalBound, in which case "user-1" is a
 	// principal of the tenant and the key holds its grants over the bucket.
 	// Each opt adjusts the stored key before it is added.
+	// storeFor is the delegation store each setup built its authorizer over.
+	storeFor := map[*auth.Authorizer]delegationstore.Store{}
 	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *bucketpolicymemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
@@ -136,8 +145,14 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
 		require.NoError(t, buckets.Add(ctx, srcID, tenantID, srcName))
+		// The bucket's root delegation, as bucket creation stores it.
+		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
+		require.NoError(t, err)
+		require.NoError(t, dels.PutBatch(ctx, []ucan.Delegation{root}))
 
-		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets), policies
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
+		storeFor[az] = dels
+		return az, policies
 	}
 
 	// grant stores a policy allowing "user-1" the given actions on the bucket.
@@ -159,7 +174,7 @@ func TestAuthorizeRequest(t *testing.T) {
 
 	call := func(t *testing.T, authorizer *auth.Authorizer, issuer did.DID, args *s3req.AuthorizeArguments) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
 		t.Helper()
-		return rpc.AuthorizeRequest(ctx, zap.NewNop(), authorizer, issuer, args)
+		return rpc.AuthorizeRequest(ctx, zap.NewNop(), authorizer, storeFor[authorizer], issuer, args)
 	}
 
 	t.Run("authorizes a validly-signed request and issues a delegation to the issuer", func(t *testing.T) {
@@ -265,10 +280,13 @@ func TestAuthorizeRequest(t *testing.T) {
 		// The destination's PutObject commands plus one /content/retrieve over the
 		// source, all keyed in the proof set.
 		putCmds := s3perm.CommandsFor("s3:PutObject")
-		require.Len(t, blocks, len(putCmds)+1)
-		require.Len(t, ok.Delegations.Entries, len(putCmds)+1)
+		keySigned := issuedBy(blocks, akDID)
+		require.Len(t, keySigned, len(putCmds)+1)
+		for _, d := range keySigned {
+			require.Contains(t, ok.Delegations.Entries, d.Link())
+		}
 		var srcRetrieve int
-		for _, d := range blocks {
+		for _, d := range keySigned {
 			require.Equal(t, providerID, d.Audience())
 			if d.Subject() == srcID {
 				require.Equal(t, content.Retrieve.Command.String(), d.Command().String())
@@ -285,7 +303,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		ok, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, bucketName, region))
 		require.NoError(t, err)
 		require.Equal(t, &bucketID, ok.SourceBucket, "a copy within one bucket names it as the source too")
-		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))
+		require.Len(t, issuedBy(blocks, akDID), len(s3perm.CommandsFor("s3:PutObject")))
 	})
 
 	t.Run("a principal-bound key signs its own per-request delegations and gets its effective set", func(t *testing.T) {
@@ -365,4 +383,75 @@ func TestAuthorizeRequest(t *testing.T) {
 		_, _, err := call(t, az, providerID, args)
 		require.Error(t, err)
 	})
+
+	t.Run("a write also delegates its cleanup commands from the tenant, past the key's expiry", func(t *testing.T) {
+		keyExpiry := time.Now().Add(time.Hour)
+		az, _ := setup(t, []string{"s3:PutObject"}, false, akSigner, expiringAt(keyExpiry))
+		args := signedArgs(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName+"/object-key", region)
+
+		ok, blocks, err := call(t, az, providerID, args)
+		require.NoError(t, err)
+
+		// Everything the access key issued is as before.
+		require.Len(t, issuedBy(blocks, akDID), len(s3perm.CommandsFor("s3:PutObject")))
+
+		var cmds []string
+		for _, d := range issuedBy(blocks, tenantID) {
+			cmds = append(cmds, d.Command().String())
+			require.Equal(t, providerID, d.Audience())
+			require.Equal(t, bucketID, d.Subject())
+			exp := d.Expiration()
+			require.NotNil(t, exp)
+			// CleanupLifetime past the next UTC midnight plus the clock skew,
+			// when the gateway stops using this response's delegations.
+			skew := int64(sigv4.MaxClockSkew / time.Second)
+			lifetime := int64(rpc.CleanupLifetime / time.Second)
+			require.Zero(t, (int64(*exp)-skew-lifetime)%86400,
+				"a cleanup delegation's lifetime runs from a UTC midnight plus the clock skew")
+			require.GreaterOrEqual(t, int64(*exp), time.Now().Add(rpc.CleanupLifetime).Unix(),
+				"and lasts at least CleanupLifetime")
+			require.LessOrEqual(t, int64(*exp), time.Now().Add(rpc.CleanupLifetime+24*time.Hour+sigv4.MaxClockSkew).Unix(),
+				"from the next one")
+			require.Greater(t, int64(*exp), keyExpiry.Unix(), "and outlives the key")
+		}
+		require.ElementsMatch(t, []string{blob.Remove.Command.String(), blob.Abort.Command.String(), upload.Remove.Command.String()}, cmds)
+
+		// The bucket's root rides along, and each cleanup delegation's proof
+		// set entry is the chain through it.
+		roots := issuedBy(blocks, bucketID)
+		require.Len(t, roots, 1)
+		root := roots[0]
+		require.Equal(t, tenantID, root.Audience())
+		for _, d := range issuedBy(blocks, tenantID) {
+			require.Equal(t, []cid.Cid{root.Link(), d.Link()}, ok.Delegations.Entries[d.Link()])
+		}
+	})
+
+	t.Run("a read delegates no cleanup commands", func(t *testing.T) {
+		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner)
+		_, blocks, err := call(t, az, providerID, signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour))
+		require.NoError(t, err)
+		require.Empty(t, issuedBy(blocks, tenantID))
+		require.Empty(t, issuedBy(blocks, bucketID))
+	})
+
+	t.Run("a bucket with no root delegation gets no cleanup delegations", func(t *testing.T) {
+		az, _ := setup(t, []string{"s3:PutObject"}, false, akSigner)
+		args := signedArgs(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName+"/object-key", region)
+		_, blocks, err := rpc.AuthorizeRequest(ctx, zap.NewNop(), az, delegationmemory.New(), providerID, args)
+		require.NoError(t, err)
+		require.Empty(t, issuedBy(blocks, tenantID))
+		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))
+	})
+}
+
+// issuedBy returns the delegations among ds that issuer issued.
+func issuedBy(ds []ucan.Delegation, issuer did.DID) []ucan.Delegation {
+	var out []ucan.Delegation
+	for _, d := range ds {
+		if d.Issuer() == issuer {
+			out = append(out, d)
+		}
+	}
+	return out
 }
