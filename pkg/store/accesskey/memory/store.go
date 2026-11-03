@@ -113,6 +113,15 @@ func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (
 func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...accesskey.ListOption) ([]accesskey.Record, error) {
 	cfg := accesskey.NewListConfig(opts...)
 
+	// A set, so the filter costs the same per record however many IDs it names.
+	var ids map[did.DID]bool
+	if cfg.IDs != nil {
+		ids = make(map[did.DID]bool, len(cfg.IDs))
+		for _, id := range cfg.IDs {
+			ids[id] = true
+		}
+	}
+
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -122,6 +131,9 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 			continue
 		}
 		if cfg.Principal != nil && (rec.Principal == nil || *rec.Principal != *cfg.Principal) {
+			continue
+		}
+		if ids != nil && !ids[rec.ID] {
 			continue
 		}
 		recs = append(recs, rec)

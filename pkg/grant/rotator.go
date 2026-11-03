@@ -2,7 +2,6 @@ package grant
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -116,15 +115,22 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 	// reading them too would make every write cost what the keys hold across
 	// all of those buckets.
 	return r.delegations.ReplaceOver(ctx, audiences(keys), bucket, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		// The listing above is a snapshot: a key deleted while this waited on
+		// the lock is left with nothing rather than issued fresh grants. One
+		// read tells which keys remain, however many the principals hold.
+		remaining, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithIDs(audiences(keys)...))
+		if err != nil {
+			return nil, fmt.Errorf("looking up the rotated keys: %w", err)
+		}
+		live := make(map[did.DID]bool, len(remaining))
+		for _, key := range remaining {
+			live[key.ID] = true
+		}
 		var revoked []ucan.Delegation
 		next := make(map[did.DID][]ucan.Delegation, len(keys))
 		for _, key := range keys {
-			// The listing above is a snapshot: a key deleted while this waited
-			// on the lock is left with nothing rather than issued fresh grants.
-			if _, err := r.accessKeys.Get(ctx, key.ID); errors.Is(err, store.ErrRecordNotFound) {
+			if !live[key.ID] {
 				continue
-			} else if err != nil {
-				return nil, fmt.Errorf("looking up key %s: %w", key.ID, err)
 			}
 			revoked = append(revoked, current[key.ID]...)
 			fresh, err := Issue(issuer, key.ID, []did.DID{bucket}, actions[principalOf[key.ID]], key.ExpiresAt)
