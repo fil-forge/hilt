@@ -51,11 +51,10 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 
 - Build / vet / test: `go build ./... && go vet ./... && go test ./...`. Run all
   three after changes — this is the standard loop.
-- Run locally: `go run ./cmd serve --upload-service-id=<did>
-  --upload-service-url=<url> --upload-product-id=<did>
-  --revocation-service-id=<did> --revocation-service-url=<url>` (all required,
-  no default; add `--storage=memory --vault=memory` to avoid external deps; see
-  `cmd/main.go` / `pkg/config`).
+- Run locally: `go run ./cmd serve --revocation-service-id=<did>
+  --revocation-service-url=<url>` (both required, no default; add
+  `--storage=memory --vault=memory` to avoid external deps; see `cmd/main.go` /
+  `pkg/config`).
 - Postgres and OpenBao-backed tests use testcontainers and **skip when Docker is
   unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
   only exercises the memory backends; run with Docker for full coverage.
@@ -187,23 +186,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   subresource, mark it supported and give it a route (and an operation) or
   it stays refused. A
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
-  destination and `s3:GetObject` on the source (`s3:GetObjectVersion` when the
-  source names a versionId). An operation S3 gives a second permission on its
-  own bucket (`companionPermission`: GetObjectAttributes needs `s3:GetObject`
-  too) is checked for both, and so is a header that adds one
-  (`classification.readHeaders`: lock and tagging headers on a write,
-  `x-amz-bypass-governance-retention` on a delete or retention write,
-  `x-amz-bucket-object-lock-enabled` on CreateBucket). Every header a
-  decision is taken from must be a signed header, which `RequirementsFor`
-  refuses too for the gateway's local check. A body is read only for the
-  operations `Operation.ReadsBody` names (DeleteObjects: an entry naming a
-  version adds `s3:DeleteObjectVersion`); the gateway attaches the body for
-  those alone, and it must be bound to the signature (the payload hash, or a
-  signed checksum header under an unsigned payload) before it is read;
-  `MaxBodySize` matches the codec's limit on the field. Never
-  widen that set to a write that streams its body; the policy PUT carries
-  its document on its own command. Command-specific S3-permission checks
-  stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
+  destination and `s3:GetObject` on the source, and the header must be a signed
+  header. Command-specific S3-permission checks stay in each handler. Both key
+  kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
   each per-request delegation keyed to itself. `/s3/bucket/info` carries no
   signed request, so it authorizes on the invocation issuer instead: the issuer
   must be the provider of the bucket's tenant, and the access key in the
