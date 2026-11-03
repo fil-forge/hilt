@@ -33,9 +33,9 @@ func LogRejections(logger *zap.Logger) middleware.Middleware {
 		log := logger.With(zap.Stringer("command", route.Command))
 		next := route.Handler
 		route.Handler = func(items []execution.Batch) error {
-			if err := next(items); err != nil {
-				return err
-			}
+			// The checks inside record their rejections before the command
+			// runs, so they are logged even when the command then fails.
+			err := next(items)
 			for _, item := range items {
 				name, ok := failureName(item.Response)
 				if !ok {
@@ -51,7 +51,7 @@ func LogRejections(logger *zap.Logger) middleware.Middleware {
 					zap.Stringer("subject", inv.Subject()),
 				)
 			}
-			return nil
+			return err
 		}
 		return route
 	}

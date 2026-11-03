@@ -102,8 +102,8 @@ func (SpanNamer) OnResponseEncode(context.Context, ucan.Container) error { retur
 // validated, so the gap before them is validation, and they end when the
 // handler returns for the whole batch. A failure receipt is an outcome the
 // caller receives, recorded as ucan.receipt.ok=false; an error returned by the
-// handler, or the receipt ucantone issues for a per-invocation handler's error
-// or panic, also marks the span as failed.
+// handler, a panic in it, or the receipt ucantone issues for a per-invocation
+// handler's error or panic, also marks the span as failed.
 func Handler(cmd ucan.Command, fn execution.BatchHandlerFunc) execution.BatchHandlerFunc {
 	tracer := Tracer()
 	name := cmd.String()
@@ -118,19 +118,31 @@ func Handler(cmd ucan.Command, fn execution.BatchHandlerFunc) execution.BatchHan
 			traced[i] = execution.Batch{Request: tracedRequest{Request: item.Request, ctx: ctx}, Response: item.Response}
 		}
 
-		err := fn(traced)
-		for i, span := range spans {
-			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			} else if rcpt := items[i].Response.Receipt(); rcpt != nil {
-				span.SetAttributes(attribute.Bool("ucan.receipt.ok", rcpt.Out().IsOK()))
-				if failure, ok := handlerFailure(rcpt); ok {
-					span.SetStatus(codes.Error, failure.Message)
+		// The spans end in a defer so a panicking handler still ends and
+		// exports them; the panic carries on to ucantone, which recovers it.
+		var err error
+		returned := false
+		defer func() {
+			for i, span := range spans {
+				switch {
+				case !returned:
+					span.SetStatus(codes.Error, "handler panicked")
+				case err != nil:
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+				default:
+					if rcpt := items[i].Response.Receipt(); rcpt != nil {
+						span.SetAttributes(attribute.Bool("ucan.receipt.ok", rcpt.Out().IsOK()))
+						if failure, ok := handlerFailure(rcpt); ok {
+							span.SetStatus(codes.Error, failure.Message)
+						}
+					}
 				}
+				span.End()
 			}
-			span.End()
-		}
+		}()
+		err = fn(traced)
+		returned = true
 		return err
 	}
 }

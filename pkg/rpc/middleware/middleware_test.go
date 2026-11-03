@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/fil-forge/hilt/internal/testutil"
@@ -75,6 +76,28 @@ func TestLogRejections(t *testing.T) {
 		err := testutil.ExecuteRoute(t, routes[0], service, agent, service.DID())
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
 		require.Zero(t, logs.Len(), "handlers log their own errors")
+	})
+
+	t.Run("logs the rejections when the command returns an error", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		broken := errors.New("command broke")
+		routes := middleware.Apply([]server.Route{server.NewBatchRoute(s3bkt.List.Command,
+			func([]execution.Batch) error { return broken },
+		)},
+			hiltmiddleware.LogRejections(zap.New(core)),
+			middleware.NotSelfSigned(),
+		)
+
+		var items []execution.Batch
+		for _, subject := range []ucan.Principal{agent, service} {
+			inv, err := invocation.Invoke(agent, subject.DID(), s3bkt.List.Command, nil, invocation.WithAudience(service.DID()))
+			require.NoError(t, err)
+			res, err := execution.NewResponse(inv.Task().Link(), execution.WithIssuer(service))
+			require.NoError(t, err)
+			items = append(items, execution.Batch{Request: execution.NewRequest(t.Context(), inv), Response: res})
+		}
+		require.ErrorIs(t, routes[0].Handler(items), broken)
+		require.Len(t, logs.FilterMessage("rejecting invocation").All(), 1)
 	})
 
 	t.Run("logs each rejected invocation of a batch", func(t *testing.T) {
