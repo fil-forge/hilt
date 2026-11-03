@@ -11,6 +11,7 @@ import (
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/server/middleware"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/fil-forge/ucantone/ucan/invocation"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -21,13 +22,12 @@ import (
 // server serves the commands Hilt holds for others.
 func route(t *testing.T, logger *zap.Logger, service ucan.Issuer, ran *bool) server.Route {
 	t.Helper()
-	routes := middleware.Apply([]server.Route{{
-		Command: s3bkt.List.Command,
-		Handler: func(req execution.Request, res execution.Response) error {
+	routes := middleware.Apply([]server.Route{server.NewRoute(s3bkt.List.Command,
+		func(req execution.Request, res execution.Response) error {
 			*ran = true
 			return nil
 		},
-	}},
+	)},
 		hiltmiddleware.LogRejections(logger),
 		middleware.NotSelfSigned(),
 		middleware.OnlySubject(service.DID()),
@@ -66,15 +66,32 @@ func TestLogRejections(t *testing.T) {
 
 	t.Run("leaves a command's own failure to the command", func(t *testing.T) {
 		core, logs := observer.New(zapcore.WarnLevel)
-		routes := middleware.Apply([]server.Route{{
-			Command: s3bkt.List.Command,
-			Handler: func(req execution.Request, res execution.Response) error {
+		routes := middleware.Apply([]server.Route{server.NewRoute(s3bkt.List.Command,
+			func(req execution.Request, res execution.Response) error {
 				return res.SetFailure(bucketsvc.ErrUnknownBucket)
 			},
-		}}, hiltmiddleware.LogRejections(zap.New(core)))
+		)}, hiltmiddleware.LogRejections(zap.New(core)))
 
 		err := testutil.ExecuteRoute(t, routes[0], service, agent, service.DID())
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket)
 		require.Zero(t, logs.Len(), "handlers log their own errors")
+	})
+
+	t.Run("logs each rejected invocation of a batch", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		var ran bool
+		r := route(t, zap.New(core), service, &ran)
+
+		var items []execution.Batch
+		for _, subject := range []ucan.Principal{agent, service, agent} {
+			inv, err := invocation.Invoke(agent, subject.DID(), r.Command, nil, invocation.WithAudience(service.DID()))
+			require.NoError(t, err)
+			res, err := execution.NewResponse(inv.Task().Link(), execution.WithIssuer(service))
+			require.NoError(t, err)
+			items = append(items, execution.Batch{Request: execution.NewRequest(t.Context(), inv), Response: res})
+		}
+		require.NoError(t, r.Handler(items))
+		require.True(t, ran, "the invocation the checks accept still runs")
+		require.Len(t, logs.FilterMessage("rejecting invocation").All(), 2)
 	})
 }

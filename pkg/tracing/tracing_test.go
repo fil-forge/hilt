@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/fil-forge/ucantone/execution"
+	"github.com/fil-forge/ucantone/execution/dispatcher"
 	"github.com/fil-forge/ucantone/ipld/codec/dagcbor"
 	"github.com/fil-forge/ucantone/ipld/datamodel"
 	"github.com/fil-forge/ucantone/server"
@@ -47,7 +48,7 @@ func newServer(t *testing.T, service ucan.Issuer, routes map[ucan.Command]execut
 	t.Helper()
 	srv := server.NewHTTP(service, server.WithEventListener(SpanNamer{}))
 	for cmd, fn := range routes {
-		srv.Handle(cmd, Handler(cmd, fn))
+		srv.HandleBatch(cmd, Handler(cmd, dispatcher.Each(fn)))
 	}
 	e := echo.New()
 	e.Use(Middleware())
@@ -170,7 +171,7 @@ func TestHandlerErrorFailsSpan(t *testing.T) {
 	}
 	require.NotNil(t, handler)
 	require.Equal(t, codes.Error, handler.Status().Code)
-	require.Equal(t, "broken", handler.Status().Description)
+	require.Contains(t, handler.Status().Description, "broken")
 }
 
 func TestHealthNotTraced(t *testing.T) {

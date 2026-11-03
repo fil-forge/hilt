@@ -32,23 +32,25 @@ func LogRejections(logger *zap.Logger) middleware.Middleware {
 	return func(route server.Route) server.Route {
 		log := logger.With(zap.Stringer("command", route.Command))
 		next := route.Handler
-		route.Handler = func(req execution.Request, res execution.Response) error {
-			if err := next(req, res); err != nil {
+		route.Handler = func(items []execution.Batch) error {
+			if err := next(items); err != nil {
 				return err
 			}
-			name, ok := failureName(res)
-			if !ok {
-				return nil
+			for _, item := range items {
+				name, ok := failureName(item.Response)
+				if !ok {
+					continue
+				}
+				if _, rejected := rejections[name]; !rejected {
+					continue
+				}
+				inv := item.Request.Invocation()
+				log.Warn("rejecting invocation",
+					zap.String("reason", name),
+					zap.Stringer("issuer", inv.Issuer()),
+					zap.Stringer("subject", inv.Subject()),
+				)
 			}
-			if _, rejected := rejections[name]; !rejected {
-				return nil
-			}
-			inv := req.Invocation()
-			log.Warn("rejecting invocation",
-				zap.String("reason", name),
-				zap.Stringer("issuer", inv.Issuer()),
-				zap.Stringer("subject", inv.Subject()),
-			)
 			return nil
 		}
 		return route
