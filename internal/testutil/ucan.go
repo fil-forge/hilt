@@ -29,7 +29,7 @@ func ExecuteRoute(t *testing.T, route server.Route, service ucan.Issuer, issuer 
 	req := execution.NewRequest(t.Context(), inv)
 	res, err := execution.NewResponse(inv.Task().Link(), execution.WithIssuer(service))
 	require.NoError(t, err)
-	if err := route.Handler(req, res); err != nil {
+	if err := route.Handler([]execution.Batch{{Request: req, Response: res}}); err != nil {
 		return err
 	}
 

@@ -338,7 +338,8 @@ func lockRow(ctx context.Context, tx pgx.Tx, bucket did.DID) (*bucketpolicystore
 const bucketFKConstraint = "bucket_policy_principal_bucket_fkey"
 
 // writeIndex replaces the bucket's index rows with one per named principal
-// and, when the document names the wildcard, one with a NULL principal.
+// and, when the document names the wildcard, one with a NULL principal, all
+// inserted in one statement.
 func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bkt.PolicyDocument) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`, bucket.String()); err != nil {
 		return fmt.Errorf("clearing policy index: %w", err)
@@ -351,22 +352,23 @@ func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bk
 	if wildcard {
 		ids = append(ids, nil)
 	}
-	for _, p := range ids {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
-			VALUES ($1, $2, $3)
-		`, bucket.String(), tenant.String(), p); err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
-				if pgErr.ConstraintName == bucketFKConstraint {
-					return fmt.Errorf("bucket %s is not a bucket of tenant %s: %w", bucket, tenant, store.ErrInvalidArgument)
-				}
-				if p != nil {
-					return fmt.Errorf("principal %q is not a principal of tenant %s: %w", *p, tenant, store.ErrInvalidArgument)
-				}
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
+		SELECT $1::text, $2::text, p.principal_id FROM unnest($3::text[]) AS p(principal_id)
+	`, bucket.String(), tenant.String(), ids); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
+			if pgErr.ConstraintName == bucketFKConstraint {
+				return fmt.Errorf("bucket %s is not a bucket of tenant %s: %w", bucket, tenant, store.ErrInvalidArgument)
 			}
-			return fmt.Errorf("indexing policy principal: %w", err)
+			// The wildcard row's NULL principal satisfies its key, so the
+			// row refused names a principal; the detail says which.
+			return fmt.Errorf("a principal the policy names is not a principal of tenant %s (%s): %w", tenant, pgErr.Detail, store.ErrInvalidArgument)
 		}
+		return fmt.Errorf("indexing policy principals: %w", err)
 	}
 	return nil
 }

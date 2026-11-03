@@ -100,6 +100,43 @@ func TestDelegationStore(t *testing.T) {
 				require.Len(t, page.Results, 1)
 			})
 
+			t.Run("PutBatch stores a delegation the batch lists twice once", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				dlg := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+				other := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/walk"))
+
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dlg, other, dlg}))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				var links []string
+				for _, d := range page.Results {
+					links = append(links, d.Link().String())
+				}
+				require.ElementsMatch(t, []string{dlg.Link().String(), other.Link().String()}, links)
+			})
+
+			t.Run("PutBatch stores the delegations of several audiences", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				a, b := testutil.RandomDID(t), testutil.RandomDID(t)
+				subject := testutil.RandomDID(t)
+				forA := makeDelegation(t, issuer, a, subject, command.MustParse("/test/run"))
+				forB := makeDelegation(t, issuer, b, did.Undef, command.MustParse("/test/run"))
+
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{forA, forB}))
+
+				got := map[did.DID][]string{}
+				for _, aud := range []did.DID{a, b} {
+					page, err := s.ListByAudience(t.Context(), aud)
+					require.NoError(t, err)
+					for _, d := range page.Results {
+						got[aud] = append(got[aud], d.Link().String())
+					}
+				}
+				require.Equal(t, map[did.DID][]string{a: {forA.Link().String()}, b: {forB.Link().String()}}, got)
+			})
+
 			t.Run("DeleteByAudience removes all delegations for an audience", func(t *testing.T) {
 				audience := testutil.RandomDID(t)
 				for range 3 {

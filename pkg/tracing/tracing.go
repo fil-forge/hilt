@@ -7,11 +7,13 @@
 package tracing
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"slices"
 	"strings"
 
+	edm "github.com/fil-forge/ucantone/errors/datamodel"
 	"github.com/fil-forge/ucantone/execution"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
@@ -93,31 +95,69 @@ func (SpanNamer) OnRequestDecode(ctx context.Context, ct ucan.Container) error {
 
 func (SpanNamer) OnResponseEncode(context.Context, ucan.Container) error { return nil }
 
-// Handler wraps a UCAN handler in a span named for its command, so the
-// invocations of a batch, which run concurrently, each get their own span
-// under the request's. The span starts once the invocation has been
-// validated, so the gap before it is validation. A failure receipt is an
-// outcome the caller receives, recorded as ucan.receipt.ok=false; only an
-// error returned by the handler marks the span as failed.
-func Handler(cmd ucan.Command, fn execution.HandlerFunc) execution.HandlerFunc {
+// Handler wraps a UCAN handler in a span per invocation, named for its
+// command, so the invocations of a batch each get their own span under the
+// request's, and work a handler does for one invocation nests under that
+// invocation's span. The spans start once the batch's invocations have been
+// validated, so the gap before them is validation, and they end when the
+// handler returns for the whole batch. A failure receipt is an outcome the
+// caller receives, recorded as ucan.receipt.ok=false. An error returned by the
+// handler, a panic in it, an invocation it left without a receipt, or the
+// receipt ucantone issues for a per-invocation handler's error or panic also
+// marks the span as failed; an invocation that already had a failure, such as
+// a rejection by the checks, keeps it and is not blamed on the handler.
+func Handler(cmd ucan.Command, fn execution.BatchHandlerFunc) execution.BatchHandlerFunc {
 	tracer := Tracer()
 	name := cmd.String()
-	return func(req execution.Request, res execution.Response) error {
-		ctx, span := tracer.Start(req.Context(), name,
-			trace.WithAttributes(attribute.String("ucan.task", req.Invocation().Task().Link().String())),
-		)
-		defer span.End()
+	return func(items []execution.Batch) error {
+		traced := make([]execution.Batch, len(items))
+		spans := make([]trace.Span, len(items))
+		for i, item := range items {
+			ctx, span := tracer.Start(item.Request.Context(), name,
+				trace.WithAttributes(attribute.String("ucan.task", item.Request.Invocation().Task().Link().String())),
+			)
+			spans[i] = span
+			traced[i] = execution.Batch{Request: tracedRequest{Request: item.Request, ctx: ctx}, Response: item.Response}
+		}
 
-		err := fn(tracedRequest{Request: req, ctx: ctx}, res)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return err
-		}
-		if rcpt := res.Receipt(); rcpt != nil {
-			span.SetAttributes(attribute.Bool("ucan.receipt.ok", rcpt.Out().IsOK()))
-		}
-		return nil
+		// The spans end in a defer so a panicking handler still ends and
+		// exports them; the panic carries on to ucantone, which recovers it.
+		var err error
+		returned := false
+		defer func() {
+			for i, span := range spans {
+				rcpt := items[i].Response.Receipt()
+				switch {
+				case rcpt != nil && rcpt.Out().IsErr():
+					// A failure the invocation already has stands, as ucantone
+					// keeps it whatever the handler does next: a rejection by
+					// the checks, which never reached the handler, or a
+					// failure the handler set.
+					span.SetAttributes(attribute.Bool("ucan.receipt.ok", false))
+					if failure, ok := handlerFailure(rcpt); ok {
+						span.SetStatus(codes.Error, failure.Message)
+					}
+				case !returned:
+					span.SetAttributes(attribute.Bool("ucan.receipt.ok", false))
+					span.SetStatus(codes.Error, "handler panicked")
+				case err != nil:
+					span.SetAttributes(attribute.Bool("ucan.receipt.ok", false))
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+				case rcpt == nil:
+					// ucantone fails an invocation left without a receipt once
+					// the handler returns, after this span has ended.
+					span.SetAttributes(attribute.Bool("ucan.receipt.ok", false))
+					span.SetStatus(codes.Error, "handler set no receipt")
+				default:
+					span.SetAttributes(attribute.Bool("ucan.receipt.ok", true))
+				}
+				span.End()
+			}
+		}()
+		err = fn(traced)
+		returned = true
+		return err
 	}
 }
 
@@ -128,3 +168,29 @@ type tracedRequest struct {
 }
 
 func (r tracedRequest) Context() context.Context { return r.ctx }
+
+// handlerFailures are the failures ucantone issues when a handler returns an
+// error or panics, rather than setting a result: unexpected, so they fail the
+// span the way a returned error does.
+var handlerFailures = map[string]struct{}{
+	execution.HandlerExecutionErrorName: {},
+	execution.ExecutionFailureErrorName: {},
+}
+
+// handlerFailure reports the failure a receipt carries when it is one of
+// [handlerFailures].
+func handlerFailure(rcpt ucan.Receipt) (edm.ErrorModel, bool) {
+	out := rcpt.Out()
+	if !out.IsErr() {
+		return edm.ErrorModel{}, false
+	}
+	_, errBytes := out.Unpack()
+	var model edm.ErrorModel
+	if err := model.UnmarshalCBOR(bytes.NewReader(errBytes)); err != nil {
+		return edm.ErrorModel{}, false
+	}
+	if _, ok := handlerFailures[model.ErrorName]; !ok {
+		return edm.ErrorModel{}, false
+	}
+	return model, true
+}

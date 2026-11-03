@@ -61,10 +61,8 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) (er
 		return err
 	}
 
-	for _, d := range delegations {
-		if err := insert(ctx, tx, d); err != nil {
-			return err
-		}
+	if err := insert(ctx, tx, delegations); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -73,31 +71,45 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) (er
 	return nil
 }
 
-// insert stores one delegation inside tx, leaving an already-stored one alone.
-func insert(ctx context.Context, tx pgx.Tx, d ucan.Delegation) error {
-	data, err := delegation.Encode(d)
-	if err != nil {
-		return fmt.Errorf("encoding delegation %s: %w", d.Link(), err)
+// insert stores the delegations inside tx in one statement, leaving an
+// already-stored one alone. Each column travels as one array parameter, so
+// the statement's size and its round trip stay the same however many
+// delegations a key or a rotation carries.
+func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
+	if len(dels) == 0 {
+		return nil
 	}
-
-	var subject *string
-	if d.Subject().Defined() {
-		str := d.Subject().String()
-		subject = &str
-	}
-
-	var expiresAt *time.Time
-	if exp := d.Expiration(); exp != nil {
-		t := time.Unix(int64(*exp), 0).UTC()
-		expiresAt = &t
+	var (
+		ids        = make([]string, len(dels))
+		issuers    = make([]string, len(dels))
+		audiences  = make([]string, len(dels))
+		subjects   = make([]*string, len(dels))
+		commands   = make([]string, len(dels))
+		datas      = make([][]byte, len(dels))
+		expiresAts = make([]*time.Time, len(dels))
+	)
+	for i, d := range dels {
+		data, err := delegation.Encode(d)
+		if err != nil {
+			return fmt.Errorf("encoding delegation %s: %w", d.Link(), err)
+		}
+		ids[i], issuers[i], audiences[i], commands[i], datas[i] = d.Link().String(), d.Issuer().String(), d.Audience().String(), d.Command().String(), data
+		if d.Subject().Defined() {
+			str := d.Subject().String()
+			subjects[i] = &str
+		}
+		if exp := d.Expiration(); exp != nil {
+			t := time.Unix(int64(*exp), 0).UTC()
+			expiresAts[i] = &t
+		}
 	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bytea[], $7::timestamptz[])
 		ON CONFLICT (id) DO NOTHING
-	`, d.Link().String(), d.Issuer().String(), d.Audience().String(), subject, d.Command().String(), data, expiresAt); err != nil {
-		return fmt.Errorf("storing delegation %s: %w", d.Link(), err)
+	`, ids, issuers, audiences, subjects, commands, datas, expiresAts); err != nil {
+		return fmt.Errorf("storing %d delegations: %w", len(dels), err)
 	}
 	return nil
 }
@@ -112,17 +124,16 @@ const lockNamespace int32 = 0x44454c47 // "DELG"
 // lockAudiences bounds tx's lock waits at [store.LockTimeout] and takes the
 // exclusive advisory lock of each distinct audience, in sorted order. The
 // order is what keeps two transactions locking overlapping audiences from
-// deadlocking: they queue for the shared audiences in the same sequence. The
-// locks are released when tx commits or rolls back.
+// deadlocking: they queue for the shared audiences in the same sequence. All
+// of them are taken in one statement, so a rotation over many keys waits on
+// one round trip. The locks are released when tx commits or rolls back.
 func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
 		return err
 	}
 	slices.Sort(audiences)
-	for _, aud := range slices.Compact(audiences) {
-		if err := pglock.Advisory(ctx, tx, lockNamespace, aud, false); err != nil {
-			return fmt.Errorf("locking delegation audience: %w", err)
-		}
+	if err := pglock.AdvisoryAll(ctx, tx, lockNamespace, slices.Compact(audiences)); err != nil {
+		return fmt.Errorf("locking delegation audiences: %w", err)
 	}
 	return nil
 }
@@ -212,12 +223,16 @@ func (s *Store) replace(ctx context.Context, audiences []did.DID, subject *did.D
 	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE `+scope, args...); err != nil {
 		return fmt.Errorf("deleting delegations by audience: %w", err)
 	}
+	var fresh []ucan.Delegation
+	seen := make(map[did.DID]bool, len(audiences))
 	for _, aud := range audiences {
-		for _, d := range replacement[aud] {
-			if err := insert(ctx, tx, d); err != nil {
-				return err
-			}
+		if !seen[aud] {
+			seen[aud] = true
+			fresh = append(fresh, replacement[aud]...)
 		}
+	}
+	if err := insert(ctx, tx, fresh); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
