@@ -30,6 +30,8 @@ import (
 	wrapkeysmemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	blobcmds "github.com/fil-forge/libforge/commands/blob"
+	contentcmds "github.com/fil-forge/libforge/commands/content"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
@@ -40,6 +42,7 @@ import (
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -97,6 +100,198 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
 		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload, &testutil.FakeSwarf{})
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
+}
+
+// failingTenants is a tenant store whose SetStatus can be made to fail.
+type failingTenants struct {
+	tenant.Store
+	failSetStatus bool
+}
+
+func (f *failingTenants) SetStatus(ctx context.Context, id did.DID, status tenant.Status) error {
+	if f.failSetStatus {
+		return errors.New("tenant store unavailable")
+	}
+	return f.Store.SetStatus(ctx, id, status)
+}
+
+// grantEnv is a tenant ("tenant-1") in the given status with one access key
+// holding a read grant (tenant-wide /content/retrieve) and a write grant
+// (/blob/add over a bucket, expiring in an hour).
+type grantEnv struct {
+	svc         *tenantsvc.Service
+	tenants     *failingTenants
+	delegations *delegationmemory.Store
+	swarf       *testutil.FakeSwarf
+	tenantID    did.DID
+	accessKey   did.DID
+	bucketID    did.DID
+	exp         ucan.UnixTimestamp
+	read, write ucan.Delegation
+}
+
+// links flattens every revocation the fake Swarf recorded, in call order.
+func (e grantEnv) links() []cid.Cid {
+	var links []cid.Cid
+	for _, b := range e.swarf.Batches() {
+		for _, r := range b {
+			links = append(links, r.Revoked)
+		}
+	}
+	return links
+}
+
+func newGrantEnv(t *testing.T, status tenant.Status) grantEnv {
+	t.Helper()
+	ctx := t.Context()
+	tenants := &failingTenants{Store: tenantmemory.New()}
+	accessKeys, delegations, secrets := accesskeymemory.New(), delegationmemory.New(), vaultmemory.New()
+	signer, err := secp256k1.Generate()
+	require.NoError(t, err)
+	env := grantEnv{
+		tenants:     tenants,
+		delegations: delegations,
+		swarf:       &testutil.FakeSwarf{},
+		tenantID:    signer.KeyDID(),
+		accessKey:   testutil.RandomIssuer(t).DID(),
+		bucketID:    testutil.RandomDID(t),
+		exp:         ucan.UnixTimestamp(time.Now().Add(time.Hour).Unix()),
+	}
+	require.NoError(t, tenants.Add(ctx, env.tenantID, "tenant-1", testutil.RandomDID(t), status))
+	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(env.tenantID), signer.Bytes()))
+	require.NoError(t, accessKeys.Add(ctx, accesskeystore.Input{
+		ID: env.accessKey, Tenant: env.tenantID, Name: "key",
+		Permissions: []string{"s3:GetObject", "s3:PutObject"},
+	}))
+
+	tenantIssuer := multikey.NewIssuer(env.tenantID, signer)
+	env.read, err = delegation.Delegate(tenantIssuer, env.accessKey, did.Undef, contentcmds.Retrieve.Command, delegation.WithNoExpiration())
+	require.NoError(t, err)
+	env.write, err = delegation.Delegate(tenantIssuer, env.accessKey, env.bucketID, blobcmds.Add.Command, delegation.WithExpiration(env.exp))
+	require.NoError(t, err)
+	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{env.read, env.write}))
+
+	env.svc = tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
+		accessKeys, principalmemory.New(), bucketpolicymemory.New(), delegations, secrets,
+		wrapkeysmemory.New(), nil, nil, env.swarf)
+	return env
+}
+
+// requireReissued checks the key now holds the unchanged read grant and one
+// write grant of the original's shape, other than the original, and returns
+// that write grant.
+func (e grantEnv) requireReissued(t *testing.T) ucan.Delegation {
+	t.Helper()
+	page, err := e.delegations.ListByAudience(t.Context(), e.accessKey)
+	require.NoError(t, err)
+	require.Len(t, page.Results, 2)
+	var reissued ucan.Delegation
+	for _, d := range page.Results {
+		if d.Link() == e.read.Link() {
+			continue
+		}
+		reissued = d
+	}
+	require.NotNil(t, reissued, "the read grant must be kept")
+	require.NotEqual(t, e.write.Link(), reissued.Link(), "the replaced grant must be gone")
+	require.Equal(t, e.tenantID, reissued.Issuer())
+	require.Equal(t, e.bucketID, reissued.Subject())
+	require.Equal(t, blobcmds.Add.Command.String(), reissued.Command().String())
+	require.Equal(t, e.exp, *reissued.Expiration())
+	return reissued
+}
+
+func (e grantEnv) requireStatus(t *testing.T, want tenant.Status) {
+	t.Helper()
+	rec, err := e.tenants.Get(t.Context(), e.tenantID)
+	require.NoError(t, err)
+	require.Equal(t, want, rec.Status)
+}
+
+// TestWriteLockGrantSweep covers the warm-cache half of FIL-1101: locking
+// revokes the tenant's mutating grants so a gateway's cached authorization is
+// invalidated, and unlocking reissues them.
+func TestWriteLockGrantSweep(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("write-lock revokes only write grants, and unlock reissues them", func(t *testing.T) {
+		env := newGrantEnv(t, tenant.Active)
+
+		// Locking revokes the write grant and leaves the read grant valid.
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Equal(t, []cid.Cid{env.write.Link()}, env.links())
+
+		// Reapplying the lock sweeps again, so a retried lock finishes a partial
+		// sweep; the repeat revocation is harmless.
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Equal(t, []cid.Cid{env.write.Link(), env.write.Link()}, env.links())
+
+		// Unlocking replaces the revoked write grant with one of the same shape,
+		// and keeps the read grant as it was.
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "active"))
+		reissued := env.requireReissued(t)
+		require.Len(t, env.links(), 3)
+		require.NotEqual(t, env.write.Link(), reissued.Link())
+		env.requireStatus(t, tenant.Active)
+	})
+
+	t.Run("returning to active revokes the grants it replaces", func(t *testing.T) {
+		// A tenant that was disabled, not write-locked, still holds live write
+		// grants. Unlocking replaces them, so it must revoke them: a later lock
+		// sweeps only the grants Hilt still stores, and would leave these live in
+		// a gateway's cache.
+		env := newGrantEnv(t, tenant.Active)
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "disabled"))
+		require.Empty(t, env.links())
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "active"))
+		reissued := env.requireReissued(t)
+		require.Equal(t, []cid.Cid{env.write.Link()}, env.links())
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Equal(t, []cid.Cid{env.write.Link(), reissued.Link()}, env.links())
+	})
+
+	t.Run("a lock whose status update fails revokes nothing", func(t *testing.T) {
+		// The sweep runs only once the lock is stored, so a failed lock leaves the
+		// tenant active with its write grants intact.
+		env := newGrantEnv(t, tenant.Active)
+		env.tenants.failSetStatus = true
+		require.Error(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Empty(t, env.links())
+		env.requireStatus(t, tenant.Active)
+	})
+
+	t.Run("a retried lock finishes a sweep that failed", func(t *testing.T) {
+		env := newGrantEnv(t, tenant.Active)
+		env.swarf.Err = errors.New("swarf unavailable")
+		require.Error(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		// The lock holds even though the sweep failed, so Hilt refuses writes.
+		env.requireStatus(t, tenant.WriteLocked)
+		require.Empty(t, env.links())
+
+		env.swarf.Err = nil
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "write-locked"))
+		require.Equal(t, []cid.Cid{env.write.Link()}, env.links())
+	})
+
+	t.Run("a failed status update revokes the grants it reissued", func(t *testing.T) {
+		env := newGrantEnv(t, tenant.WriteLocked)
+		env.tenants.failSetStatus = true
+
+		require.Error(t, env.svc.SetStatus(ctx, "tenant-1", "active"))
+		env.requireStatus(t, tenant.WriteLocked)
+		reissued := env.requireReissued(t)
+		// The replaced grant, then the replacement that must not stay live while
+		// the tenant is still locked.
+		require.Equal(t, []cid.Cid{env.write.Link(), reissued.Link()}, env.links())
+
+		// A retry reissues again and succeeds.
+		env.tenants.failSetStatus = false
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", "active"))
+		require.NotEqual(t, reissued.Link(), env.requireReissued(t).Link())
+		env.requireStatus(t, tenant.Active)
+	})
 }
 
 func TestProvision(t *testing.T) {

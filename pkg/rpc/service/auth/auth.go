@@ -188,8 +188,8 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	log = log.With(zap.Stringer("provider", tenantRec.Provider))
 
 	// Disabled is the hard lock-out state (lifecycle Active → Disabled → delete).
-	// WriteLocked still authenticates here so reads (like ListBuckets) work; write
-	// handlers gate WriteLocked themselves, since Authorize is operation-agnostic.
+	// WriteLocked authenticates past this point so reads keep working; the mutating
+	// operations it forbids are rejected below, once the operation is classified.
 	if tenantRec.Status == tenant.Disabled {
 		log.Debug("rejecting disabled tenant")
 		return nil, ErrTenantDisabled
@@ -237,6 +237,13 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	if err := c.bindBody(sr, req); err != nil {
 		log.Debug("rejecting request on its body", zap.Stringer("operation", op), zap.Error(err))
 		return nil, err
+	}
+
+	// A write-locked tenant may read but not mutate: no bucket create or delete,
+	// no object write, copy or delete, no multipart upload or part.
+	if tenantRec.Status == tenant.WriteLocked && op.Mutates() {
+		log.Debug("rejecting mutating operation for write-locked tenant", zap.Stringer("operation", op))
+		return nil, ErrTenantWriteLocked
 	}
 
 	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, c)
