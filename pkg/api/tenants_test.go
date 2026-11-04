@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
@@ -22,6 +23,8 @@ import (
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	exportsessionmemory "github.com/fil-forge/hilt/pkg/store/exportsession/memory"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
@@ -230,7 +233,7 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.providers, bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, plcClient, upload, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.providers, bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, exportsessionmemory.New(), plcClient, upload, &testutil.FakeSwarf{})
 	route := api.NewProvisionTenantHandler(zap.NewNop(), svc)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
@@ -513,7 +516,7 @@ func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), exportsessionmemory.New(), nil, nil, &testutil.FakeSwarf{})
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -541,7 +544,7 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	tenants := tenantmemory.New()
 	id := testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, id, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), exportsessionmemory.New(), nil, nil, &testutil.FakeSwarf{})
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), svc))
 
 	statusBody := func(s api.TenantStatus) []byte {
@@ -613,6 +616,7 @@ type deleteDeps struct {
 	principals  *principalmemory.Store
 	delegations *delegationmemory.Store
 	wrapKeys    *wrapkeymemory.Store
+	exports     *exportsessionmemory.Store
 	secrets     vault.Vault
 	directory   *plcDirectory
 	signer      secp256k1.Signer
@@ -668,6 +672,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		principals:  principalmemory.New(),
 		delegations: delegationmemory.New(),
 		wrapKeys:    wrapkeymemory.New(),
+		exports:     exportsessionmemory.New(),
 		secrets:     vaultmemory.New(),
 		directory:   directory,
 		signer:      signer,
@@ -689,7 +694,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, providermemory.New(), deps.buckets, deps.accessKeys, deps.principals, bucketpolicymemory.New(), deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, providermemory.New(), deps.buckets, deps.accessKeys, deps.principals, bucketpolicymemory.New(), deps.delegations, deps.secrets, deps.wrapKeys, deps.exports, plcClient, nil, &testutil.FakeSwarf{})
 	route := api.NewDeleteTenantHandler(zap.NewNop(), svc)
 	return serve(route), deps
 }
@@ -763,6 +768,20 @@ func TestDeleteTenantHandler(t *testing.T) {
 
 		// The DID was deactivated in the directory.
 		require.Equal(t, 1, deps.directory.deactivations)
+	})
+
+	t.Run("409 while an export is in progress", func(t *testing.T) {
+		e, deps := setupDelete(t, tenant.Disabled)
+		require.NoError(t, deps.exports.Add(ctx, exportsession.Input{
+			ID: "session-1", Tenant: deps.tenantID, Bucket: testutil.RandomDID(t),
+			CustomerKey: "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc", ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1", nil)
+		require.Equal(t, http.StatusConflict, rec.Code)
+		_, err := deps.tenants.GetByExternalID(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Equal(t, 0, deps.directory.deactivations)
 	})
 
 	t.Run("already-deactivated DID still cleans up locally", func(t *testing.T) {

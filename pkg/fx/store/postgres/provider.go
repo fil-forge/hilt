@@ -18,6 +18,8 @@ import (
 	pgbucketpolicy "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	pgdelegation "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	pgexportsession "github.com/fil-forge/hilt/pkg/store/exportsession/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	pgprincipal "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/provider"
@@ -39,6 +41,7 @@ var Module = fx.Module("postgres-store",
 		NewAccessKeyStore,
 		NewBucketStore,
 		NewDelegationStore,
+		NewExportSessionStore,
 		NewPolicyStore,
 		NewPrincipalStore,
 		NewProviderStore,
@@ -124,6 +127,10 @@ func NewBucketStore(mdb *MigratedPool) bucket.Store {
 
 func NewDelegationStore(mdb *MigratedPool) delegation.Store {
 	return pgdelegation.New(mdb.Pool)
+}
+
+func NewExportSessionStore(mdb *MigratedPool) exportsession.Store {
+	return pgexportsession.New(mdb.Pool)
 }
 
 func NewPolicyStore(mdb *MigratedPool) bucketpolicy.Store {

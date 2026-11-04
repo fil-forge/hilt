@@ -23,6 +23,8 @@ import (
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
+	exportsessionmemory "github.com/fil-forge/hilt/pkg/store/exportsession/memory"
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -95,7 +97,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), providers, bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload, &testutil.FakeSwarf{})
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), exportsessionmemory.New(), plcClient, upload, &testutil.FakeSwarf{})
 	return provisionEnv{svc: svc, providers: providers, sprueFailed: sprueFailed}
 }
 
@@ -156,7 +158,7 @@ func TestProvision(t *testing.T) {
 // clients — enough for Get and SetStatus, which never touch them.
 func simpleService(tenants tenant.Store) *tenantsvc.Service {
 	return tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil, &testutil.FakeSwarf{})
+		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), exportsessionmemory.New(), nil, nil, &testutil.FakeSwarf{})
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -232,6 +234,7 @@ type deleteEnv struct {
 	buckets    *bucketmemory.Store
 	policies   *bucketpolicymemory.Store
 	principals *principalmemory.Store
+	exports    *exportsessionmemory.Store
 	swarf      *testutil.FakeSwarf
 	// publisher is swarf as the service sees it, recording each publish's deadline.
 	publisher *deadlinePublisher
@@ -309,10 +312,11 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	swarf := &testutil.FakeSwarf{}
 	publisher := &deadlinePublisher{FakeSwarf: swarf}
+	exports := exportsessionmemory.New()
 	svc := tenantsvc.New(zap.NewNop(), tenants, providermemory.New(), buckets,
-		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, publisher)
+		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), exports, plcClient, nil, publisher)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
-		principals: principals, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
+		principals: principals, exports: exports, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
 		tombstone: tombstoneJSON.Bytes()}
 }
 
@@ -399,6 +403,25 @@ func TestDelete(t *testing.T) {
 	t.Run("rejects a non-disabled tenant", func(t *testing.T) {
 		env := deleteSetup(t, tenant.Active)
 		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), tenantsvc.ErrTenantNotDisabled)
+	})
+
+	t.Run("refuses while an export is open, then deletes once it closes", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		require.NoError(t, env.exports.Add(ctx, exportsession.Input{
+			ID: "session-1", Tenant: env.tenantID, Bucket: env.bucketID,
+			CustomerKey: "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc", ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), tenantsvc.ErrExportInProgress)
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Equal(t, 0, env.directory.deactivations, "nothing is torn down while the export is open")
+		require.Empty(t, env.swarf.Revoked(), "no delegation is revoked while the export is open")
+
+		require.NoError(t, env.exports.Transition(ctx, "session-1", exportsession.Opened, exportsession.Aborted))
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		_, err = env.exports.Get(ctx, "session-1")
+		require.ErrorIs(t, err, store.ErrRecordNotFound, "closed sessions are deleted with the tenant")
 	})
 
 	t.Run("maps a directory failure to ErrDIDDeactivation", func(t *testing.T) {

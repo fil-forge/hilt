@@ -18,6 +18,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
+	"github.com/fil-forge/hilt/pkg/store/exportsession"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
@@ -48,6 +49,7 @@ type Service struct {
 	delegations delegation.Store
 	secrets     vault.Vault
 	wrapKeys    wrapkeystore.Store
+	exports     exportsession.Store
 	plcClient   *plc.DirectoryClient
 	upload      *upload.Client
 	revocations grant.RevocationPublisher
@@ -65,6 +67,7 @@ func New(
 	delegations delegation.Store,
 	secrets vault.Vault,
 	wrapKeys wrapkeystore.Store,
+	exports exportsession.Store,
 	plcClient *plc.DirectoryClient,
 	upload *upload.Client,
 	revocations grant.RevocationPublisher,
@@ -81,6 +84,7 @@ func New(
 		secrets:     secrets,
 		plcClient:   plcClient,
 		wrapKeys:    wrapKeys,
+		exports:     exports,
 		upload:      upload,
 		revocations: revocations,
 	}
@@ -275,9 +279,10 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	return nil
 }
 
-// Delete permanently deletes a tenant (which must be disabled), cascading to its
-// buckets and their policies, access keys, principals, and delegations, and
-// deactivating its did:plc. It is idempotent: a missing tenant is a no-op.
+// Delete permanently deletes a tenant (which must be disabled and have no open
+// export session), cascading to its buckets and their policies, access keys,
+// principals, delegations, and export sessions, and deactivating its did:plc.
+// It is idempotent: a missing tenant is a no-op.
 //
 // Out of scope: deprovisioning the tenant's spaces from the Forge upload service
 // (Sprue), for which there is no facility per the RFC.
@@ -292,6 +297,16 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 
 	if rec.Status != tenantstore.Disabled {
 		return ErrTenantNotDisabled
+	}
+
+	// An open export still needs the tenant's keys and buckets, and deletion
+	// destroys both, so it waits for the export to be released or aborted.
+	exporting, err := s.exports.HasOpen(ctx, rec.ID)
+	if err != nil {
+		return fmt.Errorf("checking export sessions: %w", err)
+	}
+	if exporting {
+		return ErrExportInProgress
 	}
 
 	signingVaultKey := vault.TenantKeyPath(rec.ID)
@@ -397,6 +412,12 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.policies.DeleteByBucket(ctx, id, nil); err != nil {
 			return fmt.Errorf("deleting bucket policy: %w", err)
 		}
+	}
+
+	// Cascade: export sessions, all closed by now. They reference the tenant row
+	// (FK RESTRICT), so they go before it.
+	if err := s.exports.DeleteByTenant(ctx, rec.ID); err != nil {
+		return fmt.Errorf("deleting export sessions: %w", err)
 	}
 
 	// Delegations addressed to the tenant (the bucket -> tenant grants).

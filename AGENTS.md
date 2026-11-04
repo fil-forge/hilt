@@ -108,8 +108,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
   tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
   key's set as its policies change. See the package doc.
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy}` —
-  each an interface with `memory` and `postgres` backends.
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,exportsession}`
+  — each an interface with `memory` and `postgres` backends.
 - `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
   lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the

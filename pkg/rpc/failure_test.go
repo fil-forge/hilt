@@ -53,6 +53,14 @@ func TestBucketFailure(t *testing.T) {
 		requireName(t, f.got, bucketsvc.BucketAlreadyOwnedErrorName)
 	})
 
+	t.Run("wrapped export-in-progress sentinel is set as failure with its name", func(t *testing.T) {
+		f := &recordingFailer{}
+		err := fmt.Errorf("%w: %q", bucketsvc.ErrExportInProgress, "foo")
+		require.NoError(t, bucketFailure(f, err))
+		require.True(t, f.called)
+		requireName(t, f.got, bucketsvc.ExportInProgressErrorName)
+	})
+
 	t.Run("a rejected policy document is set as failure under the policy name", func(t *testing.T) {
 		f := &recordingFailer{}
 		err := fmt.Errorf("decoding policy: unknown field %q: %w", "Version", s3bkt.ErrInvalidPolicy)
