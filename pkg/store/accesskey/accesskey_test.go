@@ -301,6 +301,40 @@ func TestAccessKeyStore(t *testing.T) {
 				require.Empty(t, none)
 			})
 
+			t.Run("ListByTenant with principals returns the keys bound to any of them", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				other := testutil.RandomDID(t)
+				seed.tenant(t, tenantID)
+				seed.tenant(t, other)
+				for _, p := range []string{"alice", "bob", "carol"} {
+					seed.principal(t, tenantID, p)
+				}
+				seed.principal(t, other, "alice")
+
+				alice, bob := testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), bound(t, alice, tenantID, "alice", "alice-0")))
+				require.NoError(t, s.Add(t.Context(), bound(t, bob, tenantID, "bob", "bob-0")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "carol", "carol-0")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "svc", nil, "s3:GetObject")))
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), other, "alice", "alice-0")))
+
+				got, err := s.ListByTenant(t.Context(), tenantID, accesskey.WithPrincipals("alice", "bob", "nobody"))
+				require.NoError(t, err)
+				require.ElementsMatch(t, []did.DID{alice, bob}, ids(got))
+			})
+
+			t.Run("ListByTenant with no principals returns no key", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed.tenant(t, tenantID)
+				seed.principal(t, tenantID, "alice")
+				require.NoError(t, s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "alice", "alice-0")))
+				require.NoError(t, s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "svc", nil, "s3:GetObject")))
+
+				got, err := s.ListByTenant(t.Context(), tenantID, accesskey.WithPrincipals())
+				require.NoError(t, err)
+				require.Empty(t, got)
+			})
+
 			t.Run("ListByTenant with IDs returns the tenant's keys among them", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				other := testutil.RandomDID(t)

@@ -101,6 +101,9 @@ func (in Input) Validate() error {
 type ListConfig struct {
 	// Principal restricts results to keys bound to this principal.
 	Principal *string
+	// Principals, when non-nil, restricts results to keys bound to any of
+	// these principals. An empty, non-nil slice matches no key.
+	Principals []string
 	// IDs, when non-nil, restricts results to the keys with these IDs. An
 	// empty, non-nil slice matches no key.
 	IDs []did.DID
@@ -112,6 +115,13 @@ type ListOption func(*ListConfig)
 // WithPrincipal restricts results to keys bound to the given principal.
 func WithPrincipal(externalID string) ListOption {
 	return func(c *ListConfig) { c.Principal = &externalID }
+}
+
+// WithPrincipals restricts results to keys bound to any of the given
+// principals, in one read however many there are. Without any principals it
+// matches no key.
+func WithPrincipals(externalIDs ...string) ListOption {
+	return func(c *ListConfig) { c.Principals = append(make([]string, 0, len(externalIDs)), externalIDs...) }
 }
 
 // WithIDs restricts results to the keys with the given IDs, in one read
@@ -144,8 +154,9 @@ type Store interface {
 	// commit or roll back; on Postgres the wait is bounded at
 	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
 	Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (Record, error)
-	// ListByTenant retrieves the tenant's records, optionally restricted to one
-	// principal's keys (see [WithPrincipal]) or to given keys (see [WithIDs]).
+	// ListByTenant retrieves the tenant's records, optionally restricted to the
+	// keys of one principal or several (see [WithPrincipal], [WithPrincipals])
+	// or to given keys (see [WithIDs]).
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) ([]Record, error)
 	// Delete removes the access key record for a given ID. It is idempotent:
 	// deleting an absent record returns nil. On Postgres the wait for a row
