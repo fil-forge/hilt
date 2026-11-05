@@ -113,6 +113,10 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 		args = append(args, cfg.Prefix)
 		query += fmt.Sprintf(" AND starts_with(name, $%d)", len(args))
 	}
+	if cfg.Provider.Defined() {
+		args = append(args, cfg.Provider.String())
+		query += fmt.Sprintf(" AND provider_id = $%d", len(args))
+	}
 	if cfg.Cursor != nil {
 		args = append(args, *cfg.Cursor)
 		query += fmt.Sprintf(" AND name > $%d", len(args))

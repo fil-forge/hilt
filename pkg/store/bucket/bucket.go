@@ -55,6 +55,9 @@ type ListConfig struct {
 	// Prefix optionally restricts results to buckets whose name starts with it
 	// (matched literally). When empty, no prefix filtering is applied.
 	Prefix string
+	// Provider optionally restricts results to buckets served by it. When undef,
+	// no provider filtering is applied.
+	Provider did.DID
 }
 
 // ListOption configures a [ListConfig].
@@ -76,6 +79,12 @@ func WithNames(names ...string) ListOption {
 // prefix (matched literally).
 func WithPrefix(prefix string) ListOption {
 	return func(c *ListConfig) { c.Prefix = prefix }
+}
+
+// WithProvider restricts results to the buckets the given provider serves,
+// which is how a listing is narrowed to one region.
+func WithProvider(provider did.DID) ListOption {
+	return func(c *ListConfig) { c.Provider = provider }
 }
 
 // WithLimit sets the maximum number of results per page.

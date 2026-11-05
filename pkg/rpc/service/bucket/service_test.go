@@ -620,6 +620,68 @@ func TestList(t *testing.T) {
 		require.Equal(t, region2, ok.Buckets[1].Region)
 	})
 
+	t.Run("bucket-region narrows the listing to one region", func(t *testing.T) {
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, false)
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "local"))
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, provider2ID, "remote"))
+
+		ok, err := svc.List(ctx, providerID, listArgs("bucket-region="+region))
+		require.NoError(t, err)
+		require.Equal(t, []string{"local"}, bucketNames(ok))
+		require.Equal(t, region, ok.Buckets[0].Region)
+	})
+
+	t.Run("bucket-region can name a region other than the one signed for", func(t *testing.T) {
+		// The filter picks which buckets come back, not who may ask: the
+		// request is still authorized against the region it was signed for.
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, false)
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "local"))
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, provider2ID, "remote"))
+
+		ok, err := svc.List(ctx, providerID, listArgs("bucket-region="+region2))
+		require.NoError(t, err)
+		require.Equal(t, []string{"remote"}, bucketNames(ok))
+		require.Equal(t, region2, ok.Buckets[0].Region)
+	})
+
+	t.Run("bucket-region no provider serves lists nothing", func(t *testing.T) {
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, false)
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "local"))
+
+		ok, err := svc.List(ctx, providerID, listArgs("bucket-region=ap-south-1"))
+		require.NoError(t, err)
+		require.Empty(t, ok.Buckets)
+		require.Empty(t, ok.ContinuationToken)
+	})
+
+	t.Run("bucket-region paginates within the filter", func(t *testing.T) {
+		// Interleaved by name, so a filter applied after the page was read
+		// would answer with one bucket and a token instead of a full page.
+		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, false)
+		for _, b := range []struct {
+			name     string
+			provider did.DID
+		}{
+			{"alpha", providerID},
+			{"bravo", provider2ID},
+			{"charlie", providerID},
+			{"delta", provider2ID},
+			{"echo", providerID},
+		} {
+			require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, b.provider, b.name))
+		}
+
+		ok, err := svc.List(ctx, providerID, listArgs("bucket-region="+region, "max-buckets=2"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"alpha", "charlie"}, bucketNames(ok))
+		require.Equal(t, "charlie", ok.ContinuationToken)
+
+		ok, err = svc.List(ctx, providerID, listArgs("bucket-region="+region, "max-buckets=2", "continuation-token="+ok.ContinuationToken))
+		require.NoError(t, err)
+		require.Equal(t, []string{"echo"}, bucketNames(ok))
+		require.Empty(t, ok.ContinuationToken)
+	})
+
 	t.Run("filters by prefix and echoes it", func(t *testing.T) {
 		svc, buckets, tenantID := setup(t, allPerms, false)
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "alpha"))

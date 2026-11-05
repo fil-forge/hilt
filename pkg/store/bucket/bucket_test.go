@@ -34,22 +34,32 @@ var storeKinds = []StoreKind{Memory, Postgres}
 // referential integrity.
 type seedFunc func(t *testing.T, tenantID did.DID)
 
-// makeStore returns the store under test, a tenant seeder, and the DID of a
+// seedProviderFunc registers a provider so the bucket.provider_id foreign key
+// is satisfied. It is a no-op for the memory store, which does not enforce
+// referential integrity.
+type seedProviderFunc func(t *testing.T, providerID did.DID)
+
+// makeStore returns the store under test, a tenant seeder, the DID of a
 // provider every bucket in the suite is served by (registered for real in
-// Postgres, where bucket.provider_id is a foreign key).
-func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc, did.DID) {
+// Postgres, where bucket.provider_id is a foreign key), and a seeder for the
+// further providers a test needs to tell two regions apart.
+func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc, did.DID, seedProviderFunc) {
 	providerID := testutil.RandomDID(t)
 	switch k {
 	case Memory:
-		return bucketmemory.New(), func(*testing.T, did.DID) {}, providerID
+		return bucketmemory.New(), func(*testing.T, did.DID) {}, providerID, func(*testing.T, did.DID) {}
 	case Postgres:
 		pool := createPostgresPool(t)
-		require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, providerID.String(), nil))
+		providers := providerpostgres.New(pool)
+		seedProvider := func(t *testing.T, id did.DID) {
+			require.NoError(t, providers.Add(t.Context(), id, id.String(), nil))
+		}
+		seedProvider(t, providerID)
 		tenants := tenantpostgres.New(pool)
 		seed := func(t *testing.T, tenantID did.DID) {
 			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 		}
-		return bucketpostgres.New(pool), seed, providerID
+		return bucketpostgres.New(pool), seed, providerID, seedProvider
 	}
 	panic("unknown store kind")
 }
@@ -69,7 +79,7 @@ func createPostgresPool(t *testing.T) *pgxpool.Pool {
 func TestBucketStore(t *testing.T) {
 	for _, k := range storeKinds {
 		t.Run(string(k), func(t *testing.T) {
-			s, seed, providerID := makeStore(t, k)
+			s, seed, providerID, seedProvider := makeStore(t, k)
 
 			t.Run("adds and retrieves a bucket by name", func(t *testing.T) {
 				id := testutil.RandomDID(t)
@@ -197,6 +207,55 @@ func TestBucketStore(t *testing.T) {
 				require.Len(t, page.Results, 1)
 				require.Equal(t, "pfx-app-c", page.Results[0].Name)
 				require.Nil(t, page.Cursor)
+			})
+
+			t.Run("ListByTenant filters by provider and paginates within it", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				other := testutil.RandomDID(t)
+				seedProvider(t, other)
+				// Interleaved by name, so a filter that ran after the page was
+				// read would return a short page instead of a full one.
+				for _, b := range []struct {
+					name     string
+					provider did.DID
+				}{
+					{"prv-a", providerID},
+					{"prv-b", other},
+					{"prv-c", providerID},
+					{"prv-d", other},
+					{"prv-e", providerID},
+				} {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, b.provider, b.name))
+				}
+
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithProvider(providerID), bucket.WithLimit(2))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 2)
+				require.Equal(t, "prv-a", page.Results[0].Name)
+				require.Equal(t, "prv-c", page.Results[1].Name)
+				require.NotNil(t, page.Cursor)
+
+				page, err = s.ListByTenant(t.Context(), tenantID, bucket.WithProvider(providerID), bucket.WithLimit(2), bucket.WithCursor(*page.Cursor))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, "prv-e", page.Results[0].Name)
+				require.Nil(t, page.Cursor)
+			})
+
+			t.Run("ListByTenant combines the provider and prefix filters", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				other := testutil.RandomDID(t)
+				seedProvider(t, other)
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "cmb-keep"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, other, "cmb-wrong-provider"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "oth-wrong-prefix"))
+
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithProvider(providerID), bucket.WithPrefix("cmb-"))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, "cmb-keep", page.Results[0].Name)
 			})
 
 			t.Run("ListByTenant cursor resumes strictly after a non-existent name", func(t *testing.T) {

@@ -120,6 +120,9 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 		if cfg.Prefix != "" && !strings.HasPrefix(b.Name, cfg.Prefix) {
 			continue
 		}
+		if cfg.Provider.Defined() && b.Provider != cfg.Provider {
+			continue
+		}
 		// Resume strictly after the cursor name, whether or not a bucket with
 		// that exact name exists.
 		if cfg.Cursor != nil && b.Name <= *cfg.Cursor {
