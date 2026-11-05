@@ -65,19 +65,19 @@ func TestPolicy(t *testing.T) {
 		principals := principalmemory.New()
 		policies := bucketpolicymemory.New(bucketpolicymemory.WithBuckets(func(did.DID) bool { return !*bucketGone }))
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		if !principalBound { // seedKey adds user-1 itself for a bound key
 			require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 		}
 		bucketID := testutil.RandomDID(t)
-		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, bucketName))
 		seedKey(t, accessKeys, secrets, delegations, principals, akSigner, tenantID, perms, principalBound)
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
 		swarf := &htestutil.FakeSwarf{}
 		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone}
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, providers, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone}
 	}
 
 	type reqOpts struct {

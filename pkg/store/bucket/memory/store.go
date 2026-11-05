@@ -26,12 +26,15 @@ func New() *Store {
 	return &Store{buckets: map[did.DID]bucket.Record{}}
 }
 
-func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string) error {
+func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, provider did.DID, name string) error {
 	if id == did.Undef {
 		return fmt.Errorf("bucket ID is required: %w", store.ErrInvalidArgument)
 	}
 	if tenant == did.Undef {
 		return fmt.Errorf("bucket tenant is required: %w", store.ErrInvalidArgument)
+	}
+	if provider == did.Undef {
+		return fmt.Errorf("bucket provider is required: %w", store.ErrInvalidArgument)
 	}
 	if err := bucket.ValidateName(name); err != nil {
 		return err
@@ -48,6 +51,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string
 	s.buckets[id] = bucket.Record{
 		ID:        id,
 		Tenant:    tenant,
+		Provider:  provider,
 		Name:      name,
 		CreatedAt: time.Now().UTC(),
 	}

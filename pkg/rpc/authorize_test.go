@@ -97,8 +97,8 @@ func TestAuthorizeRequest(t *testing.T) {
 	require.NoError(t, err)
 	akDID := akSigner.KeyDID()
 
-	// providerID is both the tenant's provider and the only legitimate invocation
-	// issuer. bucketID/tenantID are opaque DIDs — the handler no longer reads any
+	// providerID serves the signing region and both buckets, so it is the only
+	// legitimate invocation issuer. bucketID/tenantID are opaque DIDs — the handler no longer reads any
 	// stored delegation chain.
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		dels := delegationmemory.New()
 
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		in := accesskey.Input{ID: akDID, Tenant: tenantID, Name: "k1", Permissions: perms}
 		if principalBound {
 			principal := "user-1"
@@ -143,8 +143,8 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, accessKeys.Add(ctx, in))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, akDID), vaultSigner.Bytes()))
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
-		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, bucketName))
-		require.NoError(t, buckets.Add(ctx, srcID, tenantID, srcName))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, bucketName))
+		require.NoError(t, buckets.Add(ctx, srcID, tenantID, providerID, srcName))
 		// The bucket's root delegation, as bucket creation stores it.
 		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 		require.NoError(t, err)

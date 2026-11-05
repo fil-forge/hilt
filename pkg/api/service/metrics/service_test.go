@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fil-forge/hilt/internal/testutil"
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
@@ -56,13 +57,13 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenantID, tenant.Active))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket-a"))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), "bucket-a"))
 	root, err := delegation.Delegate(
 		multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)
@@ -71,7 +72,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 	bucketBSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketBID := bucketBSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketBID, tenantID, "bucket-b"))
+	require.NoError(t, buckets.Add(ctx, bucketBID, tenantID, testutil.RandomDID(t), "bucket-b"))
 	rootB, err := delegation.Delegate(
 		multikey.NewIssuer(bucketBID, bucketBSigner), tenantID, bucketBID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)

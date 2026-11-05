@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/fil-forge/hilt/pkg/client"
+	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
@@ -15,6 +16,7 @@ import (
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
+	ucanerrors "github.com/fil-forge/ucantone/errors"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
@@ -188,6 +190,29 @@ func TestClientDeleteBucket(t *testing.T) {
 
 		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Delete, hilt, ingot.DID()))
 		require.Error(t, c.DeleteBucket(t.Context(), s3.Request{Method: "DELETE", URL: "https://s3.fil.one/bucket"}))
+	})
+
+	t.Run("region mismatch failure keeps its regions", func(t *testing.T) {
+		// The typed failure travels through a real receipt: Hilt sets it, the
+		// client decodes it back with both regions for the gateway to act on.
+		hilt := testutil.RandomIssuer(t)
+		ingot := testutil.RandomIssuer(t)
+
+		srv := server.NewHTTP(hilt)
+		srv.Handle(s3bkt.Delete.Command, s3bkt.Delete.Handler(
+			func(req *binding.Request[*s3bkt.DeleteArguments], res *binding.Response[*s3bkt.DeleteOK]) error {
+				return res.SetFailure(&auth.BucketRegionMismatchError{Expected: "eu-west-1", Actual: "us-west-2"})
+			}))
+
+		c := newHiltClient(t, hilt, srv, ingot, rootProofs(t, s3bkt.Delete, hilt, ingot.DID()))
+		err := c.DeleteBucket(t.Context(), s3.Request{Method: "DELETE", URL: "https://s3.fil.one/bucket"})
+		var mismatch *auth.BucketRegionMismatchError
+		require.ErrorAs(t, err, &mismatch)
+		require.Equal(t, "eu-west-1", mismatch.Expected)
+		require.Equal(t, "us-west-2", mismatch.Actual)
+		var named ucanerrors.Named
+		require.ErrorAs(t, err, &named)
+		require.Equal(t, auth.BucketRegionMismatchErrorName, named.Name())
 	})
 }
 

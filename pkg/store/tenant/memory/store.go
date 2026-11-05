@@ -22,12 +22,9 @@ func New() *Store {
 	return &Store{tenants: map[did.DID]tenant.Record{}}
 }
 
-func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status tenant.Status) error {
+func (s *Store) Add(ctx context.Context, id did.DID, externalID string, status tenant.Status) error {
 	if id == did.Undef {
 		return fmt.Errorf("tenant ID is required: %w", store.ErrInvalidArgument)
-	}
-	if provider == did.Undef {
-		return fmt.Errorf("tenant provider is required: %w", store.ErrInvalidArgument)
 	}
 	if !status.Valid() {
 		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
@@ -48,7 +45,6 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, provider
 	s.tenants[id] = tenant.Record{
 		ID:         id,
 		ExternalID: externalID,
-		Provider:   provider,
 		Status:     status,
 		CreatedAt:  now,
 		UpdatedAt:  now,

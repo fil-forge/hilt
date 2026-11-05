@@ -78,14 +78,17 @@ func (f *postgresFixtures) tenant(t *testing.T) did.DID {
 	tenantID := testutil.RandomDID(t)
 	providerID := testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(f.pool).Add(t.Context(), providerID, tenantID.String(), nil))
-	require.NoError(t, tenantpostgres.New(f.pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+	require.NoError(t, tenantpostgres.New(f.pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 	return tenantID
 }
 
 func (f *postgresFixtures) bucket(t *testing.T, tenantID did.DID) did.DID {
 	id := testutil.RandomDID(t)
 	name := fmt.Sprintf("policy-test-%d", f.buckets.Add(1))
-	require.NoError(t, bucketpostgres.New(f.pool).Add(t.Context(), id, tenantID, name))
+	// A bucket is served by a provider, so one must exist for the foreign key.
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(f.pool).Add(t.Context(), providerID, "region-"+providerID.String(), nil))
+	require.NoError(t, bucketpostgres.New(f.pool).Add(t.Context(), id, tenantID, providerID, name))
 	return id
 }
 

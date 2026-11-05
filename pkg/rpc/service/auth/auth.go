@@ -185,8 +185,6 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		log.Error("looking up tenant", zap.Error(err))
 		return nil, fmt.Errorf("looking up tenant: %w", err)
 	}
-	log = log.With(zap.Stringer("provider", tenantRec.Provider))
-
 	// Disabled is the hard lock-out state (lifecycle Active → Disabled → delete).
 	// WriteLocked still authenticates here so reads (like ListBuckets) work; write
 	// handlers gate WriteLocked themselves, since Authorize is operation-agnostic.
@@ -195,14 +193,11 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrTenantDisabled
 	}
 
-	// Only the tenant's provider may invoke on its behalf.
-	if issuer != tenantRec.Provider {
-		log.Debug("rejecting invocation not from the tenant's provider", zap.Stringer("issuer", issuer))
-		return nil, ErrIssuerForbidden
-	}
-
-	// The request must be scoped to a region served by the tenant's provider.
-	prov, region, err := validateRegion(ctx, a.providers, sr.Regions, tenantRec.Provider)
+	// The request is scoped to a region; the provider registered for it must be
+	// the invocation issuer. Tenants are region-free, so this is the only issuer
+	// check: any registered provider may act for any tenant, but only on
+	// requests signed for its own region.
+	prov, region, err := resolveProvider(ctx, a.providers, sr.Regions, issuer)
 	if err != nil {
 		log.Debug("rejecting request region", zap.Error(err))
 		return nil, err
@@ -239,7 +234,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, err
 	}
 
-	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, c)
+	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, prov, c)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +271,7 @@ func (a *Authorizer) authorizeOperation(
 	log *zap.Logger,
 	akRec accesskey.Record,
 	tenantRec tenant.Record,
+	prov provider.Record,
 	c classification,
 ) ([]string, *bucket.Record, *bucket.Record, error) {
 	op, bucketName := c.op, c.bucket
@@ -292,7 +288,7 @@ func (a *Authorizer) authorizeOperation(
 		if !op.addressesExistingBucket() {
 			return akRec.Permissions, nil, nil, nil
 		}
-		b, err := a.resolveBucketInScope(ctx, log, akRec, tenantRec.ID, bucketName)
+		b, err := a.resolveBucketInScope(ctx, log, akRec, prov, tenantRec.ID, bucketName)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -307,7 +303,7 @@ func (a *Authorizer) authorizeOperation(
 			}
 			if c.srcBucket == bucketName {
 				source = b
-			} else if source, err = a.resolveBucketInScope(ctx, log, akRec, tenantRec.ID, c.srcBucket); err != nil {
+			} else if source, err = a.resolveBucketInScope(ctx, log, akRec, prov, tenantRec.ID, c.srcBucket); err != nil {
 				return nil, nil, nil, err
 			}
 		}
@@ -346,7 +342,7 @@ func (a *Authorizer) authorizeOperation(
 		return nil, nil, nil, ErrOperationNotPermitted
 	}
 
-	b, eff, err := a.principalAccess(ctx, log, tenantRec.ID, principalID, bucketName, c.permissions()...)
+	b, eff, err := a.principalAccess(ctx, log, prov, tenantRec.ID, principalID, bucketName, c.permissions()...)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -363,7 +359,7 @@ func (a *Authorizer) authorizeOperation(
 				log.Debug("rejecting copy source outside the principal's effective set", zap.String("bucket", c.srcBucket))
 				return nil, nil, nil, ErrOperationNotPermitted
 			}
-		} else if source, _, err = a.principalAccess(ctx, log, tenantRec.ID, principalID, c.srcBucket, c.sourcePermission()); err != nil {
+		} else if source, _, err = a.principalAccess(ctx, log, prov, tenantRec.ID, principalID, c.srcBucket, c.sourcePermission()); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -375,7 +371,7 @@ func (a *Authorizer) authorizeOperation(
 // principal's effective set there. A bucket the principal holds no action on
 // is not a bucket it may learn exists, so an empty set reads as an unknown
 // bucket rather than a refusal.
-func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenantID did.DID, principalID, bucketName string, perms ...string) (*bucket.Record, []string, error) {
+func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, prov provider.Record, tenantID did.DID, principalID, bucketName string, perms ...string) (*bucket.Record, []string, error) {
 	b, err := a.resolveBucket(ctx, log, tenantID, bucketName)
 	if err != nil {
 		return nil, nil, err
@@ -393,6 +389,9 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, tenan
 			log.Debug("rejecting operation outside the principal's effective set", zap.String("permission", perm))
 			return nil, nil, ErrOperationNotPermitted
 		}
+	}
+	if err := a.assertServedBy(ctx, log, prov, b); err != nil {
+		return nil, nil, err
 	}
 	return b, eff, nil
 }
@@ -450,7 +449,7 @@ func lookupError(log *zap.Logger, what string, err error) error {
 
 // resolveBucketInScope resolves a bucket a service key addresses and confirms
 // it lies within the key's bucket scope (an empty scope admits every bucket).
-func (a *Authorizer) resolveBucketInScope(ctx context.Context, log *zap.Logger, akRec accesskey.Record, tenantID did.DID, name string) (*bucket.Record, error) {
+func (a *Authorizer) resolveBucketInScope(ctx context.Context, log *zap.Logger, akRec accesskey.Record, prov provider.Record, tenantID did.DID, name string) (*bucket.Record, error) {
 	b, err := a.resolveBucket(ctx, log, tenantID, name)
 	if err != nil {
 		return nil, err
@@ -458,6 +457,9 @@ func (a *Authorizer) resolveBucketInScope(ctx context.Context, log *zap.Logger, 
 	if len(akRec.Buckets) > 0 && !slices.Contains(akRec.Buckets, b.ID) {
 		log.Debug("rejecting bucket the access key is not scoped to", zap.String("bucket", name))
 		return nil, ErrBucketNotPermitted
+	}
+	if err := a.assertServedBy(ctx, log, prov, b); err != nil {
+		return nil, err
 	}
 	return b, nil
 }
@@ -480,6 +482,22 @@ func (a *Authorizer) resolveBucket(ctx context.Context, log *zap.Logger, tenantI
 		return nil, ErrForeignBucket
 	}
 	return &b, nil
+}
+
+// assertServedBy confirms the provider handling the request is the one serving
+// the bucket. It is asked after the caller's own access has been settled, so a
+// caller the bucket is not scoped to learns nothing about where it lives.
+func (a *Authorizer) assertServedBy(ctx context.Context, log *zap.Logger, prov provider.Record, b *bucket.Record) error {
+	if b.Provider == prov.ID {
+		return nil
+	}
+	served, err := a.providers.Get(ctx, b.Provider)
+	if err != nil {
+		log.Error("looking up the provider serving a bucket", zap.Stringer("bucket", b.ID), zap.Stringer("bucket_provider", b.Provider), zap.Error(err))
+		return fmt.Errorf("looking up provider %s of bucket %q: %w", b.Provider, b.Name, err)
+	}
+	log.Debug("rejecting bucket served by another region", zap.Stringer("bucket", b.ID), zap.String("bucket_region", served.Region))
+	return &BucketRegionMismatchError{Expected: served.Region, Actual: prov.Region}
 }
 
 // TenantIssuer loads the tenant's secp256k1 signing key from the vault and
@@ -512,9 +530,14 @@ func EncodeSecret(signer multikey.Signer) (string, error) {
 	return secret, nil
 }
 
-// validateRegion confirms the tenant's provider serves one of the regions the
-// request is scoped to, returning the provider record and the matched region.
-func validateRegion(ctx context.Context, providers provider.Store, regions []string, tenantProvider did.DID) (provider.Record, string, error) {
+// resolveProvider finds the provider serving one of the regions the request is
+// scoped to (the SigV4 credential-scope region, or the SigV4a region set) and
+// confirms it is the invocation issuer, returning the provider record and the
+// matched region. A region no provider serves is skipped: when every region is
+// unserved the request names nowhere this Hilt reaches, which is a different
+// answer from naming somewhere another provider serves.
+func resolveProvider(ctx context.Context, providers provider.Store, regions []string, issuer did.DID) (provider.Record, string, error) {
+	served := false
 	for _, r := range regions {
 		prov, err := providers.GetByRegion(ctx, r)
 		if errors.Is(err, store.ErrRecordNotFound) {
@@ -523,9 +546,13 @@ func validateRegion(ctx context.Context, providers provider.Store, regions []str
 		if err != nil {
 			return provider.Record{}, "", fmt.Errorf("looking up provider for region %q: %w", r, err)
 		}
-		if prov.ID == tenantProvider {
+		if prov.ID == issuer {
 			return prov, r, nil
 		}
+		served = true
+	}
+	if served {
+		return provider.Record{}, "", ErrIssuerForbidden
 	}
 	return provider.Record{}, "", ErrRegionNotServed
 }

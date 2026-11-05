@@ -71,7 +71,7 @@ func newMember(t *testing.T, net *forgeNet, tenantID, principal string, buckets 
 	t.Helper()
 	ctx := t.Context()
 
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 	cred, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
 		Name:        "service",
@@ -189,7 +189,7 @@ func testPrincipalKeyCreateRejectsBadRequests(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
 	const tenantID, principal = "tenant-iam-422", "member-422"
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 	_, err = net.console.CreatePrincipal(ctx, tenantID, principal)
 	require.NoError(t, err)

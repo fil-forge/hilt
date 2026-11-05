@@ -66,8 +66,8 @@ func setup(t *testing.T) deps {
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	tenantID, otherTenant := testutil.RandomDID(t), testutil.RandomDID(t)
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
 
 	principals := principalmemory.New()
 	d := deps{
@@ -663,8 +663,10 @@ func TestDeleteDuringPolicyWritePostgres(t *testing.T) {
 
 	tenantID, providerID, bucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, tenantID.String(), nil))
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-pg", providerID, tenant.Active))
-	require.NoError(t, bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, "principal-removal"))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-pg", tenant.Active))
+	bucketProvider := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil))
+	require.NoError(t, bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, bucketProvider, "principal-removal"))
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))

@@ -25,7 +25,7 @@ func testDeleteAccessKeyRevokes(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
 	const tenantID = "tenant-keydel"
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 
 	// The key's delegations are tenant-wide (powerline), and no bucket is
@@ -66,7 +66,7 @@ func testDeleteBucketRevokes(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
 	const tenantID, bucket = "tenant-bktdel", "bktdel-doomed"
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 
 	// A tenant-wide admin key creates, fills, empties, and deletes the
@@ -146,7 +146,7 @@ func testDeleteBucketRevokesOnlyThatBucket(t *testing.T, net *forgeNet) {
 
 	const tenantID = "tenant-multibkt"
 	const keptBucket, doomedBucket = "multibkt-kept", "multibkt-doomed"
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 
 	admin, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{

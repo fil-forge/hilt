@@ -19,7 +19,6 @@ import (
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
-	"github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -40,7 +39,6 @@ const fragment = "hilt"
 type Service struct {
 	logger      *zap.Logger
 	tenants     tenantstore.Store
-	providers   provider.Store
 	buckets     bucket.Store
 	accessKeys  accesskey.Store
 	principals  principalstore.Store
@@ -57,7 +55,6 @@ type Service struct {
 func New(
 	logger *zap.Logger,
 	tenants tenantstore.Store,
-	providers provider.Store,
 	buckets bucket.Store,
 	accessKeys accesskey.Store,
 	principals principalstore.Store,
@@ -72,7 +69,6 @@ func New(
 	return &Service{
 		logger:      logger,
 		tenants:     tenants,
-		providers:   providers,
 		buckets:     buckets,
 		accessKeys:  accessKeys,
 		principals:  principals,
@@ -97,24 +93,15 @@ func ValidID(id string) bool {
 // generates a rotatable did:plc key, publishes it, registers the tenant with the
 // upload service, and records it. created is false when an existing tenant is
 // returned (including the concurrent-create winner).
-func (s *Service) Provision(ctx context.Context, externalID, region string) (tenantstore.Record, bool, error) {
-	if region == "" {
-		return tenantstore.Record{}, false, ErrRegionRequired
-	}
-
+//
+// A tenant is region-free: each of its buckets is bound to the provider (region)
+// it is created through, so one tenant may hold buckets in several regions.
+func (s *Service) Provision(ctx context.Context, externalID string) (tenantstore.Record, bool, error) {
 	// Idempotent: return the existing tenant if already provisioned.
 	if existing, err := s.tenants.GetByExternalID(ctx, externalID); err == nil {
 		return existing, false, nil
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
 		return tenantstore.Record{}, false, fmt.Errorf("looking up tenant: %w", err)
-	}
-
-	// Resolve the provider for the requested region.
-	prov, err := s.providers.GetByRegion(ctx, region)
-	if errors.Is(err, store.ErrRecordNotFound) {
-		return tenantstore.Record{}, false, ErrUnknownRegion
-	} else if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("resolving provider: %w", err)
 	}
 
 	// Generate the tenant's rotatable did:plc key (secp256k1 rotation key).
@@ -195,7 +182,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	// before recording the tenant so a failed registration returns an error and is
 	// retried on the next call, rather than being short-circuited by the
 	// idempotency check above (which keys on the stored tenant record).
-	details := map[string]string{"external_id": externalID, "region": region}
+	details := map[string]string{"external_id": externalID}
 	if err := s.upload.RegisterCustomer(ctx, tenantID, s.upload.Product, details); err != nil {
 		log.Error("registering tenant with upload service", zap.Error(err))
 		runCleanups()
@@ -225,7 +212,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	})
 
 	// Record the tenant.
-	if err := s.tenants.Add(ctx, tenantID, externalID, prov.ID, tenantstore.Active); err != nil {
+	if err := s.tenants.Add(ctx, tenantID, externalID, tenantstore.Active); err != nil {
 		runCleanups()
 		// Concurrent create with the same external id: return the winner.
 		if errors.Is(err, store.ErrRecordExists) {

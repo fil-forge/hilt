@@ -169,8 +169,8 @@ func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principals
 	ctx := t.Context()
 	tenants := tenantmemory.New()
 	tenantID, otherTenant := testutil.RandomDID(t), testutil.RandomDID(t)
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
-	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
 
 	d := deps{
 		buckets:     bucketmemory.New(),
@@ -190,7 +190,7 @@ func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principals
 	require.NoError(t, err)
 	require.NoError(t, d.secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	d.tenant = multikey.NewIssuer(tenantID, signer)
-	require.NoError(t, d.buckets.Add(ctx, d.photos, tenantID, "photos"))
+	require.NoError(t, d.buckets.Add(ctx, d.photos, tenantID, testutil.RandomDID(t), "photos"))
 	var principals principalstore.Store = d.principals
 	for _, wrap := range wrapPrincipals {
 		principals = wrap(principals)
@@ -386,7 +386,7 @@ func TestPutAndGet(t *testing.T) {
 		require.NoError(t, err)
 
 		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
 		core, logs := observer.New(zapcore.WarnLevel)
 		svc := bucketpolicysvc.New(zap.New(core), tenants, d.buckets, d.principals, d.policies, d.rotator(d.swarf))
 
@@ -631,7 +631,7 @@ func TestRotations(t *testing.T) {
 		require.NoError(t, err)
 
 		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
 		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, d.policies, d.rotator(blockingSwarf{}))
 
 		start := time.Now()
@@ -655,7 +655,7 @@ func TestRotations(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
 		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
 		// The store's index foreign key refuses a document naming a principal
 		// that is gone; the memory store does not check it, so stand in for it.
 		policies := &rejectingPolicies{Store: d.policies, err: store.ErrInvalidArgument}
@@ -700,7 +700,7 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	d.principal(t, "user-1")
 
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", tenant.Active))
 	started := make(chan struct{})
 	// A principal removal revokes its keys' delegations first, so the first
 	// publish says the removal has started and is about to strip its policies.
@@ -749,7 +749,7 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	d := setup(t)
 	d.principal(t, "user-1")
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
 	policies := &parkedPolicies{Store: d.policies, reached: make(chan struct{}), resume: make(chan struct{})}
 	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
 	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
@@ -786,10 +786,12 @@ func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
 	// The rows the policy tables reference, under the memory setup's DIDs.
 	providerID := testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
-	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
-	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, "photos"))
+	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+	bucketProvider := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil))
+	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, bucketProvider, "photos"))
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
+	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
 	principals := principalpostgres.New(pool)
 	policies := bucketpolicypostgres.New(pool)
 
@@ -833,10 +835,12 @@ func (d deps) postgres(t *testing.T, pool *pgxpool.Pool) postgresDeps {
 	ctx := t.Context()
 	providerID := testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
-	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
-	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, "photos"))
+	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+	bucketProvider := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil))
+	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, bucketProvider, "photos"))
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", providerID, tenant.Active))
+	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
 	return postgresDeps{
 		tenants:     tenants,
 		principals:  principalpostgres.New(pool),
@@ -958,7 +962,7 @@ func TestPolicyWriteToMissingBucketPostgres(t *testing.T) {
 	pool := testutil.PostgresOrSkip(t)
 	d := setup(t)
 	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", testutil.RandomDID(t), tenant.Active))
+	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", tenant.Active))
 	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals,
 		bucketpolicypostgres.New(pool), d.rotator(d.swarf))
 
@@ -975,7 +979,7 @@ func TestPrincipalReads(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2")
 		backups := testutil.RandomDID(t)
-		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, "backups"))
+		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, testutil.RandomDID(t), "backups"))
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
 		onBackups := func(st s3bkt.Statement) s3bkt.Statement {
