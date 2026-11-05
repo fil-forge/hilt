@@ -429,9 +429,32 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	if token != "" {
 		listOpts = append(listOpts, bucketstore.WithCursor(token))
 	}
-	page, err := s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("listing buckets: %w", err)
+
+	// bucket-region narrows the listing to the buckets one region serves. The
+	// region names a provider, which is what a bucket records, so the filter is
+	// applied in the read: a page is then a page of matches, and the
+	// continuation token keeps meaning what it says.
+	//
+	// A region no provider serves holds none of the tenant's buckets, and the
+	// empty answer says so without disclosing which regions this Hilt knows.
+	regionServed := true
+	if region := query.Get("bucket-region"); region != "" {
+		prov, err := s.providers.GetByRegion(ctx, region)
+		switch {
+		case errors.Is(err, store.ErrRecordNotFound):
+			regionServed = false
+		case err != nil:
+			return nil, fmt.Errorf("looking up provider for region %q: %w", region, err)
+		default:
+			listOpts = append(listOpts, bucketstore.WithProvider(prov.ID))
+		}
+	}
+
+	var page store.Page[bucketstore.Record]
+	if regionServed {
+		if page, err = s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...); err != nil {
+			return nil, fmt.Errorf("listing buckets: %w", err)
+		}
 	}
 
 	out := &s3bkt.ListOK{
