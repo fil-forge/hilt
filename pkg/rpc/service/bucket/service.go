@@ -430,31 +430,22 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 		listOpts = append(listOpts, bucketstore.WithCursor(token))
 	}
 
-	// bucket-region narrows the listing to the buckets one region serves. The
-	// region names a provider, which is what a bucket records, so the filter is
-	// applied in the read: a page is then a page of matches, and the
-	// continuation token keeps meaning what it says.
-	//
-	// A region no provider serves holds none of the tenant's buckets, and the
-	// empty answer says so without disclosing which regions this Hilt knows.
-	regionServed := true
+	// bucket-region narrows the listing to the buckets one region holds. S3 does
+	// not answer the parameter from another region's endpoint, so the only
+	// region this one answers for is the region the request was signed for,
+	// whose provider is already resolved. A bucket records the provider serving
+	// it, so the filter is applied in the read: a page is then a page of
+	// matches, and the continuation token keeps meaning what it says.
 	if region := query.Get("bucket-region"); region != "" {
-		prov, err := s.providers.GetByRegion(ctx, region)
-		switch {
-		case errors.Is(err, store.ErrRecordNotFound):
-			regionServed = false
-		case err != nil:
-			return nil, fmt.Errorf("looking up provider for region %q: %w", region, err)
-		default:
-			listOpts = append(listOpts, bucketstore.WithProvider(prov.ID))
+		if region != authz.Region {
+			return nil, fmt.Errorf("%w: bucket-region %q is not the region the request is signed for", ErrInvalidArgument, region)
 		}
+		listOpts = append(listOpts, bucketstore.WithProvider(authz.Provider.ID))
 	}
 
-	var page store.Page[bucketstore.Record]
-	if regionServed {
-		if page, err = s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...); err != nil {
-			return nil, fmt.Errorf("listing buckets: %w", err)
-		}
+	page, err := s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("listing buckets: %w", err)
 	}
 
 	out := &s3bkt.ListOK{
