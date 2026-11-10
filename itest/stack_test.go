@@ -237,9 +237,10 @@ func (n *forgeNet) awaitRevocations(t *testing.T, ctx context.Context, count int
 	defer cancel()
 
 	var records []swarfstore.RevocationRecord
-	for fh, err := range n.swarf.Stream(streamCtx, time.Time{}) {
+	firehoseStart := swarfclient.Cursor(swarfstore.Cursor{}.String())
+	for event, err := range n.swarf.StreamAfter(streamCtx, firehoseStart) {
 		require.NoError(t, err, "reading the revocation firehose")
-		record, err := n.swarf.Get(streamCtx, fh.Revoke)
+		record, err := n.swarf.Get(streamCtx, event.Revocation.Revoke)
 		require.NoError(t, err, "fetching revocation record")
 		if len(record.Path) == 0 || record.Path[len(record.Path)-1].Audience().String() != audience {
 			continue
