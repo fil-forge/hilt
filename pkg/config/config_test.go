@@ -51,3 +51,17 @@ func TestLoadRevocationHasNoDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, config.RevocationConfig{}, cfg.Revocation)
 }
+
+func TestLoadAllowedWebDIDsFromEnv(t *testing.T) {
+	t.Setenv("HILT_SERVER_ALLOWED_WEB_DIDS", "did:web:ingot.one.test,did:web:ingot.two.test")
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	require.Equal(t, []string{"did:web:ingot.one.test", "did:web:ingot.two.test"}, cfg.Server.AllowedWebDIDs)
+}
+
+func TestLoadAllowedWebDIDsHasNoPermissiveDefault(t *testing.T) {
+	t.Setenv("HILT_SERVER_ALLOWED_WEB_DIDS", "")
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	require.Empty(t, cfg.Server.AllowedWebDIDs)
+}

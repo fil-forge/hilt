@@ -32,6 +32,31 @@ var or config file, **not** flags, to avoid exposing them in process args.
 | --- | --- | --- | --- |
 | `server.host` | `--host` | `HILT_SERVER_HOST` | `127.0.0.1` |
 | `server.port` | `--port` | `HILT_SERVER_PORT` | `8080` |
+| `server.insecure_did_resolution` | `--insecure-did-resolution` | `HILT_SERVER_INSECURE_DID_RESOLUTION` | `false` |
+| `server.allowed_web_dids` | `--allowed-web-dids` | `HILT_SERVER_ALLOWED_WEB_DIDS` | _(empty: deny external resolution)_ |
+
+The inbound UCAN validator resolves only the exact external `did:web` identities
+in `allowed_web_dids`. Configure a YAML list, CSV flag or CSV environment value,
+for example `did:web:s3.region.stage.example.com`. No globs, hostname suffixes or
+implicit peer defaults are accepted. An empty list denies every external web DID;
+Hilt's own identity is always resolved locally and `did:key` remains supported.
+This policy applies to issuers anywhere in an invocation's delegation chain,
+not only to the top-level caller. Inventory the stage's actual incoming Ingot
+identities and proof issuers before rollout; outgoing Sprue/Swarf endpoints do
+not by themselves authorize incoming issuers.
+
+Disallowed identities fail before DNS or HTTP and return `did:web resolution not
+permitted`, independent of target reachability. Allowed document requests may
+use only their exact configured URL, including path and port; redirects cannot
+escape that set. HTTPS is the default. `insecure_did_resolution` is for local
+HTTP fixtures only and does not disable the allowlist. DNS for an allowlisted
+identity is still trusted; this is not a general IP-level network egress policy.
+
+Changing this deployment setting requires restarting Hilt. Roll out the exact
+stage inventory with the new binary; do not add `*` to recover a missed caller.
+See [DID resolution rollout](docs/did-resolution-allowlist.md) for operational
+checks and evidence limits.
+
 
 ### Logging
 
@@ -150,3 +175,15 @@ are promoted by hand.
 [infra-central]: https://github.com/fil-forge/infra-central
 [receiver]: https://github.com/fil-forge/infra-central/blob/main/.github/workflows/bump-deployed-image.yml
 [deploy]: https://github.com/fil-forge/infra-central/blob/main/.github/workflows/check-and-deploy.yml
+
+### Integration fixture DID policy
+
+The pinned Smelt fixture uses the incoming identity `did:web:ingot`. Hilt's
+integration harness builds a tiny derived Hilt image adding only
+`HILT_SERVER_ALLOWED_WEB_DIDS=did:web:ingot`, then mounts the working tree's
+compiled binary over it through the existing Smelt API. The build context
+contains only that Dockerfile, and the unique test-owned image is removed after
+the suite. `HILT_ITEST_HILT_IMAGE` may select its base image; the default remains
+`ghcr.io/fil-forge/hilt:main`. Production defaults stay deny-all; this is not an
+allowlist bypass or an implicit production identity. It avoids changing the
+pinned Smelt dependency solely to add a Hilt config-mount path.

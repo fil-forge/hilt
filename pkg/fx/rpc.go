@@ -1,10 +1,6 @@
 package fx
 
 import (
-	"fmt"
-	"net/http"
-	"time"
-
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/rpc"
@@ -13,9 +9,6 @@ import (
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/libforge/identity"
-	"github.com/fil-forge/ucantone/did/key"
-	"github.com/fil-forge/ucantone/did/resolver"
-	"github.com/fil-forge/ucantone/did/web"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/server/middleware"
 	"github.com/fil-forge/ucantone/validator"
@@ -94,7 +87,7 @@ type UCANServerParams struct {
 // locally (no network round-trip) via a well-known tier ahead of the cached
 // HTTP resolver.
 func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
-	didResolver, err := newDIDResolver(p.Identity, p.Server.InsecureDIDResolution, p.Logger)
+	didResolver, err := newDIDResolver(p.Identity, p.Server, p.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -125,33 +118,4 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 		srv.HandleBatch(r.Command, tracing.Handler(r.Command, r.Handler))
 	}
 	return srv, nil
-}
-
-// newDIDResolver builds the DID resolver used to validate UCANs on the RPC
-// server. did:web documents are fetched over HTTPS unless insecure is set, in
-// which case they are fetched over HTTP (development only). Resolved documents
-// are cached for three hours.
-func newDIDResolver(id identity.Identity, insecure bool, logger *zap.Logger) (resolver.ByMethod, error) {
-	webResolverOpts := []web.Option{web.WithTransport(tracing.Transport(http.DefaultTransport))}
-	if insecure {
-		logger.Warn("insecure DID resolution enabled: did:web will be resolved over HTTP instead of HTTPS; this should only be used for development purposes")
-		webResolverOpts = append(webResolverOpts, web.WithInsecure(true))
-	}
-	webResolver, err := web.NewResolver(webResolverOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("creating did:web resolver: %w", err)
-	}
-
-	selfDoc, err := id.DIDDocument()
-	if err != nil {
-		return nil, fmt.Errorf("creating DID document for service identity: %w", err)
-	}
-
-	return resolver.ByMethod{
-		"key": key.Resolver,
-		"web": resolver.Tiered{
-			resolver.WellKnown{id.DID(): selfDoc},
-			resolver.NewCached(webResolver, 3*time.Hour),
-		},
-	}, nil
 }

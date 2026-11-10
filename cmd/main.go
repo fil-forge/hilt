@@ -41,6 +41,8 @@ func main() {
 	serveCmd.Flags().Int("port", 8080, "port to bind the server to")
 	serveCmd.Flags().Bool("insecure-did-resolution", false, "resolve did:web DIDs over HTTP instead of HTTPS on the UCAN RPC server (insecure; development only)")
 
+	serveCmd.Flags().StringSlice("allowed-web-dids", nil, "exact external did:web identities the UCAN server may resolve (CSV; empty denies external resolution)")
+
 	// storage config
 	serveCmd.Flags().String("storage", "postgres", "storage backend (memory or postgres)")
 	serveCmd.Flags().String("postgres-dsn", "", "postgres connection string (used when storage=postgres)")

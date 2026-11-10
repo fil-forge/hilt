@@ -54,7 +54,9 @@ func TestMain(m *testing.M) {
 		log.Printf("itest: pre-test sweep warning: %v", err)
 	}
 	cancel()
-	os.Exit(m.Run())
+	code := m.Run()
+	cleanupHiltResolverImage()
+	os.Exit(code)
 }
 
 var (
@@ -118,6 +120,7 @@ func startForge(t *testing.T) *forgeNet {
 		// Postgres-backed piri: piri:main's curio PDP pipeline refuses
 		// sqlite ("curio PDP pipeline requires Postgres").
 		stack.WithPiriNodes(stack.PiriNodeConfig{Postgres: true}),
+		stack.WithHiltImage(hiltResolverImage(t)),
 		stack.WithServiceBinary("hilt", localHiltBinary(t)),
 	}
 	// Local-dev escape hatches: run against sprue / piri / ingot images the

@@ -89,6 +89,10 @@ type ServerConfig struct {
 	// development against services that serve their DID document over plain
 	// HTTP; it must never be enabled in production.
 	InsecureDIDResolution bool `mapstructure:"insecure_did_resolution"`
+	// AllowedWebDIDs lists exact external did:web identities the inbound UCAN
+	// validator may resolve. Empty denies all external HTTP resolution; the
+	// service identity is always resolved locally. Wildcards are not supported.
+	AllowedWebDIDs []string `mapstructure:"allowed_web_dids"`
 }
 
 // AuthConfig holds authentication settings for the Tenant API.
@@ -198,6 +202,7 @@ var flagBindings = map[string]string{
 	"server.host":                      "host",
 	"server.port":                      "port",
 	"server.insecure_did_resolution":   "insecure-did-resolution",
+	"server.allowed_web_dids":          "allowed-web-dids",
 	"storage.type":                     "storage",
 	"storage.postgres.dsn":             "postgres-dsn",
 	"storage.postgres.skip_migrations": "skip-migrations",
