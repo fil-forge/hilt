@@ -13,7 +13,7 @@ require (
 	github.com/exaring/otelpgx v0.12.0
 	github.com/fil-forge/libforge v0.0.0-20261022121207-bcdd5eacc465
 	github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40
-	github.com/fil-forge/swarf v0.0.1-0.20260922133653-0b2e5b2e1c6c
+	github.com/fil-forge/swarf v0.0.1-0.20261110122649-1097d7d2f5aa
 	github.com/fil-forge/ucantone v0.0.0-20261103134646-342e8488c56a
 	github.com/ipfs/go-cid v0.6.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
