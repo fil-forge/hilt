@@ -145,31 +145,31 @@ func TestVerifyAcceptsSignedZeroContentLength(t *testing.T) {
 }
 
 // A reverse proxy built on Go's HTTP client (Caddy in front of Ingot) does not
-// forward Content-Length: 0 on a GET without a body.
-func TestVerifyAcceptsSignedZeroContentLengthThatAProxyRemovedFromAGet(t *testing.T) {
-	req := signedZeroContentLength("GET")
-	delete(req.Headers, "Content-Length")
-
-	sr, err := Parse(req)
-	require.NoError(t, err)
-	require.NoError(t, Verify(sr, awsSuiteSecret))
-}
-
-// The default covers GET alone, the only method where clients were seen signing
-// a zero length that a proxy then dropped. A PUT signed with Content-Length: 0
-// and an unsigned payload could otherwise be replayed without the header and
-// with a chunked body.
-func TestVerifyRejectsSignedZeroContentLengthRemovedFromOtherMethods(t *testing.T) {
-	for _, method := range []string{"HEAD", "PUT"} {
+// forward Content-Length: 0 on a GET or HEAD without a body.
+func TestVerifyAcceptsSignedZeroContentLengthThatAProxyRemoved(t *testing.T) {
+	for _, method := range []string{"GET", "HEAD"} {
 		t.Run(method, func(t *testing.T) {
 			req := signedZeroContentLength(method)
 			delete(req.Headers, "Content-Length")
 
 			sr, err := Parse(req)
 			require.NoError(t, err)
-			require.EqualError(t, Verify(sr, awsSuiteSecret), "signature mismatch")
+			require.NoError(t, Verify(sr, awsSuiteSecret))
 		})
 	}
+}
+
+// The default covers GET and HEAD alone, the methods where clients were seen
+// signing a zero length that a proxy then dropped. A PUT signed with
+// Content-Length: 0 and an unsigned payload could otherwise be replayed without
+// the header and with a chunked body.
+func TestVerifyRejectsSignedZeroContentLengthRemovedFromAPut(t *testing.T) {
+	req := signedZeroContentLength("PUT")
+	delete(req.Headers, "Content-Length")
+
+	sr, err := Parse(req)
+	require.NoError(t, err)
+	require.EqualError(t, Verify(sr, awsSuiteSecret), "signature mismatch")
 }
 
 func TestVerifyRejectsContentLengthThatDiffersFromTheSignedZero(t *testing.T) {
