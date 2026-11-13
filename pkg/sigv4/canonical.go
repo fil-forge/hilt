@@ -3,6 +3,7 @@ package sigv4
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"sort"
 	"strings"
 )
@@ -46,13 +47,34 @@ func (s *SignedRequest) canonicalQueryString() string {
 }
 
 // canonicalHeaders builds the canonical header block for the signed headers.
+//
+// On a GET, a signed content-length the request does not carry is taken as 0.
+// Some clients (aws-cli 2.38.0 through 2.39.3) sign Content-Length: 0 on a GET,
+// and a reverse proxy built on Go's HTTP client drops that header when
+// forwarding a bodyless request. A non-zero length always reaches us and is
+// verified as sent. GET is the only method where this was seen, so other
+// methods get no default: a PUT signed with a zero length and an unsigned
+// payload could otherwise be replayed without the header and with a chunked
+// body, which Hilt never sees.
+//
+// versitygw's signature check signs a missing content-length as 0 on every
+// method. Its authentication middleware parses the header into a length that
+// stays 0 when the header is absent, and its signer writes that length whenever
+// the client signed content-length:
+// https://github.com/fil-forge/versitygw/blob/23d4d71f50ac23877f3a4e5ed956f444e0df1058/s3api/middlewares/authentication.go#L139-L147
+// https://github.com/fil-forge/versitygw/blob/23d4d71f50ac23877f3a4e5ed956f444e0df1058/aws/signer/v4/v4.go#L478-L482
+// For a header that is present, versitygw signs the parsed number while we sign
+// the value as received, so the two differ for values such as "05".
 func (s *SignedRequest) canonicalHeaders() string {
 	var b strings.Builder
 	for _, name := range s.signedHeaders {
 		var value string
-		if name == "host" {
+		switch {
+		case name == "host":
 			value = s.host
-		} else {
+		case name == "content-length" && s.method == http.MethodGet && len(s.headers.Values(name)) == 0:
+			value = "0"
+		default:
 			value = s.headers.Get(name)
 		}
 		b.WriteString(name)
