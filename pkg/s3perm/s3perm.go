@@ -5,6 +5,8 @@
 package s3perm
 
 import (
+	"slices"
+
 	"github.com/fil-forge/libforge/commands/blob"
 	"github.com/fil-forge/libforge/commands/content"
 	"github.com/fil-forge/libforge/commands/index"
@@ -164,6 +166,32 @@ var permissionCommands = map[string][]ucan.Command{
 func Valid(p string) bool {
 	_, ok := permissionCommands[p]
 	return ok
+}
+
+// cmdsWriteLockKeeps are the commands a write lock leaves delegated: the reads,
+// and the two an abort needs. Everything else is revoked, so a command added
+// later is revoked without anyone having to remember this list.
+//
+// Keeping the abort pair is what lets a frozen tenant clean up (see
+// [RevokedByWriteLock]), and it is safe only because every other mutating
+// permission needs a command outside this set — s3:PutObject and s3:DeleteObject
+// need /upload/add, s3:DeleteBucket /upload/remove, and the catalog-write
+// permissions /blob/add and /index/add. s3:AbortMultipartUpload alone survives
+// intact. TestRevokedByWriteLock pins that for every permission, so a set
+// rewritten later cannot quietly widen what a lock leaves usable.
+var cmdsWriteLockKeeps = append([]ucan.Command{blob.Abort.Command, blob.Remove.Command}, cmdsRetrieve...)
+
+// RevokedByWriteLock reports whether a write lock revokes a delegation of cmd.
+// Only the kept command set is enumerated, so any other command (including one
+// added later) is revoked: failing closed is the safe default here.
+//
+// /content/retrieve is delegated for s3:PutObject as well, but it only reads, so
+// a write-locked tenant keeps it. /blob/abort and /blob/remove are kept so the
+// tenant can abort an in-flight multipart upload: a freeze must not block
+// cleanup, and an upload left in flight keeps its parts billable with no way for
+// the tenant to drop them.
+func RevokedByWriteLock(cmd ucan.Command) bool {
+	return !slices.ContainsFunc(cmdsWriteLockKeeps, func(c ucan.Command) bool { return c.String() == cmd.String() })
 }
 
 // CommandsFor returns the deduplicated set of Forge commands to delegate for the

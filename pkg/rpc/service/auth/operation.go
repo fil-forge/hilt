@@ -196,6 +196,53 @@ func (o Operation) CopiesSource() bool {
 
 func (o Operation) String() string { return string(o) }
 
+// Mutates reports whether the operation modifies tenant state — creating or
+// deleting a bucket, writing or deleting object data, or rewriting a bucket's
+// or an object's configuration. [Authorizer.Authorize] refuses these for a
+// write-locked tenant, which may still read.
+//
+// The verdict is derived from the operation's own permission
+// ([Operation.Permission]): s3:Get* and s3:List* name the reads, and every
+// other verb — Create, Put, Delete, Abort — names a write. Deriving it means a
+// read operation added later is readable under a write lock without anyone
+// having to remember a second list. An enumerated list of reads went stale
+// exactly that way: fifteen reads added beside it were being refused.
+//
+// It still fails closed. An operation with no entry in operationPermission,
+// including one added later, has an empty permission, which carries neither
+// verb and so counts as mutating.
+//
+// The derivation is sound only while an operation's permission names what the
+// operation does. Three operations remove a subresource under the permission
+// that writes it — DeleteBucketCors, DeleteBucketTagging and
+// DeleteBucketEncryption each carry an s3:Put*, as S3 requires — which lands
+// them on mutating, where they belong. TestOperationMutatesIsExhaustive pins
+// the verdict for every declared operation, so one whose permission does not
+// describe it cannot pass unnoticed.
+func (o Operation) Mutates() bool {
+	perm := o.Permission()
+	return !strings.HasPrefix(perm, "s3:Get") && !strings.HasPrefix(perm, "s3:List")
+}
+
+// RefusedByWriteLock reports whether [Authorizer.Authorize] refuses the
+// operation for a write-locked tenant. Every mutating operation is refused
+// except aborting a multipart upload.
+//
+// An abort is a write that only removes, and it is the sole way to drop an
+// upload left in flight when the lock landed. Refusing it strands those parts:
+// they keep costing the tenant storage, the tenant cannot clean them up, and
+// unlocking is the only remedy — which inverts the lock, since a freeze is
+// meant to stop a tenant accruing cost, not to pin cost in place.
+//
+// Completing that upload stays refused, so this does not reopen the write path.
+// [s3perm.RevokedByWriteLock] keeps the matching grants for the same reason,
+// and the two must agree: a grant kept that Authorize refuses is merely
+// useless, but an operation allowed here whose grant was revoked fails in the
+// gateway with no way to tell a policy refusal from a broken delegation.
+func (o Operation) RefusedByWriteLock() bool {
+	return o.Mutates() && o != OpAbortMultipartUpload
+}
+
 // addressesExistingBucket reports whether the operation acts on a bucket that must
 // already exist, so it can be resolved and scope-checked. ListBuckets addresses no
 // bucket; CreateBucket's bucket does not exist yet. Every multipart operation acts

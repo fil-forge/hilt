@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
@@ -386,5 +388,158 @@ func TestDelete(t *testing.T) {
 		env := deleteSetup(t, tenant.Disabled)
 		env.directory.logLastStatus = http.StatusInternalServerError
 		require.ErrorIs(t, env.svc.Delete(ctx, "tenant-1"), tenantsvc.ErrDIDDeactivation)
+	})
+}
+
+// writeLockEnv is a tenant holding one access key with a read grant and a write
+// grant over one bucket, which is the smallest shape that shows a write lock
+// separating the two.
+type writeLockEnv struct {
+	svc         *tenantsvc.Service
+	delegations *delegationmemory.Store
+	swarf       *testutil.FakeSwarf
+	keyID       did.DID
+	// readGrants and writeGrants partition what the key holds by whether the
+	// grant's command mutates. The split is per command, not per permission: a
+	// permission maps to several Forge commands, and s3:PutObject's set
+	// includes the retrieve command s3:GetObject maps to.
+	readGrants  []cid.Cid
+	writeGrants []cid.Cid
+}
+
+func writeLockSetup(t *testing.T, status tenant.Status) writeLockEnv {
+	t.Helper()
+	ctx := t.Context()
+
+	signer, err := secp256k1.Generate()
+	require.NoError(t, err)
+	tenantID := signer.KeyDID()
+
+	tenants := tenantmemory.New()
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", status))
+
+	secrets := vaultmemory.New()
+	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+
+	buckets := bucketmemory.New()
+	bucketID := testutil.RandomDID(t)
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), "photos"))
+
+	accessKeys, delegations := accesskeymemory.New(), delegationmemory.New()
+	keyID := testutil.RandomDID(t)
+	require.NoError(t, accessKeys.Add(ctx, accesskeystore.Input{
+		ID: keyID, Tenant: tenantID, Name: "any-key",
+		Permissions: []string{"s3:GetObject", "s3:PutObject"},
+	}))
+
+	issuer := multikey.NewIssuer(tenantID, signer)
+	held, err := grant.Issue(issuer, keyID, []did.DID{bucketID}, []string{"s3:GetObject", "s3:PutObject"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, delegations.PutBatch(ctx, held))
+
+	var read, write []cid.Cid
+	for _, d := range held {
+		if s3perm.RevokedByWriteLock(d.Command()) {
+			write = append(write, d.Link())
+		} else {
+			read = append(read, d.Link())
+		}
+	}
+	require.NotEmpty(t, read, "the fixture must hold a grant the lock leaves alone")
+	require.NotEmpty(t, write, "the fixture must hold a grant the lock revokes")
+
+	swarf := &testutil.FakeSwarf{}
+	svc := tenantsvc.New(zap.NewNop(), tenants, buckets,
+		accessKeys, principalmemory.New(), bucketpolicymemory.New(), delegations, secrets,
+		wrapkeysmemory.New(), nil, nil, swarf)
+
+	return writeLockEnv{
+		svc: svc, delegations: delegations, swarf: swarf, keyID: keyID,
+		readGrants: read, writeGrants: write,
+	}
+}
+
+// held is every delegation the key currently holds, by CID.
+func (e writeLockEnv) held(t *testing.T) []cid.Cid {
+	t.Helper()
+	page, err := e.delegations.ListByAudience(t.Context(), e.keyID)
+	require.NoError(t, err)
+	out := make([]cid.Cid, 0, len(page.Results))
+	for _, d := range page.Results {
+		out = append(out, d.Link())
+	}
+	return out
+}
+
+func TestSetStatusWriteLock(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("revokes the write grant and leaves the read grant alone", func(t *testing.T) {
+		env := writeLockSetup(t, tenant.Active)
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", string(tenant.WriteLocked)))
+
+		require.ElementsMatch(t, env.writeGrants, env.swarf.Revoked())
+		// Both are still stored: the unlock rebuilds the write grants from the
+		// ones it revoked, having nothing else that names their subject and command.
+		require.ElementsMatch(t, append(append([]cid.Cid{}, env.readGrants...), env.writeGrants...), env.held(t))
+	})
+
+	t.Run("replaces the write grant with a fresh one on unlock", func(t *testing.T) {
+		env := writeLockSetup(t, tenant.Active)
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", string(tenant.WriteLocked)))
+		env.swarf.Reset()
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", string(tenant.Active)))
+
+		held := env.held(t)
+		require.Len(t, held, len(env.readGrants)+len(env.writeGrants))
+		require.Subset(t, held, env.readGrants, "the read grants are never touched")
+		for _, revoked := range env.writeGrants {
+			require.NotContains(t, held, revoked, "a revoked write grant is replaced, not kept")
+		}
+		// The replacements carry new CIDs, so the revocation of the grants they
+		// replace does not reach them.
+		require.ElementsMatch(t, env.writeGrants, env.swarf.Revoked())
+	})
+
+	t.Run("leaves an abort usable after the lock", func(t *testing.T) {
+		// A lock must not strand a multipart upload left in flight: the tenant
+		// goes on paying for its parts and has no way to drop them. Aborting is
+		// the one mutation the lock keeps, so every command an abort needs has to
+		// come through still live — stored is not enough, since the sweep keeps
+		// the grants it revoked so the unlock can rebuild them.
+		env := writeLockSetup(t, tenant.Active)
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", string(tenant.WriteLocked)))
+
+		revoked := env.swarf.Revoked()
+		page, err := env.delegations.ListByAudience(ctx, env.keyID)
+		require.NoError(t, err)
+		live := map[string]bool{}
+		for _, d := range page.Results {
+			if !slices.Contains(revoked, d.Link()) {
+				live[d.Command().String()] = true
+			}
+		}
+		for _, cmd := range s3perm.CommandsFor("s3:AbortMultipartUpload") {
+			require.True(t, live[cmd.String()],
+				"a write-locked tenant must keep %s, which an abort needs", cmd)
+		}
+		// The write path is not reopened with it: a put still loses a command.
+		var putLost bool
+		for _, cmd := range s3perm.CommandsFor("s3:PutObject") {
+			putLost = putLost || !live[cmd.String()]
+		}
+		require.True(t, putLost, "a write-locked tenant must still lose a command s3:PutObject needs")
+	})
+
+	t.Run("revokes nothing when the status does not change the lock", func(t *testing.T) {
+		env := writeLockSetup(t, tenant.Active)
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", string(tenant.Disabled)))
+
+		require.Empty(t, env.swarf.Revoked())
+		require.ElementsMatch(t, append(append([]cid.Cid{}, env.readGrants...), env.writeGrants...), env.held(t))
 	})
 }

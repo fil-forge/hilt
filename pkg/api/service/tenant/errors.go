@@ -12,6 +12,7 @@ const (
 	DIDRegistrationErrorName    = "DIDRegistration"
 	UploadRegistrationErrorName = "UploadRegistration"
 	DIDDeactivationErrorName    = "DIDDeactivation"
+	ConcurrentChangeErrorName   = "ConcurrentChange"
 )
 
 // Known errors returned by the tenant [Service]. Handlers map these to HTTP
@@ -26,6 +27,10 @@ var (
 	ErrInvalidTenantID = errors.New(InvalidTenantIDErrorName, `tenantId must not contain "/", ";", ",", "?" or "%", and must not be "." or ".."`)
 	// ErrInvalidStatus is returned when a status update names an unknown status.
 	ErrInvalidStatus = errors.New(InvalidStatusErrorName, "invalid status")
+	// ErrConcurrentChange is returned when a status change could not take the
+	// lock on the keys whose grants it sweeps, because another write holds it.
+	// The status itself is already stored; repeating the call finishes the sweep.
+	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the tenant is being changed concurrently, retry the request")
 	// ErrTenantNotDisabled is returned when deleting a tenant that is not disabled.
 	ErrTenantNotDisabled = errors.New(TenantNotDisabledErrorName, "tenant must be disabled before deletion")
 	// ErrDIDRegistration is returned when publishing the tenant's did:plc fails.
