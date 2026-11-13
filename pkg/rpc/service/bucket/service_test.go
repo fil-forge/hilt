@@ -631,27 +631,17 @@ func TestList(t *testing.T) {
 		require.Equal(t, region, ok.Buckets[0].Region)
 	})
 
-	t.Run("bucket-region can name a region other than the one signed for", func(t *testing.T) {
-		// The filter picks which buckets come back, not who may ask: the
-		// request is still authorized against the region it was signed for.
+	t.Run("rejects a bucket-region other than the one signed for", func(t *testing.T) {
+		// S3 does not answer the parameter from another region's endpoint: a
+		// listing limited to one region must be asked of that region.
 		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, false)
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "local"))
 		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, provider2ID, "remote"))
 
-		ok, err := svc.List(ctx, providerID, listArgs("bucket-region="+region2))
-		require.NoError(t, err)
-		require.Equal(t, []string{"remote"}, bucketNames(ok))
-		require.Equal(t, region2, ok.Buckets[0].Region)
-	})
-
-	t.Run("bucket-region no provider serves lists nothing", func(t *testing.T) {
-		svc, buckets, tenantID := setup(t, []string{"s3:ListAllMyBuckets"}, false)
-		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "local"))
-
-		ok, err := svc.List(ctx, providerID, listArgs("bucket-region=ap-south-1"))
-		require.NoError(t, err)
-		require.Empty(t, ok.Buckets)
-		require.Empty(t, ok.ContinuationToken)
+		for _, r := range []string{region2, "ap-south-1"} {
+			_, err := svc.List(ctx, providerID, listArgs("bucket-region="+r))
+			require.ErrorIs(t, err, bucketsvc.ErrInvalidArgument, "bucket-region %q", r)
+		}
 	})
 
 	t.Run("bucket-region paginates within the filter", func(t *testing.T) {
