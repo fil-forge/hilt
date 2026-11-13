@@ -89,6 +89,70 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 	require.Error(t, Verify(sr, secret))
 }
 
+// crtGetObject is a GetObject request as aws-cli 2.38.0 through 2.39.3 sends
+// it: the CRT transfer client signs a Content-Length of 0 on the bodyless GET.
+// The signature was computed outside this package (Python's hashlib and hmac
+// over the canonical request below, with AWS's documented example secret), so
+// the test cannot agree with a bug in canonicalHeaders:
+//
+//	GET
+//	/small.bin
+//
+//	amz-sdk-invocation-id:3952c7ca-b54f-4628-a368-3d797cd16f37
+//	amz-sdk-request:attempt=1
+//	content-length:0
+//	host:bucket.s3.fil.one
+//	x-amz-checksum-mode:enabled
+//	x-amz-content-sha256:UNSIGNED-PAYLOAD
+//	x-amz-date:20261113T105657Z
+//
+//	amz-sdk-invocation-id;amz-sdk-request;content-length;host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date
+//	UNSIGNED-PAYLOAD
+func crtGetObject() Request {
+	return Request{
+		Method: "GET",
+		URL:    "https://bucket.s3.fil.one/small.bin",
+		Headers: map[string]string{
+			"Authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261113/us-east-9/s3/aws4_request, " +
+				"SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, " +
+				"Signature=80b9b6a2e70a85cff029c9e0d39c6bc6427e54423d7b168d775c47b765f89911",
+			"Amz-Sdk-Invocation-Id": "3952c7ca-b54f-4628-a368-3d797cd16f37",
+			"Amz-Sdk-Request":       "attempt=1",
+			"Content-Length":        "0",
+			"Host":                  "bucket.s3.fil.one",
+			"X-Amz-Checksum-Mode":   "enabled",
+			"X-Amz-Content-Sha256":  unsignedPayload,
+			"X-Amz-Date":            "20261113T105657Z",
+		},
+	}
+}
+
+func TestVerifyAcceptsSignedZeroContentLength(t *testing.T) {
+	sr, err := Parse(crtGetObject())
+	require.NoError(t, err)
+	require.NoError(t, Verify(sr, awsSuiteSecret))
+}
+
+// A reverse proxy built on Go's HTTP client (Caddy in front of Ingot) does not
+// forward Content-Length: 0 on a GET without a body.
+func TestVerifyAcceptsSignedZeroContentLengthThatAProxyRemoved(t *testing.T) {
+	req := crtGetObject()
+	delete(req.Headers, "Content-Length")
+
+	sr, err := Parse(req)
+	require.NoError(t, err)
+	require.NoError(t, Verify(sr, awsSuiteSecret))
+}
+
+func TestVerifyRejectsContentLengthThatDiffersFromTheSignedZero(t *testing.T) {
+	req := crtGetObject()
+	req.Headers["Content-Length"] = "5"
+
+	sr, err := Parse(req)
+	require.NoError(t, err)
+	require.EqualError(t, Verify(sr, awsSuiteSecret), "signature mismatch")
+}
+
 func TestDeriveKeyV4aDeterministic(t *testing.T) {
 	const (
 		akid   = "z6MkExampleAccessKeyIdentifier000000000000000"
