@@ -11,6 +11,7 @@ import (
 	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/did/key"
@@ -74,6 +75,7 @@ type UCANServerParams struct {
 	fx.In
 	Identity    identity.Identity   // embeds multikey.Issuer, satisfying ucan.Issuer
 	Server      config.ServerConfig // supplies InsecureDIDResolution
+	Providers   providerstore.Store // the callers whose did:web is resolved
 	Logger      *zap.Logger
 	Routes      []server.Route `group:"ucanRoutes"`
 	AdminRoutes []server.Route `group:"ucanAdminRoutes"`
@@ -92,9 +94,9 @@ type UCANServerParams struct {
 // addressed to, did:web identities — including Hilt's own service identity when
 // identity.service_id is a did:web. The service's own DID document is resolved
 // locally (no network round-trip) via a well-known tier ahead of the cached
-// HTTP resolver.
+// HTTP resolver, which fetches a document for a registered provider only.
 func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
-	didResolver, err := newDIDResolver(p.Identity, p.Server.InsecureDIDResolution, p.Logger)
+	didResolver, err := newDIDResolver(p.Identity, p.Providers, p.Server.InsecureDIDResolution, p.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +133,12 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 // server. did:web documents are fetched over HTTPS unless insecure is set, in
 // which case they are fetched over HTTP (development only). Resolved documents
 // are cached for three hours.
-func newDIDResolver(id identity.Identity, insecure bool, logger *zap.Logger) (resolver.ByMethod, error) {
+//
+// A did:web is whatever the caller wrote as a token's issuer, and it is
+// resolved before the token's signature is checked. Only the service's own
+// DID and those of the registered providers are resolved; any other did:web
+// is refused before the cache or the network is reached.
+func newDIDResolver(id identity.Identity, providers providerstore.Store, insecure bool, logger *zap.Logger) (resolver.ByMethod, error) {
 	webResolverOpts := []web.Option{web.WithTransport(tracing.Transport(http.DefaultTransport))}
 	if insecure {
 		logger.Warn("insecure DID resolution enabled: did:web will be resolved over HTTP instead of HTTPS; this should only be used for development purposes")
@@ -151,7 +158,7 @@ func newDIDResolver(id identity.Identity, insecure bool, logger *zap.Logger) (re
 		"key": key.Resolver,
 		"web": resolver.Tiered{
 			resolver.WellKnown{id.DID(): selfDoc},
-			resolver.NewCached(webResolver, 3*time.Hour),
+			newProviderResolver(providers, resolver.NewCached(webResolver, 3*time.Hour), logger),
 		},
 	}, nil
 }
