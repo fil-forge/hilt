@@ -332,7 +332,7 @@ func (s *Service) sweepWriteGrants(ctx context.Context, log *zap.Logger, tenantI
 		var revoked []ucan.Delegation
 		for aud, held := range current {
 			for _, d := range held {
-				if !s3perm.Mutates(d.Command()) {
+				if !s3perm.RevokedByWriteLock(d.Command()) {
 					replacement[aud] = append(replacement[aud], d)
 					continue
 				}

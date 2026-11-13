@@ -881,13 +881,27 @@ func TestOperationMutatesIsExhaustive(t *testing.T) {
 	}
 
 	// AbortMultipartUpload is the one read-shaped name that is not a read: it
-	// discards the parts uploaded so far. Whether a locked tenant should be
-	// allowed to clean up in flight uploads is an open product question on
-	// fil-forge/hilt#52; today it is refused.
+	// discards the parts uploaded so far, so it mutates. It is also the one
+	// mutating operation a write-locked tenant keeps, so a freeze cannot strand
+	// in-flight parts the tenant goes on paying for and cannot drop.
 	require.True(t, OpAbortMultipartUpload.Mutates())
+	require.False(t, OpAbortMultipartUpload.RefusedByWriteLock())
+
+	// And it is the only one. For every other operation the write lock refuses
+	// exactly what mutates, so carving out the abort widened the lock nowhere
+	// else — including for an operation added later, which this covers without
+	// being touched.
+	for _, op := range declared {
+		if op == OpAbortMultipartUpload {
+			continue
+		}
+		require.Equal(t, op.Mutates(), op.RefusedByWriteLock(),
+			"%s must be refused under a write lock exactly when it mutates", op)
+	}
 
 	// Unrecognized operations fail closed, so a write-locked tenant is not
 	// opened up by an operation added without an operationPermission entry.
 	require.Empty(t, Operation("Unknown").Permission())
 	require.True(t, Operation("Unknown").Mutates())
+	require.True(t, Operation("Unknown").RefusedByWriteLock())
 }

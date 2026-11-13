@@ -1093,6 +1093,28 @@ func TestAuthorize(t *testing.T) {
 			require.NoError(t, err, "GET %s must stay authorized for a write-locked tenant", path)
 		}
 	})
+
+	t.Run("authorizes an abort for a write-locked tenant", func(t *testing.T) {
+		// Aborting is the one mutating operation the lock keeps, so a frozen
+		// tenant can drop an upload left in flight instead of paying for its
+		// parts until someone unlocks. Completing the same upload is refused,
+		// which is what keeps this from being a way back onto the write path;
+		// both run against the same key and lock, so the abort carve-out is the
+		// only variable between them.
+		cfg := &setupConfig{
+			tenantStatus:         tenant.WriteLocked,
+			accessKeyPermissions: []string{"s3:AbortMultipartUpload", "s3:PutObject"},
+		}
+		az, _, _ := setup(t, accessKey, cfg)
+
+		_, err := az.Authorize(ctx, providerID,
+			signedOpRequest(t, accessKey, "DELETE", "/bucket/object-key?uploadId=u", region))
+		require.NoError(t, err, "AbortMultipartUpload must stay authorized for a write-locked tenant")
+
+		_, err = az.Authorize(ctx, providerID,
+			signedOpRequest(t, accessKey, "POST", "/bucket/object-key?uploadId=u", region))
+		require.ErrorIs(t, err, auth.ErrTenantWriteLocked, "CompleteMultipartUpload")
+	})
 }
 
 // lockedAccessKeys, lockedPrincipals and lockedPolicies fail every Get with

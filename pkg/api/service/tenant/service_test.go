@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"testing"
 	"time"
 
@@ -438,7 +439,7 @@ func writeLockSetup(t *testing.T, status tenant.Status) writeLockEnv {
 
 	var read, write []cid.Cid
 	for _, d := range held {
-		if s3perm.Mutates(d.Command()) {
+		if s3perm.RevokedByWriteLock(d.Command()) {
 			write = append(write, d.Link())
 		} else {
 			read = append(read, d.Link())
@@ -500,6 +501,37 @@ func TestSetStatusWriteLock(t *testing.T) {
 		// The replacements carry new CIDs, so the revocation of the grants they
 		// replace does not reach them.
 		require.ElementsMatch(t, env.writeGrants, env.swarf.Revoked())
+	})
+
+	t.Run("leaves an abort usable after the lock", func(t *testing.T) {
+		// A lock must not strand a multipart upload left in flight: the tenant
+		// goes on paying for its parts and has no way to drop them. Aborting is
+		// the one mutation the lock keeps, so every command an abort needs has to
+		// come through still live — stored is not enough, since the sweep keeps
+		// the grants it revoked so the unlock can rebuild them.
+		env := writeLockSetup(t, tenant.Active)
+
+		require.NoError(t, env.svc.SetStatus(ctx, "tenant-1", string(tenant.WriteLocked)))
+
+		revoked := env.swarf.Revoked()
+		page, err := env.delegations.ListByAudience(ctx, env.keyID)
+		require.NoError(t, err)
+		live := map[string]bool{}
+		for _, d := range page.Results {
+			if !slices.Contains(revoked, d.Link()) {
+				live[d.Command().String()] = true
+			}
+		}
+		for _, cmd := range s3perm.CommandsFor("s3:AbortMultipartUpload") {
+			require.True(t, live[cmd.String()],
+				"a write-locked tenant must keep %s, which an abort needs", cmd)
+		}
+		// The write path is not reopened with it: a put still loses a command.
+		var putLost bool
+		for _, cmd := range s3perm.CommandsFor("s3:PutObject") {
+			putLost = putLost || !live[cmd.String()]
+		}
+		require.True(t, putLost, "a write-locked tenant must still lose a command s3:PutObject needs")
 	})
 
 	t.Run("revokes nothing when the status does not change the lock", func(t *testing.T) {

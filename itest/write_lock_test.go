@@ -4,6 +4,7 @@ package itest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/fil-forge/hilt/pkg/s3perm"
@@ -54,6 +56,36 @@ func requireWriteLockRefusal(t *testing.T, err error, op string) {
 	require.Equal(t, "AccessDenied", code, "%s", op)
 }
 
+// inFlightUpload is a multipart upload with one part uploaded and not yet
+// completed, which a write lock then has to leave abortable.
+type inFlightUpload struct {
+	key      string
+	uploadID string
+	etag     string
+}
+
+// startUpload initiates a multipart upload and uploads a single part to it,
+// leaving it in flight.
+func startUpload(t *testing.T, ctx context.Context, s3c *s3.Client, bucket, key string) inFlightUpload {
+	t.Helper()
+	created, err := s3c.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+	// Under the 5 MiB minimum, which only binds on a part that is not the last
+	// of a completed upload — neither of these is ever completed.
+	part, err := s3c.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucket),
+		Key:        aws.String(key),
+		UploadId:   created.UploadId,
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader([]byte("part uploaded while active")),
+	})
+	require.NoError(t, err)
+	return inFlightUpload{key: key, uploadID: aws.ToString(created.UploadId), etag: aws.ToString(part.ETag)}
+}
+
 // testWriteLockBlocksWrites drives the write-lock through the real stack: an
 // active tenant creates a bucket and writes an object, then the tenant is
 // write-locked and the same operations must be refused while reads keep
@@ -69,7 +101,8 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 
-	perms := []string{"s3:CreateBucket", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:DeleteBucket", "s3:ListAllMyBuckets"}
+	perms := []string{"s3:CreateBucket", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:DeleteBucket", "s3:ListAllMyBuckets",
+		"s3:AbortMultipartUpload", "s3:ListBucketMultipartUploads"}
 	ak, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{Name: "before-lock", Permissions: perms})
 	require.NoError(t, err)
 
@@ -84,9 +117,15 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 	})
 	require.NoError(t, err)
 
+	// Two uploads left in flight across the lock: one to prove the abort still
+	// works, one to prove completing it does not. Each carries a part, so the
+	// abort has blobs to release and is not a no-op.
+	toAbort := startUpload(t, ctx, s3c, bucket, "left-in-flight.txt")
+	toComplete := startUpload(t, ctx, s3c, bucket, "never-completed.txt")
+
 	var writeGrants int
 	for _, cmd := range s3perm.CommandsFor(perms...) {
-		if s3perm.Mutates(cmd) {
+		if s3perm.RevokedByWriteLock(cmd) {
 			writeGrants++
 		}
 	}
@@ -115,6 +154,41 @@ func testWriteLockBlocksWrites(t *testing.T, net *forgeNet) {
 
 	_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	requireWriteLockRefusal(t, err, "DeleteBucket")
+
+	// Completing an upload left in flight stays refused: the carve-out below is
+	// for cleanup, not a way back onto the write path.
+	_, err = s3c.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(toComplete.key),
+		UploadId: aws.String(toComplete.uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{{ETag: aws.String(toComplete.etag), PartNumber: aws.Int32(1)}},
+		},
+	})
+	requireWriteLockRefusal(t, err, "CompleteMultipartUpload")
+
+	// Aborting is the one mutation a write-locked tenant keeps. Without it a
+	// freeze strands these parts: the tenant goes on paying for them with no way
+	// to drop them, which is the opposite of what a freeze is for. Hilt keeps
+	// the abort's grants through the sweep, so this has to succeed on Ingot's
+	// warm cache as well as through Hilt.
+	_, err = s3c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(toAbort.key),
+		UploadId: aws.String(toAbort.uploadID),
+	})
+	require.NoError(t, err, "a write-locked tenant must still be able to abort an upload left in flight")
+
+	// And the abort took effect: that upload is gone from the bucket's in-flight
+	// list, while the one that could not be completed is still there.
+	uploads, err := s3c.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	var inFlight []string
+	for _, u := range uploads.Uploads {
+		inFlight = append(inFlight, aws.ToString(u.Key))
+	}
+	require.NotContains(t, inFlight, toAbort.key, "the aborted upload must be dropped")
+	require.Contains(t, inFlight, toComplete.key, "the upload that could not be completed must still be in flight")
 
 	// Reads stay available: listing the tenant's buckets still succeeds, and so
 	// does reading an object, which needs the key's (unrevoked) retrieve grant.

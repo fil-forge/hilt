@@ -238,7 +238,9 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	// no object write or delete, no multipart upload. Checked here, before the
 	// operation is authorized, because Authorize is the one path every mutating
 	// handler shares and the status is tenant-wide, not per-permission.
-	if tenantRec.Status == tenant.WriteLocked && op.Mutates() {
+	// Aborting an upload in flight is the one mutation it keeps, so a freeze
+	// does not block cleanup (see [Operation.RefusedByWriteLock]).
+	if tenantRec.Status == tenant.WriteLocked && op.RefusedByWriteLock() {
 		log.Debug("rejecting mutating operation for write-locked tenant", zap.Stringer("operation", op))
 		return nil, ErrTenantWriteLocked
 	}
