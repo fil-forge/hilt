@@ -51,8 +51,16 @@ func (s *SignedRequest) canonicalQueryString() string {
 // clients (aws-cli 2.38.0 through 2.39.3) sign Content-Length: 0 on a GET, and
 // a reverse proxy built on Go's HTTP client drops that header when forwarding a
 // bodyless request. A non-zero length always reaches us and is verified as
-// sent. versitygw's signer applies the same default:
+// sent.
+//
+// versitygw's signature check also signs a missing content-length as 0. Its
+// authentication middleware parses the header into a length that stays 0 when
+// the header is absent, and its signer writes that length whenever the client
+// signed content-length:
+// https://github.com/fil-forge/versitygw/blob/23d4d71f50ac23877f3a4e5ed956f444e0df1058/s3api/middlewares/authentication.go#L139-L147
 // https://github.com/fil-forge/versitygw/blob/23d4d71f50ac23877f3a4e5ed956f444e0df1058/aws/signer/v4/v4.go#L478-L482
+// For a header that is present, versitygw signs the parsed number while we sign
+// the value as received, so the two differ for values such as "05".
 func (s *SignedRequest) canonicalHeaders() string {
 	var b strings.Builder
 	for _, name := range s.signedHeaders {
