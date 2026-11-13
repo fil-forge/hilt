@@ -14,20 +14,37 @@ import (
 	"go.uber.org/zap"
 )
 
-// countingProviders counts the reads of the provider store, and fails them
-// while err is set.
+// countingProviders counts the reads of the provider store, fails them while
+// err is set, and holds each one until release is closed when block is set.
 type countingProviders struct {
 	providerstore.Store
 	lists int
 	err   error
+	// block makes a read announce itself on entered and wait for release.
+	block   bool
+	entered chan struct{}
+	release chan struct{}
 }
 
 func (c *countingProviders) List(ctx context.Context) ([]providerstore.Record, error) {
 	c.lists++
+	if c.block {
+		c.entered <- struct{}{}
+		<-c.release
+	}
 	if c.err != nil {
 		return nil, c.err
 	}
 	return c.Store.List(ctx)
+}
+
+// blockReads makes the next reads of the store wait until the returned
+// function is called.
+func (c *countingProviders) blockReads() (release func()) {
+	c.block = true
+	c.entered = make(chan struct{})
+	c.release = make(chan struct{})
+	return func() { close(c.release) }
 }
 
 // resolverFixture is a providerResolver over an in-memory provider store, a
@@ -149,6 +166,66 @@ func TestProviderResolver(t *testing.T) {
 		// the cancelled request triggered went through.
 		_, err = f.resolver.Resolve(t.Context(), provider)
 		require.NoError(t, err)
+		require.Equal(t, 1, f.providers.lists)
+	})
+
+	t.Run("resolves a known provider while a reload is in flight", func(t *testing.T) {
+		f := newResolverFixture(t)
+		provider := testutil.RandomDID(t)
+		require.NoError(t, f.providers.Add(t.Context(), provider, "us-east-1", nil))
+		_, err := f.resolver.Resolve(t.Context(), provider)
+		require.NoError(t, err)
+
+		// An unrecognized DID starts a reload, and the store does not answer.
+		f.now = f.now.Add(providerReloadInterval)
+		release := f.providers.blockReads()
+		stranger := testutil.RandomDID(t)
+		refused := make(chan error, 1)
+		go func() {
+			_, err := f.resolver.Resolve(context.Background(), stranger)
+			refused <- err
+		}()
+		<-f.providers.entered
+
+		resolved := make(chan error, 1)
+		go func() {
+			_, err := f.resolver.Resolve(context.Background(), provider)
+			resolved <- err
+		}()
+		select {
+		case err := <-resolved:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			require.Fail(t, "a known provider waited for the reload")
+		}
+
+		release()
+		require.ErrorIs(t, <-refused, errDIDNotPermitted)
+	})
+
+	t.Run("recognizes a provider that asks while the reload finding it is in flight", func(t *testing.T) {
+		f := newResolverFixture(t)
+		provider := testutil.RandomDID(t)
+		require.NoError(t, f.providers.Add(t.Context(), provider, "us-east-1", nil))
+
+		release := f.providers.blockReads()
+		stranger := testutil.RandomDID(t)
+		refused := make(chan error, 1)
+		go func() {
+			_, err := f.resolver.Resolve(context.Background(), stranger)
+			refused <- err
+		}()
+		<-f.providers.entered
+
+		resolved := make(chan error, 1)
+		go func() {
+			_, err := f.resolver.Resolve(context.Background(), provider)
+			resolved <- err
+		}()
+		release()
+
+		require.NoError(t, <-resolved)
+		require.ErrorIs(t, <-refused, errDIDNotPermitted)
 		require.Equal(t, 1, f.providers.lists)
 	})
 }
