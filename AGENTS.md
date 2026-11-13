@@ -29,6 +29,12 @@ them. It exposes two APIs and talks to three external services:
   If-None-Match are optional signed headers (absent means unconditional).
   The admin commands are
   `/admin/provider/{add,list}` and `/admin/provider/nodes/set` (`hilt client admin`).
+  The route takes no credential and an invocation's issuer is resolved before
+  its signature is checked, so a `did:web` issuer is fetched only when it is
+  Hilt's own DID (answered locally) or a registered provider's
+  (`pkg/fx/provider_resolver.go`). Any other `did:web` is refused without a
+  request; a provider registered while Hilt runs is recognized within ten
+  seconds.
 - **Sprue** (the Forge upload service) — Hilt calls it to provision/inspect a
   bucket's storage space and to manage routing policies (`pkg/client`): each
   provider owns a policy whose candidates are its storage nodes, and every

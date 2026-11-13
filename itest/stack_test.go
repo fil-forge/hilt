@@ -107,6 +107,24 @@ type forgeNet struct {
 	s3URL   string
 }
 
+// pinnedBlockchainImage is a filecoin-localdev image (its multi-arch index,
+// so the digest resolves on both architectures) that can read the chain state
+// smelt commits beside it.
+//
+// smelt picks the image by the moving tag `:main`, but the state it mounts is
+// whatever the smelt version in go.mod committed. `:main` was republished on
+// 2026-11-11, and the newer Anvil cannot parse the October state smelt
+// v0.0.0-20261021123053-359a84935c40 carries, so the blockchain container
+// fails its health check and every itest dies at stack start. Pinning the
+// image that wrote that state puts the pair back in step.
+//
+// Remove this, and the override below, once hilt depends on a smelt version
+// that pins the localdev image by digest beside its state — a version whose
+// state merely matches today's `:main` is not enough, because smelt would
+// still follow `:main` and the next publish would break this again.
+// fil-forge/ingot#390 made the same change for the same reason.
+const pinnedBlockchainImage = "ghcr.io/fil-forge/filecoin-localdev@sha256:96e72624eb71efb1c15de1d0729b780955e5ece700e840dd56291f5c522b4bee"
+
 // startForge boots the smelt stack with the working tree's hilt injected,
 // waits for hilt and ingot to serve health, and returns the network with its
 // clients wired up. The stack lives until the calling test — including all
@@ -120,6 +138,12 @@ func startForge(t *testing.T) *forgeNet {
 		stack.WithPiriNodes(stack.PiriNodeConfig{Postgres: true}),
 		stack.WithServiceBinary("hilt", localHiltBinary(t)),
 	}
+	blockchainImage := pinnedBlockchainImage
+	if img := os.Getenv("HILT_ITEST_BLOCKCHAIN_IMAGE"); img != "" {
+		t.Logf("using blockchain image override: %s", img)
+		blockchainImage = img
+	}
+	opts = append(opts, stack.WithBlockchainImage(blockchainImage))
 	// Local-dev escape hatches: run against sprue / piri / ingot images the
 	// registry doesn't have yet — e.g. built from an unmerged branch. Unset
 	// (CI) uses the published defaults.
@@ -237,9 +261,10 @@ func (n *forgeNet) awaitRevocations(t *testing.T, ctx context.Context, count int
 	defer cancel()
 
 	var records []swarfstore.RevocationRecord
-	for fh, err := range n.swarf.Stream(streamCtx, time.Time{}) {
+	firehoseStart := swarfclient.Cursor(swarfstore.Cursor{}.String())
+	for event, err := range n.swarf.StreamAfter(streamCtx, firehoseStart) {
 		require.NoError(t, err, "reading the revocation firehose")
-		record, err := n.swarf.Get(streamCtx, fh.Revoke)
+		record, err := n.swarf.Get(streamCtx, event.Revocation.Revoke)
 		require.NoError(t, err, "fetching revocation record")
 		if len(record.Path) == 0 || record.Path[len(record.Path)-1].Audience().String() != audience {
 			continue
