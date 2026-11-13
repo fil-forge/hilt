@@ -3,6 +3,7 @@ package sigv4
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"sort"
 	"strings"
 )
@@ -47,16 +48,18 @@ func (s *SignedRequest) canonicalQueryString() string {
 
 // canonicalHeaders builds the canonical header block for the signed headers.
 //
-// A signed content-length the request does not carry is taken as 0. Some
-// clients (aws-cli 2.38.0 through 2.39.3) sign Content-Length: 0 on a GET, and
-// a reverse proxy built on Go's HTTP client drops that header when forwarding a
-// bodyless request. A non-zero length always reaches us and is verified as
-// sent.
+// On a GET or HEAD, a signed content-length the request does not carry is taken
+// as 0. Some clients (aws-cli 2.38.0 through 2.39.3) sign Content-Length: 0 on
+// a GET, and a reverse proxy built on Go's HTTP client drops that header when
+// forwarding a bodyless request. A non-zero length always reaches us and is
+// verified as sent. Other methods get no default: a PUT signed with a zero
+// length and an unsigned payload could otherwise be replayed without the header
+// and with a chunked body, which Hilt never sees.
 //
-// versitygw's signature check also signs a missing content-length as 0. Its
-// authentication middleware parses the header into a length that stays 0 when
-// the header is absent, and its signer writes that length whenever the client
-// signed content-length:
+// versitygw's signature check signs a missing content-length as 0 on every
+// method. Its authentication middleware parses the header into a length that
+// stays 0 when the header is absent, and its signer writes that length whenever
+// the client signed content-length:
 // https://github.com/fil-forge/versitygw/blob/23d4d71f50ac23877f3a4e5ed956f444e0df1058/s3api/middlewares/authentication.go#L139-L147
 // https://github.com/fil-forge/versitygw/blob/23d4d71f50ac23877f3a4e5ed956f444e0df1058/aws/signer/v4/v4.go#L478-L482
 // For a header that is present, versitygw signs the parsed number while we sign
@@ -68,7 +71,7 @@ func (s *SignedRequest) canonicalHeaders() string {
 		switch {
 		case name == "host":
 			value = s.host
-		case name == "content-length" && len(s.headers.Values(name)) == 0:
+		case name == "content-length" && isBodyless(s.method) && len(s.headers.Values(name)) == 0:
 			value = "0"
 		default:
 			value = s.headers.Get(name)
@@ -116,4 +119,11 @@ const upperHex = "0123456789ABCDEF"
 func hashSHA256(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// isBodyless reports whether S3 requests with this method never carry a body.
+// OPTIONS is left out: S3 CORS preflights are not signed, and the authorizer
+// refuses the method.
+func isBodyless(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
 }

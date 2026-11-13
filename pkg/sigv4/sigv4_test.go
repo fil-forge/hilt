@@ -89,13 +89,14 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 	require.Error(t, Verify(sr, secret))
 }
 
-// crtGetObject is a GetObject request as aws-cli 2.38.0 through 2.39.3 sends
-// it: the CRT transfer client signs a Content-Length of 0 on the bodyless GET.
-// The signature was computed outside this package (Python's hashlib and hmac
-// over the canonical request below, with AWS's documented example secret), so
-// the test cannot agree with a bug in canonicalHeaders:
+// zeroContentLengthSignatures holds, per method, the signature of a request
+// that signs a Content-Length of 0 the way aws-cli 2.38.0 through 2.39.3 signs
+// GetObject: its CRT transfer client adds the header to the bodyless GET. The
+// signatures were computed outside this package (Python's hashlib and hmac over
+// the canonical request below, with AWS's documented example secret), so the
+// tests cannot agree with a bug in canonicalHeaders:
 //
-//	GET
+//	<method>
 //	/small.bin
 //
 //	amz-sdk-invocation-id:3952c7ca-b54f-4628-a368-3d797cd16f37
@@ -108,14 +109,20 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 //
 //	amz-sdk-invocation-id;amz-sdk-request;content-length;host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date
 //	UNSIGNED-PAYLOAD
-func crtGetObject() Request {
+var zeroContentLengthSignatures = map[string]string{
+	"GET":  "80b9b6a2e70a85cff029c9e0d39c6bc6427e54423d7b168d775c47b765f89911",
+	"HEAD": "595153107ef690c2d3133c705a884cfdf4256382e15c553aa2941f10ab3b3deb",
+	"PUT":  "e205bf70fb531bcfc8065945dedfc99045bb8d29ad0601737ea4735dda7f79ce",
+}
+
+func signedZeroContentLength(method string) Request {
 	return Request{
-		Method: "GET",
+		Method: method,
 		URL:    "https://bucket.s3.fil.one/small.bin",
 		Headers: map[string]string{
 			"Authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261113/us-east-9/s3/aws4_request, " +
 				"SignedHeaders=amz-sdk-invocation-id;amz-sdk-request;content-length;host;x-amz-checksum-mode;x-amz-content-sha256;x-amz-date, " +
-				"Signature=80b9b6a2e70a85cff029c9e0d39c6bc6427e54423d7b168d775c47b765f89911",
+				"Signature=" + zeroContentLengthSignatures[method],
 			"Amz-Sdk-Invocation-Id": "3952c7ca-b54f-4628-a368-3d797cd16f37",
 			"Amz-Sdk-Request":       "attempt=1",
 			"Content-Length":        "0",
@@ -128,24 +135,43 @@ func crtGetObject() Request {
 }
 
 func TestVerifyAcceptsSignedZeroContentLength(t *testing.T) {
-	sr, err := Parse(crtGetObject())
-	require.NoError(t, err)
-	require.NoError(t, Verify(sr, awsSuiteSecret))
+	for method := range zeroContentLengthSignatures {
+		t.Run(method, func(t *testing.T) {
+			sr, err := Parse(signedZeroContentLength(method))
+			require.NoError(t, err)
+			require.NoError(t, Verify(sr, awsSuiteSecret))
+		})
+	}
 }
 
 // A reverse proxy built on Go's HTTP client (Caddy in front of Ingot) does not
-// forward Content-Length: 0 on a GET without a body.
+// forward Content-Length: 0 on a GET or HEAD without a body.
 func TestVerifyAcceptsSignedZeroContentLengthThatAProxyRemoved(t *testing.T) {
-	req := crtGetObject()
+	for _, method := range []string{"GET", "HEAD"} {
+		t.Run(method, func(t *testing.T) {
+			req := signedZeroContentLength(method)
+			delete(req.Headers, "Content-Length")
+
+			sr, err := Parse(req)
+			require.NoError(t, err)
+			require.NoError(t, Verify(sr, awsSuiteSecret))
+		})
+	}
+}
+
+// A PUT signed with Content-Length: 0 and an unsigned payload could otherwise
+// be replayed without the header and with a chunked body.
+func TestVerifyRejectsSignedZeroContentLengthRemovedFromAPut(t *testing.T) {
+	req := signedZeroContentLength("PUT")
 	delete(req.Headers, "Content-Length")
 
 	sr, err := Parse(req)
 	require.NoError(t, err)
-	require.NoError(t, Verify(sr, awsSuiteSecret))
+	require.EqualError(t, Verify(sr, awsSuiteSecret), "signature mismatch")
 }
 
 func TestVerifyRejectsContentLengthThatDiffersFromTheSignedZero(t *testing.T) {
-	req := crtGetObject()
+	req := signedZeroContentLength("GET")
 	req.Headers["Content-Length"] = "5"
 
 	sr, err := Parse(req)
