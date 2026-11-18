@@ -12,28 +12,31 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
+	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
-	"github.com/fil-forge/ucantone/validator"
 	"github.com/ipfs/go-cid"
 	"go.uber.org/zap"
 )
@@ -51,16 +54,6 @@ type UploadClient interface {
 	UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error
 }
 
-// RevocationPublisher is the subset of the revocation service (Swarf) the bucket
-// operations need. It is satisfied by [*swarfclient.Client]; the interface lets the
-// logic be unit tested without a live revocation service.
-type RevocationPublisher interface {
-	// Publish submits a /ucan/revoke invocation self-signed by revoker for the
-	// revoked delegation, which revoker must have issued unless a witness path is
-	// supplied with [swarfclient.WithWitnessPath].
-	Publish(ctx context.Context, revoker ucan.Issuer, revoked ucan.Delegation, opts ...swarfclient.PublishOption) error
-}
-
 // Service implements the S3 bucket operations shared by the UCAN command handlers.
 type Service struct {
 	logger      *zap.Logger
@@ -69,8 +62,12 @@ type Service struct {
 	delegations delegationstore.Store
 	accessKeys  accesskey.Store
 	tenants     tenantstore.Store
+	policies    bucketpolicystore.Store
+	providers   providerstore.Store
 	uploads     UploadClient
-	revocations RevocationPublisher
+	revocations grant.RevocationPublisher
+	// policyWrites stores a policy as the management API stores a policy PUT.
+	policyWrites *bucketpolicysvc.Service
 }
 
 // New constructs the bucket service.
@@ -81,18 +78,24 @@ func New(
 	delegations delegationstore.Store,
 	accessKeys accesskey.Store,
 	tenants tenantstore.Store,
+	policies bucketpolicystore.Store,
+	providers providerstore.Store,
 	uploads UploadClient,
-	revocations RevocationPublisher,
+	revocations grant.RevocationPublisher,
+	policyWrites *bucketpolicysvc.Service,
 ) *Service {
 	return &Service{
-		logger:      logger,
-		authorizer:  authorizer,
-		buckets:     buckets,
-		delegations: delegations,
-		accessKeys:  accessKeys,
-		tenants:     tenants,
-		uploads:     uploads,
-		revocations: revocations,
+		logger:       logger,
+		authorizer:   authorizer,
+		buckets:      buckets,
+		delegations:  delegations,
+		accessKeys:   accessKeys,
+		tenants:      tenants,
+		policies:     policies,
+		providers:    providers,
+		uploads:      uploads,
+		revocations:  revocations,
+		policyWrites: policyWrites,
 	}
 }
 
@@ -136,7 +139,10 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	bucketID := bucketSigner.KeyDID()
 	log := s.logger.With(zap.Stringer("bucket", bucketID), zap.String("name", authz.BucketName))
 
-	if err := s.buckets.Add(ctx, bucketID, authz.Tenant.ID, authz.BucketName); err != nil {
+	// The bucket is served by the provider handling this request: its space is
+	// routed to that provider's storage nodes below, and only that provider may
+	// act on it afterwards.
+	if err := s.buckets.Add(ctx, bucketID, authz.Tenant.ID, authz.Provider.ID, authz.BucketName); err != nil {
 		return nil, nil, fmt.Errorf("storing bucket: %w", err)
 	}
 	// Best-effort rollback of the bucket record on a later failure. The root
@@ -260,7 +266,7 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		Bucket: &bucketID,
 		Tenant: authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			accessKeyID: authz.AccessKey.Permissions,
+			accessKeyID: authz.Permissions,
 		}},
 		Keys: s3.KeySet{Entries: map[did.DID][]s3.VerificationKey{
 			accessKeyID: {{Kind: kind, Data: key}},
@@ -272,7 +278,9 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 // Delete authenticates the request, checks the s3:DeleteBucket permission,
 // resolves the bucket, verifies its space is empty via Sprue (acting as the
 // tenant), publishes revocations for the delegations over the bucket, then
-// deletes those delegations and the bucket record. Revocations are published
+// deletes those delegations and the bucket record, which takes the policy with
+// it. The policy goes without a publication: the gateway refuses a bucket it no longer
+// knows, so nothing cached for it can be used. Revocations are published
 // first so that a revocation service failure leaves the bucket intact and the
 // call cleanly retryable — otherwise the delegations would live on with nothing
 // for a verifier to check.
@@ -300,26 +308,55 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 		return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
 	}
 
-	if err := s.revokeDelegations(ctx, authz.Tenant.ID, authz.Bucket.ID, account); err != nil {
+	// DeleteByBucket holds the bucket's policy write lock across the callback:
+	// a policy write in flight finishes before the grants are listed, and one
+	// arriving later finds the bucket gone. The callback revokes the grants,
+	// removes the bucket's delegations (subject == bucket) and deletes the
+	// bucket record. On Postgres the bucket row's delete cascades to its
+	// policy, so no failure leaves a live bucket without one; the memory store
+	// removes the policy after the callback returns.
+	err = s.policies.DeleteByBucket(ctx, authz.Bucket.ID, func(ctx context.Context) error {
+		if err := s.revokeDelegations(ctx, authz.Tenant.ID, authz.Bucket.ID, account); err != nil {
+			return err
+		}
+		if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
+			return fmt.Errorf("deleting bucket delegations: %w", err)
+		}
+		if err := s.buckets.Delete(ctx, authz.Bucket.ID); err != nil {
+			return fmt.Errorf("deleting bucket: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
-	}
-
-	// Remove the bucket's delegations (subject == bucket), then the record.
-	if err := s.delegations.DeleteBySubject(ctx, authz.Bucket.ID); err != nil {
-		return nil, fmt.Errorf("deleting bucket delegations: %w", err)
-	}
-	if err := s.buckets.Delete(ctx, authz.Bucket.ID); err != nil {
-		return nil, fmt.Errorf("deleting bucket: %w", err)
 	}
 
 	s.logger.Debug("deleted bucket", zap.Stringer("bucket", authz.Bucket.ID), zap.String("name", authz.BucketName))
 	return &s3bkt.DeleteOK{}, nil
 }
 
-// revokeDelegations publishes a UCAN revocation for the delegations over the
-// bucket that the tenant issued — the grants held by its access keys — signed by
-// the tenant. No witness path accompanies them: the revocation service only
-// requires one to prove authority over a delegation the revoker did not issue.
+// sameLinks reports whether the two sets of delegations hold the same CIDs.
+func sameLinks(a, b []ucan.Delegation) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	links := make(map[cid.Cid]bool, len(a))
+	for _, d := range a {
+		links[d.Link()] = true
+	}
+	for _, d := range b {
+		if !links[d.Link()] {
+			return false
+		}
+	}
+	return true
+}
+
+// revokeDelegations publishes, in one request, a UCAN revocation for every
+// delegation over the bucket that the tenant issued — the grants held by its
+// access keys, service and principal-bound alike — signed by the tenant. No
+// witness path accompanies them: the revocation service only requires one to
+// prove authority over a delegation the revoker did not issue.
 //
 // Powerline delegations are not affected: they carry no subject because they grant
 // access to every bucket the tenant owns, so deleting one bucket must not revoke
@@ -337,7 +374,7 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.Stringer("bucket", bucketID))
 
-	now := ucan.UnixTimestamp(time.Now().Unix())
+	issued := make([]ucan.Delegation, 0, len(dels))
 	for _, d := range dels {
 		// The bucket→tenant root is signed by the bucket's own key, which was
 		// discarded once it had issued the root, and a root is the start of its own
@@ -348,18 +385,9 @@ func (s *Service) revokeDelegations(ctx context.Context, tenantID, bucketID did.
 				zap.Stringer("delegation", d.Link()), zap.Stringer("issuer", d.Issuer()))
 			continue
 		}
-		// An expired delegation is rejected by the revocation service, and is
-		// unusable regardless, so revoking it is moot.
-		if err := validator.ValidateNotExpired(d, now); err != nil {
-			log.Info("skipping revocation of expired delegation", zap.Stringer("delegation", d.Link()))
-			continue
-		}
-		if err := s.revocations.Publish(ctx, revoker, d); err != nil {
-			return fmt.Errorf("publishing revocation for %s: %w", d.Link(), err)
-		}
-		log.Info("published revocation", zap.Stringer("delegation", d.Link()))
+		issued = append(issued, d)
 	}
-	return nil
+	return grant.PublishRevocations(ctx, log, s.revocations, revoker, issued)
 }
 
 // List authorizes the request (which also verifies the access key holds the
@@ -401,9 +429,32 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	if token != "" {
 		listOpts = append(listOpts, bucketstore.WithCursor(token))
 	}
-	page, err := s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("listing buckets: %w", err)
+
+	// bucket-region narrows the listing to the buckets one region serves. The
+	// region names a provider, which is what a bucket records, so the filter is
+	// applied in the read: a page is then a page of matches, and the
+	// continuation token keeps meaning what it says.
+	//
+	// A region no provider serves holds none of the tenant's buckets, and the
+	// empty answer says so without disclosing which regions this Hilt knows.
+	regionServed := true
+	if region := query.Get("bucket-region"); region != "" {
+		prov, err := s.providers.GetByRegion(ctx, region)
+		switch {
+		case errors.Is(err, store.ErrRecordNotFound):
+			regionServed = false
+		case err != nil:
+			return nil, fmt.Errorf("looking up provider for region %q: %w", region, err)
+		default:
+			listOpts = append(listOpts, bucketstore.WithProvider(prov.ID))
+		}
+	}
+
+	var page store.Page[bucketstore.Record]
+	if regionServed {
+		if page, err = s.buckets.ListByTenant(ctx, authz.Tenant.ID, listOpts...); err != nil {
+			return nil, fmt.Errorf("listing buckets: %w", err)
+		}
 	}
 
 	out := &s3bkt.ListOK{
@@ -417,15 +468,45 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 	if page.Cursor != nil {
 		out.ContinuationToken = *page.Cursor
 	}
+	// A tenant's buckets may span providers; each is reported in the region of
+	// the provider serving it, resolved once per provider.
+	regions := map[did.DID]string{authz.Provider.ID: authz.Region}
 	for _, b := range page.Results {
+		region, ok := regions[b.Provider]
+		if !ok {
+			prov, err := s.providers.Get(ctx, b.Provider)
+			if err != nil {
+				return nil, fmt.Errorf("looking up provider %s of bucket %q: %w", b.Provider, b.Name, err)
+			}
+			region = prov.Region
+			regions[b.Provider] = region
+		}
 		out.Buckets = append(out.Buckets, s3bkt.Bucket{
 			ARN:          "arn:aws:s3:::" + b.Name,
-			Region:       authz.Region,
+			Region:       region,
 			CreationDate: b.CreatedAt.UTC().Format(time.RFC3339),
 			Name:         b.Name,
 		})
 	}
 	return out, nil
+}
+
+// policyETag reads the bucket policy's entity tag share-locked, so a policy
+// write in flight is waited out and its ETag read once it commits. A bucket
+// with no policy reports "", as [auth.Authorizer.EffectiveActions] does. A
+// wait the store gave up on is [auth.ErrTemporarilyUnavailable].
+func (s *Service) policyETag(ctx context.Context, bucketID did.DID) (string, error) {
+	rec, err := s.policies.Get(ctx, bucketID, store.WithShareLock())
+	if errors.Is(err, store.ErrRecordNotFound) {
+		return "", nil
+	}
+	if errors.Is(err, store.ErrLockTimeout) {
+		return "", fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("looking up bucket policy: %w", err)
+	}
+	return rec.ETag, nil
 }
 
 // Info resolves the named bucket and returns its DID, the access key's permissions,
@@ -441,18 +522,13 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, fmt.Errorf("looking up bucket: %w", err)
 	}
 
-	// The proof chains this returns are the bucket tenant's, so the caller must be
-	// the provider that acts for that tenant — the same rule Authorize applies to
-	// the signature-bearing commands.
-	tenantRec, err := s.tenants.Get(ctx, b.Tenant)
-	if errors.Is(err, store.ErrRecordNotFound) {
-		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownBucket, args.Name)
-	} else if err != nil {
-		return nil, nil, fmt.Errorf("looking up tenant: %w", err)
-	}
-	if issuer != tenantRec.Provider {
-		s.logger.Debug("rejecting bucket info not from the tenant's provider",
-			zap.Stringer("bucket", b.ID), zap.Stringer("issuer", issuer), zap.Stringer("provider", tenantRec.Provider))
+	// The proof chains this returns are the bucket tenant's, and a bucket is
+	// served by one provider, so the caller must be that provider — the same
+	// rule Authorize applies to the signature-bearing commands. A tenant is
+	// region-free, so the binding is the bucket's rather than the tenant's.
+	if issuer != b.Provider {
+		s.logger.Debug("rejecting bucket info not from the bucket's provider",
+			zap.Stringer("bucket", b.ID), zap.Stringer("issuer", issuer), zap.Stringer("provider", b.Provider))
 		return nil, nil, auth.ErrIssuerForbidden
 	}
 
@@ -471,27 +547,53 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		return nil, nil, auth.ErrForeignBucket
 	}
 
+	// A service key carries its own permission set; a principal-bound key its
+	// principal's effective actions on the bucket, whose stored grants over the
+	// bucket are the commands those actions map to. The authorizer reads the
+	// principal and the policy share-locked, so Info observes the same settled
+	// state as authorize: a removed principal is an unknown key, and a bucket
+	// the principal cannot reach is unknown.
+	permissions, etag := akRec.Permissions, ""
+	if akRec.Principal != nil {
+		eff, tag, err := s.authorizer.EffectiveActions(ctx, b.Tenant, *akRec.Principal, b.ID)
+		if errors.Is(err, auth.ErrUnknownAccessKey) {
+			return nil, nil, fmt.Errorf("%w: %s outlived its principal", ErrUnknownAccessKey, akRec.ID)
+		} else if err != nil {
+			return nil, nil, err
+		}
+		if len(eff) == 0 {
+			return nil, nil, fmt.Errorf("%w: %q is not within the principal's reach", ErrUnknownBucket, b.Name)
+		}
+		permissions, etag = eff, tag
+	}
+
 	// Build the proof chains from the bucket to the access key: for each grant to
 	// the access key that reaches this bucket (scoped to it or powerline), resolve
 	// its chain up to the bucket→tenant root.
-	stored, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
-		var o []store.PaginationOption
-		if opts.Cursor != nil {
-			o = append(o, store.WithCursor(*opts.Cursor))
+	// listGrants lists the key's grants that reach this bucket: scoped to it or
+	// powerline.
+	listGrants := func() ([]ucan.Delegation, error) {
+		dels, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+			var o []store.PaginationOption
+			if opts.Cursor != nil {
+				o = append(o, store.WithCursor(*opts.Cursor))
+			}
+			return s.delegations.ListByAudience(ctx, args.AccessKey, o...)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing delegations: %w", err)
 		}
-		return s.delegations.ListByAudience(ctx, args.AccessKey, o...)
-	})
+		return slices.DeleteFunc(dels, func(d ucan.Delegation) bool { return d.Subject().Defined() && d.Subject() != b.ID }), nil
+	}
+	stored, err := listGrants()
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing delegations: %w", err)
+		return nil, nil, err
 	}
 
 	proofSet := map[cid.Cid][]cid.Cid{}
 	var blocks []ucan.Delegation
 	seen := map[string]bool{}
 	for _, d := range stored {
-		if d.Subject().Defined() && d.Subject() != b.ID {
-			continue // grant scoped to a different bucket
-		}
 		proofs, links, err := s.delegations.ProofChain(ctx, args.AccessKey, d.Command(), b.ID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("building proof chain for %s: %w", d.Command(), err)
@@ -508,6 +610,40 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		}
 	}
 
+	// The effective actions and the delegation reads above are not tied
+	// together: a policy write rotates the grants and commits them before the
+	// policy row it belongs to becomes visible, so one landing between them
+	// pairs the old actions with the new grants. ProofChain reads by command
+	// and subject, so it too can return a chain the write just stored. Both
+	// s3:GetObject and s3:ListBucket map to /content/retrieve, so that pairing
+	// can report an action the write removed over a chain that still serves it.
+	// The ETag reread comes after the chain reads and waits on a write still in
+	// flight, whose grants may already have been read, and a policy that moved
+	// meanwhile says the caller should ask again.
+	if akRec.Principal != nil {
+		settled, err := s.policyETag(ctx, b.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if settled != etag {
+			return nil, nil, fmt.Errorf("%w: the bucket policy is being rewritten", auth.ErrTemporarilyUnavailable)
+		}
+		// The ETag is the document's content, so a write and a write back
+		// between the reads leave it where it started while the grants, and
+		// the chains built from them, are the first write's, which the second
+		// revoked. The grants are listed again after the reread, which waited
+		// out any write in flight, so a write that rotated what Info read has
+		// committed its grants by now: a set that moved says the caller should
+		// ask again.
+		current, err := listGrants()
+		if err != nil {
+			return nil, nil, err
+		}
+		if !sameLinks(stored, current) {
+			return nil, nil, fmt.Errorf("%w: the access key's grants were rewritten", auth.ErrTemporarilyUnavailable)
+		}
+	}
+
 	s.logger.Debug("bucket info",
 		zap.Stringer("bucket", b.ID),
 		zap.String("name", args.Name),
@@ -516,7 +652,7 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 	return &s3bkt.InfoOK{
 		ID: b.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			args.AccessKey: akRec.Permissions,
+			args.AccessKey: permissions,
 		}},
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, blocks, nil

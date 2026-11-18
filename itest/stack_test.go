@@ -41,7 +41,8 @@ import (
 )
 
 // forgeRegion must match the provider region hilt's post_start hook in smelt
-// registers ingot under (INGOT_REGION) — tenants are provisioned per region.
+// registers ingot under (INGOT_REGION): S3 requests are signed for it and hilt
+// resolves the serving provider from it.
 const forgeRegion = "us-west-1"
 
 // TestMain sweeps containers/volumes leaked by prior crashed itest runs (same
@@ -106,6 +107,24 @@ type forgeNet struct {
 	s3URL   string
 }
 
+// pinnedBlockchainImage is a filecoin-localdev image (its multi-arch index,
+// so the digest resolves on both architectures) that can read the chain state
+// smelt commits beside it.
+//
+// smelt picks the image by the moving tag `:main`, but the state it mounts is
+// whatever the smelt version in go.mod committed. `:main` was republished on
+// 2026-11-11, and the newer Anvil cannot parse the October state smelt
+// v0.0.0-20261021123053-359a84935c40 carries, so the blockchain container
+// fails its health check and every itest dies at stack start. Pinning the
+// image that wrote that state puts the pair back in step.
+//
+// Remove this, and the override below, once hilt depends on a smelt version
+// that pins the localdev image by digest beside its state — a version whose
+// state merely matches today's `:main` is not enough, because smelt would
+// still follow `:main` and the next publish would break this again.
+// fil-forge/ingot#390 made the same change for the same reason.
+const pinnedBlockchainImage = "ghcr.io/fil-forge/filecoin-localdev@sha256:96e72624eb71efb1c15de1d0729b780955e5ece700e840dd56291f5c522b4bee"
+
 // startForge boots the smelt stack with the working tree's hilt injected,
 // waits for hilt and ingot to serve health, and returns the network with its
 // clients wired up. The stack lives until the calling test — including all
@@ -119,6 +138,12 @@ func startForge(t *testing.T) *forgeNet {
 		stack.WithPiriNodes(stack.PiriNodeConfig{Postgres: true}),
 		stack.WithServiceBinary("hilt", localHiltBinary(t)),
 	}
+	blockchainImage := pinnedBlockchainImage
+	if img := os.Getenv("HILT_ITEST_BLOCKCHAIN_IMAGE"); img != "" {
+		t.Logf("using blockchain image override: %s", img)
+		blockchainImage = img
+	}
+	opts = append(opts, stack.WithBlockchainImage(blockchainImage))
 	// Local-dev escape hatches: run against sprue / piri / ingot images the
 	// registry doesn't have yet — e.g. built from an unmerged branch. Unset
 	// (CI) uses the published defaults.
@@ -148,6 +173,10 @@ func startForge(t *testing.T) *forgeNet {
 		t.Logf("using swarf binary override: %s", bin)
 		opts = append(opts, stack.WithServiceBinary("swarf", bin))
 	}
+	if bin := os.Getenv("HILT_ITEST_INGOT_BINARY"); bin != "" {
+		t.Logf("using ingot binary override: %s", bin)
+		opts = append(opts, stack.WithServiceBinary("ingot", bin))
+	}
 	s := stack.MustNewStack(t, opts...)
 	waitHTTPOK(t, s.HiltEndpoint()+"/health", 2*time.Minute)
 	waitHTTPOK(t, s.IngotEndpoint()+"/health", 2*time.Minute)
@@ -165,7 +194,7 @@ func startForge(t *testing.T) *forgeNet {
 
 	return &forgeNet{
 		stack:   s,
-		console: &console{client: management.NewClient(*hiltURL, s.HiltPartnerKey())},
+		console: &console{Client: management.NewClient(*hiltURL, s.HiltPartnerKey())},
 		swarf:   swarf,
 		s3URL:   s.IngotEndpoint(),
 	}
@@ -180,6 +209,26 @@ func TestForge(t *testing.T) {
 	t.Run("DeleteAccessKeyRevokes", func(t *testing.T) { testDeleteAccessKeyRevokes(t, net) })
 	t.Run("DeleteBucketRevokes", func(t *testing.T) { testDeleteBucketRevokes(t, net) })
 	t.Run("DeleteBucketRevokesOnlyThatBucket", func(t *testing.T) { testDeleteBucketRevokesOnlyThatBucket(t, net) })
+	// The IAM scenarios need an ingot that enforces the effective action set.
+	// Until the published :main image carries it, they run only against the
+	// binary override (or when HILT_ITEST_IAM=1 says the image does); drop this
+	// guard then. Swarf needs nothing: the keys' grants are revoked through
+	// the /ucan/revoke it already serves.
+	iam := func(name string, fn func(*testing.T, *forgeNet)) {
+		t.Run(name, func(t *testing.T) {
+			if os.Getenv("HILT_ITEST_IAM") != "1" && os.Getenv("HILT_ITEST_INGOT_BINARY") == "" {
+				t.Skip("IAM scenarios need HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main image carries the IAM changes and forwards ?policy")
+			}
+			fn(t, net)
+		})
+	}
+	iam("PrincipalPolicyScopesToOneBucket", testPrincipalPolicyScopesToOneBucket)
+	iam("DenyBeatsAllow", testDenyBeatsAllow)
+	iam("NarrowingRevokesGrants", testNarrowingRevokesGrants)
+	iam("DeletePrincipalRemovesKeysAndPolicies", testDeletePrincipalRemovesKeysAndPolicies)
+	iam("PresignedGetFollowsPolicy", testPresignedGetFollowsPolicy)
+	iam("PrincipalKeyCreateRejectsBadRequests", testPrincipalKeyCreateRejectsBadRequests)
+	iam("DeleteObjectsVersionNeedsTheVersionAction", testDeleteObjectsVersionNeedsTheVersionAction)
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot
@@ -212,9 +261,10 @@ func (n *forgeNet) awaitRevocations(t *testing.T, ctx context.Context, count int
 	defer cancel()
 
 	var records []swarfstore.RevocationRecord
-	for fh, err := range n.swarf.Stream(streamCtx, time.Time{}) {
+	firehoseStart := swarfclient.Cursor(swarfstore.Cursor{}.String())
+	for event, err := range n.swarf.StreamAfter(streamCtx, firehoseStart) {
 		require.NoError(t, err, "reading the revocation firehose")
-		record, err := n.swarf.Get(streamCtx, fh.Revoke)
+		record, err := n.swarf.Get(streamCtx, event.Revocation.Revoke)
 		require.NoError(t, err, "fetching revocation record")
 		if len(record.Path) == 0 || record.Path[len(record.Path)-1].Audience().String() != audience {
 			continue
@@ -230,36 +280,16 @@ func (n *forgeNet) awaitRevocations(t *testing.T, ctx context.Context, count int
 
 // console drives hilt's partner-facing REST management API using the real
 // management client, authenticating with smelt's partner key.
+// console is the management client as the console uses it: every method of
+// [management.Client], plus the provisioning shorthand below.
 type console struct {
-	client *management.Client
+	*management.Client
 }
 
 // ProvisionTenant creates (or returns the existing) tenant for the given
-// external id and region.
-func (c *console) ProvisionTenant(ctx context.Context, tenantID, region string) (api.Tenant, error) {
-	return c.client.ProvisionTenant(ctx, tenantID, api.ProvisionTenantRequest{Region: region})
-}
-
-// CreateAccessKey creates an S3 access key with the given permissions and
-// returns it, including the one-time secret access key. Naming buckets
-// scopes the key's delegations to them; with none it gets tenant-wide
-// (powerline) access.
-func (c *console) CreateAccessKey(ctx context.Context, tenantID, name string, perms, buckets []string) (api.CreatedAccessKey, error) {
-	return c.client.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
-		Name:        name,
-		Permissions: perms,
-		Buckets:     buckets,
-	})
-}
-
-// DeleteAccessKey revokes and removes an access key.
-func (c *console) DeleteAccessKey(ctx context.Context, tenantID, accessKeyID string) error {
-	return c.client.DeleteAccessKey(ctx, tenantID, accessKeyID)
-}
-
-// GetAccessKey returns a single access key.
-func (c *console) GetAccessKey(ctx context.Context, tenantID, accessKeyID string) (api.AccessKey, error) {
-	return c.client.GetAccessKey(ctx, tenantID, accessKeyID)
+// external id.
+func (c *console) ProvisionTenant(ctx context.Context, tenantID string) (api.Tenant, error) {
+	return c.Client.ProvisionTenant(ctx, tenantID)
 }
 
 // waitHTTPOK polls url until it returns 2xx or the timeout elapses.

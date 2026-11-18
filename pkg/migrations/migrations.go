@@ -30,14 +30,44 @@ func UpDB(ctx context.Context, db *sql.DB, logger *zap.Logger) error {
 	return runUp(ctx, db, logger)
 }
 
+// UpTo applies the migrations up to and including version, leaving later ones
+// pending. It is how a test gets the schema as of one migration.
+func UpTo(ctx context.Context, db *sql.DB, version int64, logger *zap.Logger) error {
+	if err := configure(logger); err != nil {
+		return err
+	}
+	if err := goose.UpToContext(ctx, db, "sql", version); err != nil {
+		return fmt.Errorf("running goose migrations: %w", err)
+	}
+	return nil
+}
+
+// Down rolls back the most recently applied migration.
+func Down(ctx context.Context, db *sql.DB, logger *zap.Logger) error {
+	if err := configure(logger); err != nil {
+		return err
+	}
+	if err := goose.DownContext(ctx, db, "sql"); err != nil {
+		return fmt.Errorf("rolling back goose migration: %w", err)
+	}
+	return nil
+}
+
 func runUp(ctx context.Context, db *sql.DB, logger *zap.Logger) error {
+	if err := configure(logger); err != nil {
+		return err
+	}
+	if err := goose.UpContext(ctx, db, "sql"); err != nil {
+		return fmt.Errorf("running goose migrations: %w", err)
+	}
+	return nil
+}
+
+func configure(logger *zap.Logger) error {
 	goose.SetBaseFS(FS)
 	goose.SetLogger(&zapGooseLogger{logger: logger})
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("setting goose dialect: %w", err)
-	}
-	if err := goose.UpContext(ctx, db, "sql"); err != nil {
-		return fmt.Errorf("running goose migrations: %w", err)
 	}
 	return nil
 }

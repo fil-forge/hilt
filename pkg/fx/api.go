@@ -3,8 +3,11 @@ package fx
 import (
 	"github.com/fil-forge/hilt/pkg/api"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"go.uber.org/fx"
 )
 
@@ -16,6 +19,9 @@ var APIModule = fx.Module("api",
 		tenantsvc.New,
 		accesskeysvc.New,
 		metricssvc.New,
+		grant.NewRotator,
+		principalsvc.New,
+		bucketpolicysvc.New,
 		// Tenants
 		asRoute(api.NewProvisionTenantHandler),
 		asRoute(api.NewGetTenantHandler),
@@ -29,6 +35,14 @@ var APIModule = fx.Module("api",
 		// Metrics
 		asRoute(api.NewGetTenantMetricsHandler),
 		asRoute(api.NewGetBucketMetricsHandler),
+		// Principals
+		asRoute(api.NewCreatePrincipalHandler),
+		asRoute(api.NewListPrincipalsHandler),
+		asRoute(api.NewGetPrincipalHandler),
+		asRoute(api.NewDeletePrincipalHandler),
+		// Bucket policies
+		asRoute(api.NewListPrincipalPoliciesHandler),
+		asRoute(api.NewGetPrincipalAccessHandler),
 	),
 )
 

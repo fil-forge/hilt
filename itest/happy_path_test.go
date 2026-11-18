@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/fil-forge/hilt/pkg/api"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,11 +26,13 @@ func testHappyPath(t *testing.T, net *forgeNet) {
 	ctx := t.Context()
 
 	const tenantID = "tenant-happy"
-	_, err := net.console.ProvisionTenant(ctx, tenantID, forgeRegion)
+	_, err := net.console.ProvisionTenant(ctx, tenantID)
 	require.NoError(t, err)
 
-	ak, err := net.console.CreateAccessKey(ctx, tenantID, "key-1",
-		[]string{"s3:CreateBucket", "s3:PutObject", "s3:GetObject"}, nil)
+	ak, err := net.console.CreateAccessKey(ctx, tenantID, api.CreateAccessKeyRequest{
+		Name:        "key-1",
+		Permissions: []string{"s3:CreateBucket", "s3:PutObject", "s3:GetObject"},
+	})
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(ak.SecretAccessKey, "u"), "secret should be a multibase base64url string")
 

@@ -7,6 +7,18 @@ import (
 	"github.com/fil-forge/ucantone/did"
 )
 
+// LockNamespace is the first key of the per-tenant advisory lock; the
+// second is the tenant DID. A policy write holds it shared for its
+// transaction; a principal add holds it exclusive for its upsert. Row locks
+// cannot order the two, because the add's row does not exist until it
+// commits: without the lock a principal added after the write's callback
+// listed the tenant's principals, and before the write committed, could
+// create an access key that finds no policy to grant from and is never
+// rotated. Under it the add commits either before the listing, so the write
+// rotates the new principal's keys, or after the commit, so the key's
+// creation reads the committed policy.
+const LockNamespace int32 = 0x54454e54 // "TENT"
+
 type Status string
 
 const (
@@ -31,8 +43,6 @@ type Record struct {
 	// ExternalID is the tenant identifier used by the Tenant API (the {tenantId}
 	// path parameter supplied by the caller).
 	ExternalID string
-	// Provider this tenant belongs to.
-	Provider did.DID
 	// Current status of the tenant.
 	Status Status
 	// When the tenant record was created.
@@ -43,10 +53,9 @@ type Record struct {
 
 type Store interface {
 	// Add creates a new tenant record. It returns [store.ErrInvalidArgument] if
-	// the ID or provider is undef or the status is not valid, and
-	// [store.ErrRecordExists] if a record with the same ID or external ID
-	// already exists.
-	Add(ctx context.Context, id did.DID, externalID string, provider did.DID, status Status) error
+	// the ID is undef or the status is not valid, and [store.ErrRecordExists]
+	// if a record with the same ID or external ID already exists.
+	Add(ctx context.Context, id did.DID, externalID string, status Status) error
 	// Get retrieves the tenant record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	Get(ctx context.Context, id did.DID) (Record, error)

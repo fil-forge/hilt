@@ -1,6 +1,10 @@
 package api
 
-import "time"
+import (
+	"time"
+
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+)
 
 // TenantStatus is the access mode of a tenant.
 type TenantStatus string
@@ -22,22 +26,28 @@ type Tenant struct {
 	CreatedAt      time.Time    `json:"createdAt"`
 }
 
-// ProvisionTenantRequest is the body of PUT /tenants/{tenantId}.
-type ProvisionTenantRequest struct {
-	Region string `json:"region"`
-}
-
 // UpdateTenantStatusRequest is the body of POST /tenants/{tenantId}/status.
 type UpdateTenantStatusRequest struct {
 	Status TenantStatus `json:"status"`
 }
 
+// The two kinds of access key, as the type field names them.
+const (
+	AccessKeyTypeService   = "service"
+	AccessKeyTypePrincipal = "principal"
+)
+
 // AccessKey is the metadata for an S3 access key (never includes the secret).
+// Type says which kind it is. A service key carries its permissions and
+// buckets; a principal-bound key carries the principal it is bound to in their
+// place.
 type AccessKey struct {
 	AccessKeyID string     `json:"accessKeyId"`
 	Name        string     `json:"name"`
-	Permissions []string   `json:"permissions"`
+	Type        string     `json:"type"`
+	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
+	PrincipalID *string    `json:"principalId,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt"`
 	CreatedAt   time.Time  `json:"createdAt"`
 }
@@ -55,10 +65,14 @@ type AccessKeyList struct {
 }
 
 // CreateAccessKeyRequest is the body of POST /tenants/{tenantId}/access-keys.
+// Without a principal it creates a service key from the permissions and
+// buckets. With one it creates a key bound to that principal, and permissions
+// and buckets must be empty.
 type CreateAccessKeyRequest struct {
 	Name        string     `json:"name"`
-	Permissions []string   `json:"permissions"`
+	Permissions []string   `json:"permissions,omitempty"`
 	Buckets     []string   `json:"buckets,omitempty"`
+	PrincipalID *string    `json:"principalId,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
 
@@ -109,4 +123,43 @@ type Metrics struct {
 	Storage StorageMetrics `json:"storage"`
 	Egress  EgressMetrics  `json:"egress"`
 	Ingress IngressMetrics `json:"ingress"`
+}
+
+// Principal is a console user of a tenant, identified by the console's principalId.
+// It holds no key material and no delegation: its access to the tenant's
+// buckets is computed from the bucket policies naming it.
+type Principal struct {
+	PrincipalID string    `json:"principalId"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// PrincipalList is the body of GET /tenants/{tenantId}/principals.
+type PrincipalList struct {
+	Items []Principal `json:"items"`
+}
+
+// PrincipalPolicy is one of the policies naming a principal, addressed by the
+// bucket it applies to.
+type PrincipalPolicy struct {
+	BucketName string               `json:"bucketName"`
+	Policy     s3bkt.PolicyDocument `json:"policy"`
+}
+
+// PrincipalPolicyList is the body of
+// GET /tenants/{tenantId}/principals/{principalId}/policies.
+type PrincipalPolicyList struct {
+	Items []PrincipalPolicy `json:"items"`
+}
+
+// BucketAccess is a principal's effective actions on one bucket.
+type BucketAccess struct {
+	Name    string   `json:"name"`
+	Actions []string `json:"actions"`
+}
+
+// PrincipalAccess is the body of
+// GET /tenants/{tenantId}/principals/{principalId}/access. Buckets the principal
+// has no action on are omitted.
+type PrincipalAccess struct {
+	Buckets []BucketAccess `json:"buckets"`
 }

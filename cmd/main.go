@@ -63,14 +63,14 @@ func main() {
 	serveCmd.Flags().String("partner-key", "", "CSV partner bearer key(s) required on Tenant API requests (prefer HILT_AUTH_PARTNER_KEY env var or config file to avoid exposing via process args)")
 
 	// upload service config
-	serveCmd.Flags().String("upload-service-id", "did:web:upload.fil-forge.com", "Upload service DID")
-	serveCmd.Flags().String("upload-service-url", "https://upload.fil-forge.com", "Upload service HTTP endpoint")
-	serveCmd.Flags().String("upload-product-id", "did:web:hilt.fil-forge.com", "Upload service product/plan DID that tenants are registered under")
+	serveCmd.Flags().String("upload-service-id", "", "Upload service DID (required)")
+	serveCmd.Flags().String("upload-service-url", "", "Upload service HTTP endpoint (required)")
+	serveCmd.Flags().String("upload-product-id", "", "Upload service product/plan DID that tenants are registered under (required)")
 	serveCmd.Flags().String("upload-proofs", "", "Upload service proofs: an encoded UCAN container or a path to a file containing one")
 
 	// revocation service config
-	serveCmd.Flags().String("revocation-service-id", "did:web:revoke.fil-forge.com", "Revocation service DID")
-	serveCmd.Flags().String("revocation-service-url", "https://revoke.fil-forge.com", "Revocation service HTTP endpoint")
+	serveCmd.Flags().String("revocation-service-id", "", "Revocation service DID (required)")
+	serveCmd.Flags().String("revocation-service-url", "", "Revocation service HTTP endpoint (required)")
 
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(client.Cmd)

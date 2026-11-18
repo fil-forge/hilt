@@ -29,25 +29,37 @@ const (
 
 var storeKinds = []StoreKind{Memory, Postgres}
 
-// seedFunc ensures the parent tenant (and its provider) exist so the
-// bucket.tenant_id foreign key is satisfied. It is a no-op for the memory store,
-// which does not enforce referential integrity.
+// seedFunc ensures the parent tenant exists so the bucket.tenant_id foreign key
+// is satisfied. It is a no-op for the memory store, which does not enforce
+// referential integrity.
 type seedFunc func(t *testing.T, tenantID did.DID)
 
-func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc) {
+// seedProviderFunc registers a provider so the bucket.provider_id foreign key
+// is satisfied. It is a no-op for the memory store, which does not enforce
+// referential integrity.
+type seedProviderFunc func(t *testing.T, providerID did.DID)
+
+// makeStore returns the store under test, a tenant seeder, the DID of a
+// provider every bucket in the suite is served by (registered for real in
+// Postgres, where bucket.provider_id is a foreign key), and a seeder for the
+// further providers a test needs to tell two regions apart.
+func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc, did.DID, seedProviderFunc) {
+	providerID := testutil.RandomDID(t)
 	switch k {
 	case Memory:
-		return bucketmemory.New(), func(*testing.T, did.DID) {}
+		return bucketmemory.New(), func(*testing.T, did.DID) {}, providerID, func(*testing.T, did.DID) {}
 	case Postgres:
 		pool := createPostgresPool(t)
 		providers := providerpostgres.New(pool)
+		seedProvider := func(t *testing.T, id did.DID) {
+			require.NoError(t, providers.Add(t.Context(), id, id.String(), nil))
+		}
+		seedProvider(t, providerID)
 		tenants := tenantpostgres.New(pool)
 		seed := func(t *testing.T, tenantID did.DID) {
-			providerID := testutil.RandomDID(t)
-			require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
-			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), providerID, tenant.Active))
+			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 		}
-		return bucketpostgres.New(pool), seed
+		return bucketpostgres.New(pool), seed, providerID, seedProvider
 	}
 	panic("unknown store kind")
 }
@@ -67,18 +79,19 @@ func createPostgresPool(t *testing.T) *pgxpool.Pool {
 func TestBucketStore(t *testing.T) {
 	for _, k := range storeKinds {
 		t.Run(string(k), func(t *testing.T) {
-			s, seed := makeStore(t, k)
+			s, seed, providerID, seedProvider := makeStore(t, k)
 
 			t.Run("adds and retrieves a bucket by name", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), id, tenantID, "photos"))
+				require.NoError(t, s.Add(t.Context(), id, tenantID, providerID, "photos"))
 
 				rec, err := s.GetByName(t.Context(), "photos")
 				require.NoError(t, err)
 				require.Equal(t, id, rec.ID)
 				require.Equal(t, tenantID, rec.Tenant)
+				require.Equal(t, providerID, rec.Provider)
 				require.Equal(t, "photos", rec.Name)
 				require.False(t, rec.CreatedAt.IsZero())
 			})
@@ -92,28 +105,35 @@ func TestBucketStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), id, tenantID, "dup-id-a"))
-				err := s.Add(t.Context(), id, tenantID, "dup-id-b")
+				require.NoError(t, s.Add(t.Context(), id, tenantID, providerID, "dup-id-a"))
+				err := s.Add(t.Context(), id, tenantID, providerID, "dup-id-b")
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("Add returns ErrRecordExists for duplicate name", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "shared-name"))
-				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, "shared-name")
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "shared-name"))
+				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "shared-name")
 				require.ErrorIs(t, err, store.ErrRecordExists)
 			})
 
 			t.Run("Add returns ErrInvalidArgument for undef bucket ID", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
-				err := s.Add(t.Context(), did.Undef, tenantID, "undef-id")
+				err := s.Add(t.Context(), did.Undef, tenantID, providerID, "undef-id")
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("Add returns ErrInvalidArgument for undef tenant", func(t *testing.T) {
-				err := s.Add(t.Context(), testutil.RandomDID(t), did.Undef, "undef-tenant")
+				err := s.Add(t.Context(), testutil.RandomDID(t), did.Undef, providerID, "undef-tenant")
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+			})
+
+			t.Run("Add returns ErrInvalidArgument for undef provider", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, did.Undef, "undef-provider")
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
@@ -130,7 +150,7 @@ func TestBucketStore(t *testing.T) {
 					"trailing-hyphen-",      // must end with letter or digit
 				}
 				for _, name := range invalid {
-					err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, name)
+					err := s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, name)
 					require.ErrorIs(t, err, store.ErrInvalidArgument, "name %q", name)
 				}
 			})
@@ -141,9 +161,9 @@ func TestBucketStore(t *testing.T) {
 				seed(t, tenantID)
 				seed(t, other)
 				for i := range 5 {
-					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, fmt.Sprintf("lbt-%d", i)))
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, fmt.Sprintf("lbt-%d", i)))
 				}
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "lbt-other"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, providerID, "lbt-other"))
 
 				// A truncated page's cursor is the name of its last record.
 				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithLimit(2))
@@ -172,7 +192,7 @@ func TestBucketStore(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				for _, name := range []string{"pfx-app-a", "pfx-app-b", "pfx-app-c", "pfx-web-a"} {
-					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, name))
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, name))
 				}
 
 				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithPrefix("pfx-app-"), bucket.WithLimit(2))
@@ -189,11 +209,60 @@ func TestBucketStore(t *testing.T) {
 				require.Nil(t, page.Cursor)
 			})
 
+			t.Run("ListByTenant filters by provider and paginates within it", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				other := testutil.RandomDID(t)
+				seedProvider(t, other)
+				// Interleaved by name, so a filter that ran after the page was
+				// read would return a short page instead of a full one.
+				for _, b := range []struct {
+					name     string
+					provider did.DID
+				}{
+					{"prv-a", providerID},
+					{"prv-b", other},
+					{"prv-c", providerID},
+					{"prv-d", other},
+					{"prv-e", providerID},
+				} {
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, b.provider, b.name))
+				}
+
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithProvider(providerID), bucket.WithLimit(2))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 2)
+				require.Equal(t, "prv-a", page.Results[0].Name)
+				require.Equal(t, "prv-c", page.Results[1].Name)
+				require.NotNil(t, page.Cursor)
+
+				page, err = s.ListByTenant(t.Context(), tenantID, bucket.WithProvider(providerID), bucket.WithLimit(2), bucket.WithCursor(*page.Cursor))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, "prv-e", page.Results[0].Name)
+				require.Nil(t, page.Cursor)
+			})
+
+			t.Run("ListByTenant combines the provider and prefix filters", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				other := testutil.RandomDID(t)
+				seedProvider(t, other)
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "cmb-keep"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, other, "cmb-wrong-provider"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "oth-wrong-prefix"))
+
+				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithProvider(providerID), bucket.WithPrefix("cmb-"))
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, "cmb-keep", page.Results[0].Name)
+			})
+
 			t.Run("ListByTenant cursor resumes strictly after a non-existent name", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
 				for _, name := range []string{"nec-a", "nec-c", "nec-e"} {
-					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, name))
+					require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, name))
 				}
 
 				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithCursor("nec-b"))
@@ -206,8 +275,8 @@ func TestBucketStore(t *testing.T) {
 			t.Run("ListByTenant prefix matches literally, not as a pattern", func(t *testing.T) {
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "wild-a"))
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "wildxa"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "wild-a"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "wildxa"))
 
 				// A LIKE-style implementation would treat _ / % as wildcards and
 				// match both buckets; a literal match finds neither.
@@ -224,11 +293,11 @@ func TestBucketStore(t *testing.T) {
 				seed(t, tenantID)
 				seed(t, other)
 				want := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}
-				require.NoError(t, s.Add(t.Context(), want[0], tenantID, "fbid-a"))
-				require.NoError(t, s.Add(t.Context(), want[1], tenantID, "fbid-b"))
+				require.NoError(t, s.Add(t.Context(), want[0], tenantID, providerID, "fbid-a"))
+				require.NoError(t, s.Add(t.Context(), want[1], tenantID, providerID, "fbid-b"))
 				// Decoys: same tenant but not requested, and a different tenant.
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "fbid-c"))
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "fbid-other"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "fbid-c"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, providerID, "fbid-other"))
 
 				page, err := s.ListByTenant(t.Context(), tenantID, bucket.WithIDs(want...))
 				require.NoError(t, err)
@@ -246,11 +315,11 @@ func TestBucketStore(t *testing.T) {
 				seed(t, tenantID)
 				seed(t, other)
 				want := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}
-				require.NoError(t, s.Add(t.Context(), want[0], tenantID, "fbn-a"))
-				require.NoError(t, s.Add(t.Context(), want[1], tenantID, "fbn-b"))
+				require.NoError(t, s.Add(t.Context(), want[0], tenantID, providerID, "fbn-a"))
+				require.NoError(t, s.Add(t.Context(), want[1], tenantID, providerID, "fbn-b"))
 				// Decoys: same tenant but not requested, and a different tenant.
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, "fbn-c"))
-				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, "fbn-other"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), tenantID, providerID, "fbn-c"))
+				require.NoError(t, s.Add(t.Context(), testutil.RandomDID(t), other, providerID, "fbn-other"))
 
 				// "fbn-other" belongs to a different tenant, so it is excluded by the
 				// tenant scope even though it is requested.
@@ -274,7 +343,7 @@ func TestBucketStore(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
 				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), id, tenantID, "to-delete"))
+				require.NoError(t, s.Add(t.Context(), id, tenantID, providerID, "to-delete"))
 
 				require.NoError(t, s.Delete(t.Context(), id))
 				_, err := s.GetByName(t.Context(), "to-delete")

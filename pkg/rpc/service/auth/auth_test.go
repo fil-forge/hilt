@@ -1,16 +1,34 @@
 package auth_test
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 	"time"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
+	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
+	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -38,10 +56,16 @@ func signedRequest(t *testing.T, signer multikey.Signer, region string, signedAt
 
 type setupConfig struct {
 	accessKeyExpires *time.Time
+	// accessKeyBuckets scopes a service key to these buckets; empty is
+	// tenant-wide.
 	accessKeyBuckets []did.DID
-	// accessKeyPermissions defaults to s3:GetObject alone.
+	// accessKeyPermissions is a service key's own permission set. Empty means
+	// s3:GetObject alone, which the happy-path request needs.
 	accessKeyPermissions []string
-	tenantStatus         tenant.Status
+	// principalBound seeds the credential as a principal-bound access key
+	// instead of a service key.
+	principalBound bool
+	tenantStatus   tenant.Status
 }
 
 // signedCopyRequest presigns a CopyObject: PUT of object-key in dstBucket with an
@@ -49,25 +73,94 @@ type setupConfig struct {
 // signature only when signSource is set.
 func signedCopyRequest(t *testing.T, signer multikey.Signer, dstBucket, srcBucket, region string, signSource bool) s3.Request {
 	t.Helper()
+	return signedCopySourceRequest(t, signer, dstBucket, "/"+srcBucket+"/object-key", region, signSource)
+}
+
+// signedCopySourceRequest is signedCopyRequest with the x-amz-copy-source
+// value given whole, so a test can name a source version.
+func signedCopySourceRequest(t *testing.T, signer multikey.Signer, dstBucket, source, region string, signSource bool) s3.Request {
+	t.Helper()
+	var signed []string
+	if signSource {
+		signed = []string{"x-amz-copy-source"}
+	}
+	return signedRequestWith(t, signer, "PUT", "https://s3.fil.one/"+dstBucket+"/object-key", map[string]string{"x-amz-copy-source": source}, region, signed...)
+}
+
+// signedBodyRequest presigns a request carrying body, covered by the payload
+// hash when bind is set and left unsigned otherwise.
+func signedBodyRequest(t *testing.T, signer multikey.Signer, method, url, body, region string, bind bool) s3.Request {
+	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
-	headers := map[string]string{"x-amz-copy-source": "/" + srcBucket + "/object-key"}
-	req := sigv4.Request{Method: "PUT", URL: "https://s3.fil.one/" + dstBucket + "/object-key", Headers: headers}
 	var opts []sigv4.PresignOption
-	if signSource {
-		opts = append(opts, sigv4.WithSignedHeaders("x-amz-copy-source"))
+	if bind {
+		sum := sha256.Sum256([]byte(body))
+		opts = append(opts, sigv4.WithPayloadHash(hex.EncodeToString(sum[:])))
 	}
-	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+	presigned, err := sigv4.Presign(sigv4.Request{Method: method, URL: url}, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
 	require.NoError(t, err)
-	return s3.Request{Method: signed.Method, URL: signed.URL, Headers: headers}
+	return s3.Request{Method: presigned.Method, URL: presigned.URL, Body: []byte(body)}
+}
+
+// signedRequestWith presigns a request carrying the given headers, of which
+// those named in signed are covered by the signature.
+func signedRequestWith(t *testing.T, signer multikey.Signer, method, url string, headers map[string]string, region string, signed ...string) s3.Request {
+	t.Helper()
+	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
+	require.NoError(t, err)
+	req := sigv4.Request{Method: method, URL: url, Headers: headers}
+	var opts []sigv4.PresignOption
+	if len(signed) > 0 {
+		opts = append(opts, sigv4.WithSignedHeaders(signed...))
+	}
+	presigned, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour, opts...)
+	require.NoError(t, err)
+	return s3.Request{Method: presigned.Method, URL: presigned.URL, Headers: headers}
+}
+
+// seedKey stores the credential's record and vault entry: a service key with
+// its own permissions and buckets unless principalBound, in which case a key
+// bound to "user-1", which holds neither.
+func seedKey(t *testing.T, accessKeys *accesskeymemory.Store, secrets *vaultmemory.Store, delegations *delegationmemory.Store, key multikey.Issuer, tenantID did.DID, cfg *setupConfig) {
+	t.Helper()
+	ctx := t.Context()
+	var expires *time.Time
+	var permissions []string
+	var bucketIDs []did.DID
+	principalBound := false
+	if cfg != nil {
+		expires, bucketIDs, permissions, principalBound = cfg.accessKeyExpires, cfg.accessKeyBuckets, cfg.accessKeyPermissions, cfg.principalBound
+	}
+	if len(permissions) == 0 {
+		permissions = []string{"s3:GetObject"}
+	}
+	in := accesskey.Input{ID: key.DID(), Tenant: tenantID, Name: "k1", Buckets: bucketIDs, Permissions: permissions, ExpiresAt: expires}
+	if principalBound {
+		principal := "user-1"
+		in = accesskey.Input{ID: key.DID(), Tenant: tenantID, Name: "k1", Principal: &principal, ExpiresAt: expires}
+	}
+	require.NoError(t, accessKeys.Add(ctx, in))
+	require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, key.DID()), key.Bytes()))
 }
 
 // signedObjectRequest presigns a GET of an object in the named bucket.
 func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, region string) s3.Request {
 	t.Helper()
+	return signedObjectQueryRequest(t, signer, bucketName, "", region)
+}
+
+// signedObjectQueryRequest presigns a GET of an object in the named bucket
+// with the given query, such as "attributes".
+func signedObjectQueryRequest(t *testing.T, signer multikey.Signer, bucketName, query, region string) s3.Request {
+	t.Helper()
 	secret, err := multibase.Encode(multibase.Base64url, signer.Bytes())
 	require.NoError(t, err)
-	req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/" + bucketName + "/object-key"}
+	url := "https://s3.fil.one/" + bucketName + "/object-key"
+	if query != "" {
+		url += "?" + query
+	}
+	req := sigv4.Request{Method: "GET", URL: url}
 	signed, err := sigv4.Presign(req, signer.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
 	require.NoError(t, err)
 	return s3.Request{Method: signed.Method, URL: signed.URL}
@@ -75,53 +168,76 @@ func signedObjectRequest(t *testing.T, signer multikey.Signer, bucketName, regio
 
 func TestAuthorize(t *testing.T) {
 	ctx := t.Context()
-	const region = "us-west-2"
+	// providerID serves region; provider2ID serves region2. A tenant is
+	// region-free, so this one owns buckets in both.
+	const region, region2 = "us-west-2", "eu-west-1"
 
 	accessKey, err := ed25519.GenerateIssuer()
 	require.NoError(t, err)
 
-	// providerID is both the tenant's provider and the only legitimate invocation
-	// issuer.
-	providerID := testutil.RandomDID(t)
-	// The tenant's two buckets, and a bucket of some other tenant.
-	bucketID, bucket2ID, theirsID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	providerID, provider2ID := testutil.RandomDID(t), testutil.RandomDID(t)
+	// The tenant's two buckets in region, one in region2, and a bucket of some
+	// other tenant.
+	bucketID, bucket2ID, region2BucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	theirsID := testutil.RandomDID(t)
 
-	// setup wires the stores + vault for a tenant whose provider serves the signing
-	// region and that owns this access key, returning the Authorizer built from
-	// them (plus the provider handle and tenant DID subtests still use).
-	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID) {
+	// setup wires the stores + vault for the fixture every subtest shares:
+	//
+	//	providerID  serves region  and holds "bucket" (bucketID) and "bucket2"
+	//	                           (bucket2ID), plus another tenant's "theirs"
+	//	provider2ID serves region2 and holds "remote" (remoteID)
+	//
+	// One tenant owns this access key and all three of its buckets. A tenant is
+	// region-free, so its buckets may live with either provider. The key may use
+	// any of them unless setupConfig scopes it. setupWithPolicies also hands back
+	// the bucket DID and the policy store, so a subtest can grant the principal
+	// actions on the bucket the request addresses.
+	setupWithPolicies := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID, did.DID, *bucketpolicymemory.Store) {
 		t.Helper()
-		tenants := tenantmemory.New()
-		accessKeys := accesskeymemory.New(tenants)
+		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
+		principals, policies := principalmemory.New(), bucketpolicymemory.New()
+		dels := delegationmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
+		require.NoError(t, providers.Add(ctx, provider2ID, region2, nil))
 		tenantID := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
+		tenantStatus := tenant.Active
+		if setupConfig != nil && setupConfig.tenantStatus != "" {
+			tenantStatus = setupConfig.tenantStatus
+		}
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenantStatus))
 		// The bucket the happy-path request addresses (GET /bucket/object-key), a
 		// second bucket of the same tenant (copy destination), and another tenant's.
-		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, "bucket"))
-		require.NoError(t, buckets.Add(ctx, bucket2ID, tenantID, "bucket2"))
+		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "bucket"))
+		require.NoError(t, buckets.Add(ctx, bucket2ID, tenantID, providerID, "bucket2"))
+		require.NoError(t, buckets.Add(ctx, region2BucketID, tenantID, provider2ID, "bucket-in-region2"))
 		otherTenant := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", providerID, tenant.Active))
-		require.NoError(t, buckets.Add(ctx, theirsID, otherTenant, "theirs"))
-		var accessKeyExpires *time.Time
-		var accessKeyBuckets []did.DID
-		permissions := []string{"s3:GetObject"}
-		if setupConfig != nil {
-			accessKeyExpires = setupConfig.accessKeyExpires
-			accessKeyBuckets = setupConfig.accessKeyBuckets
-			if setupConfig.accessKeyPermissions != nil {
-				permissions = setupConfig.accessKeyPermissions
-			}
+		require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
+		require.NoError(t, buckets.Add(ctx, theirsID, otherTenant, providerID, "theirs"))
+		if setupConfig != nil && setupConfig.principalBound {
+			require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 		}
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", accessKeyBuckets, permissions, accessKeyExpires))
-		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), accessKey.Bytes()))
-		// The status is set after the key is added, as a disabled tenant accepts
-		// no new keys.
-		if setupConfig != nil && setupConfig.tenantStatus != "" {
-			require.NoError(t, tenants.SetStatus(ctx, tenantID, setupConfig.tenantStatus))
-		}
-		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, secrets), providers, tenantID
+		seedKey(t, accessKeys, secrets, dels, accessKey, tenantID, setupConfig)
+		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets),
+			providers, tenantID, bucketID, policies
+	}
+
+	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID) {
+		az, providers, tenantID, _, _ := setupWithPolicies(t, accessKey, setupConfig)
+		return az, providers, tenantID
+	}
+
+	// grant stores a policy on the bucket. statements are applied as given.
+	grant := func(t *testing.T, policies *bucketpolicymemory.Store, bucketID, tenantID did.DID, statements ...s3bkt.Statement) {
+		t.Helper()
+		_, err := policies.Put(ctx, bucketpolicystore.Input{
+			Bucket: bucketID,
+			Tenant: tenantID,
+			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements},
+
+			Conditional: true,
+		}, nil)
+		require.NoError(t, err)
 	}
 
 	t.Run("authorizes a validly-signed request", func(t *testing.T) {
@@ -130,11 +246,27 @@ func TestAuthorize(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, accessKey.DID(), authz.AccessKey.ID)
 		require.Equal(t, tenantID, authz.Tenant.ID)
+		require.Equal(t, providerID, authz.Provider.ID)
 		require.Equal(t, region, authz.Region)
 		require.Equal(t, auth.OpGetObject, authz.Operation) // GET /bucket/object-key
 		require.NotNil(t, authz.Bucket)
 		require.Equal(t, "bucket", authz.Bucket.Name)
 		require.NotNil(t, authz.Signed)
+		// A service key holds its own permission set.
+		require.Equal(t, []string{"s3:GetObject"}, authz.Permissions)
+	})
+
+	t.Run("refuses a request naming two subresources", func(t *testing.T) {
+		// Refused by name, before any permission is consulted, as S3 refuses it.
+		az, _, _ := setup(t, accessKey, nil)
+		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+		require.NoError(t, err)
+		signed, err := sigv4.Presign(sigv4.Request{Method: "GET", URL: "https://s3.fil.one/bucket?uploads&encryption"},
+			accessKey.DID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		_, err = az.Authorize(ctx, providerID, s3.Request{Method: signed.Method, URL: signed.URL})
+		require.ErrorIs(t, err, auth.ErrConflictingQuery)
+		require.ErrorContains(t, err, "encryption, uploads")
 	})
 
 	t.Run("rejects a bucket the access key is not scoped to", func(t *testing.T) {
@@ -156,6 +288,40 @@ func TestAuthorize(t *testing.T) {
 		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "theirs", region))
 		require.ErrorIs(t, err, auth.ErrForeignBucket)
 		require.NotErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("authorizes a bucket in a second region through that region's provider", func(t *testing.T) {
+		// Same tenant, same access key: setup gave "bucket-in-region2" to
+		// provider2ID, and the request is signed for region2 and invoked by
+		// provider2ID.
+		az, _, tenantID := setup(t, accessKey, nil)
+		authz, err := az.Authorize(ctx, provider2ID, signedObjectRequest(t, accessKey, "bucket-in-region2", region2))
+		require.NoError(t, err)
+		require.Equal(t, tenantID, authz.Tenant.ID)
+		require.Equal(t, provider2ID, authz.Provider.ID)
+		require.Equal(t, region2, authz.Region)
+		require.Equal(t, region2BucketID, authz.Bucket.ID)
+	})
+
+	t.Run("rejects a bucket served by another region", func(t *testing.T) {
+		// "bucket-in-region2" is the tenant's, but setup gave it to provider2ID in
+		// region2; this request is signed for region and reaches providerID, which
+		// does not hold the bucket.
+		az, _, _ := setup(t, accessKey, nil)
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket-in-region2", region))
+		var mismatch *auth.BucketRegionMismatchError
+		require.ErrorAs(t, err, &mismatch)
+		require.Equal(t, region2, mismatch.Expected)
+		require.Equal(t, region, mismatch.Actual)
+	})
+
+	t.Run("checks the key's bucket scope before the bucket's region", func(t *testing.T) {
+		// The key is scoped to bucketID ("bucket", in region) alone, so addressing
+		// the tenant's other bucket is refused for scope: the caller learns nothing
+		// about the region that bucket lives in.
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyBuckets: []did.DID{bucketID}})
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket-in-region2", region))
+		require.ErrorIs(t, err, auth.ErrBucketNotPermitted)
 	})
 
 	copyPerms := &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject"}}
@@ -192,13 +358,23 @@ func TestAuthorize(t *testing.T) {
 	t.Run("rejects a copy whose source header is not signed", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, copyPerms)
 		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, false))
-		require.ErrorIs(t, err, auth.ErrUnsignedCopySource)
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
 	})
 
 	t.Run("rejects a copy from another tenant's bucket", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, copyPerms)
 		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "theirs", region, true))
 		require.ErrorIs(t, err, auth.ErrForeignBucket)
+	})
+
+	t.Run("rejects a copy whose source is served by another region", func(t *testing.T) {
+		// The destination "bucket2" is providerID's, the source is provider2ID's.
+		az, _, _ := setup(t, accessKey, copyPerms)
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket-in-region2", region, true))
+		var mismatch *auth.BucketRegionMismatchError
+		require.ErrorAs(t, err, &mismatch)
+		require.Equal(t, region2, mismatch.Expected)
+		require.Equal(t, region, mismatch.Actual)
 	})
 
 	t.Run("rejects a copy from a missing bucket", func(t *testing.T) {
@@ -223,6 +399,218 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
+	t.Run("a copy of a source version needs the version read", func(t *testing.T) {
+		// S3 reads a source naming a versionId under s3:GetObjectVersion, so
+		// the object read alone does not reach it.
+		az, _, _ := setup(t, accessKey, copyPerms)
+		authz, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.SourcePermission, authz.SourcePermission)
+
+		_, err = az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectVersion", "s3:PutObject"}})
+		authz, err = az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+		require.Equal(t, auth.SourceVersionPermission, authz.SourcePermission)
+		require.Equal(t, bucketID, authz.SourceBucket.ID)
+	})
+
+	t.Run("a header that adds a permission is checked with the write", func(t *testing.T) {
+		// S3 needs s3:PutObjectRetention beside s3:PutObject to set a
+		// retention period on the version a put creates, and the gateway
+		// stamps it from the header, so the header is priced here.
+		const objectURL = "https://s3.fil.one/bucket/object-key"
+		lock := map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"}
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:PutObject"}})
+		_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", objectURL, lock, region, "x-amz-object-lock-mode"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:PutObject", "s3:PutObjectRetention"}})
+		authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", objectURL, lock, region, "x-amz-object-lock-mode"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpPutObject, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+
+		// The header is trusted only when the signature covers it.
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", objectURL, lock, region))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-object-lock-mode")
+
+		// A copy replacing the tags needs the tagging write on the destination
+		// beside the put and the source read.
+		replace := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE"}
+		az, _, _ = setup(t, accessKey, copyPerms)
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:PutObjectTagging"}})
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+
+		// With the source signed and the directive not, the copy is refused on
+		// the directive.
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", replace, region, "x-amz-copy-source"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-tagging-directive")
+
+		// A repeated directive reaches hilt comma-joined and the gateway acts
+		// on its first value, so the first value decides here too.
+		repeated := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE,COPY"}
+		az, _, _ = setup(t, accessKey, copyPerms)
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", repeated, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObject", "s3:PutObject", "s3:PutObjectTagging"}})
+
+		// The replacement tags are written from the tagging header, so a
+		// signed directive does not cover unsigned tags.
+		withTags := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-tagging-directive": "REPLACE", "x-amz-tagging": "k=v"}
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", withTags, region, "x-amz-copy-source", "x-amz-tagging-directive"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-tagging")
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", withTags, region, "x-amz-copy-source", "x-amz-tagging-directive", "x-amz-tagging"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCopyObject, authz.Operation)
+	})
+
+	t.Run("creating a bucket with Object Lock needs the configuration permissions", func(t *testing.T) {
+		// The bucket is born versioned and locked, which S3 prices as
+		// s3:PutBucketVersioning and s3:PutBucketObjectLockConfiguration
+		// beside s3:CreateBucket.
+		const bucketURL = "https://s3.fil.one/newbucket"
+		locked := map[string]string{"x-amz-bucket-object-lock-enabled": "true"}
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket"}})
+		authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, nil, region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCreateBucket, authz.Operation)
+
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket", "s3:PutBucketVersioning"}})
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		// A repeated flag is comma-joined and the gateway acts on its first
+		// value: "true,false" creates a locked bucket.
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket"}})
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, map[string]string{"x-amz-bucket-object-lock-enabled": "true,false"}, region, "x-amz-bucket-object-lock-enabled"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:CreateBucket", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration"}})
+		authz, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region, "x-amz-bucket-object-lock-enabled"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpCreateBucket, authz.Operation)
+		require.Nil(t, authz.Bucket)
+
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", bucketURL, locked, region))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+	})
+
+	t.Run("bypassing governance retention needs its permission", func(t *testing.T) {
+		const objectURL = "https://s3.fil.one/bucket/object-key?versionId=v1"
+		bypass := map[string]string{"x-amz-bypass-governance-retention": "true"}
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObjectVersion"}})
+		_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", objectURL, bypass, region, "x-amz-bypass-governance-retention"))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"}})
+		authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", objectURL, bypass, region, "x-amz-bypass-governance-retention"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjectVersion, authz.Operation)
+
+		_, err = az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", objectURL, bypass, region))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+	})
+
+	t.Run("a request's requirements refuse an unsigned header as Authorize does", func(t *testing.T) {
+		headers := map[string]string{"x-amz-object-lock-legal-hold": "ON", "x-amz-tagging": "k=v"}
+		_, _, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging"))
+		require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		require.ErrorContains(t, err, "x-amz-object-lock-legal-hold")
+
+		op, reqs, err := auth.RequirementsFor(signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket/object-key", headers, region, "x-amz-tagging", "x-amz-object-lock-legal-hold"))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpPutObject, op)
+		require.Equal(t, []auth.Requirement{{Bucket: "bucket", Permission: "s3:PutObject"}, {Bucket: "bucket", Permission: "s3:PutObjectLegalHold"}, {Bucket: "bucket", Permission: "s3:PutObjectTagging"}}, reqs)
+	})
+
+	t.Run("a DeleteObjects naming a version needs the version permission", func(t *testing.T) {
+		// S3 needs s3:DeleteObjectVersion for each entry that names a version;
+		// hilt reads the body, bound by the payload hash, and needs it for the
+		// whole request.
+		const deleteURL = "https://s3.fil.one/bucket?delete"
+		const versions = `<Delete><Object><Key>a</Key></Object><Object><Key>b</Key><VersionId>v1</VersionId></Object></Delete>`
+		const plain = `<Delete><Object><Key>a</Key></Object></Delete>`
+
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObject"}})
+		authz, err := az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, plain, region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, authz.Operation)
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:DeleteObject", "s3:DeleteObjectVersion"}})
+		authz, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+
+		// The body is trusted only when the signature binds it.
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, versions, region, false))
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+		req := signedBodyRequest(t, accessKey, "POST", deleteURL, plain, region, true)
+		req.Body = []byte(versions)
+		_, err = az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+		req = signedBodyRequest(t, accessKey, "POST", deleteURL, "", region, true)
+		_, err = az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+
+		// A body on an operation hilt reads none for is refused too.
+		req = signedObjectRequest(t, accessKey, "bucket", region)
+		req.Body = []byte(plain)
+		_, err = az.Authorize(ctx, providerID, req)
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+
+		// An unparseable or oversized body is refused by name through
+		// Authorize as it is through RequirementsFor, never as an
+		// unsupported operation.
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, "<Delete><Object>", region, true))
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+		require.NotErrorIs(t, err, auth.ErrUnsupportedOperation)
+		huge := string(make([]byte, auth.MaxBodySize+1))
+		_, err = az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", deleteURL, huge, region, true))
+		require.ErrorIs(t, err, auth.ErrInvalidBody)
+	})
+
+	t.Run("an operation that copies nothing names no source permission", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, nil)
+		authz, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.NoError(t, err)
+		require.Empty(t, authz.SourcePermission)
+	})
+
+	t.Run("an attributes read needs the object read too", func(t *testing.T) {
+		// S3 requires s3:GetObject beside s3:GetObjectAttributes, so a key
+		// holding the attributes permission alone reads nothing.
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectAttributes"}})
+		_, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, _ = setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:GetObjectAttributes", "s3:GetObject"}})
+		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
 	t.Run("rejects an operation the access key lacks permission for", func(t *testing.T) {
 		// The key holds only s3:GetObject, but a ListBuckets-shaped request (GET
 		// with no bucket in the path) requires s3:ListAllMyBuckets.
@@ -236,20 +624,323 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
 	})
 
+	t.Run("a principal-bound key holds no permissions of its own", func(t *testing.T) {
+		// The key carries neither permissions nor buckets: every action it has comes
+		// from the bucket policies, so with no policy it reaches nothing, and the
+		// bucket it addressed is not one it can see.
+		az, _, _, _, _ := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("a service key holding s3:ListAllMyBuckets may list", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: []string{"s3:ListAllMyBuckets"}})
+		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+		require.NoError(t, err)
+		req := sigv4.Request{Method: "GET", URL: "https://s3.fil.one/"}
+		signed, err := sigv4.Presign(req, accessKey.KeyDID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		authz, err := az.Authorize(ctx, providerID, s3.Request{Method: signed.Method, URL: signed.URL})
+		require.NoError(t, err)
+		require.Equal(t, auth.OpListBuckets, authz.Operation)
+		require.Nil(t, authz.Bucket)
+		require.Equal(t, []string{"s3:ListAllMyBuckets"}, authz.Permissions)
+	})
+
+	t.Run("authorizes a principal-bound key for what the policy grants it", func(t *testing.T) {
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, s3bkt.Statement{
+			Effect:    s3bkt.Allow,
+			Principal: s3bkt.Only("user-1"),
+			Actions:   s3bkt.NewStringSet("s3:GetObject", "s3:ListBucket"),
+			Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
+		})
+
+		authz, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.NoError(t, err)
+		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, authz.Permissions)
+		require.NotNil(t, authz.Bucket)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
+	t.Run("a principal's attributes read needs both actions from the policy", func(t *testing.T) {
+		allow := func(actions ...string) s3bkt.Statement {
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
+		}
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:GetObjectAttributes"))
+		_, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:GetObjectAttributes", "s3:GetObject"))
+		authz, err := az.Authorize(ctx, providerID, signedObjectQueryRequest(t, accessKey, "bucket", "attributes", region))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpGetObjectAttributes, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
+	t.Run("a principal's DeleteObjects naming a version needs the version action", func(t *testing.T) {
+		allow := func(actions ...string) s3bkt.Statement {
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
+		}
+		const versions = `<Delete><Object><Key>b</Key><VersionId>v1</VersionId></Object></Delete>`
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:DeleteObject"))
+		_, err := az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", "https://s3.fil.one/bucket?delete", versions, region, true))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, allow("s3:DeleteObject", "s3:DeleteObjectVersion"))
+		authz, err := az.Authorize(ctx, providerID, signedBodyRequest(t, accessKey, "POST", "https://s3.fil.one/bucket?delete", versions, region, true))
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, authz.Operation)
+		require.Equal(t, bucketID, authz.Bucket.ID)
+	})
+
+	t.Run("a Deny wins over an Allow naming the same action", func(t *testing.T) {
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID,
+			s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject", "s3:ListBucket"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+			s3bkt.Statement{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+		)
+
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+	})
+
+	t.Run("an empty effective set hides the bucket", func(t *testing.T) {
+		// No policy at all, and a policy that denies everything it allows, both
+		// leave the principal with nothing, which reads as an unknown bucket
+		// rather than a refusal.
+		az, _, _, _, _ := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID,
+			s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+			s3bkt.Statement{Effect: s3bkt.Deny, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+		)
+		_, err = az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrUnknownBucket)
+	})
+
+	t.Run("a principal-bound key may not create or delete a bucket or set its encryption or CORS", func(t *testing.T) {
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		grant(t, policies, bucketID, tenantID, s3bkt.Statement{
+			Effect:    s3bkt.Allow,
+			Principal: s3bkt.Only("user-1"),
+			Actions:   s3bkt.NewStringSet("s3:GetObject"),
+			Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
+		})
+		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+		require.NoError(t, err)
+
+		for _, req := range []sigv4.Request{
+			{Method: "PUT", URL: "https://s3.fil.one/bucket"},
+			{Method: "DELETE", URL: "https://s3.fil.one/bucket"},
+			{Method: "GET", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "PUT", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "DELETE", URL: "https://s3.fil.one/bucket?encryption"},
+			{Method: "PUT", URL: "https://s3.fil.one/bucket?cors"},
+			{Method: "DELETE", URL: "https://s3.fil.one/bucket?cors"},
+		} {
+			signed, err := sigv4.Presign(req, accessKey.DID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+			require.NoError(t, err)
+			_, err = az.Authorize(ctx, providerID, s3.Request{Method: signed.Method, URL: signed.URL})
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted, req.Method)
+		}
+	})
+
+	t.Run("every principal lists the tenant's buckets", func(t *testing.T) {
+		// ListBuckets consults no policy: the principal holds it with no grant at
+		// all, and the listing addresses no bucket.
+		az, _, _, _, _ := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+		secret, err := multibase.Encode(multibase.Base64url, accessKey.Bytes())
+		require.NoError(t, err)
+		signed, err := sigv4.Presign(sigv4.Request{Method: "GET", URL: "https://s3.fil.one/"},
+			accessKey.DID().Identifier(), secret, region, sigv4.SchemeV4, time.Now(), time.Hour)
+		require.NoError(t, err)
+		authz, err := az.Authorize(ctx, providerID, s3.Request{Method: signed.Method, URL: signed.URL})
+		require.NoError(t, err)
+		require.Equal(t, auth.OpListBuckets, authz.Operation)
+		require.Equal(t, []string{"s3:ListAllMyBuckets"}, authz.Permissions)
+		require.Nil(t, authz.Bucket)
+	})
+
+	t.Run("a principal-bound key copies only what both policies grant", func(t *testing.T) {
+		// A copy is two decisions for a principal as much as for a service key:
+		// the write on the destination and the read on the source, each against
+		// the effective set the bucket's own policy gives the principal.
+		allow := func(actions ...string) s3bkt.Statement {
+			return s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
+		}
+
+		t.Run("the source's policy grants the read", func(t *testing.T) {
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
+
+			authz, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+			require.NoError(t, err)
+			require.Equal(t, auth.OpCopyObject, authz.Operation)
+			require.Equal(t, bucket2ID, authz.Bucket.ID)
+			require.Equal(t, "bucket", authz.SourceBucketName)
+			require.NotNil(t, authz.SourceBucket)
+			require.Equal(t, bucketID, authz.SourceBucket.ID)
+		})
+
+		t.Run("the source's policy grants everything but the read", func(t *testing.T) {
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject", "s3:GetObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:ListBucket"))
+
+			_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+		})
+
+		t.Run("the read on the destination does not carry to the source", func(t *testing.T) {
+			// Holding the read on the destination is what a copy of an object
+			// already in the bucket needs; it says nothing about another bucket.
+			az, _, tenantID, _, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject", "s3:GetObject"))
+
+			_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, true))
+			// No policy on the source, so it is not a bucket the principal may
+			// learn exists.
+			require.ErrorIs(t, err, auth.ErrUnknownBucket)
+		})
+
+		t.Run("a source version needs the version read from the source's policy", func(t *testing.T) {
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
+			_, err := az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObjectVersion"))
+			authz, err := az.Authorize(ctx, providerID, signedCopySourceRequest(t, accessKey, "bucket2", "/bucket/object-key?versionId=v1", region, true))
+			require.NoError(t, err)
+			require.Equal(t, auth.SourceVersionPermission, authz.SourcePermission)
+			require.Equal(t, bucketID, authz.SourceBucket.ID)
+		})
+
+		t.Run("a bypass header needs the bypass action from the policy", func(t *testing.T) {
+			bypass := map[string]string{"x-amz-bypass-governance-retention": "true"}
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucketID, tenantID, allow("s3:DeleteObjectVersion"))
+			_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", "https://s3.fil.one/bucket/object-key?versionId=v1", bypass, region, "x-amz-bypass-governance-retention"))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucketID, tenantID, allow("s3:DeleteObjectVersion", "s3:BypassGovernanceRetention"))
+			authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "DELETE", "https://s3.fil.one/bucket/object-key?versionId=v1", bypass, region, "x-amz-bypass-governance-retention"))
+			require.NoError(t, err)
+			require.Equal(t, bucketID, authz.Bucket.ID)
+		})
+
+		t.Run("a lock header needs the lock action from the destination's policy", func(t *testing.T) {
+			hold := map[string]string{"x-amz-copy-source": "/bucket/object-key", "x-amz-object-lock-legal-hold": "ON"}
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject", "s3:PutObjectLegalHold"))
+			_, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", hold, region, "x-amz-copy-source", "x-amz-object-lock-legal-hold"))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject", "s3:PutObjectLegalHold"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
+			authz, err := az.Authorize(ctx, providerID, signedRequestWith(t, accessKey, "PUT", "https://s3.fil.one/bucket2/object-key", hold, region, "x-amz-copy-source", "x-amz-object-lock-legal-hold"))
+			require.NoError(t, err)
+			require.Equal(t, bucket2ID, authz.Bucket.ID)
+		})
+
+		t.Run("a copy within one bucket needs both actions there", func(t *testing.T) {
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucketID, tenantID, allow("s3:PutObject"))
+			_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket", "bucket", region, true))
+			require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+			az, _, tenantID, bucketID, policies = setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucketID, tenantID, allow("s3:PutObject", "s3:GetObject"))
+			authz, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket", "bucket", region, true))
+			require.NoError(t, err)
+			require.Same(t, authz.Bucket, authz.SourceBucket)
+		})
+
+		t.Run("a copy from another tenant's bucket is refused before any policy", func(t *testing.T) {
+			az, _, tenantID, _, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject", "s3:GetObject"))
+
+			_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "theirs", region, true))
+			require.ErrorIs(t, err, auth.ErrForeignBucket)
+		})
+
+		t.Run("an unsigned source header is refused for a principal too", func(t *testing.T) {
+			az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{principalBound: true})
+			grant(t, policies, bucket2ID, tenantID, allow("s3:PutObject"))
+			grant(t, policies, bucketID, tenantID, allow("s3:GetObject"))
+
+			_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket2", "bucket", region, false))
+			require.ErrorIs(t, err, auth.ErrUnsignedHeader)
+		})
+	})
+
+	t.Run("a principal-bound key whose principal is gone is an unknown key", func(t *testing.T) {
+		// Seed a key bound to a principal the tenant does not have: what a removal
+		// leaves behind for the moment before it deletes the key.
+		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
+		tenantID := testutil.RandomDID(t)
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, testutil.RandomDID(t), "bucket"))
+		delegations := delegationmemory.New()
+		seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
+		gone := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets,
+			principalmemory.New(), bucketpolicymemory.New(), secrets)
+
+		_, err := gone.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
+	})
+
+	t.Run("a principal-bound key whose principal was removed is an unknown key", func(t *testing.T) {
+		// The principal exists as a tombstone: removal marks the row rather than
+		// deleting it, and the authorizer must not see it.
+		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
+		require.NoError(t, providers.Add(ctx, providerID, region, nil))
+		tenantID := testutil.RandomDID(t)
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, testutil.RandomDID(t), "bucket"))
+		delegations := delegationmemory.New()
+		seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
+		principals := principalmemory.New()
+		require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
+		require.NoError(t, principals.Tombstone(ctx, tenantID, "user-1", nil))
+		gone := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets,
+			principals, bucketpolicymemory.New(), secrets)
+
+		_, err := gone.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
+	})
+
 	t.Run("rejects an invalid signature", func(t *testing.T) {
 		// The access key record exists, but the vault holds a different secret than
 		// the one that signed the request, so the recomputed signature won't match.
 		other, err := ed25519.GenerateIssuer()
 		require.NoError(t, err)
-		tenants := tenantmemory.New()
-		accessKeys := accesskeymemory.New(tenants)
+		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), other.Bytes()))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), secrets)
 
 		_, err = az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrSignatureMismatch)
@@ -262,7 +953,7 @@ func TestAuthorize(t *testing.T) {
 	})
 
 	t.Run("rejects an unknown access key", func(t *testing.T) {
-		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(tenantmemory.New()), tenantmemory.New(), providermemory.New(), bucketmemory.New(), vaultmemory.New())
+		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), vaultmemory.New())
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
 	})
@@ -270,31 +961,29 @@ func TestAuthorize(t *testing.T) {
 	t.Run("rejects when the access key secret is missing from the vault", func(t *testing.T) {
 		// The access key record exists but its private key was never written to the
 		// vault — a store/vault inconsistency the signer load must reject.
-		tenants := tenantmemory.New()
-		accessKeys := accesskeymemory.New(tenants)
+		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
 		providers, secrets := providermemory.New(), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", providerID, tenant.Active))
-		require.NoError(t, accessKeys.Add(ctx, accessKey.DID(), tenantID, "k1", nil, []string{"s3:GetObject"}, nil))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), secrets)
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), secrets)
 
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.Error(t, err)
 	})
 
-	t.Run("rejects a region the tenant's provider does not serve", func(t *testing.T) {
-		az, providers, _ := setup(t, accessKey, nil)
-		// A provider exists in eu-west-1, but it isn't the tenant's provider.
-		require.NoError(t, providers.Add(ctx, testutil.RandomDID(t), "eu-west-1", nil))
-		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "eu-west-1", time.Now(), time.Hour))
-		require.ErrorIs(t, err, auth.ErrRegionNotServed)
+	t.Run("rejects a request signed for a region another provider serves", func(t *testing.T) {
+		// setup gave region2 to provider2ID, so providerID may not act on a request
+		// signed for it, even though the tenant has a bucket there.
+		az, _, _ := setup(t, accessKey, nil)
+		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region2, time.Now(), time.Hour))
+		require.ErrorIs(t, err, auth.ErrIssuerForbidden)
 	})
 
 	t.Run("rejects a region no provider serves", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, nil)
-		// No provider is registered for eu-west-1, so validateRegion skips it.
-		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "eu-west-1", time.Now(), time.Hour))
+		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, "ap-south-1", time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrRegionNotServed)
 	})
 
@@ -305,14 +994,14 @@ func TestAuthorize(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrSignatureExpired)
 	})
 
-	t.Run("rejects an invocation not from the tenant's provider", func(t *testing.T) {
+	t.Run("rejects an invocation not from the provider serving the request region", func(t *testing.T) {
 		az, _, _ := setup(t, accessKey, nil)
 		_, err := az.Authorize(ctx, testutil.RandomDID(t), signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrIssuerForbidden)
 	})
 
 	t.Run("rejects an expired access key", func(t *testing.T) {
-		// A freshly-signed request from the tenant's provider must still be rejected
+		// A freshly-signed request from the region's provider must still be rejected
 		// when the access key itself has expired (so expiry is the only variable).
 		past := time.Now().Add(-time.Hour)
 		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyExpires: &past})
@@ -321,7 +1010,7 @@ func TestAuthorize(t *testing.T) {
 	})
 
 	t.Run("rejects a disabled tenant", func(t *testing.T) {
-		// A freshly-signed request from the tenant's provider must be rejected when
+		// A freshly-signed request from the region's provider must be rejected when
 		// the tenant is disabled (so disabled status is the only variable).
 		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.Disabled})
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
@@ -329,10 +1018,85 @@ func TestAuthorize(t *testing.T) {
 	})
 }
 
+// lockedAccessKeys, lockedPrincipals and lockedPolicies fail every Get with
+// err, standing in for a share-locked read the store gave up on behind a write
+// still holding the row.
+type lockedAccessKeys struct {
+	accesskey.Store
+	err error
+}
+
+func (l *lockedAccessKeys) Get(context.Context, did.DID, ...store.ReadOption) (accesskey.Record, error) {
+	return accesskey.Record{}, l.err
+}
+
+type lockedPrincipals struct {
+	principalstore.Store
+	err error
+}
+
+func (l *lockedPrincipals) Get(context.Context, did.DID, string, ...store.ReadOption) (principalstore.Record, error) {
+	return principalstore.Record{}, l.err
+}
+
+type lockedPolicies struct {
+	bucketpolicystore.Store
+	err error
+}
+
+func (l *lockedPolicies) Get(context.Context, did.DID, ...store.ReadOption) (bucketpolicystore.Record, error) {
+	return bucketpolicystore.Record{}, l.err
+}
+
+// TestAuthorizeLockTimeout pins that a share-locked read the store gave up on
+// is the named, retryable failure rather than an internal error, at each of
+// the three reads that take the lock.
+func TestAuthorizeLockTimeout(t *testing.T) {
+	ctx := t.Context()
+	const region = "us-west-2"
+	providerID := testutil.RandomDID(t)
+	accessKey, err := ed25519.GenerateIssuer()
+	require.NoError(t, err)
+
+	accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
+	providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
+	principals, policies, delegations := principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New()
+	require.NoError(t, providers.Add(ctx, providerID, region, nil))
+	tenantID := testutil.RandomDID(t)
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
+	bucketID := testutil.RandomDID(t)
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "bucket"))
+	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
+	seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
+	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
+		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
+	}, Conditional: true}, nil)
+	require.NoError(t, err)
+
+	// With every read answered, the request is authorized.
+	az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
+	_, err = az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+	require.NoError(t, err)
+
+	timeout := store.ErrLockTimeout
+	cases := map[string]*auth.Authorizer{
+		"access key":    auth.NewAuthorizer(zap.NewNop(), &lockedAccessKeys{accessKeys, timeout}, tenants, providers, buckets, principals, policies, secrets),
+		"principal":     auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, &lockedPrincipals{principals, timeout}, policies, secrets),
+		"bucket policy": auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, &lockedPolicies{policies, timeout}, secrets),
+	}
+	for name, az := range cases {
+		t.Run(name+" read waited out the lock timeout", func(t *testing.T) {
+			_, err := az.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
+			require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
+			require.ErrorIs(t, err, store.ErrLockTimeout, "the failure must carry the store's timeout")
+		})
+	}
+}
+
 func TestTenantIssuer(t *testing.T) {
 	ctx := t.Context()
 	buckets, secrets := bucketmemory.New(), vaultmemory.New()
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(tenantmemory.New()), tenantmemory.New(), providermemory.New(), buckets, secrets)
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), buckets, principalmemory.New(), bucketpolicymemory.New(), secrets)
 
 	tenantSigner, err := secp256k1.Generate()
 	require.NoError(t, err)
@@ -349,4 +1113,52 @@ func TestTenantIssuer(t *testing.T) {
 		_, err := az.TenantIssuer(ctx, testutil.RandomDID(t))
 		require.Error(t, err)
 	})
+}
+
+// TestEffectiveActionsDuringPolicyWrite runs the principal-bound read path
+// against Postgres while a policy write is in flight. The write holds the
+// policy row and then locks the principal, as its delegation rotation does;
+// the read takes the principal and then the policy. Each read runs in its own
+// short transaction, so the read waits for the write and neither waits on the
+// other.
+func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
+	principals := principalpostgres.New(pool)
+	policies := bucketpolicypostgres.New(pool)
+	az := auth.NewAuthorizer(zap.NewNop(), nil, nil, nil, nil, principals, policies, nil)
+
+	tenantID, providerID, bucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, tenantID.String(), nil))
+	require.NoError(t, tenantpostgres.New(pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
+	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, providerID, "effective-actions"))
+	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
+	statement := func(actions ...string) s3bkt.PolicyDocument {
+		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
+	}
+	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
+	require.NoError(t, err)
+
+	var actions []string
+	var readETag string
+	written, read := htestutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
+				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:PutObject"), IfMatch: &etag,
+				Conditional: true,
+			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
+				close(entered)
+				<-release
+				return principals.WithLock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
+			})
+			return err
+		},
+		func() error {
+			var err error
+			actions, readETag, err = az.EffectiveActions(context.Background(), tenantID, "alice", bucketID)
+			return err
+		})
+	require.NoError(t, written)
+	require.NoError(t, read)
+	require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions, "the read is answered from the committed write")
+	require.Equal(t, s3bkt.ETag(statement("s3:GetObject", "s3:PutObject")), readETag)
 }

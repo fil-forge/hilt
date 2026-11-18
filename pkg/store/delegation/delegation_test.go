@@ -2,8 +2,10 @@ package delegation_test
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"testing"
+	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -98,6 +100,43 @@ func TestDelegationStore(t *testing.T) {
 				require.Len(t, page.Results, 1)
 			})
 
+			t.Run("PutBatch stores a delegation the batch lists twice once", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				dlg := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+				other := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/walk"))
+
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{dlg, other, dlg}))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				var links []string
+				for _, d := range page.Results {
+					links = append(links, d.Link().String())
+				}
+				require.ElementsMatch(t, []string{dlg.Link().String(), other.Link().String()}, links)
+			})
+
+			t.Run("PutBatch stores the delegations of several audiences", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				a, b := testutil.RandomDID(t), testutil.RandomDID(t)
+				subject := testutil.RandomDID(t)
+				forA := makeDelegation(t, issuer, a, subject, command.MustParse("/test/run"))
+				forB := makeDelegation(t, issuer, b, did.Undef, command.MustParse("/test/run"))
+
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{forA, forB}))
+
+				got := map[did.DID][]string{}
+				for _, aud := range []did.DID{a, b} {
+					page, err := s.ListByAudience(t.Context(), aud)
+					require.NoError(t, err)
+					for _, d := range page.Results {
+						got[aud] = append(got[aud], d.Link().String())
+					}
+				}
+				require.Equal(t, map[did.DID][]string{a: {forA.Link().String()}, b: {forB.Link().String()}}, got)
+			})
+
 			t.Run("DeleteByAudience removes all delegations for an audience", func(t *testing.T) {
 				audience := testutil.RandomDID(t)
 				for range 3 {
@@ -111,6 +150,325 @@ func TestDelegationStore(t *testing.T) {
 				page, err := s.ListByAudience(t.Context(), audience)
 				require.NoError(t, err)
 				require.Empty(t, page.Results)
+			})
+
+			t.Run("Replace hands next the current set and stores its result", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				old := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+				fresh := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+
+				var seen []ucan.Delegation
+				require.NoError(t, replaceOne(t.Context(), s, audience, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+					seen = current
+					return []ucan.Delegation{fresh}, nil
+				}))
+
+				require.Len(t, seen, 1)
+				require.Equal(t, old.Link(), seen[0].Link())
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, fresh.Link(), page.Results[0].Link())
+			})
+
+			t.Run("Replace with next returning nil leaves the audience with none", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{
+					makeDelegation(t, issuer, audience, issuer.DID(), cmd),
+					makeDelegation(t, issuer, audience, issuer.DID(), cmd),
+				}))
+
+				require.NoError(t, replaceOne(t.Context(), s, audience, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+					require.Len(t, current, 2)
+					return nil, nil
+				}))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Empty(t, page.Results)
+			})
+
+			t.Run("Replace rolls back when next errors", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				old := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+				boom := errors.New("publish failed")
+
+				err := replaceOne(t.Context(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					return nil, boom
+				})
+				require.ErrorIs(t, err, boom)
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, old.Link(), page.Results[0].Link())
+			})
+
+			t.Run("Replace stores next's result for an audience holding nothing", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				fresh := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+
+				called := false
+				require.NoError(t, replaceOne(t.Context(), s, audience, func(_ context.Context, current []ucan.Delegation) ([]ucan.Delegation, error) {
+					called = true
+					require.Empty(t, current)
+					return []ucan.Delegation{fresh}, nil
+				}))
+
+				require.True(t, called, "next is told the audience holds nothing")
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1)
+				require.Equal(t, fresh.Link(), page.Results[0].Link())
+			})
+
+			t.Run("PutBatch and DeleteByAudience wait for an in-flight Replace", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{
+					makeDelegation(t, issuer, audience, issuer.DID(), cmd),
+				}))
+				fresh := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+				other := makeDelegation(t, issuer, audience, issuer.DID(), cmd)
+
+				entered, release := make(chan struct{}), make(chan struct{})
+				replaced := make(chan error, 1)
+				go func() {
+					replaced <- replaceOne(t.Context(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+						close(entered)
+						<-release
+						return []ucan.Delegation{fresh}, nil
+					})
+				}()
+				<-entered
+
+				put, deleted := make(chan error, 1), make(chan error, 1)
+				go func() { put <- s.PutBatch(t.Context(), []ucan.Delegation{other}) }()
+				go func() { deleted <- s.DeleteByAudience(t.Context(), audience) }()
+
+				select {
+				case err := <-put:
+					t.Fatalf("PutBatch completed while Replace held the audience: %v", err)
+				case err := <-deleted:
+					t.Fatalf("DeleteByAudience completed while Replace held the audience: %v", err)
+				case <-time.After(200 * time.Millisecond):
+				}
+
+				close(release)
+				require.NoError(t, <-replaced)
+				require.NoError(t, <-put)
+				require.NoError(t, <-deleted)
+			})
+
+			t.Run("Replace swaps several audiences in one call", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				a, b := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				oldA := makeDelegation(t, issuer, a, issuer.DID(), cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{oldA}))
+				freshA, freshB := makeDelegation(t, issuer, a, issuer.DID(), cmd), makeDelegation(t, issuer, b, issuer.DID(), cmd)
+
+				require.NoError(t, s.Replace(t.Context(), []did.DID{a, b}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					require.Len(t, current[a], 1)
+					require.Equal(t, oldA.Link(), current[a][0].Link())
+					require.Empty(t, current[b])
+					return map[did.DID][]ucan.Delegation{a: {freshA}, b: {freshB}}, nil
+				}))
+
+				for aud, want := range map[did.DID]ucan.Delegation{a: freshA, b: freshB} {
+					page, err := s.ListByAudience(t.Context(), aud)
+					require.NoError(t, err)
+					require.Len(t, page.Results, 1)
+					require.Equal(t, want.Link(), page.Results[0].Link())
+				}
+			})
+
+			t.Run("Replace returns ErrInvalidArgument for a nil delegation from next", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				old := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+
+				err := replaceOne(t.Context(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					return []ucan.Delegation{nil}, nil
+				})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Len(t, page.Results, 1, "the current set is kept")
+			})
+
+			t.Run("Replace returns ErrInvalidArgument for a delegation filed under another audience", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				locked, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				stray := makeDelegation(t, issuer, other, issuer.DID(), command.MustParse("/test/run"))
+
+				err := replaceOne(t.Context(), s, locked, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					return []ucan.Delegation{stray}, nil
+				})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+				page, err := s.ListByAudience(t.Context(), other)
+				require.NoError(t, err)
+				require.Empty(t, page.Results, "nothing is written under an audience the call did not lock")
+			})
+
+			t.Run("ReplaceOver hands next only the delegations over the subject and keeps the rest", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				over, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				old := makeDelegation(t, issuer, audience, over, cmd)
+				kept := makeDelegation(t, issuer, audience, other, cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old, kept}))
+				fresh := makeDelegation(t, issuer, audience, over, cmd)
+
+				var seen []ucan.Delegation
+				require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					seen = current[audience]
+					return map[did.DID][]ucan.Delegation{audience: {fresh}}, nil
+				}))
+
+				require.Len(t, seen, 1)
+				require.Equal(t, old.Link(), seen[0].Link())
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.ElementsMatch(t, []string{fresh.Link().String(), kept.Link().String()}, linkStrings(page.Results))
+			})
+
+			t.Run("ReplaceOver with next returning nil leaves the audience with nothing over the subject", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				over, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				kept := makeDelegation(t, issuer, audience, other, cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{makeDelegation(t, issuer, audience, over, cmd), kept}))
+
+				require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					return nil, nil
+				}))
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Equal(t, []string{kept.Link().String()}, linkStrings(page.Results))
+			})
+
+			t.Run("ReplaceOver rolls back when next errors", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience, over := testutil.RandomDID(t), testutil.RandomDID(t)
+				old := makeDelegation(t, issuer, audience, over, command.MustParse("/test/run"))
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
+				boom := errors.New("publish failed")
+
+				err := s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					return nil, boom
+				})
+				require.ErrorIs(t, err, boom)
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Equal(t, []string{old.Link().String()}, linkStrings(page.Results))
+			})
+
+			t.Run("ReplaceOver returns ErrInvalidArgument for a delegation over another subject", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience := testutil.RandomDID(t)
+				over, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				stray := makeDelegation(t, issuer, audience, other, command.MustParse("/test/run"))
+
+				err := s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					return map[did.DID][]ucan.Delegation{audience: {stray}}, nil
+				})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
+
+				page, err := s.ListByAudience(t.Context(), audience)
+				require.NoError(t, err)
+				require.Empty(t, page.Results)
+			})
+
+			t.Run("ReplaceOver swaps several audiences in one call", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				a, b := testutil.RandomDID(t), testutil.RandomDID(t)
+				over, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				oldA := makeDelegation(t, issuer, a, over, cmd)
+				keptA := makeDelegation(t, issuer, a, other, cmd)
+				keptB := makeDelegation(t, issuer, b, other, cmd)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{oldA, keptA, keptB}))
+				freshA, freshB := makeDelegation(t, issuer, a, over, cmd), makeDelegation(t, issuer, b, over, cmd)
+
+				var seen map[did.DID][]ucan.Delegation
+				require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{a, b}, over, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					seen = current
+					return map[did.DID][]ucan.Delegation{a: {freshA}, b: {freshB}}, nil
+				}))
+
+				require.Equal(t, []string{oldA.Link().String()}, linkStrings(seen[a]))
+				require.Empty(t, seen[b], "b holds nothing over the subject")
+				pageA, err := s.ListByAudience(t.Context(), a)
+				require.NoError(t, err)
+				require.ElementsMatch(t, []string{freshA.Link().String(), keptA.Link().String()}, linkStrings(pageA.Results))
+				pageB, err := s.ListByAudience(t.Context(), b)
+				require.NoError(t, err)
+				require.ElementsMatch(t, []string{freshB.Link().String(), keptB.Link().String()}, linkStrings(pageB.Results))
+			})
+
+			t.Run("Replace and ReplaceOver hand next each audience once when it is listed twice", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience, over := testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{makeDelegation(t, issuer, audience, over, command.MustParse("/test/run"))}))
+				keep := func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					require.Len(t, current[audience], 1)
+					return current, nil
+				}
+
+				require.NoError(t, s.Replace(t.Context(), []did.DID{audience, audience}, keep))
+				require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{audience, audience}, over, keep))
+			})
+
+			t.Run("ReplaceOver waits for an in-flight Replace of the same audience", func(t *testing.T) {
+				issuer := testutil.RandomIssuer(t)
+				audience, over := testutil.RandomDID(t), testutil.RandomDID(t)
+				cmd := command.MustParse("/test/run")
+				fresh := makeDelegation(t, issuer, audience, over, cmd)
+
+				var seen []ucan.Delegation
+				writeErr, waitErr := htestutil.RequireWaitsForWriter(t,
+					func(entered chan<- struct{}, release <-chan struct{}) error {
+						return replaceOne(t.Context(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+							close(entered)
+							<-release
+							return []ucan.Delegation{fresh}, nil
+						})
+					},
+					func() error {
+						return s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+							seen = current[audience]
+							return current, nil
+						})
+					},
+				)
+				require.NoError(t, writeErr)
+				require.NoError(t, waitErr)
+				require.Equal(t, []string{fresh.Link().String()}, linkStrings(seen), "ReplaceOver sees the settled result of the Replace it waited on")
+			})
+
+			t.Run("ReplaceOver returns ErrInvalidArgument for undef subject", func(t *testing.T) {
+				err := s.ReplaceOver(t.Context(), []did.DID{testutil.RandomDID(t)}, did.Undef, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+					t.Fatal("next must not run")
+					return nil, nil
+				})
+				require.ErrorIs(t, err, store.ErrInvalidArgument)
 			})
 
 			t.Run("DeleteBySubject removes only that subject's delegations", func(t *testing.T) {
@@ -332,4 +690,68 @@ func TestDelegationStore(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestDelegationStoreMemoryLockTimeout: a write that waits out a Replace in
+// flight gives up with [store.ErrLockTimeout] instead of wedging against it,
+// as lock_timeout bounds the advisory lock wait on Postgres.
+func TestDelegationStoreMemoryLockTimeout(t *testing.T) {
+	delegationmemory.LockWait = 100 * time.Millisecond
+	t.Cleanup(func() { delegationmemory.LockWait = store.LockTimeout })
+
+	s := delegationmemory.New()
+	issuer := testutil.RandomIssuer(t)
+	audience := testutil.RandomDID(t)
+	fresh := makeDelegation(t, issuer, audience, issuer.DID(), command.MustParse("/test/run"))
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	replaced := make(chan error, 1)
+	go func() {
+		replaced <- replaceOne(context.Background(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+			close(entered)
+			<-release
+			return []ucan.Delegation{fresh}, nil
+		})
+	}()
+	<-entered
+
+	// The second Replace waits on the audience the first holds and gives up.
+	waited := make(chan error, 1)
+	go func() {
+		waited <- replaceOne(context.Background(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+			return nil, errors.New("next must not run while the first Replace holds the audience")
+		})
+	}()
+	select {
+	case err := <-waited:
+		require.ErrorIs(t, err, store.ErrLockTimeout)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the second Replace waited on the first without a bound")
+	}
+
+	close(release)
+	require.NoError(t, <-replaced)
+	page, err := s.ListByAudience(t.Context(), audience)
+	require.NoError(t, err)
+	require.Len(t, page.Results, 1)
+	require.Equal(t, fresh.Link(), page.Results[0].Link())
+}
+
+// replaceOne calls Replace over one audience, the shape most tests need.
+func replaceOne(ctx context.Context, s dlgstore.Store, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error {
+	return s.Replace(ctx, []did.DID{audience}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		out, err := next(ctx, current[audience])
+		if err != nil {
+			return nil, err
+		}
+		return map[did.DID][]ucan.Delegation{audience: out}, nil
+	})
+}
+
+func linkStrings(dels []ucan.Delegation) []string {
+	out := make([]string, len(dels))
+	for i, d := range dels {
+		out[i] = d.Link().String()
+	}
+	return out
 }

@@ -17,7 +17,7 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 	switch {
 	case errors.Is(err, tenantsvc.ErrTenantNotFound):
 		return httpError(http.StatusNotFound, err)
-	case errors.Is(err, tenantsvc.ErrRegionRequired), errors.Is(err, tenantsvc.ErrUnknownRegion):
+	case errors.Is(err, tenantsvc.ErrInvalidTenantID):
 		return httpError(http.StatusBadRequest, err)
 	case errors.Is(err, tenantsvc.ErrInvalidStatus):
 		return httpError(http.StatusUnprocessableEntity, err)
@@ -38,16 +38,13 @@ func tenantHTTPError(log *zap.Logger, err error) error {
 func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "ProvisionTenant"))
 	return NewRoute(http.MethodPut, "/tenants/:tenantId", func(c echo.Context) error {
-		externalID := c.Param("tenantId")
+		externalID := tenantParam(c)
 		if externalID == "" {
 			return echo.NewHTTPError(http.StatusBadRequest, "missing tenant id")
 		}
-		var req ProvisionTenantRequest
-		if err := c.Bind(&req); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
-		}
-
-		rec, created, err := tenants.Provision(c.Request().Context(), externalID, req.Region)
+		// The request takes no body: a tenant is region-free, and each bucket
+		// binds to the region it is created in.
+		rec, created, err := tenants.Provision(c.Request().Context(), externalID)
 		if err != nil {
 			return tenantHTTPError(log, err)
 		}
@@ -58,12 +55,16 @@ func NewProvisionTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) R
 	})
 }
 
+// tenantParam returns the tenantId route parameter. [NewRoute] has refused an
+// id holding a character the route would see escaped.
+func tenantParam(c echo.Context) string { return c.Param("tenantId") }
+
 // NewGetTenantHandler handles GET /tenants/{tenantId} — retrieve tenant
 // operational state and quotas.
 func NewGetTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "GetTenant"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId", func(c echo.Context) error {
-		rec, err := tenants.Get(c.Request().Context(), c.Param("tenantId"))
+		rec, err := tenants.Get(c.Request().Context(), tenantParam(c))
 		if err != nil {
 			return tenantHTTPError(log, err)
 		}
@@ -80,7 +81,7 @@ func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants *tenantsvc.Service
 		if err := c.Bind(&req); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
-		if err := tenants.SetStatus(c.Request().Context(), c.Param("tenantId"), string(req.Status)); err != nil {
+		if err := tenants.SetStatus(c.Request().Context(), tenantParam(c), string(req.Status)); err != nil {
 			return tenantHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -92,7 +93,7 @@ func NewUpdateTenantStatusHandler(logger *zap.Logger, tenants *tenantsvc.Service
 func NewDeleteTenantHandler(logger *zap.Logger, tenants *tenantsvc.Service) Route {
 	log := logger.With(zap.String("handler", "DeleteTenant"))
 	return NewRoute(http.MethodDelete, "/tenants/:tenantId", func(c echo.Context) error {
-		if err := tenants.Delete(c.Request().Context(), c.Param("tenantId")); err != nil {
+		if err := tenants.Delete(c.Request().Context(), tenantParam(c)); err != nil {
 			return tenantHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)

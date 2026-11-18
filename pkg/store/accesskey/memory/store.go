@@ -1,8 +1,8 @@
+// Package memory provides an in-memory implementation of accesskey.Store.
 package memory
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -14,69 +14,109 @@ import (
 )
 
 type Store struct {
-	mutex   sync.RWMutex
-	keys    map[did.DID]accesskey.Record
-	tenants tenantstore.Store
+	mutex      sync.RWMutex
+	keys       map[did.DID]accesskey.Record
+	tenants    tenantstore.Store
+	principals func(ctx context.Context, tenant did.DID, principal string, fn func() error) error
 }
 
 var _ accesskey.Store = (*Store)(nil)
 
-// New returns a store that reads tenant status from tenants.
-func New(tenants tenantstore.Store) *Store {
-	return &Store{keys: map[did.DID]accesskey.Record{}, tenants: tenants}
+// Option configures a Store.
+type Option func(*Store)
+
+// WithPrincipals makes Add run a principal-bound key's insert inside guard,
+// which holds the principal against a removal and refuses one that is not
+// live with [store.ErrInvalidArgument], as the Postgres insert's FOR SHARE on
+// the principal row does. The memory principal store's WithLive is the guard.
+// Without it any principal may be named.
+func WithPrincipals(guard func(ctx context.Context, tenant did.DID, principal string, fn func() error) error) Option {
+	return func(s *Store) { s.principals = guard }
 }
 
-func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, name string, buckets []did.DID, permissions []string, expiresAt *time.Time) error {
-	if id == did.Undef {
-		return fmt.Errorf("access key ID is required: %w", store.ErrInvalidArgument)
-	}
-	if tenant == did.Undef {
-		return fmt.Errorf("access key tenant is required: %w", store.ErrInvalidArgument)
-	}
-	if name == "" {
-		return fmt.Errorf("access key name is required: %w", store.ErrInvalidArgument)
-	}
-	if slices.Contains(buckets, did.Undef) {
-		return fmt.Errorf("access key bucket DIDs must be defined: %w", store.ErrInvalidArgument)
-	}
+// WithTenants makes Add refuse a key for a disabled tenant with
+// [accesskey.ErrTenantDisabled], as the Postgres insert does. Without it any
+// tenant is accepted.
+func WithTenants(tenants tenantstore.Store) Option {
+	return func(s *Store) { s.tenants = tenants }
+}
 
+func New(opts ...Option) *Store {
+	s := &Store{keys: map[did.DID]accesskey.Record{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// Add stores the record. It enforces no referential integrity of its own: a
+// principal-bound key's principal is checked only when the store is built with
+// [WithPrincipals], and then the insert runs while the principal is held.
+func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
+	if err := in.Validate(); err != nil {
+		return err
+	}
+	if in.Principal != nil && s.principals != nil {
+		return s.principals(ctx, in.Tenant, *in.Principal, func() error { return s.add(ctx, in) })
+	}
+	return s.add(ctx, in)
+}
+
+func (s *Store) add(ctx context.Context, in accesskey.Input) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if _, ok := s.keys[id]; ok {
+	if _, ok := s.keys[in.ID]; ok {
 		return store.ErrRecordExists
 	}
 	// Checked under the write lock ListByTenant also takes, so a tenant
 	// deletion's snapshot of its keys never misses one added here. An unknown
 	// tenant is allowed: this store does not enforce referential integrity.
-	if rec, err := s.tenants.Get(ctx, tenant); err == nil && rec.Status == tenantstore.Disabled {
-		return accesskey.ErrTenantDisabled
+	if s.tenants != nil {
+		if rec, err := s.tenants.Get(ctx, in.Tenant); err == nil && rec.Status == tenantstore.Disabled {
+			return accesskey.ErrTenantDisabled
+		}
 	}
-	// Names must be unique within a tenant (mirrors the Postgres
-	// UNIQUE (tenant_id, name) constraint).
+	// A service key's name is unique within the tenant; a principal-bound key's
+	// name is unique within its principal. This mirrors the two partial unique
+	// indexes of the Postgres schema.
 	for _, rec := range s.keys {
-		if rec.Tenant == tenant && rec.Name == name {
+		if rec.Tenant != in.Tenant || rec.Name != in.Name {
+			continue
+		}
+		switch {
+		case rec.Principal == nil && in.Principal == nil:
+			return store.ErrRecordExists
+		case rec.Principal != nil && in.Principal != nil && *rec.Principal == *in.Principal:
 			return store.ErrRecordExists
 		}
 	}
 	var expires *time.Time
-	if expiresAt != nil {
-		e := expiresAt.UTC()
+	if in.ExpiresAt != nil {
+		e := in.ExpiresAt.UTC()
 		expires = &e
 	}
-	s.keys[id] = accesskey.Record{
-		ID:          id,
-		Tenant:      tenant,
-		Name:        name,
-		Buckets:     slices.Clone(buckets),
-		Permissions: slices.Clone(permissions),
+	var principal *string
+	if in.Principal != nil {
+		p := *in.Principal
+		principal = &p
+	}
+	s.keys[in.ID] = accesskey.Record{
+		ID:          in.ID,
+		Tenant:      in.Tenant,
+		Name:        in.Name,
+		Buckets:     slices.Clone(in.Buckets),
+		Permissions: slices.Clone(in.Permissions),
+		Principal:   principal,
 		ExpiresAt:   expires,
 		CreatedAt:   time.Now().UTC(),
 	}
 	return nil
 }
 
-func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
+// Get ignores the lock mode: reads and writes are serialized by the store
+// mutex, so a read already waits for an in-flight Delete.
+func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
@@ -87,15 +127,44 @@ func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 	return rec, nil
 }
 
-func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]accesskey.Record, error) {
+func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...accesskey.ListOption) ([]accesskey.Record, error) {
+	cfg := accesskey.NewListConfig(opts...)
+
+	// Sets, so each filter costs the same per record however many IDs or
+	// principals it names.
+	var ids map[did.DID]bool
+	if cfg.IDs != nil {
+		ids = make(map[did.DID]bool, len(cfg.IDs))
+		for _, id := range cfg.IDs {
+			ids[id] = true
+		}
+	}
+	var principals map[string]bool
+	if cfg.Principals != nil {
+		principals = make(map[string]bool, len(cfg.Principals))
+		for _, p := range cfg.Principals {
+			principals[p] = true
+		}
+	}
+
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
 	var recs []accesskey.Record
 	for _, rec := range s.keys {
-		if rec.Tenant == tenant {
-			recs = append(recs, rec)
+		if rec.Tenant != tenant {
+			continue
 		}
+		if cfg.Principal != nil && (rec.Principal == nil || *rec.Principal != *cfg.Principal) {
+			continue
+		}
+		if principals != nil && (rec.Principal == nil || !principals[*rec.Principal]) {
+			continue
+		}
+		if ids != nil && !ids[rec.ID] {
+			continue
+		}
+		recs = append(recs, rec)
 	}
 	return recs, nil
 }

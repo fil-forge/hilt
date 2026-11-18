@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -23,6 +24,15 @@ const (
 // migrations against it, and returns a connection pool. The container is
 // cleaned up when the test finishes.
 func CreatePostgres(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := CreateUnmigratedPostgres(t)
+	require.NoError(t, migrations.Up(t.Context(), pool, zap.NewNop()))
+	return pool
+}
+
+// CreateUnmigratedPostgres is CreatePostgres without the migrations, for tests
+// that drive the migrations themselves.
+func CreateUnmigratedPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	ctx := t.Context()
@@ -48,7 +58,19 @@ func CreatePostgres(t *testing.T) *pgxpool.Pool {
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-
-	require.NoError(t, migrations.Up(ctx, pool, zap.NewNop()))
 	return pool
+}
+
+// PostgresOrSkip is [CreatePostgres] for a test that runs only where Docker
+// is: without it the test skips, except on a Linux CI runner, where Docker is
+// expected and its absence fails the test.
+func PostgresOrSkip(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	if IsRunningInCI(t) && runtime.GOOS == "linux" && !IsDockerAvailable(t) {
+		t.Fatalf("docker is expected in CI linux testing environments, but wasn't found")
+	}
+	if !IsDockerAvailable(t) {
+		t.SkipNow()
+	}
+	return CreatePostgres(t)
 }

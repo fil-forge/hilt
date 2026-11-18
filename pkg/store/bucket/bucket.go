@@ -34,6 +34,9 @@ type Record struct {
 	ID did.DID
 	// Tenant the bucket belongs to.
 	Tenant did.DID
+	// Provider that serves the bucket: the regional Ingot whose storage nodes
+	// hold its data and the only issuer allowed to act on it.
+	Provider did.DID
 	// Human readable name of the bucket.
 	Name string
 	// When the bucket record was created.
@@ -52,6 +55,9 @@ type ListConfig struct {
 	// Prefix optionally restricts results to buckets whose name starts with it
 	// (matched literally). When empty, no prefix filtering is applied.
 	Prefix string
+	// Provider optionally restricts results to buckets served by it. When undef,
+	// no provider filtering is applied.
+	Provider did.DID
 }
 
 // ListOption configures a [ListConfig].
@@ -75,6 +81,12 @@ func WithPrefix(prefix string) ListOption {
 	return func(c *ListConfig) { c.Prefix = prefix }
 }
 
+// WithProvider restricts results to the buckets the given provider serves,
+// which is how a listing is narrowed to one region.
+func WithProvider(provider did.DID) ListOption {
+	return func(c *ListConfig) { c.Provider = provider }
+}
+
 // WithLimit sets the maximum number of results per page.
 func WithLimit(limit int) ListOption {
 	return func(c *ListConfig) { c.Limit = &limit }
@@ -89,9 +101,10 @@ func WithCursor(cursor string) ListOption {
 
 type Store interface {
 	// Add creates a new bucket record. It returns [store.ErrInvalidArgument] if
-	// the ID or tenant is undef or the name is not valid (see [ValidateName]),
-	// and [store.ErrRecordExists] if a record with the same ID already exists.
-	Add(ctx context.Context, id did.DID, tenant did.DID, name string) error
+	// the ID, tenant or provider is undef or the name is not valid (see
+	// [ValidateName]), and [store.ErrRecordExists] if a record with the same ID
+	// or name already exists.
+	Add(ctx context.Context, id did.DID, tenant did.DID, provider did.DID, name string) error
 	// GetByName retrieves the bucket record for a given name. It returns
 	// [store.ErrRecordNotFound] if no bucket exists with the specified name.
 	GetByName(ctx context.Context, name string) (Record, error)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/labstack/echo/v4"
@@ -21,9 +22,14 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 	case errors.Is(err, accesskeysvc.ErrInvalidName),
 		errors.Is(err, accesskeysvc.ErrNoPermissions),
 		errors.Is(err, accesskeysvc.ErrInvalidPermission),
-		errors.Is(err, accesskeysvc.ErrUnknownBucket):
+		errors.Is(err, accesskeysvc.ErrUnknownBucket),
+		errors.Is(err, accesskeysvc.ErrPrincipalScoped),
+		errors.Is(err, accesskeysvc.ErrUnknownPrincipal),
+		errors.Is(err, principalsvc.ErrInvalidPrincipalID):
 		return httpError(http.StatusUnprocessableEntity, err)
-	case errors.Is(err, accesskeysvc.ErrNameConflict), errors.Is(err, accesskeysvc.ErrTenantDisabled):
+	case errors.Is(err, accesskeysvc.ErrNameConflict),
+		errors.Is(err, accesskeysvc.ErrConcurrentChange),
+		errors.Is(err, accesskeysvc.ErrTenantDisabled):
 		return httpError(http.StatusConflict, err)
 	default:
 		log.Error("request failed", zap.Error(err))
@@ -32,8 +38,10 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 }
 
 // NewCreateAccessKeyHandler handles POST /tenants/{tenantId}/access-keys — create
-// an S3 access-key pair (returns the secret once only) and issue the
-// tenant→access-key UCAN delegations for the requested permissions.
+// an S3 access-key pair (returns the secret once only). Without principalId it
+// is a service key and the tenant→access-key UCAN delegations for the requested
+// permissions are issued; with principalId it is bound to that principal and
+// holds the delegations the bucket policies grant it.
 func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "CreateAccessKey"))
 	return NewRoute(http.MethodPost, "/tenants/:tenantId/access-keys", func(c echo.Context) error {
@@ -42,7 +50,7 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 		}
 
-		rec, secret, err := accessKeys.Create(c.Request().Context(), c.Param("tenantId"), req.Name, req.Permissions, req.Buckets, req.ExpiresAt)
+		rec, secret, err := accessKeys.Create(c.Request().Context(), tenantParam(c), req.Name, req.Permissions, req.Buckets, req.PrincipalID, req.ExpiresAt)
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -50,8 +58,10 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 			AccessKey: AccessKey{
 				AccessKeyID: rec.ID.Identifier(),
 				Name:        rec.Name,
+				Type:        accessKeyType(rec),
 				Permissions: rec.Permissions,
 				Buckets:     req.Buckets,
+				PrincipalID: rec.Principal,
 				ExpiresAt:   rec.ExpiresAt,
 				CreatedAt:   rec.CreatedAt,
 			},
@@ -61,11 +71,16 @@ func NewCreateAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 }
 
 // NewListAccessKeysHandler handles GET /tenants/{tenantId}/access-keys — list all
-// S3 access keys for a tenant (excludes secrets).
+// S3 access keys for a tenant (excludes secrets), or only the keys bound to
+// the principal named by the principalId query parameter.
 func NewListAccessKeysHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "ListAccessKeys"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/access-keys", func(c echo.Context) error {
-		recs, bucketNames, err := accessKeys.List(c.Request().Context(), c.Param("tenantId"))
+		var opts []accesskey.ListOption
+		if p := c.QueryParam("principalId"); p != "" {
+			opts = append(opts, accesskey.WithPrincipal(p))
+		}
+		recs, bucketNames, err := accessKeys.List(c.Request().Context(), tenantParam(c), opts...)
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -82,7 +97,7 @@ func NewListAccessKeysHandler(logger *zap.Logger, accessKeys *accesskeysvc.Servi
 func NewGetAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "GetAccessKey"))
 	return NewRoute(http.MethodGet, "/tenants/:tenantId/access-keys/:accessKeyId", func(c echo.Context) error {
-		rec, bucketNames, err := accessKeys.Get(c.Request().Context(), c.Param("tenantId"), c.Param("accessKeyId"))
+		rec, bucketNames, err := accessKeys.Get(c.Request().Context(), tenantParam(c), c.Param("accessKeyId"))
 		if err != nil {
 			return accessKeyHTTPError(log, err)
 		}
@@ -95,7 +110,7 @@ func NewGetAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service
 func NewDeleteAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Service) Route {
 	log := logger.With(zap.String("handler", "DeleteAccessKey"))
 	return NewRoute(http.MethodDelete, "/tenants/:tenantId/access-keys/:accessKeyId", func(c echo.Context) error {
-		if err := accessKeys.Delete(c.Request().Context(), c.Param("tenantId"), c.Param("accessKeyId")); err != nil {
+		if err := accessKeys.Delete(c.Request().Context(), tenantParam(c), c.Param("accessKeyId")); err != nil {
 			return accessKeyHTTPError(log, err)
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -104,7 +119,8 @@ func NewDeleteAccessKeyHandler(logger *zap.Logger, accessKeys *accesskeysvc.Serv
 
 // accessKeyResponse builds the API representation of an access key, resolving
 // stored bucket DIDs back to their names (a DID with no known name is rendered as
-// the DID string). The secret is never included.
+// the DID string). A principal-bound key carries its principal and no
+// permissions or buckets. The secret is never included.
 func accessKeyResponse(rec accesskey.Record, bucketNames map[did.DID]string) AccessKey {
 	var bucketList []string
 	for _, b := range rec.Buckets {
@@ -117,9 +133,20 @@ func accessKeyResponse(rec accesskey.Record, bucketNames map[did.DID]string) Acc
 	return AccessKey{
 		AccessKeyID: rec.ID.Identifier(),
 		Name:        rec.Name,
+		Type:        accessKeyType(rec),
 		Permissions: rec.Permissions,
 		Buckets:     bucketList,
+		PrincipalID: rec.Principal,
 		ExpiresAt:   rec.ExpiresAt,
 		CreatedAt:   rec.CreatedAt,
 	}
+}
+
+// accessKeyType is the API type of a key: principal when it is bound to one,
+// service otherwise.
+func accessKeyType(rec accesskey.Record) string {
+	if rec.Principal == nil {
+		return AccessKeyTypeService
+	}
+	return AccessKeyTypePrincipal
 }

@@ -34,17 +34,18 @@ func TestNewIdentityMissingKeyFile(t *testing.T) {
 	require.Error(t, err)
 }
 
-// newRPCApp builds the RPC module over in-memory backends and returns the two
-// route groups and the server built from them, so a test sees the wiring the
-// app actually gets (RPCModule decides which group a handler joins). fx.New
-// executes Invoke functions immediately, so the values are populated without
-// starting the app; nothing here registers a lifecycle hook.
+// newRPCApp builds the RPC module, with the API module that provides the
+// policy writes the bucket service uses, over in-memory backends and returns
+// the two route groups and the server built from them, so a test sees the
+// wiring the app actually gets (RPCModule decides which group a handler
+// joins). fx.New executes Invoke functions immediately, so the values are
+// populated without starting the app; nothing here registers a lifecycle hook.
 func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *server.HTTPServer, id identity.Identity) {
 	t.Helper()
 	cfg := &config.Config{
 		Storage:    config.StorageConfig{Type: config.StorageTypeMemory},
 		Vault:      config.VaultConfig{Type: config.VaultTypeMemory},
-		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test"},
+		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test", ProductID: testutil.RandomDID(t).String()},
 		Revocation: config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
 	}
 	app := fx.New(
@@ -53,6 +54,7 @@ func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *
 		appfx.LoggerModule,
 		appfx.IdentityModule,
 		appfx.RevocationModule,
+		appfx.APIModule,
 		appfx.RPCModule,
 		storememory.Module,
 		vaultmemory.Module,
@@ -87,6 +89,7 @@ func TestRPCModuleRouteGroups(t *testing.T) {
 		"/s3/bucket/delete",
 		"/s3/bucket/info",
 		"/s3/bucket/list",
+		"/s3/bucket/policy",
 	}, commandsOf(routes))
 
 	require.ElementsMatch(t, []string{

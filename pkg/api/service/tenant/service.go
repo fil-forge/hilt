@@ -9,13 +9,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
-	"github.com/fil-forge/hilt/pkg/store/provider"
+	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -23,6 +26,7 @@ import (
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
+	"github.com/fil-forge/ucantone/ucan"
 	"go.uber.org/zap"
 )
 
@@ -35,65 +39,69 @@ const fragment = "hilt"
 type Service struct {
 	logger      *zap.Logger
 	tenants     tenantstore.Store
-	providers   provider.Store
 	buckets     bucket.Store
 	accessKeys  accesskey.Store
+	principals  principalstore.Store
+	policies    bucketpolicystore.Store
 	delegations delegation.Store
 	secrets     vault.Vault
 	wrapKeys    wrapkeystore.Store
 	plcClient   *plc.DirectoryClient
 	upload      *upload.Client
+	revocations grant.RevocationPublisher
 }
 
 // New constructs the tenant service.
 func New(
 	logger *zap.Logger,
 	tenants tenantstore.Store,
-	providers provider.Store,
 	buckets bucket.Store,
 	accessKeys accesskey.Store,
+	principals principalstore.Store,
+	policies bucketpolicystore.Store,
 	delegations delegation.Store,
 	secrets vault.Vault,
 	wrapKeys wrapkeystore.Store,
 	plcClient *plc.DirectoryClient,
 	upload *upload.Client,
+	revocations grant.RevocationPublisher,
 ) *Service {
 	return &Service{
 		logger:      logger,
 		tenants:     tenants,
-		providers:   providers,
 		buckets:     buckets,
 		accessKeys:  accessKeys,
+		principals:  principals,
+		policies:    policies,
 		delegations: delegations,
 		secrets:     secrets,
 		plcClient:   plcClient,
 		wrapKeys:    wrapKeys,
 		upload:      upload,
+		revocations: revocations,
 	}
+}
+
+// ValidID reports whether id can be a tenantId. The id travels as one path
+// segment of the Tenant API, so it must not hold a character that delimits or
+// escapes a segment, nor be a dot segment a client could resolve away.
+func ValidID(id string) bool {
+	return !strings.ContainsAny(id, "/;,?%") && id != "." && id != ".."
 }
 
 // Provision provisions (or, idempotently, returns) the tenant for externalID: it
 // generates a rotatable did:plc key, publishes it, registers the tenant with the
 // upload service, and records it. created is false when an existing tenant is
 // returned (including the concurrent-create winner).
-func (s *Service) Provision(ctx context.Context, externalID, region string) (tenantstore.Record, bool, error) {
-	if region == "" {
-		return tenantstore.Record{}, false, ErrRegionRequired
-	}
-
+//
+// A tenant is region-free: each of its buckets is bound to the provider (region)
+// it is created through, so one tenant may hold buckets in several regions.
+func (s *Service) Provision(ctx context.Context, externalID string) (tenantstore.Record, bool, error) {
 	// Idempotent: return the existing tenant if already provisioned.
 	if existing, err := s.tenants.GetByExternalID(ctx, externalID); err == nil {
 		return existing, false, nil
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
 		return tenantstore.Record{}, false, fmt.Errorf("looking up tenant: %w", err)
-	}
-
-	// Resolve the provider for the requested region.
-	prov, err := s.providers.GetByRegion(ctx, region)
-	if errors.Is(err, store.ErrRecordNotFound) {
-		return tenantstore.Record{}, false, ErrUnknownRegion
-	} else if err != nil {
-		return tenantstore.Record{}, false, fmt.Errorf("resolving provider: %w", err)
 	}
 
 	// Generate the tenant's rotatable did:plc key (secp256k1 rotation key).
@@ -174,7 +182,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	// before recording the tenant so a failed registration returns an error and is
 	// retried on the next call, rather than being short-circuited by the
 	// idempotency check above (which keys on the stored tenant record).
-	details := map[string]string{"external_id": externalID, "region": region}
+	details := map[string]string{"external_id": externalID}
 	if err := s.upload.RegisterCustomer(ctx, tenantID, s.upload.Product, details); err != nil {
 		log.Error("registering tenant with upload service", zap.Error(err))
 		runCleanups()
@@ -204,7 +212,7 @@ func (s *Service) Provision(ctx context.Context, externalID, region string) (ten
 	})
 
 	// Record the tenant.
-	if err := s.tenants.Add(ctx, tenantID, externalID, prov.ID, tenantstore.Active); err != nil {
+	if err := s.tenants.Add(ctx, tenantID, externalID, tenantstore.Active); err != nil {
 		runCleanups()
 		// Concurrent create with the same external id: return the winner.
 		if errors.Is(err, store.ErrRecordExists) {
@@ -255,8 +263,8 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its
-// buckets, access keys, and delegations, and deactivating its did:plc. It is
-// idempotent: a missing tenant is a no-op.
+// buckets and their policies, access keys, principals, and delegations, and
+// deactivating its did:plc. It is idempotent: a missing tenant is a no-op.
 //
 // Out of scope: deprovisioning the tenant's spaces from the Forge upload service
 // (Sprue), for which there is no facility per the RFC.
@@ -275,18 +283,41 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 
 	signingVaultKey := vault.TenantKeyPath(rec.ID)
 
-	// Deactivate the did:plc first — it requires the (still-present) tenant key.
-	// Aborting here leaves all local state intact for a retry.
-	if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, signingVaultKey, rec.ID); err != nil {
-		log.Error("deactivating tenant DID", zap.Error(err))
-		return ErrDIDDeactivation
-	}
-
-	// Cascade: access keys (records + their delegations + vault keys).
 	keys, err := s.accessKeys.ListByTenant(ctx, rec.ID)
 	if err != nil {
 		return fmt.Errorf("listing access keys: %w", err)
 	}
+
+	// Revoke and remove every delegation the tenant's keys hold, in one
+	// request and one delegation-store write, before the did:plc goes: the
+	// tenant signs the revocations and Swarf verifies them against its DID. A
+	// warm key would otherwise keep serving from the gateway's cache until the
+	// next UTC midnight. A failed publish leaves everything in place for a
+	// retry. A DID an earlier attempt already deactivated skips both: that
+	// attempt published first, and Swarf could not verify a new publish against
+	// the tombstone anyway. A tenant tombstoned by a removal that predates the
+	// publish, and that then failed in its cascade, is the one case nothing
+	// here can revoke for: its keys' cached grants last until they expire.
+	last, err := s.plcClient.Last(ctx, rec.ID)
+	if _, deactivated := errors.AsType[*plc.DeactivatedDIDError](err); deactivated {
+		log.Info("tenant DID is already deactivated; skipping the revocation publish and the tombstone")
+	} else {
+		if err != nil {
+			log.Error("fetching the tenant DID's last operation", zap.Error(err))
+			return ErrDIDDeactivation
+		}
+		if err := s.revokeKeyDelegations(ctx, log, rec.ID, keys); err != nil {
+			return err
+		}
+		// Deactivate the did:plc next — it requires the (still-present) tenant
+		// key. Aborting here leaves all local state intact for a retry.
+		if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, signingVaultKey, rec.ID, last); err != nil {
+			log.Error("deactivating tenant DID", zap.Error(err))
+			return ErrDIDDeactivation
+		}
+	}
+
+	// Cascade: access keys (records + any delegations left + vault keys).
 	for _, ak := range keys {
 		if err := s.delegations.DeleteByAudience(ctx, ak.ID); err != nil {
 			return fmt.Errorf("deleting access key delegations: %w", err)
@@ -297,6 +328,12 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.accessKeys.Delete(ctx, ak.ID); err != nil {
 			return fmt.Errorf("deleting access key: %w", err)
 		}
+	}
+
+	// Cascade: principals. They reference the tenant row (FK RESTRICT), so they
+	// go before it. Their keys' delegations were revoked above.
+	if err := s.principals.DeleteByTenant(ctx, rec.ID); err != nil {
+		return fmt.Errorf("deleting principals: %w", err)
 	}
 
 	// Cascade: wrap keys (registry rows + their sealed private halves). Every
@@ -318,7 +355,10 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("deleting wrap keys: %w", err)
 	}
 
-	// Cascade: buckets (records; bucket keys are discarded at creation).
+	// Cascade: buckets (records and their policies; bucket keys are discarded at
+	// creation). Postgres cascades a policy with its bucket row, so the row goes
+	// first and no failure leaves a bucket without its policy; the explicit
+	// delete keeps the memory backend in step.
 	bucketIDs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[did.DID], error) {
 		var listOpts []bucket.ListOption
 		if opts.Cursor != nil {
@@ -341,6 +381,9 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err := s.buckets.Delete(ctx, id); err != nil {
 			return fmt.Errorf("deleting bucket: %w", err)
 		}
+		if err := s.policies.DeleteByBucket(ctx, id, nil); err != nil {
+			return fmt.Errorf("deleting bucket policy: %w", err)
+		}
 	}
 
 	// Delegations addressed to the tenant (the bucket -> tenant grants).
@@ -359,6 +402,38 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 	return nil
 }
 
+// revokeKeyDelegations publishes, in one request signed by the tenant, a
+// revocation for every delegation the keys hold, and removes them in the same
+// delegation-store write, so a failed publish leaves every key's delegations
+// in place. Nothing is published when they hold none.
+func (s *Service) revokeKeyDelegations(ctx context.Context, log *zap.Logger, tenantID did.DID, keys []accesskey.Record) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	audiences := make([]did.DID, len(keys))
+	for i, ak := range keys {
+		audiences[i] = ak.ID
+	}
+	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
+	if err != nil {
+		return err
+	}
+	// The publish runs while the keys' delegations are locked, so the whole
+	// write is bounded at the batch deadline, as the rotator's is.
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		var all []ucan.Delegation
+		for _, held := range current {
+			all = append(all, held...)
+		}
+		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, all); err != nil {
+			return nil, fmt.Errorf("revoking the tenant's key delegations: %w", err)
+		}
+		return nil, nil
+	})
+}
+
 // cleanupKey removes an orphaned tenant key after a provisioning failure. It runs
 // on a context detached from the request so a client disconnect — which cancels
 // ctx — cannot abort the cleanup partway.
@@ -368,17 +443,9 @@ func (s *Service) cleanupKey(ctx context.Context, log *zap.Logger, vaultKey stri
 	}
 }
 
-// deactivateTenantDID publishes a tombstone for the tenant's did:plc, signed with
-// its rotation key from the vault. If the DID is already deactivated it is a no-op.
-func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID) error {
-	last, err := plcClient.Last(ctx, tenantID)
-	if err != nil {
-		if _, ok := errors.AsType[*plc.DeactivatedDIDError](err); ok {
-			return nil // already deactivated
-		}
-		return fmt.Errorf("fetching last operation: %w", err)
-	}
-
+// deactivateTenantDID publishes a tombstone for the tenant's did:plc after its
+// last operation, signed with its rotation key from the vault.
+func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID, last *plc.SignedOperation) error {
 	keyBytes, err := secrets.Read(ctx, vaultKey)
 	if err != nil {
 		return fmt.Errorf("reading tenant key: %w", err)

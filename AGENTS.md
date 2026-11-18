@@ -2,18 +2,51 @@
 
 Tenant-management service for the Forge network. Hilt owns tenants, their access
 keys, and their buckets — plus the UCAN delegations and key material that back
-them. It exposes two APIs and talks to one external service:
+them. It exposes two APIs and talks to three external services:
 
-- **Tenant REST API** (`pkg/api`, echo) — partner-facing CRUD for tenants and
-  access keys, guarded by a pre-shared partner key.
+- **Tenant REST API** (`pkg/api`, echo) — partner-facing CRUD for tenants,
+  access keys and principals, guarded by a pre-shared partner
+  key. `POST /tenants/{id}/access-keys` creates both key kinds. Without
+  `principalId` it is a **service key**: it carries its own `permissions` and
+  `buckets`, and the tenant→access-key delegations for them are issued at
+  creation. With `principalId` it is a **principal-bound key**: it takes no
+  permissions or buckets (both stored as `NULL`) and names a principal (the
+  console's `principalId`). What that principal may do on a bucket is the
+  bucket policy's effective set for it, and the key holds, over each bucket
+  the principal can reach, the tenant→access-key delegations for the Forge
+  commands that set maps to (`pkg/grant`), rewritten on every policy change.
+  Each authorize evaluates the policy and re-delegates from the key to the
+  gateway, as a service key does. Removing a principal tombstones its row
+  (`deleted_at`): no read returns it, and a later `PUT` for the same id
+  revives it with no keys and named in no statement.
 - **Hilt UCAN RPC API** (`pkg/rpc`, ucantone server mounted at `POST /`) — the
   `/s3/*` commands Ingot (the S3 gateway) invokes: `/s3/request/authorize`,
-  `/s3/bucket/{create,delete,info,list}`; and the self-issued admin commands
+  `/s3/bucket/{create,delete,info,list,policy}`; and the self-issued admin
+  commands. `/s3/bucket/policy` carries the S3 GetBucketPolicy,
+  PutBucketPolicy and DeleteBucketPolicy operations (the request's method
+  selects), reached with a service key holding the matching permission; a
+  PUT's body must hash to the signed payload hash, and If-Match /
+  If-None-Match are optional signed headers (absent means unconditional).
+  The admin commands are
   `/admin/provider/{add,list}` and `/admin/provider/nodes/set` (`hilt client admin`).
+  The route takes no credential and an invocation's issuer is resolved before
+  its signature is checked, so a `did:web` issuer is fetched only when it is
+  Hilt's own DID (answered locally) or a registered provider's
+  (`pkg/fx/provider_resolver.go`). Any other `did:web` is refused without a
+  request; a provider registered while Hilt runs is recognized within ten
+  seconds.
 - **Sprue** (the Forge upload service) — Hilt calls it to provision/inspect a
   bucket's storage space and to manage routing policies (`pkg/client`): each
   provider owns a policy whose candidates are its storage nodes, and every
   bucket's space is pointed at its provider's policy on creation.
+- **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke` to
+  revoke delegations, every revocation of one write in a single request
+  (`PublishBatch`): a deleted key's grants, a deleted bucket's, and the grants
+  a policy change or a principal removal takes off a principal-bound key
+  (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate
+  Swarf records once.
+- **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
+  provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
 
 Module: `github.com/fil-forge/hilt` (Go 1.27). Sibling repos it builds on:
 `ucantone` (UCAN primitives: `did`, `multikey`, `ucan/delegation`, `binding`,
@@ -24,8 +57,11 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 
 - Build / vet / test: `go build ./... && go vet ./... && go test ./...`. Run all
   three after changes — this is the standard loop.
-- Run locally: `go run ./cmd serve` (flags: `--storage=memory --vault=memory` to
-  avoid external deps; see `cmd/main.go` / `pkg/config`).
+- Run locally: `go run ./cmd serve --upload-service-id=<did>
+  --upload-service-url=<url> --upload-product-id=<did>
+  --revocation-service-id=<did> --revocation-service-url=<url>` (all required,
+  no default; add `--storage=memory --vault=memory` to avoid external deps; see
+  `cmd/main.go` / `pkg/config`).
 - Postgres and OpenBao-backed tests use testcontainers and **skip when Docker is
   unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
   only exercises the memory backends; run with Docker for full coverage.
@@ -41,7 +77,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   images Docker never re-pulls — `docker pull` them when the stack misbehaves,
   or override per run with `HILT_ITEST_UPLOAD_IMAGE` / `HILT_ITEST_PIRI_IMAGE`
   / `HILT_ITEST_INGOT_IMAGE` / `HILT_ITEST_SWARF_IMAGE` / `HILT_ITEST_PIRI_BINARY`
-  / `HILT_ITEST_SWARF_BINARY`. CI runs the suite on
+  / `HILT_ITEST_SWARF_BINARY` / `HILT_ITEST_INGOT_BINARY`. A binary override
+  wants a static linux build for the Docker host's architecture
+  (`GOOS=linux GOARCH=<host arch> CGO_ENABLED=0 GOWORK=off go build`), and is
+  how the IAM scenarios run against ingot changes that the `:main` image does
+  not carry yet. Until the published `:main` ingot image carries the IAM
+  changes, the IAM scenarios skip unless `HILT_ITEST_INGOT_BINARY` is set (or
+  `HILT_ITEST_IAM=1`); drop that guard once it does. CI runs the suite after
+  the unit job, on pull requests, on pushes to `main`, and on manual dispatch
+  (`.github/workflows/go-test.yml`). It sets neither override, so the IAM
+  scenarios stay skipped there until the published image carries the change.
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 
@@ -60,11 +105,23 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/sigv4` — stdlib-only SigV4 / SigV4a verification, key derivation
   (`DeriveKey`), and local verification (`VerifyWithKey`).
 - `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider}` — each an interface
-  with `memory` and `postgres` backends.
+- `pkg/bucketpolicy` — bucket policy evaluation over libforge's
+  `s3bkt.BucketPolicy` (`Decode`, `Validate`, `Canonical`, `Effective`,
+  `Changed`); pure, no store or transport dependencies. The document type,
+  its JSON parsing and structural checks, ETag calculation, and the policy
+  action allowlist live in libforge `commands/s3/bucket`. The package doc has
+  the document shape.
+- `pkg/grant` — an access key's stored delegations: `Issue` builds the
+  tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
+  key's set as its policies change. See the package doc.
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy}` —
+  each an interface with `memory` and `postgres` backends.
+- `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
+  lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
-- `pkg/client` — clients for external services (the Sprue `UploadClient`).
+- `pkg/client` — clients for external services: the Sprue `UploadClient`, and
+  `pkg/client/management`, the partner-key REST client for the tenant API.
 - `pkg/tracing` — OpenTelemetry: `Setup` installs the OTLP exporter for
   `serve`; the Echo server-span middleware; `SpanNamer`, which names a UCAN
   request's span for its commands; `Handler`, which gives each invocation its
@@ -82,6 +139,24 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   implementations kept in lockstep and exercised by one backend-parametrized test
   suite (`<entity>_test.go`). Add a method to all three (interface + both backends)
   and cover it in that suite.
+- **Locking and callbacks**: a write that another service must learn about runs
+  in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
+  caller-supplied callback (`fn`, which runs inside the write before it takes
+  effect), commit. The callback's ctx carries
+  the transaction (`pglock.WithTx`), and a store that opens its own through
+  `pglock.Begin` joins it, so what the callback writes commits with the
+  caller's write or not at all. A policy write's callback rewrites the
+  affected keys' delegations and publishes the revocations before anything is
+  stored, so a failure before the commit, a failed publish included, rolls the
+  write and the rotation back together and leaves the principal with its old
+  access, never with more; a publish that succeeded followed by a commit that
+  failed leaves revoked grants without a replacement, the one window the
+  gateway's revoked set covers (`pkg/api/service/bucketpolicy` and
+  `grant.Rotator` document the sequence). A reader that
+  must not be answered from a snapshot older than an in-flight write passes
+  `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
+  `store.LockTimeout` and a statement that gives up returns
+  `store.ErrLockTimeout`, which the caller retries.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an
@@ -106,15 +181,53 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   the service invokes it on itself, and put the check in middleware rather than
   in the handler.
 - **Authorization**: signature-bearing S3 commands authenticate via the
-  `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == tenant's
-  provider + region served by that provider), which also classifies the operation
-  and resolves every bucket it addresses within the tenant and the key's scope. A
+  `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == the
+  provider registered for the request's signing region), which also classifies
+  the operation and resolves every bucket it addresses within the tenant, the
+  key's scope, and that provider. Tenants are region-free; a bucket is bound to
+  the provider (region) it was created through and only that provider may act on
+  it (`BucketRegionMismatchError` otherwise).
+  Classification mirrors the gateway's router (`pkg/rpc/service/auth/operation.go`):
+  `subresources` is S3's subresource vocabulary, each marked supported or
+  not, and `bucketRoutes` / `objectRoutes` give the operation a supported
+  one selects per method. A request naming two subresources, an unsupported
+  one, or a route Hilt does not authorize is refused; other query parameters
+  are ignored, as S3 ignores them. When a versitygw bump serves a new
+  subresource, mark it supported and give it a route (and an operation) or
+  it stays refused. A
   copy (`x-amz-copy-source` on a PUT) is two decisions: the write on the
-  destination and `s3:GetObject` on the source, and the header must be a signed
-  header. Command-specific S3-permission checks stay in each handler.
-  `/s3/bucket/info` carries no signed request, so it authorizes on the
-  invocation issuer instead: the issuer must be the provider of the bucket's
-  tenant, and the access key in the arguments must belong to that same tenant.
+  destination and `s3:GetObject` on the source (`s3:GetObjectVersion` when the
+  source names a versionId). An operation S3 gives a second permission on its
+  own bucket (`companionPermission`: GetObjectAttributes needs `s3:GetObject`
+  too) is checked for both, and so is a header that adds one
+  (`classification.readHeaders`: lock and tagging headers on a write,
+  `x-amz-bypass-governance-retention` on a delete or retention write,
+  `x-amz-bucket-object-lock-enabled` on CreateBucket). Every header a
+  decision is taken from must be a signed header, which `RequirementsFor`
+  refuses too for the gateway's local check. A body is read only for the
+  operations `Operation.ReadsBody` names (DeleteObjects: an entry naming a
+  version adds `s3:DeleteObjectVersion`); the gateway attaches the body for
+  those alone, and it must be bound to the signature (the payload hash, or a
+  signed checksum header under an unsigned payload) before it is read;
+  `MaxBodySize` matches the codec's limit on the field. Never
+  widen that set to a write that streams its body; the policy PUT carries
+  its document on its own command. Command-specific S3-permission checks
+  stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
+  each per-request delegation keyed to itself. The cleanup commands among
+  them (`/blob/remove`, `/blob/abort`, `/upload/remove`) are also issued by
+  the tenant for `CleanupLifetime` (8 days) past the next UTC midnight plus
+  the clock skew, when the gateway stops reusing the response, keyed to the
+  chain through the
+  bucket's root, which rides back with them, so cleanup the gateway schedules
+  outlives the key. The gateway must authorize requests locally only on
+  chains the access key issued, or these would stand in for a request's
+  authority once the key expires.
+  `/s3/bucket/info` carries no
+  signed request, so it authorizes on the invocation issuer instead: the issuer
+  must be the provider of the bucket's tenant, and the access key in the
+  arguments must belong to that same tenant. It answers the proof chains from
+  the bucket root through the key's stored grants over the bucket, and a
+  principal-bound key's effective actions as its permissions.
 - **Identities & keys**: tenants are secp256k1 → did:plc; access keys and buckets
   are ed25519 → did:key. Build issuers with `multikey.NewIssuer(did, signer)`. Bucket
   keys are **ephemeral** — used once to sign the bucket→tenant root delegation, then
@@ -130,6 +243,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `fx.ValidateApp(appfx.AppModule(cfg), fx.NopLogger)` returns no error (and errors
   for an invalid/unknown selection). This proves every module combination yields a
   graph with all dependencies satisfied, without starting the app.
+
+## Observability
+
+When a change adds or alters behavior someone depends on, decide how on-call
+would see it working and see it fail, and add what's useful in the same PR:
+logs, complete trace spans, and an alert or dashboard panel in
+fil-forge/infra-central. Skip it for changes nothing operational depends on.
+When a feature's health is best read as a number, say so in the PR
+description, naming the metric and [FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143).
+`docs/observability.md` says how to do each.
 
 ## Security
 

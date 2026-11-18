@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 	"github.com/fil-forge/libforge/testutil"
@@ -12,6 +13,7 @@ import (
 	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
 
@@ -23,6 +25,7 @@ func TestNewUploadClient(t *testing.T) {
 		return config.UploadConfig{
 			ServiceID:  testutil.RandomDID(t).String(),
 			ServiceURL: "http://sprue.test",
+			ProductID:  testutil.RandomDID(t).String(),
 			Proofs:     proofs,
 		}
 	}
@@ -66,8 +69,57 @@ func TestNewUploadClient(t *testing.T) {
 		require.NotNil(t, c)
 	})
 
+	missingCases := map[string]struct {
+		unset       func(*config.UploadConfig)
+		wantMessage string
+	}{
+		"service DID is unset": {
+			unset:       func(c *config.UploadConfig) { c.ServiceID = "" },
+			wantMessage: "upload.service_id is required: set HILT_UPLOAD_SERVICE_ID or --upload-service-id",
+		},
+		"service URL is unset": {
+			unset:       func(c *config.UploadConfig) { c.ServiceURL = "" },
+			wantMessage: "upload.service_url is required: set HILT_UPLOAD_SERVICE_URL or --upload-service-url",
+		},
+		"product DID is unset": {
+			unset:       func(c *config.UploadConfig) { c.ProductID = "" },
+			wantMessage: "upload.product_id is required: set HILT_UPLOAD_PRODUCT_ID or --upload-product-id",
+		},
+	}
+	for desc, tc := range missingCases {
+		t.Run("errors when "+desc, func(t *testing.T) {
+			cfg := baseCfg("")
+			tc.unset(&cfg)
+			_, err := appfx.NewUploadClient(id, cfg, zap.NewNop())
+			require.EqualError(t, err, tc.wantMessage)
+		})
+	}
+
+	t.Run("invalid product DID errors", func(t *testing.T) {
+		cfg := baseCfg("")
+		cfg.ProductID = "not-a-did"
+		_, err := appfx.NewUploadClient(id, cfg, zap.NewNop())
+		require.ErrorContains(t, err, "upload.product_id")
+	})
+
 	t.Run("invalid proofs (neither container nor file) errors", func(t *testing.T) {
 		_, err := appfx.NewUploadClient(id, baseCfg("not-a-container-and-not-a-file"), zap.NewNop())
 		require.Error(t, err)
 	})
+}
+
+// TestUploadClientRequiresConfig checks that an app built without the upload
+// settings fails while it is being constructed, which is when `hilt serve`
+// exits, rather than when it first calls Sprue.
+func TestUploadClientRequiresConfig(t *testing.T) {
+	app := fx.New(
+		fx.Supply(&config.Config{}),
+		appfx.ConfigModule,
+		appfx.LoggerModule,
+		appfx.IdentityModule,
+		fx.Provide(appfx.NewUploadClient),
+		fx.NopLogger,
+		fx.Invoke(func(*upload.Client) {}),
+	)
+	require.ErrorContains(t, app.Err(), "upload.service_id is required")
 }

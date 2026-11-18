@@ -4,6 +4,8 @@ import (
 	"slices"
 	"testing"
 
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -14,7 +16,9 @@ func TestValid(t *testing.T) {
 	for _, p := range []string{
 		"s3:GetObject", "s3:PutObject", "s3:DeleteObject",
 		"s3:CreateBucket", "s3:ListAllMyBuckets", "s3:DeleteBucket",
+		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
 		"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+		"s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
 	} {
 		require.True(t, s3perm.Valid(p), p)
 	}
@@ -104,7 +108,7 @@ func TestCommandsFor(t *testing.T) {
 	})
 
 	t.Run("bucket-level permissions map to no commands", func(t *testing.T) {
-		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets"))
+		require.Empty(t, strs("s3:CreateBucket", "s3:ListAllMyBuckets", "s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy"))
 	})
 
 	t.Run("deleting a bucket unwinds the blobs its space holds", func(t *testing.T) {
@@ -161,6 +165,11 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 		{"s3:GetObject", "s3:GetObjectRetention"},
 		{"s3:GetObject", "s3:GetObjectLegalHold"},
 		{"s3:ListBucket", "s3:ListBucketVersions"},
+		// A write that tags the version it creates is authorized under the
+		// write's re-delegation, with s3:PutObjectTagging checked beside it
+		// (auth.classification.readHeaders); the lock pairs above cover the
+		// lock headers the same way.
+		{"s3:PutObject", "s3:PutObjectTagging"},
 	} {
 		// Guard against the check going vacuous if a set is ever emptied.
 		require.NotEmpty(t, strs(c.specialized), c.specialized)
@@ -169,6 +178,56 @@ func TestClassifiedPermissionsCoverTheirShapes(t *testing.T) {
 				"%s classifies as %s, which must therefore grant %s", c.specialized, c.classified, cmd)
 		}
 	}
+}
+
+// TestOperationPermissionCoversCompanion pins that an operation's own
+// permission grants every command its companion does. The authorize handler
+// re-delegates the commands of the operation's own permission alone, so a
+// companion that mapped to a command outside that set would leave the gateway
+// a command short at runtime.
+func TestOperationPermissionCoversCompanion(t *testing.T) {
+	perms := auth.OpGetObjectAttributes.Permissions()
+	require.Len(t, perms, 2)
+	own, companion := perms[0], perms[1]
+	require.NotEmpty(t, strs(companion), companion)
+	for _, cmd := range strs(companion) {
+		require.Contains(t, strs(own), cmd, "%s needs %s, which must therefore grant %s", own, companion, cmd)
+	}
+}
+
+// TestPolicyAction pins the policy vocabulary: every recognized permission except
+// the three bucket-level actions, which a policy can neither grant nor withhold.
+func TestPolicyAction(t *testing.T) {
+	for _, p := range []string{
+		"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
+		"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+	} {
+		require.True(t, s3bkt.PolicyAction(p), p)
+	}
+	for _, p := range []string{
+		"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
+		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+		"", "s3:Frobnicate", "s3:getobject",
+	} {
+		require.False(t, s3bkt.PolicyAction(p), p)
+	}
+}
+
+// TestPolicyActions pins the wildcard expansion: sorted, every PolicyAction and
+// nothing else.
+func TestPolicyActions(t *testing.T) {
+	actions := s3bkt.PolicyActions()
+	require.True(t, slices.IsSorted(actions))
+	require.Len(t, actions, 25)
+	for _, p := range actions {
+		require.True(t, s3bkt.PolicyAction(p), p)
+	}
+	for _, p := range []string{"s3:CreateBucket", "s3:DeleteBucket", "s3:ListAllMyBuckets",
+		"s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration", "s3:PutBucketCORS", s3bkt.PolicyWildcard} {
+		require.NotContains(t, actions, p)
+	}
+	require.False(t, s3bkt.PolicyAction(s3bkt.PolicyWildcard))
 }
 
 // TestOperationPermissionsAreValid keeps the two hardcoded permission lists in
@@ -199,6 +258,25 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 		{"PUT", "https://s3.example.com/bkt/k?retention"},
 		{"PUT", "https://s3.example.com/bkt/k?legal-hold"},
 		{"DELETE", "https://s3.example.com/bkt/k?versionId=v"},
+		{"GET", "https://s3.example.com/bkt?encryption"},
+		{"PUT", "https://s3.example.com/bkt?encryption"},
+		{"DELETE", "https://s3.example.com/bkt?encryption"},
+		{"POST", "https://s3.example.com/bkt?delete"},
+		{"GET", "https://s3.example.com/bkt?location"},
+		{"GET", "https://s3.example.com/bkt?acl"},
+		{"GET", "https://s3.example.com/bkt?cors"},
+		{"GET", "https://s3.example.com/bkt?tagging"},
+		{"PUT", "https://s3.example.com/bkt?tagging"},
+		{"DELETE", "https://s3.example.com/bkt?tagging"},
+		{"GET", "https://s3.example.com/bkt?versioning"},
+		{"PUT", "https://s3.example.com/bkt?versioning"},
+		{"GET", "https://s3.example.com/bkt?object-lock"},
+		{"PUT", "https://s3.example.com/bkt?object-lock"},
+		{"GET", "https://s3.example.com/bkt/k?tagging"},
+		{"PUT", "https://s3.example.com/bkt/k?tagging"},
+		{"DELETE", "https://s3.example.com/bkt/k?tagging"},
+		{"GET", "https://s3.example.com/bkt/k?attributes"},
+		{"GET", "https://s3.example.com/bkt?policyStatus"},
 	}
 	for _, r := range reqs {
 		op, err := auth.OperationFor(s3.Request{Method: r.method, URL: r.url})
@@ -220,4 +298,5 @@ func TestOperationPermissionsAreValid(t *testing.T) {
 	require.Equal(t, auth.OpUploadPartCopy, op)
 	require.True(t, s3perm.Valid(op.Permission()))
 	require.True(t, s3perm.Valid(auth.SourcePermission))
+	require.True(t, s3perm.Valid(auth.SourceVersionPermission))
 }

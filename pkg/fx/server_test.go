@@ -9,6 +9,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/build"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
+	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -17,7 +18,7 @@ func TestServerInfoRoute(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id})
+	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providermemory.New(), Logger: zap.NewNop()})
 	require.NoError(t, err)
 
 	e := appfx.NewEchoServer(appfx.ServerParams{
@@ -65,7 +66,7 @@ func TestHealthRoute(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Logger: zap.NewNop()})
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providermemory.New(), Logger: zap.NewNop()})
 	require.NoError(t, err)
 
 	e := appfx.NewEchoServer(appfx.ServerParams{
@@ -89,7 +90,7 @@ func TestDIDDocumentRoute(t *testing.T) {
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Logger: zap.NewNop()})
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providermemory.New(), Logger: zap.NewNop()})
 	require.NoError(t, err)
 
 	e := appfx.NewEchoServer(appfx.ServerParams{
