@@ -64,8 +64,21 @@ func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOp
 	return f.Store.Get(ctx, id, opts...)
 }
 
+// disablingTenants disables each tenant right after it is looked up, landing a
+// concurrent disable deterministically between Create's lookup and its insert.
+type disablingTenants struct{ tenant.Store }
+
+func (s disablingTenants) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
+	rec, err := s.Store.GetByExternalID(ctx, externalID)
+	if err == nil {
+		err = s.SetStatus(ctx, rec.ID, tenant.Disabled)
+	}
+	return rec, err
+}
+
 type deps struct {
 	svc         *accesskeysvc.Service
+	tenants     tenant.Store
 	accessKeys  accesskeystore.Store
 	principals  principal.Store
 	delegations delegationstore.Store
@@ -84,8 +97,9 @@ func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeys
 }
 
 func memoryBackend(t *testing.T) backend {
+	tenants := tenantmemory.New()
 	return backend{
-		tenants: tenantmemory.New(), accessKeys: accesskeymemory.New(), principals: principalmemory.New(),
+		tenants: tenants, accessKeys: accesskeymemory.New(accesskeymemory.WithTenants(tenants)), principals: principalmemory.New(),
 		buckets: bucketmemory.New(), delegations: delegationmemory.New(), policies: bucketpolicymemory.New(),
 		providerID: testutil.RandomDID(t),
 	}
@@ -162,6 +176,7 @@ func setupWith(t *testing.T, b backend, wrapAccessKeys ...func(accesskeystore.St
 	swarf := &testutil.FakeSwarf{}
 	return deps{
 		svc:         accesskeysvc.New(zap.NewNop(), tenants, keys, principals, buckets, policies, delegations, secrets, swarf),
+		tenants:     tenants,
 		accessKeys:  accessKeys,
 		principals:  principals,
 		delegations: delegations,
@@ -221,6 +236,43 @@ func TestCreate(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "missing", "k1", []string{"s3:GetObject"}, nil, nil, nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantNotFound)
+	})
+
+	for _, backend := range []struct {
+		name  string
+		setup func(*testing.T, ...func(accesskeystore.Store) accesskeystore.Store) deps
+	}{{"memory", setup}, {"postgres", setupPostgres}} {
+		for _, key := range []struct {
+			name      string
+			perms     []string
+			principal *string
+		}{
+			{"service key", []string{"s3:GetObject"}, nil},
+			{"principal-bound key", nil, new("alice")},
+		} {
+			t.Run("refuses a "+key.name+" for a disabled tenant on "+backend.name, func(t *testing.T) {
+				d := backend.setup(t)
+				require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
+				_, _, err := d.svc.Create(ctx, "tenant-1", "k1", key.perms, nil, key.principal, nil)
+				require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
+				keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+				require.NoError(t, err)
+				require.Empty(t, keys)
+			})
+		}
+	}
+
+	t.Run("rejects a tenant disabled after the lookup", func(t *testing.T) {
+		// The tenant is disabled between Create's lookup and the key's insert, the
+		// window in which a deletion could snapshot the tenant's keys without it.
+		b := memoryBackend(t)
+		b.tenants = disablingTenants{b.tenants}
+		d := setupWith(t, b)
+		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil, nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
+		keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, keys)
 	})
 
 	t.Run("rejects a duplicate name", func(t *testing.T) {

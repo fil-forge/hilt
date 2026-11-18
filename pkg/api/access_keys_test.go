@@ -65,9 +65,10 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 
 func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	t.Helper()
+	tenants := tenantmemory.New()
 	deps := &accessKeyDeps{
-		tenants:     tenantmemory.New(),
-		accessKeys:  accesskeymemory.New(),
+		tenants:     tenants,
+		accessKeys:  accesskeymemory.New(accesskeymemory.WithTenants(tenants)),
 		principals:  principalmemory.New(),
 		buckets:     bucketmemory.New(),
 		delegations: delegationmemory.New(),
@@ -253,6 +254,14 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		keys, err := deps.accessKeys.ListByTenant(ctx, deps.tenantID)
 		require.NoError(t, err)
 		require.Empty(t, keys)
+	})
+
+	t.Run("disabled tenant is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		require.NoError(t, deps.tenants.SetStatus(t.Context(), deps.tenantID, tenant.Disabled))
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantDisabled", Message: "tenant is disabled"}, decodeError(t, rec))
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {

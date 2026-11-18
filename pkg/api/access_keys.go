@@ -28,7 +28,8 @@ func accessKeyHTTPError(log *zap.Logger, err error) error {
 		errors.Is(err, principalsvc.ErrInvalidPrincipalID):
 		return httpError(http.StatusUnprocessableEntity, err)
 	case errors.Is(err, accesskeysvc.ErrNameConflict),
-		errors.Is(err, accesskeysvc.ErrConcurrentChange):
+		errors.Is(err, accesskeysvc.ErrConcurrentChange),
+		errors.Is(err, accesskeysvc.ErrTenantDisabled):
 		return httpError(http.StatusConflict, err)
 	default:
 		log.Error("request failed", zap.Error(err))

@@ -14,6 +14,7 @@ import (
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
@@ -31,20 +32,28 @@ const (
 var storeKinds = []StoreKind{Memory, Postgres}
 
 // seeder ensures the referenced rows exist so the access_key foreign keys are
-// satisfied: the parent tenant (and its provider), and any principals a key is
-// bound to. It is a no-op for the memory store, which does not enforce
-// referential integrity.
+// satisfied and Add can check the tenant's status: the parent tenant, and any
+// principals a key is bound to. disable sets a seeded tenant's status to
+// disabled. The memory store does not enforce referential integrity, so its
+// principal seed is a no-op.
 type seeder struct {
 	tenant    func(t *testing.T, tenantID did.DID)
 	principal func(t *testing.T, tenantID did.DID, externalID string)
+	disable   func(t *testing.T, tenantID did.DID)
 }
 
 func makeStore(t *testing.T, k StoreKind) (accesskey.Store, seeder) {
 	switch k {
 	case Memory:
-		return accesskeymemory.New(), seeder{
-			tenant:    func(*testing.T, did.DID) {},
+		tenants := tenantmemory.New()
+		return accesskeymemory.New(accesskeymemory.WithTenants(tenants)), seeder{
+			tenant: func(t *testing.T, tenantID did.DID) {
+				require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
+			},
 			principal: func(*testing.T, did.DID, string) {},
+			disable: func(t *testing.T, tenantID did.DID) {
+				require.NoError(t, tenants.SetStatus(t.Context(), tenantID, tenant.Disabled))
+			},
 		}
 	case Postgres:
 		pool := htestutil.PostgresOrSkip(t)
@@ -62,6 +71,9 @@ func postgresSeeder(pool *pgxpool.Pool) seeder {
 		},
 		principal: func(t *testing.T, tenantID did.DID, externalID string) {
 			require.NoError(t, principals.Add(t.Context(), tenantID, externalID))
+		},
+		disable: func(t *testing.T, tenantID did.DID) {
+			require.NoError(t, tenants.SetStatus(t.Context(), tenantID, tenant.Disabled))
 		},
 	}
 }
@@ -360,6 +372,18 @@ func TestAccessKeyStore(t *testing.T) {
 				require.Empty(t, got)
 			})
 
+			t.Run("Add returns ErrTenantDisabled for a disabled tenant", func(t *testing.T) {
+				tenantID := testutil.RandomDID(t)
+				seed.tenant(t, tenantID)
+				seed.disable(t, tenantID)
+
+				err := s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "k", nil, "s3:GetObject"))
+				require.ErrorIs(t, err, accesskey.ErrTenantDisabled)
+				recs, err := s.ListByTenant(t.Context(), tenantID)
+				require.NoError(t, err)
+				require.Empty(t, recs)
+			})
+
 			t.Run("Delete removes the row and is idempotent", func(t *testing.T) {
 				id := testutil.RandomDID(t)
 				tenantID := testutil.RandomDID(t)
@@ -469,6 +493,35 @@ func TestAccessKeyStorePostgresLocking(t *testing.T) {
 	require.NoError(t, committed)
 	require.NoError(t, got)
 	require.Equal(t, id, rec.ID)
+}
+
+// TestAccessKeyStorePostgresTenantLock pins that Add waits for an uncommitted
+// disable of the tenant and then refuses the key, so a tenant deletion's
+// snapshot of its keys cannot miss one added concurrently.
+func TestAccessKeyStorePostgresTenantLock(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
+	s := accesskeypostgres.New(pool)
+	tenantID := testutil.RandomDID(t)
+	postgresSeeder(pool).tenant(t, tenantID)
+
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer tx.Rollback(t.Context())
+
+	committed, added := htestutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			if _, err := tx.Exec(t.Context(), `UPDATE tenant SET status = 'disabled' WHERE id = $1`, tenantID.String()); err != nil {
+				return err
+			}
+			close(entered)
+			<-release
+			return tx.Commit(t.Context())
+		},
+		func() error {
+			return s.Add(context.Background(), service(t, testutil.RandomDID(t), tenantID, "k", nil, "s3:GetObject"))
+		})
+	require.NoError(t, committed)
+	require.ErrorIs(t, added, accesskey.ErrTenantDisabled)
 }
 
 func TestNewServiceKey(t *testing.T) {

@@ -7,6 +7,7 @@ package accesskey
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -14,6 +15,9 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
+
+// ErrTenantDisabled is returned by [Store.Add] when the tenant is disabled.
+var ErrTenantDisabled = errors.New("tenant is disabled")
 
 // Record is one stored access key.
 type Record struct {
@@ -146,7 +150,11 @@ type Store interface {
 	// the input fails [Input.Validate] or, on Postgres, the principal does not
 	// exist for the tenant. It returns [store.ErrRecordExists] if a record with
 	// the same ID already exists, if a service key of the tenant already holds
-	// the name, or if the principal already holds a key of the name.
+	// the name, or if the principal already holds a key of the name. It
+	// returns [ErrTenantDisabled] if the tenant is disabled (or, where
+	// referential integrity is enforced, gone), checked atomically with the
+	// insert: a tenant deletion, which requires a disabled tenant, never misses
+	// a key added concurrently.
 	Add(ctx context.Context, in Input) error
 	// Get retrieves the record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID. With
