@@ -46,6 +46,7 @@ func NewEchoServer(p ServerParams) *echo.Echo {
 	// The server span goes first, so it times the whole request.
 	e.Use(tracing.Middleware())
 	e.Use(echomiddleware.Recover())
+	e.Use(middleware.RequestID())
 	e.Use(middleware.RequestLogger(p.Logger))
 
 	e.GET("/", serverInfoHandler(p.Identity))

@@ -3,6 +3,7 @@ package grant_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/fil-forge/libforge/testutil"
 
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/reqlog"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -340,6 +342,41 @@ func TestRotate(t *testing.T) {
 		require.Equal(t, d.photos.String(), fields["bucket"])
 		require.Contains(t, fields["error"], boom.Error())
 		require.Contains(t, fields, "took")
+	})
+
+	t.Run("a rotation logs its request, principals and rewritten keys", func(t *testing.T) {
+		d := setup(t, nil)
+		core, logs := observer.New(zapcore.InfoLevel)
+		rotator := grant.NewRotator(zap.New(core), d.delegations, d.accessKeys, d.secrets, d.swarf)
+		inv := htestutil.RandomCID(t)
+		rctx := reqlog.WithInvocation(reqlog.WithRequestID(ctx, "req-1"), inv)
+		require.NoError(t, rotator.Rotate(rctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
+
+		entries := logs.FilterMessage("prepared delegation rotation").All()
+		require.Len(t, entries, 1)
+		fields := entries[0].ContextMap()
+		var names []string
+		for _, k := range d.alice {
+			names = append(names, k.String())
+		}
+		slices.Sort(names)
+		var keys []any
+		for _, n := range names {
+			keys = append(keys, n)
+		}
+		delete(fields, "started")
+		delete(fields, "took")
+		require.Equal(t, map[string]any{
+			"request_id":        "req-1",
+			"invocation":        inv.String(),
+			"tenant":            d.tenant.DID().String(),
+			"bucket":            d.photos.String(),
+			"keys":              int64(len(d.alice)),
+			"principals_count":  int64(1),
+			"principals":        []any{"alice"},
+			"access_keys_count": int64(len(d.alice)),
+			"access_keys":       keys,
+		}, fields)
 	})
 
 	t.Run("a rotation that fails before its keys are listed is logged too", func(t *testing.T) {

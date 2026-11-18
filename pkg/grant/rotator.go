@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/reqlog"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
@@ -83,8 +84,10 @@ func NewRotator(
 // revocation. An empty action set leaves the key with nothing over the bucket.
 func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) (err error) {
 	start := time.Now()
-	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
+	principals := slices.Sorted(maps.Keys(actions))
+	log := r.logger.With(append(reqlog.Fields(ctx), zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))...)
 	var keys []accesskeystore.Record
+	var rewritten []did.DID
 	defer func() {
 		// The key count is what a rotation's cost follows, and [BatchTimeout]
 		// is what it runs out against, so both go in the log. The handler
@@ -92,7 +95,15 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 		// logged here, the listing's included. A policy write runs Rotate
 		// inside its own transaction, which commits after this returns, so
 		// success is logged as prepared: the write can still roll it back.
-		fields := []zap.Field{zap.Int("keys", len(keys)), zap.Duration("took", time.Since(start))}
+		// The start, the principals and the keys rewritten let an operator
+		// tell whether an access key created meanwhile was among them.
+		fields := []zap.Field{
+			zap.Int("keys", len(keys)),
+			zap.Time("started", start),
+			zap.Duration("took", time.Since(start)),
+		}
+		fields = append(fields, listed("principals", principals)...)
+		fields = append(fields, listed("access_keys", rewritten)...)
 		if err != nil {
 			log.Warn("rotating delegations failed", append(fields, zap.Error(err))...)
 		} else if len(keys) > 0 {
@@ -101,7 +112,7 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 	}()
 	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
 	defer cancel()
-	keys, issuer, err := r.load(ctx, tenant, slices.Sorted(maps.Keys(actions))...)
+	keys, issuer, err := r.load(ctx, tenant, principals...)
 	if err != nil || len(keys) == 0 {
 		return err
 	}
@@ -142,6 +153,7 @@ func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions ma
 		if err := PublishRevocations(ctx, log, r.revocations, issuer, revoked); err != nil {
 			return nil, err
 		}
+		rewritten = slices.Collect(maps.Keys(next))
 		return next, nil
 	})
 }
@@ -186,6 +198,24 @@ func (r *Rotator) load(ctx context.Context, tenant did.DID, principals ...string
 		return keys, nil, err
 	}
 	return keys, issuer, nil
+}
+
+// maxListed is how many items a log line names before it gives a count only.
+const maxListed = 10
+
+// listed logs items under key, sorted, when there are at most [maxListed] of
+// them, and their count under key+"_count" always.
+func listed[T any](key string, items []T) []zap.Field {
+	fields := []zap.Field{zap.Int(key+"_count", len(items))}
+	if len(items) > maxListed {
+		return fields
+	}
+	names := make([]string, len(items))
+	for i, item := range items {
+		names[i] = fmt.Sprint(item)
+	}
+	slices.Sort(names)
+	return append(fields, zap.Strings(key, names))
 }
 
 func audiences(keys []accesskeystore.Record) []did.DID {
