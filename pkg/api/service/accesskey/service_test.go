@@ -238,12 +238,29 @@ func TestCreate(t *testing.T) {
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantNotFound)
 	})
 
-	t.Run("rejects a disabled tenant", func(t *testing.T) {
-		d := setup(t)
-		require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
-		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil, nil)
-		require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
-	})
+	for _, backend := range []struct {
+		name  string
+		setup func(*testing.T, ...func(accesskeystore.Store) accesskeystore.Store) deps
+	}{{"memory", setup}, {"postgres", setupPostgres}} {
+		for _, key := range []struct {
+			name      string
+			perms     []string
+			principal *string
+		}{
+			{"service key", []string{"s3:GetObject"}, nil},
+			{"principal-bound key", nil, new("alice")},
+		} {
+			t.Run("refuses a "+key.name+" for a disabled tenant on "+backend.name, func(t *testing.T) {
+				d := backend.setup(t)
+				require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
+				_, _, err := d.svc.Create(ctx, "tenant-1", "k1", key.perms, nil, key.principal, nil)
+				require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
+				keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+				require.NoError(t, err)
+				require.Empty(t, keys)
+			})
+		}
+	}
 
 	t.Run("rejects a tenant disabled after the lookup", func(t *testing.T) {
 		// The tenant is disabled between Create's lookup and the key's insert, the
