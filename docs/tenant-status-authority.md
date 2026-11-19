@@ -1,5 +1,53 @@
 # Tenant status and stored authority
 
+**Rollout blocked.** Tenant key/principal/policy cardinality has no enforced
+upper bound. This draft's all-or-nothing eight-second status reconciliation
+does work proportional to all stored roots, and can repeatedly fail for large
+or adversarial tenants while retaining their prior active status. This is a
+restriction-liveness defect. General rollout requires a scalable tenant-level
+authority fence and the separate lease/acknowledgement protocol decision.
+Neither a larger timeout nor an undocumented quota resolves this guarantee.
+
+## Cardinality evidence
+
+`accesskey.Input.Validate` enforces shape, not a key-count quota;
+`accesskey/postgres.ListByTenant` queries every matching row without `LIMIT`;
+principal/bucket/policy counts have no enforced tenant-wide bound. Status
+reconciliation materializes keys and roots, and replacement authority for every
+key. Principal policies are queried again for each principal-bound key. Swarf's
+client signs and submits one revocation invocation per root in a single batch.
+An expired batch rolls back the status and stored-root transition, retaining
+the prior active status rather than progressively restricting it.
+
+A bounded local benchmark on an Apple M3 Max, one iteration per size:
+
+| Keys | Existing roots | Transition time | Allocated bytes |
+|---:|---:|---:|---:|
+| 128 | 896 | 44.1 ms | 5,218,944 |
+| 512 | 3,584 | 176.7 ms | 20,863,616 |
+| 2,048 | 14,336 | 714.0 ms | 83,844,976 |
+
+These use real grant issuance with memory stores and a deadline-aware fake
+publisher, excluding Postgres, actual revocation-invocation signing, encoding
+and network. They are lower-bound work/allocation observations, **not** a
+production latency estimate or a safe tenant limit. All measured transitions
+succeeded; the evidence does not claim these specific sizes exceeded eight
+seconds. Reproduce with:
+
+```sh
+GOWORK=off go test -count=1 ./pkg/api/service/tenant \
+  -run TestManyKeyRestrictionFailurePreservesPriorStatus \
+  -bench BenchmarkStatusCardinality -benchtime=1x -benchmem
+```
+
+The regression separately seeds 256 keys and delays publication past a
+100-millisecond caller deadline. It confirms the failure leaves the tenant
+active. This proves failure behavior, not a production cardinality threshold.
+The lack of any enforced upper bound makes general restriction completion
+unprovable with this all-or-nothing per-root algorithm. A tenant-level fence
+with bounded request-path enforcement must replace the cardinality-dependent
+security transition; per-key cleanup can then be separately bounded/retried.
+
 The partner status API reconciles status and every current access key's stored
 root delegations. It publishes revocations to Swarf before committing the new
 status and roots in the same Postgres transaction. A publish failure leaves the
