@@ -144,11 +144,27 @@ func (s *Store) ChangeStatus(ctx context.Context, id did.DID, status tenant.Stat
 }
 
 func (s *Store) Delete(ctx context.Context, id did.DID) error {
+	return s.DeleteWithCallback(ctx, id, nil)
+}
+
+func (s *Store) DeleteWithCallback(ctx context.Context, id did.DID, fn func(context.Context, tenant.Record) error) error {
 	release, err := s.hold(ctx, id)
 	if err != nil {
 		return err
 	}
 	defer release()
+	rec, err := s.Get(ctx, id)
+	if err == store.ErrRecordNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fn != nil {
+		if err := fn(ctx, rec); err != nil {
+			return err
+		}
+	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

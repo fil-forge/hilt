@@ -109,14 +109,19 @@ func memoryBackend(t *testing.T) backend {
 // transaction shows. It skips without Docker.
 func setupPostgres(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
 	t.Helper()
+	return setupWith(t, postgresBackend(t), wrapAccessKeys...)
+}
+
+func postgresBackend(t *testing.T) backend {
+	t.Helper()
 	pool := testutil.PostgresOrSkip(t)
 	providerID := testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, "region-1", nil))
-	return setupWith(t, backend{
+	return backend{
 		tenants: tenantpostgres.New(pool), accessKeys: accesskeypostgres.New(pool), principals: principalpostgres.New(pool),
 		buckets: bucketpostgres.New(pool), delegations: delegationpostgres.New(pool), policies: bucketpolicypostgres.New(pool),
 		providerID: providerID,
-	}, wrapAccessKeys...)
+	}
 }
 
 // backend is the stores setupWith builds the service over, and the provider

@@ -22,7 +22,7 @@ test:
 # GOWORK=off keeps it hermetic — the harness builds the hilt binary the same
 # way; drop it to resolve unmerged sibling repos through a parent go.work.
 itest:
-	GOWORK=off go test -tags itest -v -timeout 30m ./itest
+	GOWORK=off go test -count=1 -tags itest -v -timeout 30m ./itest
 
 vet:
 	go vet ./...

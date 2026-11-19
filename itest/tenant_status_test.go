@@ -158,4 +158,17 @@ func testTenantStatusRestrictsWarmCaches(t *testing.T, net *forgeNet) {
 		"restoration must issue fresh readable authority")
 	_, err = targetS3.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(targetBucket), Key: aws.String("restored.txt"), Body: bytes.NewReader([]byte("synthetic restored write"))})
 	require.NoError(t, err)
+	// Exercise the exclusive deletion fence with real Postgres child tables,
+	// PLC and Vault, rather than infer cascade compatibility from mocks.
+	require.NoError(t, net.console.UpdateTenantStatus(ctx, target, api.TenantStatusDisabled))
+	require.NoError(t, net.console.DeleteTenant(ctx, target))
+	require.NoError(t, net.console.DeleteTenant(ctx, target), "completed deletion is idempotent")
+	require.Eventually(t, func() bool {
+		status, _ := fetch(targetURL.URL)
+		return status == http.StatusForbidden && time.Now().Before(expiresNotBefore)
+	}, time.Minute, time.Second,
+		"the deleted tenant's original valid URL remains denied")
+	status, matches = fetch(controlURL.URL)
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, matches)
 }

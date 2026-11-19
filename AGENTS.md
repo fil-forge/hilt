@@ -87,6 +87,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   the unit job, on pull requests, on pushes to `main`, and on manual dispatch
   (`.github/workflows/go-test.yml`). It sets neither override, so the IAM
   scenarios stay skipped there until the published image carries the change.
+  `make itest` disables test-result caching: Hilt source compiled at test runtime
+  and an external Ingot binary override are not complete Go test-cache inputs.
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 

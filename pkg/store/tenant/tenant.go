@@ -80,4 +80,10 @@ type Store interface {
 	// Delete removes the tenant record for a given ID. It is idempotent:
 	// deleting an absent record returns nil.
 	Delete(ctx context.Context, id did.DID) error
+	// DeleteWithCallback holds the tenant fence exclusively, reads the current
+	// record, runs fn and removes the row. An absent row is a no-op. The callback
+	// uses its original context, not an enclosing database transaction: external
+	// PLC/Vault effects and independently committed cascade steps remain retryable
+	// partial work on failure. A callback error retains the tenant row.
+	DeleteWithCallback(ctx context.Context, id did.DID, fn func(context.Context, Record) error) error
 }

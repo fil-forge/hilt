@@ -351,11 +351,28 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	log := s.logger.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
-
-	if rec.Status != tenantstore.Disabled {
-		return ErrTenantNotDisabled
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+	err = s.tenants.DeleteWithCallback(ctx, rec.ID, func(ctx context.Context, current tenantstore.Record) error {
+		// The disabled precondition and destructive work belong to the same
+		// exclusive lifecycle fence as status restoration and grant writers.
+		if current.Status != tenantstore.Disabled {
+			return ErrTenantNotDisabled
+		}
+		return s.deleteDisabled(ctx, current)
+	})
+	if err != nil {
+		return err
 	}
+	s.logger.Info("deleted tenant", zap.Stringer("tenant", rec.ID))
+	return nil
+}
+
+// deleteDisabled runs under the deletion fence. Cascade steps and external
+// PLC/Vault effects retain their existing partial-completion retry semantics;
+// this fence orders competing lifecycle operations, not distributed rollback.
+func (s *Service) deleteDisabled(ctx context.Context, rec tenantstore.Record) error {
+	log := s.logger.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
 
 	signingVaultKey := vault.TenantKeyPath(rec.ID)
 
@@ -467,14 +484,10 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("deleting tenant delegations: %w", err)
 	}
 
-	if err := s.tenants.Delete(ctx, rec.ID); err != nil {
-		return fmt.Errorf("deleting tenant: %w", err)
-	}
 	// Best-effort removal of the tenant's key material.
 	if err := s.secrets.Delete(ctx, signingVaultKey); err != nil {
 		log.Warn("removing signing key from vault", zap.Error(err))
 	}
-	log.Info("deleted tenant")
 	return nil
 }
 

@@ -156,6 +156,10 @@ func (s *Store) WithReadLock(ctx context.Context, id did.DID, fn func(context.Co
 }
 
 func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
+	return s.DeleteWithCallback(ctx, id, nil)
+}
+
+func (s *Store) DeleteWithCallback(ctx context.Context, id did.DID, fn func(context.Context, tenant.Record) error) (err error) {
 	defer func() { err = pglock.MapError(err) }()
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
@@ -167,6 +171,20 @@ func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
 	}
 	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, id.String(), false); err != nil {
 		return err
+	}
+	rec, err := scanRecord(tx.QueryRow(ctx, `SELECT id, external_id, status, created_at, updated_at FROM tenant WHERE id = $1 FOR UPDATE`, id.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fn != nil {
+		// The destructive service cascade retains its existing independently
+		// committed retry steps; PLC and Vault effects cannot join this tx.
+		if err := fn(ctx, rec); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting tenant: %w", err)

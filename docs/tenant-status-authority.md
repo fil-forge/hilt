@@ -28,6 +28,21 @@ change therefore includes an earlier writer's roots or finishes before a later
 writer reads the restricted status. Locks and the grant batch have bounded
 waits; a failed operation must be retried.
 
+Tenant deletion takes that fence exclusively before rechecking `disabled` and
+keeps it across PLC deactivation, the existing cascade and final tenant-row
+deletion. Restoration cannot reopen key creation during the cascade. The
+deletion callback deliberately does not attach its fence transaction to the
+cascade: its database steps and irreversible PLC/Vault effects retain their
+existing partial-completion retry behavior. Failure can leave cleanup to retry;
+the fence does not make external side effects atomic.
+
+Key creation acknowledges success only after its enclosing tenant transaction
+commits. A rollback or lost commit acknowledgement triggers bounded best-effort
+cleanup of that call's freshly generated key DID, including its Vault secret,
+stored roots and metadata. It never removes keys by name or an acknowledged
+existing key. Cleanup failures are logged without secret material and require
+operator follow-up.
+
 `disabled` stores no root authority. `write-locked` keeps recognized read/list
 operations and storage cleanup: object/version/batch/bucket deletion and
 multipart abort. Configuration and security mutations are denied, including
@@ -62,6 +77,13 @@ and outstanding operations. A console-side deny check cannot supply this
 provider enforcement guarantee.
 
 ## Evidence and operations
+
+Deploy the backward-compatible [Ingot wire-error adapter](https://github.com/fil-forge/ingot/pull/411)
+before this Hilt change. Otherwise a new `TenantWriteLocked` denial reaching an
+older Ingot can appear as HTTP 500/retryable failure instead of HTTP 403. Exact
+parent-chain response metadata is already wire compatible. Source PRs and local
+tests do not authorize a provider deployment; coordinated rollout and deployed
+acceptance remain separate actions.
 
 Store tests cover memory and real Postgres fencing, cross-tenant independence,
 and nested authority transaction rollback. Service tests cover publish failure,
