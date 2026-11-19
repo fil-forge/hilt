@@ -84,6 +84,38 @@ func New(
 // It returns the stored record and the secret access key (the one time it is
 // exposed).
 func (s *Service) Create(ctx context.Context, externalID, name string, permissions, bucketNames []string, principalID *string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
+	rec, err := s.tenants.GetByExternalID(ctx, externalID)
+	if errors.Is(err, store.ErrRecordNotFound) {
+		return accesskeystore.Record{}, "", ErrTenantNotFound
+	}
+	if err != nil {
+		return accesskeystore.Record{}, "", fmt.Errorf("looking up tenant: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+	var created accesskeystore.Record
+	var secret string
+	err = s.tenants.WithReadLock(ctx, rec.ID, func(ctx context.Context, current tenant.Record) error {
+		if current.Status == tenant.Disabled {
+			return ErrTenantDisabled
+		}
+		var err error
+		created, secret, err = s.create(ctx, externalID, name, permissions, bucketNames, principalID, expiresAt)
+		return err
+	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		return accesskeystore.Record{}, "", ErrConcurrentChange
+	}
+	if err != nil {
+		return accesskeystore.Record{}, "", err
+	}
+	return created, secret, nil
+}
+
+// create runs inside the shared tenant fence, joining its transaction. The
+// key and initial grants therefore commit before a status transition lists
+// its keys, or read the transitioned status after it commits.
+func (s *Service) create(ctx context.Context, externalID, name string, permissions, bucketNames []string, principalID *string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
 	if name == "" || len(name) > maxNameLength {
 		return accesskeystore.Record{}, "", ErrInvalidName
 	}
@@ -270,7 +302,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			if len(eff) == 0 {
 				continue
 			}
-			granted, err := grant.Issue(issuer, accessKeyID, []did.DID{p.Bucket}, eff, expiresAt)
+			granted, err := grant.Issue(issuer, accessKeyID, []did.DID{p.Bucket}, grant.LimitToTenantStatus(tenantRec.Status, eff), expiresAt)
 			if err != nil {
 				rollback()
 				return accesskeystore.Record{}, "", fmt.Errorf("issuing delegation: %w", err)
@@ -278,7 +310,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			dels = append(dels, granted...)
 		}
 	} else {
-		dels, err = grant.Issue(issuer, accessKeyID, bucketIDs, permissions, expiresAt)
+		dels, err = grant.Issue(issuer, accessKeyID, bucketIDs, grant.LimitToTenantStatus(tenantRec.Status, permissions), expiresAt)
 		if err != nil {
 			rollback()
 			return accesskeystore.Record{}, "", fmt.Errorf("issuing delegation: %w", err)
@@ -306,7 +338,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		}
 	}
 
-	rec, err := s.accessKeys.Get(ctx, accessKeyID)
+	rec, err := s.accessKeys.Get(ctx, accessKeyID, store.WithShareLock())
 	if err != nil {
 		rollback()
 		return accesskeystore.Record{}, "", fmt.Errorf("loading created access key: %w", err)

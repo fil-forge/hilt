@@ -213,8 +213,11 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   widen that set to a write that streams its body; the policy PUT carries
   its document on its own command. Command-specific S3-permission checks
   stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
-  each per-request delegation keyed to itself. The cleanup commands among
-  them (`/blob/remove`, `/blob/abort`, `/upload/remove`) are also issued by
+  each per-request delegation keyed to its full captured parent chain. The
+  exact stored parent blocks ride back with it, assembled under the shared
+  tenant status fence with the S3 permission decision, so a late response
+  exposes a revoked parent rather than borrowing newer cleanup roots. The
+  cleanup commands among them (`/blob/remove`, `/blob/abort`, `/upload/remove`) are also issued by
   the tenant for `CleanupLifetime` (8 days) past the next UTC midnight plus
   the clock skew, when the gateway stops reusing the response, keyed to the
   chain through the

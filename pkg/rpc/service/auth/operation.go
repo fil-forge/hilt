@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 )
@@ -156,6 +157,12 @@ var operationPermission = map[Operation]string{
 // the copy operations this is the destination's permission; the source's is
 // [SourcePermission].
 func (o Operation) Permission() string { return operationPermission[o] }
+
+// AllowedWhenWriteLocked uses the classified operation's permission, rather
+// than its HTTP verb. Unknown operations and configuration deletes are denied.
+func (o Operation) AllowedWhenWriteLocked() bool {
+	return s3perm.AllowedWhenWriteLocked(o.Permission())
+}
 
 // companionPermission is a second S3 permission an access key must hold on
 // the addressed bucket beside the operation's own, as S3 requires. Reading an

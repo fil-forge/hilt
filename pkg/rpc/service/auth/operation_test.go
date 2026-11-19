@@ -775,3 +775,28 @@ func TestRoutesAddressExistingBuckets(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteLockedOperationClassification(t *testing.T) {
+	for _, req := range []s3.Request{
+		{Method: "GET", URL: "https://s3.example/bucket/key"},
+		{Method: "DELETE", URL: "https://s3.example/bucket/key?versionId=v1"},
+		{Method: "POST", URL: "https://s3.example/bucket?delete"},
+		{Method: "DELETE", URL: "https://s3.example/bucket/key?uploadId=upload"},
+	} {
+		op, err := OperationFor(req)
+		require.NoError(t, err)
+		require.True(t, op.AllowedWhenWriteLocked(), op)
+	}
+	for _, req := range []s3.Request{
+		{Method: "PUT", URL: "https://s3.example/bucket/key"},
+		{Method: "DELETE", URL: "https://s3.example/bucket?policy"},
+		{Method: "DELETE", URL: "https://s3.example/bucket?encryption"},
+		{Method: "DELETE", URL: "https://s3.example/bucket?cors"},
+		{Method: "DELETE", URL: "https://s3.example/bucket/key?tagging"},
+	} {
+		op, err := OperationFor(req)
+		require.NoError(t, err)
+		require.False(t, op.AllowedWhenWriteLocked(), op)
+	}
+	require.False(t, Operation("UnknownFutureRead").AllowedWhenWriteLocked())
+}

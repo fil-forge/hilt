@@ -14,6 +14,7 @@ import (
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -124,9 +125,22 @@ func NewAuthorizer(
 // is committing waits for the outcome and is answered from the new state. A
 // key whose principal was removed is refused ([ErrUnknownAccessKey]).
 //
-// Note that the caller must still check the operation matches the handler's
-// operation, since Authorize is operation-agnostic.
+// The caller must still check that the classified operation matches the one
+// its RPC handler serves.
 func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request) (*AuthorizedRequest, error) {
+	return a.authorize(ctx, issuer, req, nil)
+}
+
+// WithAuthorizedRequest holds the tenant's shared status fence through fn, so
+// authority assembled for this decision cannot use parents from a later status.
+// The callback context joins the same database transaction. A named lock-timeout
+// rejection remains retryable; neither an unavailable fence nor fn is skipped.
+func (a *Authorizer) WithAuthorizedRequest(ctx context.Context, issuer did.DID, req s3.Request, fn func(context.Context, *AuthorizedRequest) error) error {
+	_, err := a.authorize(ctx, issuer, req, fn)
+	return err
+}
+
+func (a *Authorizer) authorize(ctx context.Context, issuer did.DID, req s3.Request, fn func(context.Context, *AuthorizedRequest) error) (*AuthorizedRequest, error) {
 	sr, err := sigv4.Parse(sigv4.Request{
 		Method:  req.Method,
 		Headers: req.Headers,
@@ -180,14 +194,31 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrSignatureExpired
 	}
 
-	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
+	var authorized *AuthorizedRequest
+	err = a.tenants.WithReadLock(ctx, akRec.Tenant, func(locked context.Context, tenantRec tenant.Record) error {
+		var err error
+		authorized, err = a.authorizeTenant(locked, log, issuer, req, sr, akRec, tenantRec)
+		if err != nil {
+			return err
+		}
+		if fn != nil {
+			return fn(locked, authorized)
+		}
+		return nil
+	})
 	if err != nil {
-		log.Error("looking up tenant", zap.Error(err))
-		return nil, fmt.Errorf("looking up tenant: %w", err)
+		if errors.Is(err, store.ErrLockTimeout) {
+			return nil, lookupError(log, "tenant authorization", err)
+		}
+		return nil, err
 	}
+	return authorized, nil
+}
+
+func (a *Authorizer) authorizeTenant(ctx context.Context, log *zap.Logger, issuer did.DID, req s3.Request, sr *sigv4.SignedRequest, akRec accesskey.Record, tenantRec tenant.Record) (*AuthorizedRequest, error) {
 	// Disabled is the hard lock-out state (lifecycle Active → Disabled → delete).
-	// WriteLocked still authenticates here so reads (like ListBuckets) work; write
-	// handlers gate WriteLocked themselves, since Authorize is operation-agnostic.
+	// WriteLocked allows known reads and cleanup only, decided from the
+	// classified S3 operation and every additional permission it requires.
 	if tenantRec.Status == tenant.Disabled {
 		log.Debug("rejecting disabled tenant")
 		return nil, ErrTenantDisabled
@@ -217,6 +248,14 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrUnsupportedOperation
 	}
 	op, bucketName := c.op, c.bucket
+	if tenantRec.Status == tenant.WriteLocked {
+		for _, permission := range c.permissions() {
+			if !s3perm.AllowedWhenWriteLocked(permission) {
+				log.Debug("rejecting tenant write-locked operation", zap.Stringer("operation", op))
+				return nil, ErrTenantWriteLocked
+			}
+		}
+	}
 
 	// A copy reads its source, and a write may set a lock or tags, each named
 	// by a header. The path is always signed; a header only when listed, so
@@ -237,6 +276,15 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, prov, c)
 	if err != nil {
 		return nil, err
+	}
+	if tenantRec.Status == tenant.WriteLocked {
+		filtered := make([]string, 0, len(permissions))
+		for _, permission := range permissions {
+			if s3perm.AllowedWhenWriteLocked(permission) {
+				filtered = append(filtered, permission)
+			}
+		}
+		permissions = filtered
 	}
 	var sourcePermission string
 	if op.CopiesSource() {

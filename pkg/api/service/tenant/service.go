@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -253,13 +255,87 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	if err := s.tenants.SetStatus(ctx, rec.ID, tenantstore.Status(status)); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+	start := time.Now()
+	if err := s.tenants.ChangeStatus(ctx, rec.ID, tenantstore.Status(status), func(ctx context.Context, previous tenantstore.Record) error {
+		// Reapplying a status also reconciles grants left by an older writer.
+		// The externally visible state remains idempotent; revoked CIDs are
+		// never reused for fresh authority.
+		return s.replaceStatusGrants(ctx, previous.ID, tenantstore.Status(status))
+	}); err != nil {
+		s.logger.Error("tenant status authority change failed", zap.Stringer("tenant", rec.ID), zap.String("status", status), zap.Duration("took", time.Since(start)), zap.Error(err))
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("updating tenant status: %w", err)
 	}
+	s.logger.Info("committed tenant status and authority change", zap.Stringer("tenant", rec.ID), zap.String("status", status), zap.Duration("took", time.Since(start)))
 	return nil
+}
+
+// replaceStatusGrants runs under the tenant's exclusive fence and transaction.
+// Key creation and policy writers share that fence: the key list cannot miss a
+// new stored grant, and a late writer cannot restore pre-transition authority.
+// Publication is durable at Swarf before commit, not acknowledged by every
+// gateway. This does not establish a global cache acknowledgement barrier.
+func (s *Service) replaceStatusGrants(ctx context.Context, tenantID did.DID, status tenantstore.Status) error {
+	keys, err := s.accessKeys.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
+	if err != nil {
+		return err
+	}
+	audiences := make([]did.DID, len(keys))
+	for i, key := range keys {
+		audiences[i] = key.ID
+	}
+	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		next := make(map[did.DID][]ucan.Delegation, len(keys))
+		var revoked []ucan.Delegation
+		for _, key := range keys {
+			revoked = append(revoked, current[key.ID]...)
+			if status == tenantstore.Disabled || (key.ExpiresAt != nil && !time.Now().Before(*key.ExpiresAt)) {
+				continue
+			}
+			if key.Principal == nil {
+				dels, err := grant.Issue(issuer, key.ID, key.Buckets, grant.LimitToTenantStatus(status, key.Permissions), key.ExpiresAt)
+				if err != nil {
+					return nil, err
+				}
+				next[key.ID] = dels
+				continue
+			}
+			if _, err := s.principals.Get(ctx, tenantID, *key.Principal); errors.Is(err, store.ErrRecordNotFound) {
+				// A completed principal removal must not regain stored authority
+				// even if a failed cleanup left its key metadata behind.
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+			policies, err := s.policies.ListByPrincipal(ctx, tenantID, *key.Principal)
+			if err != nil {
+				return nil, err
+			}
+			for _, policy := range policies {
+				actions := grant.LimitToTenantStatus(status, bucketpolicy.Effective(&policy.Policy, *key.Principal))
+				dels, err := grant.Issue(issuer, key.ID, []did.DID{policy.Bucket}, actions, key.ExpiresAt)
+				if err != nil {
+					return nil, err
+				}
+				next[key.ID] = append(next[key.ID], dels...)
+			}
+		}
+		if err := grant.PublishRevocations(ctx, s.logger, s.revocations, issuer, revoked); err != nil {
+			return nil, err
+		}
+		return next, nil
+	})
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its

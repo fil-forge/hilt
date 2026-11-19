@@ -1,6 +1,10 @@
 package rpc_test
 
 import (
+	"context"
+	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,7 +93,9 @@ func TestAuthorizeRequest(t *testing.T) {
 		bucketName = "mybucket"
 		srcName    = "srcbucket"
 	)
-	srcID := testutil.RandomDID(t)
+	srcSigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	srcID := srcSigner.KeyDID()
 
 	// The access key signs the request; its private key lives in the vault so the
 	// handler can issue delegations as the access key.
@@ -119,6 +125,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	// Each opt adjusts the stored key before it is added.
 	// storeFor is the delegation store each setup built its authorizer over.
 	storeFor := map[*auth.Authorizer]delegationstore.Store{}
+	tenantsFor := map[*auth.Authorizer]*tenantmemory.Store{}
 	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *bucketpolicymemory.Store) {
 		t.Helper()
 		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
@@ -145,13 +152,22 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, bucketName))
 		require.NoError(t, buckets.Add(ctx, srcID, tenantID, providerID, srcName))
-		// The bucket's root delegation, as bucket creation stores it.
-		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
-		require.NoError(t, err)
-		require.NoError(t, dels.PutBatch(ctx, []ucan.Delegation{root}))
+		// Seed real stored parent grants, as bucket/key provisioning does. Both
+		// source and destination roots must accompany a copy's exact decision.
+		for _, rootIssuer := range []ucan.Issuer{multikey.NewIssuer(bucketID, bucketSigner), multikey.NewIssuer(srcID, srcSigner)} {
+			root, err := delegation.Delegate(rootIssuer, tenantID, rootIssuer.DID(), command.Top(), delegation.WithNoExpiration())
+			require.NoError(t, err)
+			require.NoError(t, dels.PutBatch(ctx, []ucan.Delegation{root}))
+		}
+		if !principalBound {
+			grants, err := grant.Issue(multikey.NewIssuer(tenantID, tenantSigner), akDID, []did.DID{bucketID, srcID}, perms, nil)
+			require.NoError(t, err)
+			require.NoError(t, dels.PutBatch(ctx, grants))
+		}
 
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
 		storeFor[az] = dels
+		tenantsFor[az] = tenants
 		return az, policies
 	}
 
@@ -198,9 +214,9 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, sigv4.VerifyWithKey(sr, keys[0].Data))
 
 		// s3:GetObject maps to /content/retrieve: exactly one delegation issued to
-		// the invocation issuer over the bucket, no proof chain fetched.
-		require.Len(t, blocks, 1)
-		reDel := blocks[0]
+		// the invocation issuer over the bucket, accompanied by exact parents.
+		require.Len(t, issuedBy(blocks, akDID), 1)
+		reDel := issuedBy(blocks, akDID)[0]
 		require.Equal(t, providerID, reDel.Audience())
 		require.Equal(t, bucketID, reDel.Subject())
 		require.Equal(t, content.Retrieve.Command.String(), reDel.Command().String())
@@ -223,12 +239,16 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.GreaterOrEqual(t, int64(*exp)-now, overhang,
 			"a delegation must always carry at least the async overhang")
 
-		// The delegations map keys the issued delegation to its own CID (the
-		// initial-implementation proof chain).
+		// The leaf carries the exact bucket→tenant→key parent chain captured
+		// with the permission decision, so late responses expose revoked CIDs.
 		require.Len(t, ok.Delegations.Entries, 1)
 		chain, found := ok.Delegations.Entries[reDel.Link()]
 		require.True(t, found)
-		require.Equal(t, []cid.Cid{reDel.Link()}, chain)
+		require.Len(t, chain, 3)
+		require.Equal(t, reDel.Link(), chain[2])
+		for _, link := range chain {
+			require.True(t, slices.ContainsFunc(blocks, func(d ucan.Delegation) bool { return d.Link() == link }))
+		}
 	})
 
 	// expiringAt stores the key with the given expiry.
@@ -246,8 +266,8 @@ func TestAuthorizeRequest(t *testing.T) {
 
 		_, blocks, err := call(t, az, providerID, args)
 		require.NoError(t, err)
-		require.Len(t, blocks, 1)
-		exp := blocks[0].Expiration()
+		require.Len(t, issuedBy(blocks, akDID), 1)
+		exp := issuedBy(blocks, akDID)[0].Expiration()
 		require.NotNil(t, exp)
 		require.Equal(t, keyExpiry.Unix(), int64(*exp),
 			"the gateway must not hold authority past the access key's expiry")
@@ -260,8 +280,8 @@ func TestAuthorizeRequest(t *testing.T) {
 
 		_, blocks, err := call(t, az, providerID, args)
 		require.NoError(t, err)
-		require.Len(t, blocks, 1)
-		exp := blocks[0].Expiration()
+		require.Len(t, issuedBy(blocks, akDID), 1)
+		exp := issuedBy(blocks, akDID)[0].Expiration()
 		require.NotNil(t, exp)
 		skew := int64(sigv4.MaxClockSkew / time.Second)
 		overhang := int64(rpc.AsyncOverhang / time.Second)
@@ -319,13 +339,14 @@ func TestAuthorizeRequest(t *testing.T) {
 		// The key re-delegates to the gateway as a service key does; its stored
 		// grants over the bucket, which /s3/bucket/info chains through, are what
 		// the policy's actions map to.
-		require.Len(t, blocks, 1)
-		reDel := blocks[0]
+		require.Len(t, issuedBy(blocks, akDID), 1)
+		reDel := issuedBy(blocks, akDID)[0]
 		require.Equal(t, akDID, reDel.Issuer())
 		require.Equal(t, providerID, reDel.Audience())
 		require.Equal(t, bucketID, reDel.Subject())
 		require.Equal(t, content.Retrieve.Command.String(), reDel.Command().String())
-		require.Equal(t, map[cid.Cid][]cid.Cid{reDel.Link(): {reDel.Link()}}, ok.Delegations.Entries)
+		require.Len(t, ok.Delegations.Entries[reDel.Link()], 3)
+		require.Equal(t, reDel.Link(), ok.Delegations.Entries[reDel.Link()][2])
 	})
 
 	t.Run("a service key signs its own delegations", func(t *testing.T) {
@@ -334,8 +355,8 @@ func TestAuthorizeRequest(t *testing.T) {
 
 		_, blocks, err := call(t, az, providerID, args)
 		require.NoError(t, err)
-		require.Len(t, blocks, 1)
-		require.Equal(t, akDID, blocks[0].Issuer())
+		require.Len(t, issuedBy(blocks, akDID), 1)
+		require.Equal(t, akDID, issuedBy(blocks, akDID)[0].Issuer())
 	})
 
 	t.Run("a principal with no policy on the bucket cannot see it", func(t *testing.T) {
@@ -371,7 +392,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		_, blocks, err := call(t, az, providerID, signedArgs(t, akSigner, "PUT", lock, region))
 		require.NoError(t, err)
 		var cmds []string
-		for _, d := range blocks {
+		for _, d := range issuedBy(blocks, akDID) {
 			cmds = append(cmds, d.Command().String())
 		}
 		require.ElementsMatch(t, []string{"/blob/add", "/index/add", "/content/retrieve"}, cmds)
@@ -396,7 +417,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.Len(t, issuedBy(blocks, akDID), len(s3perm.CommandsFor("s3:PutObject")))
 
 		var cmds []string
-		for _, d := range issuedBy(blocks, tenantID) {
+		for _, d := range issuedByTo(blocks, tenantID, providerID) {
 			cmds = append(cmds, d.Command().String())
 			require.Equal(t, providerID, d.Audience())
 			require.Equal(t, bucketID, d.Subject())
@@ -422,7 +443,7 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.Len(t, roots, 1)
 		root := roots[0]
 		require.Equal(t, tenantID, root.Audience())
-		for _, d := range issuedBy(blocks, tenantID) {
+		for _, d := range issuedByTo(blocks, tenantID, providerID) {
 			require.Equal(t, []cid.Cid{root.Link(), d.Link()}, ok.Delegations.Entries[d.Link()])
 		}
 	})
@@ -431,17 +452,37 @@ func TestAuthorizeRequest(t *testing.T) {
 		az, _ := setup(t, []string{"s3:GetObject"}, false, akSigner)
 		_, blocks, err := call(t, az, providerID, signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour))
 		require.NoError(t, err)
-		require.Empty(t, issuedBy(blocks, tenantID))
-		require.Empty(t, issuedBy(blocks, bucketID))
+		require.Empty(t, issuedByTo(blocks, tenantID, providerID))
+		require.Len(t, issuedBy(blocks, bucketID), 1, "the stored root is present even for a read")
 	})
 
-	t.Run("a bucket with no root delegation gets no cleanup delegations", func(t *testing.T) {
+	t.Run("status change waits until the exact parent snapshot is assembled", func(t *testing.T) {
+		az, _ := setup(t, []string{"s3:PutObject", "s3:GetObject"}, false, akSigner)
+		entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		blocked := &blockingParents{Store: storeFor[az], entered: entered, release: release}
+		args := signedArgs(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName+"/object-key", region)
+		go func() {
+			_, _, err := rpc.AuthorizeRequest(ctx, zap.NewNop(), az, blocked, providerID, args)
+			finished <- err
+		}()
+		<-entered
+		wait, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		err := tenantsFor[az].ChangeStatus(wait, tenantID, tenant.WriteLocked, nil)
+		cancel()
+		require.True(t, errors.Is(err, context.DeadlineExceeded), "status cannot commit while old parents are being captured")
+		close(release)
+		require.NoError(t, <-finished)
+		require.NoError(t, tenantsFor[az].ChangeStatus(ctx, tenantID, tenant.WriteLocked, nil))
+		_, _, err = call(t, az, providerID, args)
+		require.ErrorIs(t, err, auth.ErrTenantWriteLocked)
+	})
+
+	t.Run("missing request parents fail closed instead of borrowing later roots", func(t *testing.T) {
 		az, _ := setup(t, []string{"s3:PutObject"}, false, akSigner)
 		args := signedArgs(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName+"/object-key", region)
 		_, blocks, err := rpc.AuthorizeRequest(ctx, zap.NewNop(), az, delegationmemory.New(), providerID, args)
-		require.NoError(t, err)
-		require.Empty(t, issuedBy(blocks, tenantID))
-		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))
+		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
+		require.Empty(t, blocks)
 	})
 }
 
@@ -454,4 +495,29 @@ func issuedBy(ds []ucan.Delegation, issuer did.DID) []ucan.Delegation {
 		}
 	}
 	return out
+}
+
+// issuedByTo selects cleanup leaves without confusing them with attached roots.
+func issuedByTo(ds []ucan.Delegation, issuer, audience did.DID) []ucan.Delegation {
+	var out []ucan.Delegation
+	for _, d := range ds {
+		if d.Issuer() == issuer && d.Audience() == audience {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// blockingParents pauses the first parent lookup inside the authorization
+// fence, exposing the exact interval a concurrent status write must exclude.
+type blockingParents struct {
+	delegationstore.Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingParents) ProofChain(ctx context.Context, audience did.DID, command ucan.Command, subject did.DID) ([]ucan.Delegation, []cid.Cid, error) {
+	b.once.Do(func() { close(b.entered); <-b.release })
+	return b.Store.ProofChain(ctx, audience, command, subject)
 }
