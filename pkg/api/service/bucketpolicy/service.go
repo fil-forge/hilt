@@ -127,6 +127,22 @@ func WithCondition(c Condition) WriteOption {
 // The delegations of the principals the change affects are rotated inside the
 // store's transaction, so a publish failure leaves the old document in place.
 func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc s3bkt.PolicyDocument, opts ...WriteOption) (string, bool, error) {
+	var etag string
+	var created bool
+	err := s.tenants.WithReadLock(ctx, tenantID, func(ctx context.Context, current tenantstore.Record) error {
+		var err error
+		etag, created, err = s.write(ctx, tenantID, bucketID, bucketName, doc, current.Status, opts...)
+		return err
+	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		return "", false, ErrConcurrentChange
+	}
+	return etag, created, err
+}
+
+// The tenant fence encloses the policy lock and grant rotation, in that order.
+// A status transition cannot miss a policy writer's replacement grants.
+func (s *Service) write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc s3bkt.PolicyDocument, status tenantstore.Status, opts ...WriteOption) (string, bool, error) {
 	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
 		return "", false, err
@@ -168,7 +184,7 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 				return fmt.Errorf("principal %q was removed: %w", p, store.ErrInvalidArgument)
 			}
 		}
-		return s.rotate(ctx, tenantID, bucketID, oldDoc, &doc, principals)
+		return s.rotate(ctx, tenantID, bucketID, oldDoc, &doc, principals, status)
 	})
 	if err != nil {
 		return "", false, s.writeError(ctx, bucketName, err)
@@ -183,6 +199,16 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 // delegations over the bucket inside the store's transaction. bucketName names
 // the bucket in errors and logs.
 func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName string, ifMatch *string) error {
+	err := s.tenants.WithReadLock(ctx, tenantID, func(ctx context.Context, current tenantstore.Record) error {
+		return s.remove(ctx, tenantID, bucketID, bucketName, ifMatch, current.Status)
+	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		return ErrConcurrentChange
+	}
+	return err
+}
+
+func (s *Service) remove(ctx context.Context, tenantID, bucketID did.DID, bucketName string, ifMatch *string, status tenantstore.Status) error {
 	var tag string
 	if ifMatch != nil {
 		tag = *ifMatch
@@ -193,7 +219,7 @@ func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucket
 		if err != nil {
 			return err
 		}
-		return s.rotate(ctx, tenantID, bucketID, &old.Policy, nil, principals)
+		return s.rotate(ctx, tenantID, bucketID, &old.Policy, nil, principals, status)
 	})
 	if errors.Is(err, store.ErrRecordNotFound) {
 		return ErrPolicyNotFound
@@ -270,7 +296,7 @@ func (s *Service) principalPolicies(ctx context.Context, externalID, principalID
 // store's write transaction while the bucket is locked, so the whole of it is
 // bounded at [grant.BatchTimeout] (see there). Any failure, the deadline
 // included, fails the write and rolls it back.
-func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc, newDoc *s3bkt.PolicyDocument, principals []string) error {
+func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc, newDoc *s3bkt.PolicyDocument, principals []string, status tenantstore.Status) error {
 	affected := bucketpolicy.Changed(oldDoc, newDoc, principals)
 	if len(affected) == 0 {
 		return nil
@@ -280,7 +306,7 @@ func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc
 	return s.principals.WithLock(ctx, tenantID, affected, func(ctx context.Context) error {
 		actions := make(map[string][]string, len(affected))
 		for _, p := range affected {
-			actions[p] = bucketpolicy.Effective(newDoc, p)
+			actions[p] = grant.LimitToTenantStatus(status, bucketpolicy.Effective(newDoc, p))
 		}
 		if err := s.grants.Rotate(ctx, tenantID, bucketID, actions); err != nil {
 			return fmt.Errorf("rotating the delegations of the affected principals: %w", err)

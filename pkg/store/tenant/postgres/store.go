@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
@@ -83,10 +84,38 @@ func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.
 }
 
 func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status) error {
+	return s.ChangeStatus(ctx, id, status, nil)
+}
+
+func (s *Store) ChangeStatus(ctx context.Context, id did.DID, status tenant.Status, beforeCommit func(context.Context, tenant.Record) error) (err error) {
 	if !status.Valid() {
 		return fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
 	}
-	tag, err := s.pool.Exec(ctx, `
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, id.String(), false); err != nil {
+		return err
+	}
+	rec, err := scanRecord(tx.QueryRow(ctx, `SELECT id, external_id, status, created_at, updated_at FROM tenant WHERE id = $1 FOR UPDATE`, id.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.ErrRecordNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(pglock.WithTx(ctx, tx), rec); err != nil {
+			return err
+		}
+	}
+	tag, err := tx.Exec(ctx, `
 		UPDATE tenant
 		SET status = $1, updated_at = NOW()
 		WHERE id = $2
@@ -97,14 +126,70 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 	if tag.RowsAffected() == 0 {
 		return store.ErrRecordNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
-func (s *Store) Delete(ctx context.Context, id did.DID) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
+func (s *Store) WithReadLock(ctx context.Context, id did.DID, fn func(context.Context, tenant.Record) error) (err error) {
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, id.String(), true); err != nil {
+		return err
+	}
+	rec, err := scanRecord(tx.QueryRow(ctx, `SELECT id, external_id, status, created_at, updated_at FROM tenant WHERE id = $1 FOR SHARE`, id.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.ErrRecordNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := fn(pglock.WithTx(ctx, tx), rec); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
+	return s.DeleteWithCallback(ctx, id, nil)
+}
+
+func (s *Store) DeleteWithCallback(ctx context.Context, id did.DID, fn func(context.Context, tenant.Record) error) (err error) {
+	defer func() { err = pglock.MapError(err) }()
+	tx, err := pglock.Begin(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := pglock.SetTimeout(ctx, tx); err != nil {
+		return err
+	}
+	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, id.String(), false); err != nil {
+		return err
+	}
+	rec, err := scanRecord(tx.QueryRow(ctx, `SELECT id, external_id, status, created_at, updated_at FROM tenant WHERE id = $1 FOR UPDATE`, id.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fn != nil {
+		// The destructive service cascade retains its existing independently
+		// committed retry steps; PLC and Vault effects cannot join this tx.
+		if err := fn(ctx, rec); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting tenant: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func scanRecord(row pgx.Row) (tenant.Record, error) {

@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -253,13 +255,87 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	if err := s.tenants.SetStatus(ctx, rec.ID, tenantstore.Status(status)); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+	start := time.Now()
+	if err := s.tenants.ChangeStatus(ctx, rec.ID, tenantstore.Status(status), func(ctx context.Context, previous tenantstore.Record) error {
+		// Reapplying a status also reconciles grants left by an older writer.
+		// The externally visible state remains idempotent; revoked CIDs are
+		// never reused for fresh authority.
+		return s.replaceStatusGrants(ctx, previous.ID, tenantstore.Status(status))
+	}); err != nil {
+		s.logger.Error("tenant status authority change failed", zap.Stringer("tenant", rec.ID), zap.String("status", status), zap.Duration("took", time.Since(start)), zap.Error(err))
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("updating tenant status: %w", err)
 	}
+	s.logger.Info("committed tenant status and authority change", zap.Stringer("tenant", rec.ID), zap.String("status", status), zap.Duration("took", time.Since(start)))
 	return nil
+}
+
+// replaceStatusGrants runs under the tenant's exclusive fence and transaction.
+// Key creation and policy writers share that fence: the key list cannot miss a
+// new stored grant, and a late writer cannot restore pre-transition authority.
+// Publication is durable at Swarf before commit, not acknowledged by every
+// gateway. This does not establish a global cache acknowledgement barrier.
+func (s *Service) replaceStatusGrants(ctx context.Context, tenantID did.DID, status tenantstore.Status) error {
+	keys, err := s.accessKeys.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
+	if err != nil {
+		return err
+	}
+	audiences := make([]did.DID, len(keys))
+	for i, key := range keys {
+		audiences[i] = key.ID
+	}
+	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		next := make(map[did.DID][]ucan.Delegation, len(keys))
+		var revoked []ucan.Delegation
+		for _, key := range keys {
+			revoked = append(revoked, current[key.ID]...)
+			if status == tenantstore.Disabled || (key.ExpiresAt != nil && !time.Now().Before(*key.ExpiresAt)) {
+				continue
+			}
+			if key.Principal == nil {
+				dels, err := grant.Issue(issuer, key.ID, key.Buckets, grant.LimitToTenantStatus(status, key.Permissions), key.ExpiresAt)
+				if err != nil {
+					return nil, err
+				}
+				next[key.ID] = dels
+				continue
+			}
+			if _, err := s.principals.Get(ctx, tenantID, *key.Principal); errors.Is(err, store.ErrRecordNotFound) {
+				// A completed principal removal must not regain stored authority
+				// even if a failed cleanup left its key metadata behind.
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+			policies, err := s.policies.ListByPrincipal(ctx, tenantID, *key.Principal)
+			if err != nil {
+				return nil, err
+			}
+			for _, policy := range policies {
+				actions := grant.LimitToTenantStatus(status, bucketpolicy.Effective(&policy.Policy, *key.Principal))
+				dels, err := grant.Issue(issuer, key.ID, []did.DID{policy.Bucket}, actions, key.ExpiresAt)
+				if err != nil {
+					return nil, err
+				}
+				next[key.ID] = append(next[key.ID], dels...)
+			}
+		}
+		if err := grant.PublishRevocations(ctx, s.logger, s.revocations, issuer, revoked); err != nil {
+			return nil, err
+		}
+		return next, nil
+	})
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its
@@ -275,11 +351,28 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	log := s.logger.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
-
-	if rec.Status != tenantstore.Disabled {
-		return ErrTenantNotDisabled
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+	err = s.tenants.DeleteWithCallback(ctx, rec.ID, func(ctx context.Context, current tenantstore.Record) error {
+		// The disabled precondition and destructive work belong to the same
+		// exclusive lifecycle fence as status restoration and grant writers.
+		if current.Status != tenantstore.Disabled {
+			return ErrTenantNotDisabled
+		}
+		return s.deleteDisabled(ctx, current)
+	})
+	if err != nil {
+		return err
 	}
+	s.logger.Info("deleted tenant", zap.Stringer("tenant", rec.ID))
+	return nil
+}
+
+// deleteDisabled runs under the deletion fence. Cascade steps and external
+// PLC/Vault effects retain their existing partial-completion retry semantics;
+// this fence orders competing lifecycle operations, not distributed rollback.
+func (s *Service) deleteDisabled(ctx context.Context, rec tenantstore.Record) error {
+	log := s.logger.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
 
 	signingVaultKey := vault.TenantKeyPath(rec.ID)
 
@@ -391,14 +484,10 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("deleting tenant delegations: %w", err)
 	}
 
-	if err := s.tenants.Delete(ctx, rec.ID); err != nil {
-		return fmt.Errorf("deleting tenant: %w", err)
-	}
 	// Best-effort removal of the tenant's key material.
 	if err := s.secrets.Delete(ctx, signingVaultKey); err != nil {
 		log.Warn("removing signing key from vault", zap.Error(err))
 	}
-	log.Info("deleted tenant")
 	return nil
 }
 

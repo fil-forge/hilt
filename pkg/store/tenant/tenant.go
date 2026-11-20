@@ -16,7 +16,9 @@ import (
 // create an access key that finds no policy to grant from and is never
 // rotated. Under it the add commits either before the listing, so the write
 // rotates the new principal's keys, or after the commit, so the key's
-// creation reads the committed policy.
+// creation reads the committed policy. Status changes and tenant deletion also
+// hold it exclusive; key creation and authorize-response construction hold it
+// shared through their authority work, fencing stale status-derived grants.
 const LockNamespace int32 = 0x54454e54 // "TENT"
 
 type Status string
@@ -67,7 +69,21 @@ type Store interface {
 	// [store.ErrInvalidArgument] if the status is not valid, and
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	SetStatus(ctx context.Context, id did.DID, status Status) error
+	// ChangeStatus holds the tenant fence exclusively, invokes beforeCommit
+	// with the current record and transaction context, then commits the status.
+	// A failed callback leaves the status unchanged. Grant writers use
+	// WithReadLock so none can publish authority from a superseded status.
+	ChangeStatus(ctx context.Context, id did.DID, status Status, beforeCommit func(context.Context, Record) error) error
+	// WithReadLock holds the shared tenant fence while fn validates and stores
+	// authority. Its callback joins the enclosing Postgres transaction.
+	WithReadLock(ctx context.Context, id did.DID, fn func(context.Context, Record) error) error
 	// Delete removes the tenant record for a given ID. It is idempotent:
 	// deleting an absent record returns nil.
 	Delete(ctx context.Context, id did.DID) error
+	// DeleteWithCallback holds the tenant fence exclusively, reads the current
+	// record, runs fn and removes the row. An absent row is a no-op. The callback
+	// uses its original context, not an enclosing database transaction: external
+	// PLC/Vault effects and independently committed cascade steps remain retryable
+	// partial work on failure. A callback error retains the tenant row.
+	DeleteWithCallback(ctx context.Context, id did.DID, fn func(context.Context, Record) error) error
 }

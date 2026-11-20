@@ -70,10 +70,20 @@ func AuthorizeRequest(
 	issuer did.DID,
 	args *s3req.AuthorizeArguments,
 ) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
-	authz, err := authorizer.Authorize(ctx, issuer, args.Request)
-	if err != nil {
-		return nil, nil, err
-	}
+	var ok *s3req.AuthorizeOK
+	var blocks []ucan.Delegation
+	err := authorizer.WithAuthorizedRequest(ctx, issuer, args.Request, func(locked context.Context, authz *auth.AuthorizedRequest) error {
+		var err error
+		ok, blocks, err = issueAuthorizedRequest(locked, logger, authorizer, delegations, issuer, authz)
+		return err
+	})
+	return ok, blocks, err
+}
+
+// issueAuthorizedRequest runs while the tenant status fence and the joined
+// authorization transaction are held. Attach the exact parent grants from this
+// decision, so a late response cannot borrow freshly narrowed cleanup roots.
+func issueAuthorizedRequest(ctx context.Context, logger *zap.Logger, authorizer *auth.Authorizer, delegations delegationstore.Store, issuer did.DID, authz *auth.AuthorizedRequest) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
 	accessKeyID := authz.AccessKey.ID
 
 	// Authorize also verified the access key holds the operation's permission; the
@@ -102,9 +112,9 @@ func AuthorizeRequest(
 	// command the action maps to, signing as the access key with the bucket as
 	// subject. The key holds these commands over the bucket, a service key from
 	// its creation and a principal-bound key from the bucket's policy, which the
-	// action check above is the mirror of. If it does not, the delegation simply
-	// has no proof chain to a root and is unusable — harmless. The gateway
-	// obtains the chain to the access key via `/s3/bucket/info`.
+	// action check above is the mirror of. The exact stored parent chain is
+	// attached below while that decision is still fenced. Missing parents fail
+	// closed rather than relying on a later bucket-info snapshot.
 	akIssuer := multikey.NewIssuer(accessKeyID, signer)
 	// Expire when the derived key does — 00:00:00 UTC of the following day —
 	// plus the max clock skew, so the gateway can still enact a request signed
@@ -143,11 +153,25 @@ func AuthorizeRequest(
 		}
 		issued = append(issued, srcDlgs...)
 	}
-	// The proof set keys each issued delegation to its own one-element chain.
+	// Bind each leaf to the actual stored parent chain, under the same fence
+	// as the S3 action decision. Returning only a leaf would let a late active
+	// response combine its old PUT permission set with newer DELETE roots,
+	// whose lower-level catalog commands overlap. The gateway's revoked-CID
+	// check must see the old parent even when its remaining chain is cached.
 	proofSet := make(map[cid.Cid][]cid.Cid, len(issued))
+	var parents []ucan.Delegation
 	for _, d := range issued {
-		proofSet[d.Link()] = []cid.Cid{d.Link()}
+		chain, links, err := delegations.ProofChain(ctx, accessKeyID, d.Command(), d.Subject())
+		if err != nil {
+			return nil, nil, fmt.Errorf("finding request authority parents: %w", err)
+		}
+		if len(chain) == 0 || chain[len(chain)-1].Audience() != accessKeyID {
+			return nil, nil, fmt.Errorf("%w: request authority parents are unavailable", auth.ErrTemporarilyUnavailable)
+		}
+		proofSet[d.Link()] = append(append([]cid.Cid{}, links...), d.Link())
+		parents = append(parents, chain...)
 	}
+	issued = append(issued, parents...)
 	if bucketID != nil {
 		cleanup, root, err := issueCleanupDelegations(ctx, authorizer, delegations, authz.Tenant.ID, issuer, *bucketID, perm)
 		if err != nil {
@@ -167,6 +191,16 @@ func AuthorizeRequest(
 			logger.Warn("no root delegation for the bucket; issuing no cleanup delegations", zap.Stringer("bucket", bucketID))
 		}
 	}
+
+	seen := make(map[cid.Cid]bool, len(issued))
+	unique := make([]ucan.Delegation, 0, len(issued))
+	for _, d := range issued {
+		if !seen[d.Link()] {
+			seen[d.Link()] = true
+			unique = append(unique, d)
+		}
+	}
+	issued = unique
 
 	logger.Debug("authorized request",
 		zap.Stringer("bucket", bucketID),

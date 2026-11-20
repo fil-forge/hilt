@@ -125,6 +125,12 @@ delegation it issued is withdrawn (e.g. when an access key is deleted). Both
 are required, and `hilt serve` exits at startup when either is unset. Each
 stage points at its own Swarf, which only knows that stage's tenants.
 
+## Tenant status enforcement
+
+Status changes reconcile stored authority and publish cache revocations.
+See [tenant status and stored authority](docs/tenant-status-authority.md) for
+operation semantics, transactional fencing, and asynchronous propagation limits.
+
 ## Container images
 
 A push to `main` publishes to GHCR from the `Container` workflow. The `prod`

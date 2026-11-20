@@ -1,0 +1,151 @@
+# Tenant status and stored authority
+
+**Rollout blocked.** Tenant key/principal/policy cardinality has no enforced
+upper bound. This draft's all-or-nothing eight-second status reconciliation
+does work proportional to all stored roots, and can repeatedly fail for large
+or adversarial tenants while retaining their prior active status. This is a
+restriction-liveness defect. General rollout requires a scalable tenant-level
+authority fence and the separate lease/acknowledgement protocol decision.
+Neither a larger timeout nor an undocumented quota resolves this guarantee.
+
+## Cardinality evidence
+
+`accesskey.Input.Validate` enforces shape, not a key-count quota;
+`accesskey/postgres.ListByTenant` queries every matching row without `LIMIT`;
+principal/bucket/policy counts have no enforced tenant-wide bound. Status
+reconciliation materializes keys and roots, and replacement authority for every
+key. Principal policies are queried again for each principal-bound key. Swarf's
+client signs and submits one revocation invocation per root in a single batch.
+An expired batch rolls back the status and stored-root transition, retaining
+the prior active status rather than progressively restricting it.
+
+A bounded local benchmark on an Apple M3 Max, one iteration per size:
+
+| Keys | Existing roots | Transition time | Allocated bytes |
+|---:|---:|---:|---:|
+| 128 | 896 | 44.1 ms | 5,218,944 |
+| 512 | 3,584 | 176.7 ms | 20,863,616 |
+| 2,048 | 14,336 | 714.0 ms | 83,844,976 |
+
+These use real grant issuance with memory stores and a deadline-aware fake
+publisher, excluding Postgres, actual revocation-invocation signing, encoding
+and network. They are lower-bound work/allocation observations, **not** a
+production latency estimate or a safe tenant limit. All measured transitions
+succeeded; the evidence does not claim these specific sizes exceeded eight
+seconds. Reproduce with:
+
+```sh
+GOWORK=off go test -count=1 ./pkg/api/service/tenant \
+  -run TestManyKeyRestrictionFailurePreservesPriorStatus \
+  -bench BenchmarkStatusCardinality -benchtime=1x -benchmem
+```
+
+The regression separately seeds 256 keys and delays publication past a
+100-millisecond caller deadline. It confirms the failure leaves the tenant
+active. This proves failure behavior, not a production cardinality threshold.
+The lack of any enforced upper bound makes general restriction completion
+unprovable with this all-or-nothing per-root algorithm. A tenant-level fence
+with bounded request-path enforcement must replace the cardinality-dependent
+security transition; per-key cleanup can then be separately bounded/retried.
+
+The partner status API reconciles status and every current access key's stored
+root delegations. It publishes revocations to Swarf before committing the new
+status and roots in the same Postgres transaction. A publish failure leaves the
+old database state in place. Reapplying the same status reconciles roots issued
+by an older writer; revoked CIDs are never reused.
+
+```mermaid
+sequenceDiagram
+    participant API as Status API
+    participant DB as Tenant and delegation stores
+    participant Swarf
+    participant Gateway as Ingot caches
+    API->>DB: Exclusive tenant fence and transaction
+    API->>DB: Read keys and prepare replacement roots
+    API->>Swarf: Publish old root revocations
+    Swarf-->>API: Publication accepted
+    API->>DB: Commit roots and status together
+    API-->>API: Management operation complete
+    Swarf-->>Gateway: Asynchronous revocation stream
+```
+
+Access-key creation, policy grant rotation, and authorize response construction
+hold the same tenant fence shared. Each reads the status under that fence and
+keeps it through authority persistence or parent-chain attachment. A status
+change therefore includes an earlier writer's roots or finishes before a later
+writer reads the restricted status. Locks and the grant batch have bounded
+waits; a failed operation must be retried.
+
+Tenant deletion takes that fence exclusively before rechecking `disabled` and
+keeps it across PLC deactivation, the existing cascade and final tenant-row
+deletion. Restoration cannot reopen key creation during the cascade. The
+deletion callback deliberately does not attach its fence transaction to the
+cascade: its database steps and irreversible PLC/Vault effects retain their
+existing partial-completion retry behavior. Failure can leave cleanup to retry;
+the fence does not make external side effects atomic.
+
+Key creation acknowledges success only after its enclosing tenant transaction
+commits. A rollback or lost commit acknowledgement triggers bounded best-effort
+cleanup of that call's freshly generated key DID, including its Vault secret,
+stored roots and metadata. It never removes keys by name or an acknowledged
+existing key. Cleanup failures are logged without secret material and require
+operator follow-up.
+
+`disabled` stores no root authority. `write-locked` keeps recognized read/list
+operations and storage cleanup: object/version/batch/bucket deletion and
+multipart abort. Configuration and security mutations are denied, including
+HTTP DELETE operations on policies, tags, encryption or other configuration.
+Unknown S3 operations fail closed under this status. The operation classifier
+uses S3 actions, not the HTTP verb. Configured service-key permissions and
+principal policies remain intact so restoration can issue fresh roots from
+them. Expired keys and removed principals regain no authority.
+
+Write-lock enforcement also filters effective S3 permissions in each authorize
+response. Lower-level UCAN commands overlap between allowed cleanup and denied
+uploads; a cleanup grant must not imply permission for every S3 action using
+those commands. Authorize responses include their exact stored parent roots,
+so Ingot can invalidate a response arriving after a revocation it has already
+observed.
+
+## Consistency limits
+
+Management completion establishes a durable database transition and Swarf
+publication, **not** an acknowledgement from every gateway. Warm requests may
+continue before a gateway consumes the revocation. A gateway restart, stream
+interruption, or publication followed by database commit failure still requires
+separate recovery/acknowledgement design. No propagation deadline or immediate
+global cutoff is established here. In-flight storage operations are not rolled
+back by a later status change.
+
+Literal cutoff at management completion requires a separate protocol decision:
+an authoritative gateway acknowledgement barrier with membership and restart
+recovery, or a bounded authorization lease whose expiry the management API
+waits for. Either choice must define unavailable gateways, failure behavior,
+and outstanding operations. A console-side deny check cannot supply this
+provider enforcement guarantee.
+
+## Evidence and operations
+
+Deploy the backward-compatible [Ingot wire-error adapter](https://github.com/fil-forge/ingot/pull/411)
+before this Hilt change. Otherwise a new `TenantWriteLocked` denial reaching an
+older Ingot can appear as HTTP 500/retryable failure instead of HTTP 403. Exact
+parent-chain response metadata is already wire compatible. Source PRs and local
+tests do not authorize a provider deployment; coordinated rollout and deployed
+acceptance remain separate actions.
+
+Store tests cover memory and real Postgres fencing, cross-tenant independence,
+and nested authority transaction rollback. Service tests cover publish failure,
+restriction, restoration with fresh CIDs, unchanged controls and configured
+permissions, and real Postgres status/root atomicity. RPC and Ingot tests cover
+operation classification, parent attachment, warmed cache action separation,
+and late responses after an observed revocation. The local Forge integration
+`TestForge/TenantStatusRestrictsWarmCaches` exercises the real service path with
+two synthetic tenants, original valid signed URLs, cleanup-warmed denial of
+writes and configuration changes, and restoration. Local test results are not
+deployed acceptance or proof of a propagation deadline.
+
+Stable logs `tenant status authority change failed` and
+`committed tenant status and authority change` include tenant DID, requested
+status and duration, without key material. A companion infra-central alert
+should count the failure message; exported failure/duration metrics belong to
+FIL-1143 when Hilt metrics are enabled.

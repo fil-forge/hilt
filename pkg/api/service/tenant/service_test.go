@@ -188,11 +188,17 @@ type plcDirectory struct {
 	logLast       []byte
 	logLastStatus int
 	deactivations int
+	lookupStarted chan struct{}
+	lookupRelease chan struct{}
 }
 
 func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if d.lookupStarted != nil {
+			close(d.lookupStarted)
+			<-d.lookupRelease
+		}
 		if d.logLastStatus != 0 {
 			w.WriteHeader(d.logLastStatus)
 			return
@@ -209,7 +215,7 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type deleteEnv struct {
 	svc        *tenantsvc.Service
-	tenants    *tenantmemory.Store
+	tenants    tenant.Store
 	buckets    *bucketmemory.Store
 	policies   *bucketpolicymemory.Store
 	principals *principalmemory.Store
@@ -226,7 +232,7 @@ type deleteEnv struct {
 	tombstone []byte
 }
 
-func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
+func deleteSetup(t *testing.T, status tenant.Status, stores ...tenant.Store) deleteEnv {
 	t.Helper()
 	ctx := t.Context()
 
@@ -255,7 +261,10 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	plcClient, err := plc.NewDirectoryClient(*endpoint)
 	require.NoError(t, err)
 
-	tenants := tenantmemory.New()
+	var tenants tenant.Store = tenantmemory.New()
+	if len(stores) > 0 {
+		tenants = stores[0]
+	}
 	secrets := vaultmemory.New()
 	principals := principalmemory.New()
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", status))

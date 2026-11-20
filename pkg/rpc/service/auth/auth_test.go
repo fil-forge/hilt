@@ -11,6 +11,7 @@ import (
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -1016,6 +1017,83 @@ func TestAuthorize(t *testing.T) {
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrTenantDisabled)
 	})
+
+	t.Run("write lock classifies S3 operations and returns only safe cached permissions", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, method, path, permission string
+			allowed                        bool
+		}{
+			{"get object", "GET", "/bucket/object-key", "s3:GetObject", true},
+			{"head object", "HEAD", "/bucket/object-key", "s3:GetObject", true},
+			{"list bucket", "GET", "/bucket", "s3:ListBucket", true},
+			{"list all buckets", "GET", "/", "s3:ListAllMyBuckets", true},
+			{"version read", "GET", "/bucket/object-key?versionId=v1", "s3:GetObjectVersion", true},
+			{"list versions", "GET", "/bucket?versions", "s3:ListBucketVersions", true},
+			{"policy read", "GET", "/bucket?policy", "s3:GetBucketPolicy", true},
+			{"list multipart", "GET", "/bucket?uploads", "s3:ListBucketMultipartUploads", true},
+			{"delete object", "DELETE", "/bucket/object-key", "s3:DeleteObject", true},
+			{"delete version", "DELETE", "/bucket/object-key?versionId=v1", "s3:DeleteObjectVersion", true},
+			{"delete bucket", "DELETE", "/bucket", "s3:DeleteBucket", true},
+			{"abort multipart", "DELETE", "/bucket/object-key?uploadId=upload", "s3:AbortMultipartUpload", true},
+			{"put object", "PUT", "/bucket/object-key", "s3:PutObject", false},
+			{"create bucket", "PUT", "/newbucket", "s3:CreateBucket", false},
+			{"create multipart", "POST", "/bucket/object-key?uploads", "s3:PutObject", false},
+			{"upload part", "PUT", "/bucket/object-key?uploadId=upload&partNumber=1", "s3:PutObject", false},
+			{"complete multipart", "POST", "/bucket/object-key?uploadId=upload", "s3:PutObject", false},
+			{"policy delete", "DELETE", "/bucket?policy", "s3:DeleteBucketPolicy", false},
+			{"encryption delete", "DELETE", "/bucket?encryption", "s3:PutEncryptionConfiguration", false},
+			{"cors delete", "DELETE", "/bucket?cors", "s3:PutBucketCORS", false},
+			{"bucket tags delete", "DELETE", "/bucket?tagging", "s3:PutBucketTagging", false},
+			{"object tags delete", "DELETE", "/bucket/object-key?tagging", "s3:DeleteObjectTagging", false},
+			{"retention write", "PUT", "/bucket/object-key?retention", "s3:PutObjectRetention", false},
+			{"legal hold write", "PUT", "/bucket/object-key?legal-hold", "s3:PutObjectLegalHold", false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked,
+					accessKeyPermissions: []string{tc.permission, "s3:PutObject", "s3:DeleteObjectTagging"}})
+				req := signedRequestWith(t, accessKey, tc.method, "https://s3.fil.one"+tc.path, nil, region)
+				got, err := az.Authorize(ctx, providerID, req)
+				if !tc.allowed {
+					require.ErrorIs(t, err, auth.ErrTenantWriteLocked)
+					return
+				}
+				require.NoError(t, err)
+				require.Contains(t, got.Permissions, tc.permission)
+				for _, action := range got.Permissions {
+					require.True(t, s3perm.AllowedWhenWriteLocked(action), action)
+				}
+			})
+		}
+	})
+
+	t.Run("write lock still permits signature-bound batch deletion", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked,
+			accessKeyPermissions: []string{"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:PutObject"}})
+		req := signedBodyRequest(t, accessKey, "POST", "https://s3.fil.one/bucket?delete",
+			"<Delete><Object><Key>one</Key><VersionId>v1</VersionId></Object></Delete>", region, true)
+		got, err := az.Authorize(ctx, providerID, req)
+		require.NoError(t, err)
+		require.Equal(t, auth.OpDeleteObjects, got.Operation)
+		require.NotContains(t, got.Permissions, "s3:PutObject")
+	})
+
+	t.Run("write lock denies copy even with valid source-read authority", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked,
+			accessKeyPermissions: []string{"s3:PutObject", "s3:GetObject"}})
+		_, err := az.Authorize(ctx, providerID, signedCopyRequest(t, accessKey, "bucket", "bucket2", region, true))
+		require.ErrorIs(t, err, auth.ErrTenantWriteLocked)
+	})
+
+	t.Run("write lock filters a principal policy's cached permission set", func(t *testing.T) {
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked, principalBound: true})
+		grant(t, policies, bucketID, tenantID, s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"),
+			Actions:   s3bkt.NewStringSet("s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectTagging"),
+			Resources: s3bkt.NewStringSet(s3bkt.ObjectsARN("bucket"))})
+		got, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"s3:GetObject", "s3:DeleteObject"}, got.Permissions)
+	})
+
 }
 
 // lockedAccessKeys, lockedPrincipals and lockedPolicies fail every Get with
