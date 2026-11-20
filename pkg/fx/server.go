@@ -12,6 +12,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/fil-forge/hilt/pkg/echo/middleware"
 	"github.com/fil-forge/hilt/pkg/tracing"
+	"github.com/fil-forge/libforge/diddoc"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/labstack/echo/v4"
@@ -139,14 +140,24 @@ func serverInfoHandler(id identity.Identity) echo.HandlerFunc {
 }
 
 // didDocumentHandler serves the service identity's DID document for did:web
-// resolution, so other services can verify Hilt's UCAN signatures.
+// resolution, so other services can verify Hilt's UCAN signatures. Responses
+// carry Cache-Control, ETag and Last-Modified headers, and conditional
+// requests get a 304 when the document has not changed.
 func didDocumentHandler(logger *zap.Logger, id identity.Identity) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		doc, err := id.DIDDocument()
-		if err != nil {
-			logger.Error("building DID document", zap.Error(err))
+	handler, err := newDIDDocumentHandler(id)
+	if err != nil {
+		logger.Error("building DID document", zap.Error(err))
+		return func(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal error")
 		}
-		return c.JSON(http.StatusOK, doc)
 	}
+	return echo.WrapHandler(handler)
+}
+
+func newDIDDocumentHandler(id identity.Identity) (http.Handler, error) {
+	doc, err := id.DIDDocument()
+	if err != nil {
+		return nil, err
+	}
+	return diddoc.NewHandler(doc)
 }
