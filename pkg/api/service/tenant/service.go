@@ -13,6 +13,7 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
@@ -27,6 +28,7 @@ import (
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	ucandelegation "github.com/fil-forge/ucantone/ucan/delegation"
 	"go.uber.org/zap"
 )
 
@@ -253,13 +255,128 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	if err := s.tenants.SetStatus(ctx, rec.ID, tenantstore.Status(status)); err != nil {
+	next := tenantstore.Status(status)
+	log := s.logger.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
+
+	// The status lands first, so a sweep that fails leaves the tenant in the
+	// state the operator asked for rather than silently still writable. The
+	// sweep is then safe to repeat: the same call run again revokes what is
+	// left, and revoking a grant twice is harmless.
+	if err := s.tenants.SetStatus(ctx, rec.ID, next); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("updating tenant status: %w", err)
 	}
+
+	// Enforcing the lock in Authorize is not enough on its own: a gateway that
+	// already holds a key's write grants authorizes an object write from its
+	// own cache without asking Hilt again (ingot's authorizeLocal). Revoking
+	// those grants is what drops that cache, so the next write has to come
+	// back here, where the lock is enforced.
+	switch {
+	case next == tenantstore.WriteLocked && rec.Status != tenantstore.WriteLocked:
+		return s.sweepWriteGrants(ctx, log, rec.ID, revokeOnly)
+	case next == tenantstore.Active && rec.Status == tenantstore.WriteLocked:
+		return s.sweepWriteGrants(ctx, log, rec.ID, reissue)
+	}
 	return nil
+}
+
+// writeGrantSweep is what [Service.sweepWriteGrants] does with the write grants
+// it finds: a lock revokes them where they are, and an unlock replaces each
+// with a fresh grant of the same audience, subject, command and expiry.
+//
+// Revoking without deleting is deliberate. The grant is what records the
+// audience, subject and command, and an unlock has nothing else to rebuild them
+// from: a service key's permissions would do, but a principal-bound key's
+// authority lives in bucket policies this path does not read. Keeping the
+// revoked grant keeps the unlock a rewrite rather than a reconstruction.
+type writeGrantSweep int
+
+const (
+	revokeOnly writeGrantSweep = iota
+	reissue
+)
+
+// sweepWriteGrants revokes every write grant the tenant's access keys hold and,
+// on an unlock, replaces them. Read grants are never touched, so a write-locked
+// tenant keeps reading, which is what separates the lock from a disable.
+//
+// The whole sweep is one Replace: the keys' delegations are locked for it, so a
+// key minted or a policy rotated meanwhile serializes with it rather than
+// racing it, and a failed publish rolls the write back with nothing revoked.
+func (s *Service) sweepWriteGrants(ctx context.Context, log *zap.Logger, tenantID did.DID, mode writeGrantSweep) error {
+	keys, err := s.accessKeys.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("listing access keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
+	if err != nil {
+		return err
+	}
+	audiences := make([]did.DID, len(keys))
+	for i, key := range keys {
+		audiences[i] = key.ID
+	}
+	// The publish runs while the delegations are locked, so the write is
+	// bounded at the batch deadline, as the rotator's is.
+	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
+	defer cancel()
+
+	err = s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
+		replacement := make(map[did.DID][]ucan.Delegation, len(current))
+		var revoked []ucan.Delegation
+		for aud, held := range current {
+			for _, d := range held {
+				if !s3perm.RevokedByWriteLock(d.Command()) {
+					replacement[aud] = append(replacement[aud], d)
+					continue
+				}
+				revoked = append(revoked, d)
+				if mode == revokeOnly {
+					// Kept where it is: the unlock reads it to rebuild from.
+					replacement[aud] = append(replacement[aud], d)
+					continue
+				}
+				fresh, err := reissueGrant(issuer, d)
+				if err != nil {
+					return nil, err
+				}
+				replacement[aud] = append(replacement[aud], fresh)
+			}
+		}
+		if len(revoked) == 0 {
+			return replacement, nil
+		}
+		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, revoked); err != nil {
+			return nil, fmt.Errorf("revoking the tenant's write grants: %w", err)
+		}
+		return replacement, nil
+	})
+	if errors.Is(err, store.ErrLockTimeout) {
+		log.Info("write-grant sweep lost a race with a concurrent write", zap.Error(err))
+		return ErrConcurrentChange
+	}
+	return err
+}
+
+// reissueGrant issues a fresh grant carrying what d carried. ucantone gives
+// every delegation a random nonce, so the replacement has a new CID and is
+// unaffected by the revocation of the one it replaces.
+func reissueGrant(issuer ucan.Issuer, d ucan.Delegation) (ucan.Delegation, error) {
+	opts := []ucandelegation.Option{ucandelegation.WithNoExpiration()}
+	if exp := d.Expiration(); exp != nil {
+		opts = []ucandelegation.Option{ucandelegation.WithExpiration(*exp)}
+	}
+	fresh, err := ucandelegation.Delegate(issuer, d.Audience(), d.Subject(), d.Command(), opts...)
+	if err != nil {
+		return nil, fmt.Errorf("reissuing %s: %w", d.Link(), err)
+	}
+	return fresh, nil
 }
 
 // Delete permanently deletes a tenant (which must be disabled), cascading to its
