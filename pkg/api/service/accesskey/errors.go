@@ -51,7 +51,8 @@ var (
 	// a principal of the tenant.
 	ErrUnknownPrincipal = errors.New(UnknownPrincipalErrorName, "unknown principal")
 	// ErrConcurrentChange is returned when another write to the access key was
-	// in flight and this call gave up rather than wait on it. Nothing was
-	// changed and the call can be repeated.
+	// in flight and this call gave up rather than wait on it, or when a policy
+	// write rotated a principal-bound key while it was being created. Nothing
+	// was changed and the call can be repeated.
 	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the access key is being changed concurrently, retry the request")
 )

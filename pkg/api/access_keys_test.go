@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -555,4 +556,33 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/missing/access-keys/z6MkWhatever", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+}
+
+// heldBeforeReplace answers Replace as if a policy write had rotated the key
+// meanwhile: the callback sees each audience already holding a delegation.
+// Only the count is read, so the held delegation is a placeholder.
+type heldBeforeReplace struct{ *delegationmemory.Store }
+
+func (h heldBeforeReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	current := make(map[did.DID][]ucan.Delegation, len(audiences))
+	for _, aud := range audiences {
+		current[aud] = make([]ucan.Delegation, 1)
+	}
+	_, err := next(ctx, current)
+	return err
+}
+
+func TestCreateAccessKeyRotatedMeanwhileHandler(t *testing.T) {
+	_, deps := setupAccessKeys(t)
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), heldBeforeReplace{deps.delegations}, deps.vault, &testutil.FakeSwarf{})
+	e := echo.New()
+	route := api.NewCreateAccessKeyHandler(zap.NewNop(), svc)
+	e.Add(route.Method, route.Path, route.Handler)
+
+	rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+
+	require.Equal(t, []any{http.StatusConflict, api.Error{
+		Code:    accesskeysvc.ConcurrentChangeErrorName,
+		Message: accesskeysvc.ErrConcurrentChange.Error(),
+	}}, []any{rec.Code, decodeError(t, rec)})
 }
