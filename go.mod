@@ -14,7 +14,7 @@ require (
 	github.com/fil-forge/libforge v0.0.0-20261022121207-bcdd5eacc465
 	github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40
 	github.com/fil-forge/swarf v0.0.1-0.20261110122649-1097d7d2f5aa
-	github.com/fil-forge/ucantone v0.0.0-20261103134646-342e8488c56a
+	github.com/fil-forge/ucantone v0.0.0-20261120104359-4253712d41e4
 	github.com/ipfs/go-cid v0.6.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
@@ -100,7 +100,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/gobwas/glob v0.2.3 // indirect
+	github.com/gobwas/glob v1.1.0 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
