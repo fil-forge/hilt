@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"github.com/fil-forge/hilt/pkg/reqlog"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	"github.com/fil-forge/ucantone/binding"
@@ -16,7 +17,7 @@ func NewPolicyHandler(logger *zap.Logger, buckets *bucketsvc.Service) server.Rou
 	return s3bkt.Policy.Route(func(req *binding.Request[*s3bkt.PolicyArguments], res *binding.Response[*s3bkt.PolicyOK]) error {
 		ok, err := buckets.Policy(req.Context(), req.Invocation().Issuer(), req.Task().Arguments())
 		if err != nil {
-			log.Error("bucket policy operation failed", zap.Error(err))
+			log.Error("bucket policy operation failed", append(reqlog.Fields(req.Context()), zap.Error(err))...)
 			return bucketFailure(res, err)
 		}
 		return res.SetSuccess(ok)

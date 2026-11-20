@@ -64,6 +64,29 @@ func (f *failReadBack) Get(ctx context.Context, id did.DID, opts ...store.ReadOp
 	return f.Store.Get(ctx, id, opts...)
 }
 
+// rotatedOnAdd wraps an access-key store and stores a delegation for each key
+// right after its record is added, standing in for a policy write that rotates
+// the principal's keys between the key's commit and its delegation write. It
+// records the key's ID.
+type rotatedOnAdd struct {
+	accesskeystore.Store
+	delegations delegationstore.Store
+	issuer      ucan.Issuer
+	created     *did.DID
+}
+
+func (s *rotatedOnAdd) Add(ctx context.Context, in accesskeystore.Input) error {
+	if err := s.Store.Add(ctx, in); err != nil {
+		return err
+	}
+	*s.created = in.ID
+	rotated, err := delegation.Delegate(s.issuer, in.ID, s.issuer.DID(), command.Top(), delegation.WithNoExpiration())
+	if err != nil {
+		return err
+	}
+	return s.delegations.PutBatch(ctx, []ucan.Delegation{rotated})
+}
+
 // disablingTenants disables each tenant right after it is looked up, landing a
 // concurrent disable deterministically between Create's lookup and its insert.
 type disablingTenants struct{ tenant.Store }
@@ -318,6 +341,18 @@ func TestCreatePrincipalBound(t *testing.T) {
 		// The key pair is stored where every access key's is.
 		_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, rec.ID))
 		require.NoError(t, err)
+	})
+
+	t.Run("names the tenant, key and principal when a rotation reached the key first", func(t *testing.T) {
+		b := memoryBackend(t)
+		var created did.DID
+		d := setupWith(t, b, func(s accesskeystore.Store) accesskeystore.Store {
+			return &rotatedOnAdd{Store: s, delegations: b.delegations, issuer: testutil.RandomIssuer(t), created: &created}
+		})
+		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, new("alice"), nil)
+		require.EqualError(t, err, fmt.Sprintf(
+			`storing delegations: access key %s of principal "alice" in tenant %s (tenant-1) already holds delegations: invalid argument`,
+			created, d.tenantID))
 	})
 
 	t.Run("holds nothing when no policy names the principal", func(t *testing.T) {

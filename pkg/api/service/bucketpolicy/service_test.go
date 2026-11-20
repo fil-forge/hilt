@@ -16,6 +16,7 @@ import (
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/reqlog"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -400,6 +401,28 @@ func TestPutAndGet(t *testing.T) {
 			"bucket": "photos",
 			"error":  fmt.Sprintf("policy ETag is %s, not %s: %s", etag, stale, store.ErrPreconditionFailed),
 		}, entries[0].ContextMap())
+	})
+
+	t.Run("the rotation a write runs logs the write's request and invocation ids", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		tenants := tenantmemory.New()
+		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+		core, logs := observer.New(zapcore.InfoLevel)
+		rotator := grant.NewRotator(zap.New(core), d.delegations, d.accessKeys, d.secrets, d.swarf)
+		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, d.policies, rotator)
+
+		inv := testutil.RandomCID(t)
+		rctx := reqlog.WithInvocation(reqlog.WithRequestID(ctx, "req-1"), inv)
+		_, _, err := svc.Write(rctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")))
+		require.NoError(t, err)
+
+		var got []any
+		for _, entry := range logs.FilterMessage("prepared delegation rotation").All() {
+			fields := entry.ContextMap()
+			got = append(got, []any{fields["request_id"], fields["invocation"]})
+		}
+		require.Equal(t, []any{[]any{"req-1", inv.String()}}, got)
 	})
 
 	t.Run("a replace with a stale ETag fails and writes nothing", func(t *testing.T) {

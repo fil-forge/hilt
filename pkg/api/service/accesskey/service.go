@@ -111,7 +111,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	} else if err != nil {
 		return accesskeystore.Record{}, "", fmt.Errorf("looking up tenant: %w", err)
 	}
-	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
+	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID), zap.String("external_id", externalID))
 	// A disabled tenant is on its way to deletion, which revokes every key it
 	// holds at that point; a key created after that snapshot would keep its
 	// authority. Refuse it, as the deletion itself refuses a tenant that is not
@@ -294,7 +294,11 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		// rolls back rather than store stale grants beside it.
 		if err := s.delegations.Replace(ctx, []did.DID{accessKeyID}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 			if len(current[accessKeyID]) > 0 {
-				return nil, fmt.Errorf("access key already holds delegations: %w", store.ErrInvalidArgument)
+				// The tenant, key and principal find the policy write whose
+				// rotation reached this key, in that rotation's log line.
+				log.Warn("access key was rotated while being created", zap.Int("held", len(current[accessKeyID])))
+				return nil, fmt.Errorf("access key %s of principal %q in tenant %s (%s) already holds delegations: %w",
+					accessKeyID, principalOf(principalID), tenantRec.ID, externalID, store.ErrInvalidArgument)
 			}
 			return map[did.DID][]ucan.Delegation{accessKeyID: dels}, nil
 		}); err != nil {
@@ -465,4 +469,12 @@ func (s *Service) bucketNamesByID(ctx context.Context, tenantID did.DID, ids []d
 		names[b.ID] = b.Name
 	}
 	return names, nil
+}
+
+// principalOf names a key's principal in an error, or none for a service key.
+func principalOf(principalID *string) string {
+	if principalID == nil {
+		return ""
+	}
+	return *principalID
 }

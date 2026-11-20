@@ -21,8 +21,10 @@ func RequestLogger(logger *zap.Logger) echo.MiddlewareFunc {
 		LogResponseSize:  true,
 		LogHeaders:       []string{},
 		LogError:         true,
+		LogRequestID:     true,
 		LogValuesFunc: func(c echo.Context, v echomiddleware.RequestLoggerValues) error {
 			fields := []zap.Field{
+				zap.String("request_id", v.RequestID),
 				zap.Int("status", v.Status),
 				zap.String("method", v.Method),
 				zap.String("uri", v.URI),

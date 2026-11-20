@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
 
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/reqlog"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
@@ -36,7 +38,16 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 	// The bucket the authorizer resolved and scope-checked, by DID: looking it
 	// up again by name could reach a bucket recreated under that name since.
 	tenantID, bucketID, name := authz.Tenant.ID, authz.Bucket.ID, authz.BucketName
-	log := s.logger.With(zap.Stringer("tenant", authz.Tenant.ID), zap.String("bucket", name), zap.Stringer("operation", authz.Operation))
+	// The request and invocation ids join this line to the invocation's own
+	// line, and the tenant and bucket DIDs to the rotation's and to an access
+	// key creation's.
+	log := s.logger.With(append(reqlog.Fields(ctx),
+		zap.Stringer("tenant", authz.Tenant.ID),
+		zap.String("external_id", authz.Tenant.ExternalID),
+		zap.String("bucket", name),
+		zap.Stringer("bucket_id", bucketID),
+		zap.Stringer("operation", authz.Operation),
+	)...)
 
 	switch authz.Operation {
 	case auth.OpGetBucketPolicy:
@@ -64,13 +75,14 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 		if cond != nil {
 			opts = append(opts, bucketpolicysvc.WithCondition(*cond))
 		}
+		started := time.Now()
 		_, _, err = s.policyWrites.Write(ctx, tenantID, bucketID, name, doc, opts...)
 		if errors.Is(err, bucketpolicysvc.ErrBucketNotFound) {
 			return nil, fmt.Errorf("%w: %q", ErrUnknownBucket, name)
 		} else if err != nil {
 			return nil, err
 		}
-		log.Info("wrote bucket policy over S3")
+		log.Info("wrote bucket policy over S3", zap.Time("started", started), zap.Duration("took", time.Since(started)))
 		return &s3bkt.PolicyOK{}, nil
 
 	case auth.OpDeleteBucketPolicy:
@@ -86,10 +98,11 @@ func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.Policy
 			}
 			ifMatch = &cond.Match
 		}
+		started := time.Now()
 		if err := s.policyWrites.Remove(ctx, tenantID, bucketID, name, ifMatch); err != nil {
 			return nil, err
 		}
-		log.Info("deleted bucket policy over S3")
+		log.Info("deleted bucket policy over S3", zap.Time("started", started), zap.Duration("took", time.Since(started)))
 		return &s3bkt.PolicyOK{}, nil
 
 	default:

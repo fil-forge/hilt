@@ -176,8 +176,10 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   invoked with. A self-signed invocation (issuer == subject) needs no proofs and
   carries unattenuated authority under the UCAN rules, which is why nothing but
   the service's own key may issue one. Those checks are silent, so
-  `middleware.LogRejections` (`pkg/rpc/middleware`, Hilt's own) goes outermost
-  and logs what they turn away. Register a new handler with `asUCANRoute` unless
+  `middleware.LogRejections` (`pkg/rpc/middleware`, Hilt's own) wraps them
+  and logs what they turn away. `middleware.LogInvocations` goes outermost and
+  logs one "invocation handled" line per invocation; `pkg/reqlog` carries its
+  request and invocation ids to the lines a handler logs. Register a new handler with `asUCANRoute` unless
   the service invokes it on itself, and put the check in middleware rather than
   in the handler.
 - **Authorization**: signature-bearing S3 commands authenticate via the
