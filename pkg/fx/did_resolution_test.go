@@ -2,6 +2,7 @@ package fx_test
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -125,19 +126,28 @@ func newWebHost(t *testing.T) webHost {
 	}))
 	t.Cleanup(ts.Close)
 
-	id, err := identity.New("", "did:web:"+url.QueryEscape(strings.TrimPrefix(ts.URL, "http://")))
+	id, err := identity.New("", localDIDWeb(t, ts))
 	require.NoError(t, err)
 	h.id = id
 	return h
+}
+
+// localDIDWeb is the did:web of a test server. A did:web names a host, never
+// an IP address, so the server is addressed as localhost.
+func localDIDWeb(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	_, port, err := net.SplitHostPort(ts.Listener.Addr().String())
+	require.NoError(t, err)
+	return "did:web:localhost%3A" + port
 }
 
 // unreachableWebIdentity is a did:web identity whose host refuses connections.
 func unreachableWebIdentity(t *testing.T) identity.Identity {
 	t.Helper()
 	ts := httptest.NewServer(http.NotFoundHandler())
-	host := strings.TrimPrefix(ts.URL, "http://")
+	webDID := localDIDWeb(t, ts)
 	ts.Close()
-	id, err := identity.New("", "did:web:"+url.QueryEscape(host))
+	id, err := identity.New("", webDID)
 	require.NoError(t, err)
 	return id
 }
