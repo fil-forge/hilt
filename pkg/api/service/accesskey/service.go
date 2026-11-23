@@ -209,13 +209,16 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	// detached from the request (values retained, cancellation/deadline dropped) so
 	// a client disconnect — which cancels ctx — cannot abort the rollback partway
 	// and leave orphaned state.
+	// The record goes before the delegations: a policy write rotating the
+	// principal's keys skips a key whose record is gone, so none stores grants
+	// for this key after its delegations are deleted.
 	rollback := func() {
 		cleanupCtx := context.WithoutCancel(ctx)
-		if err := s.delegations.DeleteByAudience(cleanupCtx, accessKeyID); err != nil {
-			log.Warn("rollback: deleting delegations", zap.Error(err))
-		}
 		if err := s.accessKeys.Delete(cleanupCtx, accessKeyID); err != nil {
 			log.Warn("rollback: deleting access key", zap.Error(err))
+		}
+		if err := s.delegations.DeleteByAudience(cleanupCtx, accessKeyID); err != nil {
+			log.Warn("rollback: deleting delegations", zap.Error(err))
 		}
 		if err := s.secrets.Delete(cleanupCtx, vaultPath); err != nil {
 			log.Warn("rollback: deleting access key from vault", zap.Error(err))
@@ -294,12 +297,12 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		// rolls back rather than store stale grants beside it.
 		if err := s.delegations.Replace(ctx, []did.DID{accessKeyID}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
 			if len(current[accessKeyID]) > 0 {
-				return nil, fmt.Errorf("access key already holds delegations: %w", store.ErrInvalidArgument)
+				return nil, fmt.Errorf("access key already holds delegations: %w", ErrConcurrentChange)
 			}
 			return map[did.DID][]ucan.Delegation{accessKeyID: dels}, nil
 		}); err != nil {
 			rollback()
-			if errors.Is(err, store.ErrLockTimeout) {
+			if errors.Is(err, store.ErrLockTimeout) || errors.Is(err, ErrConcurrentChange) {
 				return accesskeystore.Record{}, "", ErrConcurrentChange
 			}
 			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)

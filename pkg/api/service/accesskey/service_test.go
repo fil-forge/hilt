@@ -706,3 +706,59 @@ func TestCreateLockTimeoutsAreConcurrentChanges(t *testing.T) {
 		})
 	}
 }
+
+// rotateBeforeReplace stands in for a policy write that rotates a
+// principal-bound key between the key record's commit and the creation's
+// delegation write: before each Replace it stores a delegation to the first
+// audience. It records that audience, the created key's DID.
+type rotateBeforeReplace struct {
+	delegationstore.Store
+	t        *testing.T
+	subject  did.DID
+	audience did.DID
+}
+
+func (r *rotateBeforeReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	r.audience = audiences[0]
+	signer, err := ed25519.Generate()
+	require.NoError(r.t, err)
+	rotated, err := delegation.Delegate(multikey.NewIssuer(signer.KeyDID(), signer), r.audience, r.subject, command.Top(), delegation.WithNoExpiration())
+	require.NoError(r.t, err)
+	require.NoError(r.t, r.Store.PutBatch(ctx, []ucan.Delegation{rotated}))
+	return r.Store.Replace(ctx, audiences, next)
+}
+
+// TestCreateRotatedMeanwhile checks that a principal-bound key rotated by a
+// policy write while it is being created is reported as a concurrent change,
+// and that the rollback leaves nothing of it behind, so the call can be
+// repeated.
+func TestCreateRotatedMeanwhile(t *testing.T) {
+	create := func(t *testing.T) (deps, *rotateBeforeReplace, error) {
+		b := memoryBackend(t)
+		rotating := &rotateBeforeReplace{Store: b.delegations, t: t}
+		b.delegations = rotating
+		d := setupWith(t, b)
+		rotating.subject = d.bucketID
+		_, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, new("alice"), nil)
+		return d, rotating, err
+	}
+
+	t.Run("reports a concurrent change", func(t *testing.T) {
+		_, _, err := create(t)
+		require.ErrorIs(t, err, accesskeysvc.ErrConcurrentChange)
+	})
+
+	t.Run("leaves no access key record", func(t *testing.T) {
+		d, _, _ := create(t)
+		keys, err := d.accessKeys.ListByTenant(t.Context(), d.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, keys)
+	})
+
+	t.Run("leaves no delegations to the discarded key", func(t *testing.T) {
+		d, rotating, _ := create(t)
+		held, err := d.delegations.ListByAudience(t.Context(), rotating.audience)
+		require.NoError(t, err)
+		require.Empty(t, held.Results)
+	})
+}
