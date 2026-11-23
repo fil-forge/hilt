@@ -152,5 +152,11 @@ func (p *PublicKey) String() string {
 
 // KeyDID returns the did:key DID for this public key, e.g. did:key:z6LS….
 func (p *PublicKey) KeyDID() did.DID {
-	return did.New(key.Method, p.String())
+	d, err := did.New(key.Method, p.String())
+	if err != nil {
+		// The identifier is the Base58BTC encoding of the key, which is always
+		// a valid did:key identifier.
+		panic(fmt.Errorf("creating did:key of X25519 public key: %w", err))
+	}
+	return d
 }
