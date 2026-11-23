@@ -10,6 +10,7 @@ import (
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/reqlog"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/sigv4"
@@ -32,6 +33,8 @@ import (
 	"github.com/multiformats/go-multibase"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestPolicy covers /s3/bucket/policy: the three S3 bucket policy operations,
@@ -54,6 +57,7 @@ func TestPolicy(t *testing.T) {
 		policies   *bucketpolicymemory.Store
 		bucketID   did.DID
 		bucketGone *bool // the policy store's view of the bucket, for a delete racing a write
+		logs       *observer.ObservedLogs
 	}
 	// setup seeds the tenant, the photos bucket, principal user-1 with one
 	// key, and akSigner as a service key holding perms (or bound to user-1).
@@ -77,7 +81,8 @@ func TestPolicy(t *testing.T) {
 		swarf := &htestutil.FakeSwarf{}
 		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, grants)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, providers, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone}
+		core, logs := observer.New(zapcore.InfoLevel)
+		return fixture{bucketsvc.New(zap.New(core), az, buckets, delegations, accessKeys, tenants, policies, providers, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone, logs}
 	}
 
 	type reqOpts struct {
@@ -146,6 +151,31 @@ func TestPolicy(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, read, stored.Policy)
 		require.Equal(t, s3bkt.ETag(read), stored.ETag)
+	})
+
+	t.Run("a write logs the request, invocation, tenant and bucket it touched", func(t *testing.T) {
+		f := setup(t, policyPerms, false)
+		inv := htestutil.RandomCID(t)
+		rctx := reqlog.WithInvocation(reqlog.WithRequestID(ctx, "req-1"), inv)
+		_, err := f.svc.Policy(rctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
+		require.NoError(t, err)
+
+		entries := f.logs.FilterMessage("wrote bucket policy over S3").All()
+		require.Len(t, entries, 1)
+		fields := entries[0].ContextMap()
+		require.Contains(t, fields, "started")
+		require.Contains(t, fields, "took")
+		delete(fields, "started")
+		delete(fields, "took")
+		require.Equal(t, map[string]any{
+			"request_id":  "req-1",
+			"invocation":  inv.String(),
+			"tenant":      tenantID.String(),
+			"external_id": "tenant-1",
+			"bucket":      bucketName,
+			"bucket_id":   f.bucketID.String(),
+			"operation":   "PutBucketPolicy",
+		}, fields)
 	})
 
 	t.Run("a GET returns the canonical document", func(t *testing.T) {

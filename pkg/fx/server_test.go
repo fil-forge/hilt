@@ -1,6 +1,7 @@
 package fx_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,8 +11,17 @@ import (
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+	"github.com/fil-forge/ucantone/execution"
+	"github.com/fil-forge/ucantone/ipld/codec/dagcbor"
+	"github.com/fil-forge/ucantone/server"
+	"github.com/fil-forge/ucantone/ucan/container"
+	"github.com/fil-forge/ucantone/ucan/invocation"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestServerInfoRoute(t *testing.T) {
@@ -119,4 +129,44 @@ func TestDIDDocumentRoute(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotModified, rec.Code)
 	require.Empty(t, rec.Body.Bytes())
+}
+
+func TestUCANRequestLogsShareRequestID(t *testing.T) {
+	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
+	require.NoError(t, err)
+	core, logs := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+
+	// An admin command: Hilt invokes it on itself, so it validates with no
+	// proofs.
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{
+		Identity:  id,
+		Providers: providermemory.New(),
+		Logger:    logger,
+		AdminRoutes: []server.Route{server.NewRoute(s3bkt.List.Command,
+			func(req execution.Request, res execution.Response) error {
+				return res.SetSuccess(&s3bkt.ListOK{})
+			},
+		)},
+	})
+	require.NoError(t, err)
+	e := appfx.NewEchoServer(appfx.ServerParams{Logger: logger, Identity: id, UCANServer: ucanSrv})
+
+	inv, err := invocation.Invoke(id, id.DID(), s3bkt.List.Command, nil, invocation.WithAudience(id.DID()))
+	require.NoError(t, err)
+	var body bytes.Buffer
+	require.NoError(t, container.New(container.WithInvocations(inv)).MarshalCBOR(&body))
+	req := httptest.NewRequest(http.MethodPost, "/", &body)
+	req.Header.Set("Content-Type", dagcbor.ContentType)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	requestID := rec.Header().Get(echo.HeaderXRequestID)
+	var got []any
+	for _, msg := range []string{"request completed", "invocation handled"} {
+		for _, entry := range logs.FilterMessage(msg).All() {
+			got = append(got, entry.ContextMap()["request_id"])
+		}
+	}
+	require.Equal(t, []any{requestID, requestID}, got)
 }

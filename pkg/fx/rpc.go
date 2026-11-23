@@ -107,6 +107,7 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 		server.WithEventListener(tracing.SpanNamer{}),
 	)
 	routes := middleware.Apply(p.Routes,
+		hiltmiddleware.LogInvocations(p.Logger),
 		hiltmiddleware.LogRejections(p.Logger),
 		middleware.NotSelfSigned(),
 		middleware.OnlySubject(p.Identity.DID()),
@@ -116,6 +117,7 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 	// subject is still pinned to the service, so an admin command only ever acts
 	// on the service's own authority.
 	routes = append(routes, middleware.Apply(p.AdminRoutes,
+		hiltmiddleware.LogInvocations(p.Logger),
 		hiltmiddleware.LogRejections(p.Logger),
 		middleware.OnlyIssuer(p.Identity.DID()),
 		middleware.OnlySubject(p.Identity.DID()),

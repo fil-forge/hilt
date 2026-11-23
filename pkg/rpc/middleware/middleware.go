@@ -1,6 +1,7 @@
 // Package middleware holds the Hilt side of the UCAN route middleware: the
 // authorization checks themselves live in ucantone's server/middleware, which
-// is silent, and [LogRejections] records what they reject. pkg/fx's
+// is silent, and [LogRejections] records what they reject. [LogInvocations]
+// logs every invocation a route executes, with its outcome. pkg/fx's
 // NewUCANServer applies them: the commands Hilt serves for others behind
 // NotSelfSigned and OnlySubject, the ones Hilt invokes on itself behind
 // OnlyIssuer.
@@ -26,8 +27,8 @@ var rejections = map[string]struct{}{
 }
 
 // LogRejections logs an invocation the authorization middleware turned away,
-// with the issuer and subject that were refused. It belongs outermost, so it
-// sees whatever the checks inside it record on the response.
+// with the issuer and subject that were refused. It belongs outside the
+// checks, so it sees whatever they record on the response.
 func LogRejections(logger *zap.Logger) middleware.Middleware {
 	return func(route server.Route) server.Route {
 		log := logger.With(zap.Stringer("command", route.Command))
@@ -60,18 +61,24 @@ func LogRejections(logger *zap.Logger) middleware.Middleware {
 // failureName reports the name of the failure the response carries, if it
 // carries one.
 func failureName(res execution.Response) (string, bool) {
+	model, ok := failure(res)
+	return model.Name(), ok
+}
+
+// failure reports the failure the response carries, if it carries one.
+func failure(res execution.Response) (edm.ErrorModel, bool) {
 	rcpt := res.Receipt()
 	if rcpt == nil {
-		return "", false
+		return edm.ErrorModel{}, false
 	}
 	out := rcpt.Out()
 	if !out.IsErr() {
-		return "", false
+		return edm.ErrorModel{}, false
 	}
 	_, errBytes := out.Unpack()
 	var model edm.ErrorModel
 	if err := model.UnmarshalCBOR(bytes.NewReader(errBytes)); err != nil {
-		return "", false
+		return edm.ErrorModel{}, false
 	}
-	return model.Name(), true
+	return model, true
 }
