@@ -3,7 +3,6 @@ package fx
 import (
 	"fmt"
 	"net/http"
-	"time"
 
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/config"
@@ -131,8 +130,9 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 
 // newDIDResolver builds the DID resolver used to validate UCANs on the RPC
 // server. did:web documents are fetched over HTTPS unless insecure is set, in
-// which case they are fetched over HTTP (development only). Resolved documents
-// are cached for three hours.
+// which case they are fetched over HTTP (development only). The did:web
+// resolver caches the documents it fetches: for the max-age the response
+// gives, or five minutes when it gives none.
 //
 // A did:web is whatever the caller wrote as a token's issuer, and it is
 // resolved before the token's signature is checked. Only the service's own
@@ -158,7 +158,7 @@ func newDIDResolver(id identity.Identity, providers providerstore.Store, insecur
 		"key": key.Resolver,
 		"web": resolver.Tiered{
 			resolver.WellKnown{id.DID(): selfDoc},
-			newProviderResolver(providers, resolver.NewCached(webResolver, 3*time.Hour), logger),
+			newProviderResolver(providers, webResolver, logger),
 		},
 	}, nil
 }
