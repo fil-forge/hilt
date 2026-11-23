@@ -164,8 +164,8 @@ github.com/felixge/httpsnoop v1.1.0 h1:3YtUj32ZZkqZtt3sZZsClsymw/QDuVfpNhoA31zeO
 github.com/felixge/httpsnoop v1.1.0/go.mod h1:Zqxgdd+1Rkcz8euOqdr7lqgCRJztwr5hp9vDSi5UZCE=
 github.com/fil-forge/libforge v0.0.0-20261123132321-e3267015aa44 h1:qTw0xtrVOhxbmgNxMGaJ4Zwdrha0bJ/6MGaKU9/xU7Q=
 github.com/fil-forge/libforge v0.0.0-20261123132321-e3267015aa44/go.mod h1:Z2F5ns5o/fk64SUJE79ctLYI5M1khrYSJbh4/xd74DE=
-github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40 h1:Meq7loWqQvwCVtlUGP173VfULpOM33YtSyej5507USU=
-github.com/fil-forge/smelt v0.0.0-20261021123053-359a84935c40/go.mod h1:Zz67XgtRsLViFDCVMxpXwRcge9Y3dbUA9rvZqAF93vg=
+github.com/fil-forge/smelt v0.0.0-20261123163211-a0554b227952 h1:wP8ceY68MPv1iT5HG2FPaeFTCj1EZmCGiFIls3blj8E=
+github.com/fil-forge/smelt v0.0.0-20261123163211-a0554b227952/go.mod h1:UMmhABT0jftWFKdBXv8hQWzgORZCnUrOsKsrHm9EvMk=
 github.com/fil-forge/swarf v0.0.1-0.20261110122649-1097d7d2f5aa h1:Q0AOjatKwC5RBSFHDZCC5AJHQJSumyX47EIdAyg8Qb0=
 github.com/fil-forge/swarf v0.0.1-0.20261110122649-1097d7d2f5aa/go.mod h1:bQHWuu146k3KZWpEWbj+jtgQMjzVUxb5TKO+YWprVTo=
 github.com/fil-forge/ucantone v0.0.0-20261123131543-0ef2b25abb66 h1:bjARwsoQ+D3xANVSIbCSQSUvb5ZR4GdGV8dRXnoD/cs=
