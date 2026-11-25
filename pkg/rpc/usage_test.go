@@ -67,7 +67,7 @@ func TestReportUsageStoresAProvidersCounts(t *testing.T) {
 
 	ok, err := f.report(t, f.provider, usage.SpaceEgress{Space: f.bucket, Hours: hours(10, 20)})
 	require.NoError(t, err)
-	require.Empty(t, ok.Skipped)
+	require.Empty(t, ok.Warnings)
 	require.Equal(t, []usagestore.HourlyEgress{{Hour: usageHour0, Bytes: 10}, {Hour: usageHour1, Bytes: 20}}, f.stored(t, f.bucket))
 
 	// The counts are attributed to the bucket's tenant, which the report
@@ -80,7 +80,7 @@ func TestReportUsageStoresAProvidersCounts(t *testing.T) {
 	for range 2 {
 		ok, err = f.report(t, f.provider, usage.SpaceEgress{Space: f.bucket, Hours: hours(10, 35)})
 		require.NoError(t, err)
-		require.Empty(t, ok.Skipped)
+		require.Empty(t, ok.Warnings)
 	}
 	require.Equal(t, []usagestore.HourlyEgress{{Hour: usageHour0, Bytes: 10}, {Hour: usageHour1, Bytes: 35}}, f.stored(t, f.bucket))
 }
@@ -99,7 +99,14 @@ func TestReportUsageSkipsBucketsItCannotAttribute(t *testing.T) {
 		usage.SpaceEgress{Space: theirs, Hours: hours(1000)},
 	)
 	require.NoError(t, err)
-	require.Equal(t, []did.DID{unknown, theirs}, ok.Skipped)
+	// Each bucket left out comes back with the reason, in the report's order.
+	require.Len(t, ok.Warnings, 2)
+	require.Equal(t, usage.UnknownBucketWarningName, ok.Warnings[0].Name)
+	require.Equal(t, unknown, ok.Warnings[0].Space)
+	require.NotEmpty(t, ok.Warnings[0].Message)
+	require.Equal(t, usage.BucketRegionMismatchWarningName, ok.Warnings[1].Name)
+	require.Equal(t, theirs, ok.Warnings[1].Space)
+	require.NotEmpty(t, ok.Warnings[1].Message)
 	require.Equal(t, []usagestore.HourlyEgress{{Hour: usageHour0, Bytes: 10}}, f.stored(t, f.bucket))
 	// Another provider's bucket gains nothing from a provider that does not serve it.
 	require.Empty(t, f.stored(t, theirs))
@@ -114,7 +121,7 @@ func TestReportUsageAcceptsADeletedBucket(t *testing.T) {
 
 	ok, err := f.report(t, f.provider, usage.SpaceEgress{Space: f.bucket, Hours: hours(10)})
 	require.NoError(t, err)
-	require.Empty(t, ok.Skipped)
+	require.Empty(t, ok.Warnings)
 
 	tenantTotal, err := f.counts.TenantEgress(t.Context(), f.tenant, usageHour0, usageHour1)
 	require.NoError(t, err)
@@ -156,13 +163,13 @@ func TestReportUsageLimitsTheCountsInOneReport(t *testing.T) {
 
 	ok, err := f.report(t, f.provider, usage.SpaceEgress{Space: f.bucket, Hours: many})
 	require.NoError(t, err)
-	require.Empty(t, ok.Skipped)
+	require.Empty(t, ok.Warnings)
 }
 
 func TestReportUsageAcceptsAnEmptyReport(t *testing.T) {
 	f := newUsageFixture(t)
 	ok, err := f.report(t, f.provider)
 	require.NoError(t, err)
-	require.NotNil(t, ok.Skipped)
-	require.Empty(t, ok.Skipped)
+	require.NotNil(t, ok.Warnings)
+	require.Empty(t, ok.Warnings)
 }

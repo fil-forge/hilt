@@ -65,15 +65,17 @@ func NewReportUsageHandler(logger *zap.Logger, buckets bucket.Store, counts usag
 	})
 }
 
-// ReportUsage stores the counts a provider reported and returns the buckets it
-// skipped.
+// ReportUsage stores the counts a provider reported and returns a warning for
+// each bucket whose counts it did not store.
 //
 // One count that cannot be used does not fail the report: the counts for a
-// bucket no record was ever kept of, or one another provider serves, are
-// skipped and named in the result, and the rest are stored. The gateway then
-// stops sending the skipped counts, where failing the report would have it
-// resend them, and everything queued behind them, without end. A deleted
-// bucket is not skipped: its last hours are reported after it has gone.
+// bucket no record was ever kept of ([usage.UnknownBucketWarningName]), or
+// one another provider serves ([usage.BucketRegionMismatchWarningName]), are
+// left out, each with a warning naming the bucket and the reason, and the rest
+// are stored. The gateway then stops sending those counts, where failing the
+// report would have it resend them, and everything queued behind them, without
+// end. A deleted bucket is not left out: its last hours are reported after it
+// has gone.
 //
 // A report is refused whole, as [ErrInvalidUsageReport] or [ErrTooManyCounts],
 // only when it is not well formed.
@@ -86,7 +88,7 @@ func ReportUsage(ctx context.Context, log *zap.Logger, buckets BucketOwners, cou
 		return nil, ErrTooManyCounts
 	}
 
-	skipped := []did.DID{}
+	warnings := []usage.Warning{}
 	egress := make([]usagestore.EgressCount, 0, total)
 	for _, space := range args.Egress {
 		owner, err := buckets.Owner(ctx, space.Space)
@@ -94,7 +96,11 @@ func ReportUsage(ctx context.Context, log *zap.Logger, buckets BucketOwners, cou
 		case errors.Is(err, store.ErrRecordNotFound):
 			log.Warn("skipping usage for an unknown bucket",
 				zap.Stringer("provider", provider), zap.Stringer("bucket", space.Space))
-			skipped = append(skipped, space.Space)
+			warnings = append(warnings, usage.Warning{
+				Name:    usage.UnknownBucketWarningName,
+				Message: "no bucket has this space, so its counts were not stored",
+				Space:   space.Space,
+			})
 			continue
 		case err != nil:
 			return nil, fmt.Errorf("looking up the owner of bucket %s: %w", space.Space, err)
@@ -102,7 +108,11 @@ func ReportUsage(ctx context.Context, log *zap.Logger, buckets BucketOwners, cou
 			log.Warn("skipping usage for a bucket another provider serves",
 				zap.Stringer("provider", provider), zap.Stringer("bucket", space.Space),
 				zap.Stringer("bucket_provider", owner.Provider))
-			skipped = append(skipped, space.Space)
+			warnings = append(warnings, usage.Warning{
+				Name:    usage.BucketRegionMismatchWarningName,
+				Message: "another provider serves this space's bucket, so its counts were not stored",
+				Space:   space.Space,
+			})
 			continue
 		}
 		for _, h := range space.Hours {
@@ -121,5 +131,5 @@ func ReportUsage(ctx context.Context, log *zap.Logger, buckets BucketOwners, cou
 		}
 		return nil, fmt.Errorf("storing egress counts: %w", err)
 	}
-	return &usage.ReportOK{Skipped: skipped}, nil
+	return &usage.ReportOK{Warnings: warnings}, nil
 }

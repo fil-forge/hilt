@@ -300,7 +300,9 @@ func TestClientReportUsage(t *testing.T) {
 			gotIss, gotSub, gotAud = inv.Issuer(), inv.Subject(), inv.Audience()
 			gotProofs = len(inv.Proofs())
 			gotArgs = req.Task().Arguments()
-			return res.SetSuccess(&usage.ReportOK{Skipped: []did.DID{skippedBucket}})
+			return res.SetSuccess(&usage.ReportOK{Warnings: []usage.Warning{{
+				Name: usage.UnknownBucketWarningName, Message: "no bucket has this space", Space: skippedBucket,
+			}}})
 		}))
 
 	// The client holds no proofs at all, and the report does not need any.
@@ -311,7 +313,9 @@ func TestClientReportUsage(t *testing.T) {
 	}
 	ok, err := c.ReportUsage(t.Context(), egress)
 	require.NoError(t, err)
-	require.Equal(t, []did.DID{skippedBucket}, ok.Skipped)
+	require.Equal(t, []usage.Warning{{
+		Name: usage.UnknownBucketWarningName, Message: "no bucket has this space", Space: skippedBucket,
+	}}, ok.Warnings)
 
 	require.Equal(t, ingot.DID(), gotIss)
 	require.Equal(t, ingot.DID(), gotSub)
