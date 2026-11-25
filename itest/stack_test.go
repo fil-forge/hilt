@@ -185,26 +185,13 @@ func TestForge(t *testing.T) {
 	t.Run("DeleteAccessKeyRevokes", func(t *testing.T) { testDeleteAccessKeyRevokes(t, net) })
 	t.Run("DeleteBucketRevokes", func(t *testing.T) { testDeleteBucketRevokes(t, net) })
 	t.Run("DeleteBucketRevokesOnlyThatBucket", func(t *testing.T) { testDeleteBucketRevokesOnlyThatBucket(t, net) })
-	// The IAM scenarios need an ingot that enforces the effective action set.
-	// Until the published :main image carries it, they run only against the
-	// binary override (or when HILT_ITEST_IAM=1 says the image does); drop this
-	// guard then. Swarf needs nothing: the keys' grants are revoked through
-	// the /ucan/revoke it already serves.
-	iam := func(name string, fn func(*testing.T, *forgeNet)) {
-		t.Run(name, func(t *testing.T) {
-			if os.Getenv("HILT_ITEST_IAM") != "1" && os.Getenv("HILT_ITEST_INGOT_BINARY") == "" {
-				t.Skip("IAM scenarios need HILT_ITEST_INGOT_BINARY (or HILT_ITEST_IAM=1) until the :main image carries the IAM changes and forwards ?policy")
-			}
-			fn(t, net)
-		})
-	}
-	iam("PrincipalPolicyScopesToOneBucket", testPrincipalPolicyScopesToOneBucket)
-	iam("DenyBeatsAllow", testDenyBeatsAllow)
-	iam("NarrowingRevokesGrants", testNarrowingRevokesGrants)
-	iam("DeletePrincipalRemovesKeysAndPolicies", testDeletePrincipalRemovesKeysAndPolicies)
-	iam("PresignedGetFollowsPolicy", testPresignedGetFollowsPolicy)
-	iam("PrincipalKeyCreateRejectsBadRequests", testPrincipalKeyCreateRejectsBadRequests)
-	iam("DeleteObjectsVersionNeedsTheVersionAction", testDeleteObjectsVersionNeedsTheVersionAction)
+	t.Run("PrincipalPolicyScopesToOneBucket", func(t *testing.T) { testPrincipalPolicyScopesToOneBucket(t, net) })
+	t.Run("DenyBeatsAllow", func(t *testing.T) { testDenyBeatsAllow(t, net) })
+	t.Run("NarrowingRevokesGrants", func(t *testing.T) { testNarrowingRevokesGrants(t, net) })
+	t.Run("DeletePrincipalRemovesKeysAndPolicies", func(t *testing.T) { testDeletePrincipalRemovesKeysAndPolicies(t, net) })
+	t.Run("PresignedGetFollowsPolicy", func(t *testing.T) { testPresignedGetFollowsPolicy(t, net) })
+	t.Run("PrincipalKeyCreateRejectsBadRequests", func(t *testing.T) { testPrincipalKeyCreateRejectsBadRequests(t, net) })
+	t.Run("DeleteObjectsVersionNeedsTheVersionAction", func(t *testing.T) { testDeleteObjectsVersionNeedsTheVersionAction(t, net) })
 }
 
 // s3Client builds a real AWS S3 SDK client pointed at the real ingot

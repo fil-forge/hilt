@@ -88,13 +88,10 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   / `HILT_ITEST_SWARF_BINARY` / `HILT_ITEST_INGOT_BINARY`. A binary override
   wants a static linux build for the Docker host's architecture
   (`GOOS=linux GOARCH=<host arch> CGO_ENABLED=0 GOWORK=off go build`), and is
-  how the IAM scenarios run against ingot changes that the `:main` image does
-  not carry yet. Until the published `:main` ingot image carries the IAM
-  changes, the IAM scenarios skip unless `HILT_ITEST_INGOT_BINARY` is set (or
-  `HILT_ITEST_IAM=1`); drop that guard once it does. CI runs the suite after
-  the unit job, on pull requests, on pushes to `main`, and on manual dispatch
-  (`.github/workflows/go-test.yml`). It sets neither override, so the IAM
-  scenarios stay skipped there until the published image carries the change.
+  how a scenario runs against peer changes that the `:main` image does not
+  carry yet. CI runs the suite after the unit job, on pull requests, on pushes
+  to `main`, and on manual dispatch (`.github/workflows/go-test.yml`), against
+  the published images.
 - Editor/LSP diagnostics can lag after cross-file or cross-package edits —
   `go build` / `go vet` are authoritative, prefer them over stale squiggles.
 
