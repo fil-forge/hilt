@@ -18,9 +18,8 @@ const defaultListLimit = 1000
 type Store struct {
 	mutex   sync.RWMutex
 	buckets map[did.DID]bucket.Record
-	// deleted is who each deleted bucket belonged to. Unlike the Postgres
-	// backend's, it is not dropped with the tenant: this store never learns
-	// that a tenant was deleted.
+	// deleted is who each deleted bucket belonged to, until its tenant is
+	// deleted (see ForgetTenant).
 	deleted map[did.DID]bucket.Owner
 }
 
@@ -156,6 +155,20 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	}
 	delete(s.buckets, id)
 	return nil
+}
+
+// ForgetTenant drops the record of who the tenant's deleted buckets belonged
+// to, as deleting the tenant does in the Postgres backend. The tenant store
+// calls it when a tenant is deleted.
+func (s *Store) ForgetTenant(tenant did.DID) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for id, o := range s.deleted {
+		if o.Tenant == tenant {
+			delete(s.deleted, id)
+		}
+	}
 }
 
 func (s *Store) Owner(ctx context.Context, id did.DID) (bucket.Owner, error) {

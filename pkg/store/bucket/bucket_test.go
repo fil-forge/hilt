@@ -14,6 +14,7 @@ import (
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,9 +31,11 @@ const (
 var storeKinds = []StoreKind{Memory, Postgres}
 
 // seedFunc ensures the parent tenant exists so the bucket.tenant_id foreign key
-// is satisfied. It is a no-op for the memory store, which does not enforce
-// referential integrity.
+// is satisfied.
 type seedFunc func(t *testing.T, tenantID did.DID)
+
+// dropTenantFunc deletes a tenant.
+type dropTenantFunc func(t *testing.T, tenantID did.DID)
 
 // seedProviderFunc registers a provider so the bucket.provider_id foreign key
 // is satisfied. It is a no-op for the memory store, which does not enforce
@@ -43,11 +46,19 @@ type seedProviderFunc func(t *testing.T, providerID did.DID)
 // provider every bucket in the suite is served by (registered for real in
 // Postgres, where bucket.provider_id is a foreign key), and a seeder for the
 // further providers a test needs to tell two regions apart.
-func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc, did.DID, seedProviderFunc) {
+func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc, did.DID, seedProviderFunc, dropTenantFunc) {
 	providerID := testutil.RandomDID(t)
 	switch k {
 	case Memory:
-		return bucketmemory.New(), func(*testing.T, did.DID) {}, providerID, func(*testing.T, did.DID) {}
+		buckets := bucketmemory.New()
+		tenants := tenantmemory.New(tenantmemory.WithOnDelete(buckets.ForgetTenant))
+		seed := func(t *testing.T, tenantID did.DID) {
+			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
+		}
+		drop := func(t *testing.T, tenantID did.DID) {
+			require.NoError(t, tenants.Delete(t.Context(), tenantID))
+		}
+		return buckets, seed, providerID, func(*testing.T, did.DID) {}, drop
 	case Postgres:
 		pool := createPostgresPool(t)
 		providers := providerpostgres.New(pool)
@@ -59,7 +70,10 @@ func makeStore(t *testing.T, k StoreKind) (bucket.Store, seedFunc, did.DID, seed
 		seed := func(t *testing.T, tenantID did.DID) {
 			require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 		}
-		return bucketpostgres.New(pool), seed, providerID, seedProvider
+		drop := func(t *testing.T, tenantID did.DID) {
+			require.NoError(t, tenants.Delete(t.Context(), tenantID))
+		}
+		return bucketpostgres.New(pool), seed, providerID, seedProvider, drop
 	}
 	panic("unknown store kind")
 }
@@ -79,7 +93,7 @@ func createPostgresPool(t *testing.T) *pgxpool.Pool {
 func TestBucketStore(t *testing.T) {
 	for _, k := range storeKinds {
 		t.Run(string(k), func(t *testing.T) {
-			s, seed, providerID, seedProvider := makeStore(t, k)
+			s, seed, providerID, seedProvider, dropTenant := makeStore(t, k)
 
 			t.Run("adds and retrieves a bucket by name", func(t *testing.T) {
 				id := testutil.RandomDID(t)
@@ -379,6 +393,25 @@ func TestBucketStore(t *testing.T) {
 				owner, err = s.Owner(t.Context(), reuse)
 				require.NoError(t, err)
 				require.False(t, owner.Deleted)
+			})
+
+			t.Run("Owner forgets a deleted bucket when its tenant is deleted", func(t *testing.T) {
+				gone, kept := testutil.RandomDID(t), testutil.RandomDID(t)
+				tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
+				seed(t, tenantID)
+				seed(t, other)
+				require.NoError(t, s.Add(t.Context(), gone, tenantID, providerID, "forgotten"))
+				require.NoError(t, s.Add(t.Context(), kept, other, providerID, "remembered"))
+				require.NoError(t, s.Delete(t.Context(), gone))
+				require.NoError(t, s.Delete(t.Context(), kept))
+
+				dropTenant(t, tenantID)
+
+				_, err := s.Owner(t.Context(), gone)
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+				owner, err := s.Owner(t.Context(), kept)
+				require.NoError(t, err)
+				require.True(t, owner.Deleted)
 			})
 
 			t.Run("Owner returns ErrRecordNotFound for an ID no bucket had", func(t *testing.T) {

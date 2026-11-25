@@ -14,12 +14,28 @@ import (
 type Store struct {
 	mutex   sync.RWMutex
 	tenants map[did.DID]tenant.Record
+	// onDelete are called with a tenant's ID as it is deleted.
+	onDelete []func(did.DID)
 }
 
 var _ tenant.Store = (*Store)(nil)
 
-func New() *Store {
-	return &Store{tenants: map[did.DID]tenant.Record{}}
+// Option configures a Store.
+type Option func(*Store)
+
+// WithOnDelete has the store call fn with a tenant's ID as the tenant is
+// deleted. The stores that keep rows for a tenant drop them here, as the
+// Postgres backend's foreign keys do. fn must not call back into the store.
+func WithOnDelete(fn func(did.DID)) Option {
+	return func(s *Store) { s.onDelete = append(s.onDelete, fn) }
+}
+
+func New(opts ...Option) *Store {
+	s := &Store{tenants: map[did.DID]tenant.Record{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, externalID string, status tenant.Status) error {
@@ -97,6 +113,12 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	if _, ok := s.tenants[id]; !ok {
+		return nil
+	}
 	delete(s.tenants, id)
+	for _, fn := range s.onDelete {
+		fn(id)
+	}
 	return nil
 }

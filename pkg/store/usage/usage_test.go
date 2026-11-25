@@ -9,6 +9,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/store/usage"
 	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
@@ -28,12 +29,12 @@ var storeKinds = []StoreKind{Memory, Postgres}
 
 // fixture is the store under test and what a test needs to satisfy the
 // Postgres backend's foreign keys. The memory store enforces none, so its
-// seeders do nothing.
+// provider seeder does nothing.
 type fixture struct {
 	store        usage.Store
 	seedTenant   func(t *testing.T) did.DID
 	seedProvider func(t *testing.T) did.DID
-	// dropTenant deletes a tenant, or is nil where the backend cannot.
+	// dropTenant deletes a tenant.
 	dropTenant func(t *testing.T, id did.DID)
 }
 
@@ -41,7 +42,20 @@ func makeStore(t *testing.T, k StoreKind) fixture {
 	switch k {
 	case Memory:
 		random := func(t *testing.T) did.DID { return testutil.RandomDID(t) }
-		return fixture{store: usagememory.New(), seedTenant: random, seedProvider: random}
+		counts := usagememory.New()
+		tenants := tenantmemory.New(tenantmemory.WithOnDelete(counts.ForgetTenant))
+		return fixture{
+			store: counts,
+			seedTenant: func(t *testing.T) did.DID {
+				id := testutil.RandomDID(t)
+				require.NoError(t, tenants.Add(t.Context(), id, "ext-"+id.String(), tenant.Active))
+				return id
+			},
+			seedProvider: random,
+			dropTenant: func(t *testing.T, id did.DID) {
+				require.NoError(t, tenants.Delete(t.Context(), id))
+			},
+		}
 	case Postgres:
 		if testutil.IsRunningInCI(t) && runtime.GOOS == "linux" {
 			if !testutil.IsDockerAvailable(t) {
@@ -222,17 +236,19 @@ func TestUsageStore(t *testing.T) {
 			})
 
 			t.Run("a tenant's counts go when the tenant does", func(t *testing.T) {
-				if f.dropTenant == nil {
-					t.Skip("this backend does not learn of a deleted tenant")
-				}
 				provider, tenantID, bucket := f.seedProvider(t), f.seedTenant(t), testutil.RandomDID(t)
+				other, kept := f.seedTenant(t), testutil.RandomDID(t)
 				require.NoError(t, s.SetEgress(t.Context(), provider, []usage.EgressCount{
 					{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 10},
+					{Bucket: kept, Tenant: other, Hour: h0, Bytes: 7},
 				}))
 				f.dropTenant(t, tenantID)
 				got, err := s.BucketEgress(t.Context(), bucket, h0, h1)
 				require.NoError(t, err)
 				require.Empty(t, got)
+				got, err = s.BucketEgress(t.Context(), kept, h0, h1)
+				require.NoError(t, err)
+				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: 7}}, got)
 			})
 		})
 	}

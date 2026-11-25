@@ -33,6 +33,19 @@ func New() *Store {
 	return &Store{egress: map[key]row{}}
 }
 
+// ForgetTenant drops the tenant's counts, as deleting the tenant does in the
+// Postgres backend. The tenant store calls it when a tenant is deleted.
+func (s *Store) ForgetTenant(tenant did.DID) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for k, r := range s.egress {
+		if r.tenant == tenant {
+			delete(s.egress, k)
+		}
+	}
+}
+
 func (s *Store) SetEgress(ctx context.Context, provider did.DID, counts []usage.EgressCount) error {
 	if err := usage.Validate(provider, counts); err != nil {
 		return err
