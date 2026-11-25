@@ -14,6 +14,7 @@ import (
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
@@ -109,7 +110,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	return metricssvc.New(zap.NewNop(), tenants, buckets, secrets, client, delegations, opts...), bucketID, bucketBID, seen
+	return metricssvc.New(zap.NewNop(), tenants, buckets, secrets, client, delegations, usagememory.New(), opts...), bucketID, bucketBID, seen
 }
 
 // A bucket's proof chain is rooted in the delegation the bucket issued at

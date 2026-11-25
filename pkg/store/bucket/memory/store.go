@@ -18,12 +18,15 @@ const defaultListLimit = 1000
 type Store struct {
 	mutex   sync.RWMutex
 	buckets map[did.DID]bucket.Record
+	// deleted is who each deleted bucket belonged to, until its tenant is
+	// deleted (see ForgetTenant).
+	deleted map[did.DID]bucket.Owner
 }
 
 var _ bucket.Store = (*Store)(nil)
 
 func New() *Store {
-	return &Store{buckets: map[did.DID]bucket.Record{}}
+	return &Store{buckets: map[did.DID]bucket.Record{}, deleted: map[did.DID]bucket.Owner{}}
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, provider did.DID, name string) error {
@@ -147,6 +150,36 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	if b, ok := s.buckets[id]; ok {
+		s.deleted[id] = bucket.Owner{Tenant: b.Tenant, Provider: b.Provider, Deleted: true}
+	}
 	delete(s.buckets, id)
 	return nil
+}
+
+// ForgetTenant drops the record of who the tenant's deleted buckets belonged
+// to, as deleting the tenant does in the Postgres backend. The tenant store
+// calls it when a tenant is deleted.
+func (s *Store) ForgetTenant(tenant did.DID) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for id, o := range s.deleted {
+		if o.Tenant == tenant {
+			delete(s.deleted, id)
+		}
+	}
+}
+
+func (s *Store) Owner(ctx context.Context, id did.DID) (bucket.Owner, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if b, ok := s.buckets[id]; ok {
+		return bucket.Owner{Tenant: b.Tenant, Provider: b.Provider}, nil
+	}
+	if o, ok := s.deleted[id]; ok {
+		return o, nil
+	}
+	return bucket.Owner{}, store.ErrRecordNotFound
 }

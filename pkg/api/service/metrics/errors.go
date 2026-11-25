@@ -1,6 +1,11 @@
 package metrics
 
-import "github.com/fil-forge/ucantone/errors"
+import (
+	"fmt"
+
+	metricscmds "github.com/fil-forge/libforge/commands/metrics"
+	"github.com/fil-forge/ucantone/errors"
+)
 
 // Error names for the metrics service's known errors, exported so callers can
 // match on the stable Name() of a serialized failure.
@@ -31,4 +36,9 @@ var (
 	// ErrInvalidWindow is returned when the window is not a positive number of
 	// hours.
 	ErrInvalidWindow = errors.New(InvalidWindowErrorName, "window must be a positive number of hours, as <integer>h")
+	// ErrTooManySamples is returned when the range divided by the window is
+	// more than [MaxEgressSamples]. It carries the upload service's name for
+	// the same refusal, so a caller sees one error whichever series hit its
+	// limit first.
+	ErrTooManySamples = errors.New(metricscmds.TooManySamplesErrorName, fmt.Sprintf("the range holds more than %d windows; widen the window or shorten the range", MaxEgressSamples))
 )

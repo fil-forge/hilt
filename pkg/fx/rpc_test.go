@@ -8,6 +8,7 @@ import (
 	appfx "github.com/fil-forge/hilt/pkg/fx"
 	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
+	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/libforge/identity"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/execution/batch"
@@ -34,13 +35,32 @@ func TestNewIdentityMissingKeyFile(t *testing.T) {
 	require.Error(t, err)
 }
 
+// rpcApp is the RPC wiring the app gets: the three route groups, the server
+// built from them, the service identity and the provider registry the server
+// reads.
+type rpcApp struct {
+	routes    []server.Route
+	admin     []server.Route
+	provider  []server.Route
+	srv       *server.HTTPServer
+	id        identity.Identity
+	providers providerstore.Store
+}
+
 // newRPCApp builds the RPC module, with the API module that provides the
 // policy writes the bucket service uses, over in-memory backends and returns
-// the two route groups and the server built from them, so a test sees the
+// the route groups and the server built from them, so a test sees the
 // wiring the app actually gets (RPCModule decides which group a handler
 // joins). fx.New executes Invoke functions immediately, so the values are
 // populated without starting the app; nothing here registers a lifecycle hook.
 func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *server.HTTPServer, id identity.Identity) {
+	t.Helper()
+	app := newFullRPCApp(t)
+	return app.routes, app.admin, app.srv, app.id
+}
+
+// newFullRPCApp is newRPCApp with everything it built.
+func newFullRPCApp(t *testing.T) (out rpcApp) {
 	t.Helper()
 	cfg := &config.Config{
 		Storage:    config.StorageConfig{Type: config.StorageTypeMemory},
@@ -62,26 +82,31 @@ func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *
 		// The handlers log their rejections; keep the test output quiet.
 		fx.Decorate(func(*zap.Logger) *zap.Logger { return zap.NewNop() }),
 		fx.Invoke(fx.Annotate(
-			func(r []server.Route, a []server.Route, s *server.HTTPServer, i identity.Identity) {
-				routes, admin, srv, id = r, a, s, i
+			func(r []server.Route, a []server.Route, p []server.Route, s *server.HTTPServer, i identity.Identity, ps providerstore.Store) {
+				out = rpcApp{routes: r, admin: a, provider: p, srv: s, id: i, providers: ps}
 			},
-			fx.ParamTags(`group:"ucanRoutes"`, `group:"ucanAdminRoutes"`),
+			fx.ParamTags(`group:"ucanRoutes"`, `group:"ucanAdminRoutes"`, `group:"ucanProviderRoutes"`),
 		)),
 	)
 	require.NoError(t, app.Err())
-	require.NotNil(t, srv)
-	// Both groups are asserted non-empty here because the tests below range over
+	require.NotNil(t, out.srv)
+	// The groups are asserted non-empty here because the tests below range over
 	// them: an empty group would make those tests pass without asserting a thing.
-	require.NotEmpty(t, routes)
-	require.NotEmpty(t, admin)
-	return routes, admin, srv, id
+	require.NotEmpty(t, out.routes)
+	require.NotEmpty(t, out.admin)
+	require.NotEmpty(t, out.provider)
+	return out
 }
 
 // TestRPCModuleRouteGroups checks which group each handler joins: the admin
-// commands, which the service invokes on itself, are the ones served unguarded,
-// and every other command is guarded.
+// commands, which the service invokes on itself, the commands a provider
+// invokes on its own authority, and every other command, which needs authority
+// the service delegated.
 func TestRPCModuleRouteGroups(t *testing.T) {
-	routes, admin, _, _ := newRPCApp(t)
+	app := newFullRPCApp(t)
+	routes, admin := app.routes, app.admin
+
+	require.ElementsMatch(t, []string{"/s3/usage/report"}, commandsOf(app.provider))
 
 	require.ElementsMatch(t, []string{
 		"/s3/request/authorize",
@@ -189,4 +214,61 @@ func executeOn(t *testing.T, srv *server.HTTPServer, service did.DID, cmd ucan.C
 	rcpt, ok := resp.Receipt(inv.Task().Link())
 	require.True(t, ok, "the server issued no receipt for the invocation")
 	return testutil.ReceiptFailure(t, rcpt)
+}
+
+// TestUCANServerProviderRoutes drives the commands a provider invokes on its
+// own authority through the server the app serves. Such an invocation is
+// self-signed over the provider, not the service, and carries no proofs, so
+// what admits it is the provider registry alone.
+func TestUCANServerProviderRoutes(t *testing.T) {
+	app := newFullRPCApp(t)
+	provider := testutil.RandomIssuer(t)
+	require.NoError(t, app.providers.Add(t.Context(), provider.DID(), "eu-west-1", nil))
+	stranger := testutil.RandomIssuer(t)
+
+	for _, route := range app.provider {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			// A registered provider, over itself, with no proofs: the command runs.
+			err := executeOn(t, app.srv, app.id.DID(), route.Command, provider, provider.DID())
+			require.NoError(t, err)
+
+			// Anyone can self-sign. Only a registered provider is acted on.
+			err = executeOn(t, app.srv, app.id.DID(), route.Command, stranger, stranger.DID())
+			require.ErrorIs(t, err, middleware.ErrUnauthorized)
+
+			// A provider speaks for itself and no one else: an invocation over
+			// another subject is refused even with that subject's delegation.
+			prf, err := delegation.Delegate(stranger, provider.DID(), stranger.DID(), route.Command)
+			require.NoError(t, err)
+			err = executeOn(t, app.srv, app.id.DID(), route.Command, provider, stranger.DID(), prf)
+			require.ErrorIs(t, err, middleware.ErrInvalidSubject)
+
+			// The service's own authority is not a way in either.
+			prf, err = delegation.Delegate(app.id, provider.DID(), app.id.DID(), route.Command)
+			require.NoError(t, err)
+			err = executeOn(t, app.srv, app.id.DID(), route.Command, provider, app.id.DID(), prf)
+			require.ErrorIs(t, err, middleware.ErrInvalidSubject)
+		})
+	}
+}
+
+// The commands served for others, and the admin ones, stay closed to a
+// provider acting on its own authority.
+func TestUCANServerKeepsProvidersOffTheOtherRoutes(t *testing.T) {
+	app := newFullRPCApp(t)
+	provider := testutil.RandomIssuer(t)
+	require.NoError(t, app.providers.Add(t.Context(), provider.DID(), "eu-west-1", nil))
+
+	for _, route := range app.routes {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			err := executeOn(t, app.srv, app.id.DID(), route.Command, provider, provider.DID())
+			require.ErrorIs(t, err, middleware.ErrSelfSignedInvocation)
+		})
+	}
+	for _, route := range app.admin {
+		t.Run(route.Command.String(), func(t *testing.T) {
+			err := executeOn(t, app.srv, app.id.DID(), route.Command, provider, provider.DID())
+			require.ErrorIs(t, err, middleware.ErrUnauthorized)
+		})
+	}
 }

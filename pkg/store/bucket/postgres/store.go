@@ -150,9 +150,10 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	return store.Page[bucket.Record]{Cursor: cursor, Results: recs}, nil
 }
 
-// Delete removes the bucket row, and with it, by cascade, its policy. Inside a
-// callback whose ctx carries a transaction (see [pglock.WithTx]) the delete
-// joins that transaction.
+// Delete removes the bucket row, and with it, by cascade, its policy, and
+// records who the bucket belonged to (see [Store.Owner]). Inside a callback
+// whose ctx carries a transaction (see [pglock.WithTx]) the delete joins that
+// transaction.
 func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
@@ -160,13 +161,51 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	}
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
-	if _, err := tx.Exec(ctx, `DELETE FROM bucket WHERE id = $1`, id.String()); err != nil {
+	// One statement, so the bucket is never gone without its owner recorded.
+	if _, err := tx.Exec(ctx, `
+		WITH gone AS (
+			DELETE FROM bucket WHERE id = $1 RETURNING id, tenant_id, provider_id
+		)
+		INSERT INTO deleted_bucket (id, tenant_id, provider_id)
+		SELECT id, tenant_id, provider_id FROM gone
+		ON CONFLICT (id) DO NOTHING
+	`, id.String()); err != nil {
 		return fmt.Errorf("deleting bucket: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) Owner(ctx context.Context, id did.DID) (bucket.Owner, error) {
+	var (
+		tenantStr, providerStr string
+		deleted                bool
+	)
+	// A bucket ID is in one table or the other: it is generated at creation
+	// and never reused.
+	err := s.pool.QueryRow(ctx, `
+		SELECT tenant_id, provider_id, FALSE FROM bucket WHERE id = $1
+		UNION ALL
+		SELECT tenant_id, provider_id, TRUE FROM deleted_bucket WHERE id = $1
+		LIMIT 1
+	`, id.String()).Scan(&tenantStr, &providerStr, &deleted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return bucket.Owner{}, store.ErrRecordNotFound
+	}
+	if err != nil {
+		return bucket.Owner{}, fmt.Errorf("getting bucket owner: %w", err)
+	}
+	tenant, err := did.Parse(tenantStr)
+	if err != nil {
+		return bucket.Owner{}, fmt.Errorf("parsing tenant DID: %w", err)
+	}
+	provider, err := did.Parse(providerStr)
+	if err != nil {
+		return bucket.Owner{}, fmt.Errorf("parsing provider DID: %w", err)
+	}
+	return bucket.Owner{Tenant: tenant, Provider: provider, Deleted: deleted}, nil
 }
 
 func scanRecord(row pgx.Row) (bucket.Record, error) {

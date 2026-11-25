@@ -1,6 +1,7 @@
 package fx
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -13,6 +14,7 @@ import (
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/libforge/identity"
+	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/key"
 	"github.com/fil-forge/ucantone/did/resolver"
 	"github.com/fil-forge/ucantone/did/web"
@@ -25,7 +27,8 @@ import (
 
 // RPCModule provides the Hilt UCAN RPC server and the command handlers it
 // serves, collected into the "ucanRoutes" group — or, for the commands the
-// service invokes on itself, the "ucanAdminRoutes" group.
+// service invokes on itself, the "ucanAdminRoutes" group, and for the ones a
+// provider invokes on its own authority, the "ucanProviderRoutes" group.
 var RPCModule = fx.Module("rpc",
 	fx.Provide(
 		auth.NewAuthorizer,
@@ -44,6 +47,7 @@ var RPCModule = fx.Module("rpc",
 		asUCANRoute(rpc.NewBucketInfoHandler),
 		asUCANRoute(rpc.NewListBucketsHandler),
 		asUCANRoute(rpc.NewPolicyHandler),
+		asProviderUCANRoute(rpc.NewReportUsageHandler),
 		asAdminUCANRoute(rpc.NewAddProviderHandler),
 		asAdminUCANRoute(rpc.NewSetProviderNodesHandler),
 		asAdminUCANRoute(rpc.NewListProvidersHandler),
@@ -67,24 +71,37 @@ func asAdminUCANRoute(constructor any) any {
 	return fx.Annotate(constructor, fx.ResultTags(`group:"ucanAdminRoutes"`))
 }
 
+// asProviderUCANRoute annotates a handler constructor so its result joins the
+// "ucanProviderRoutes" group: the commands a registered provider invokes on its
+// own authority, as issuer and subject both, with the service as audience.
+// They carry no delegation proofs and are served behind
+// [hiltmiddleware.OnlySelfSignedByProvider]. A command belongs here only when
+// all it does is record what the provider says about itself.
+func asProviderUCANRoute(constructor any) any {
+	return fx.Annotate(constructor, fx.ResultTags(`group:"ucanProviderRoutes"`))
+}
+
 // UCANServerParams are the dependencies for the UCAN RPC server. Handlers are
-// collected from the "ucanRoutes" and "ucanAdminRoutes" fx groups (see
-// RPCModule).
+// collected from the "ucanRoutes", "ucanAdminRoutes" and "ucanProviderRoutes"
+// fx groups (see RPCModule).
 type UCANServerParams struct {
 	fx.In
-	Identity    identity.Identity   // embeds multikey.Issuer, satisfying ucan.Issuer
-	Server      config.ServerConfig // supplies InsecureDIDResolution
-	Providers   providerstore.Store // the callers whose did:web is resolved
-	Logger      *zap.Logger
-	Routes      []server.Route `group:"ucanRoutes"`
-	AdminRoutes []server.Route `group:"ucanAdminRoutes"`
+	Identity       identity.Identity   // embeds multikey.Issuer, satisfying ucan.Issuer
+	Server         config.ServerConfig // supplies InsecureDIDResolution
+	Providers      providerstore.Store // the callers whose did:web is resolved
+	Logger         *zap.Logger
+	Routes         []server.Route `group:"ucanRoutes"`
+	AdminRoutes    []server.Route `group:"ucanAdminRoutes"`
+	ProviderRoutes []server.Route `group:"ucanProviderRoutes"`
 }
 
 // NewUCANServer builds the ucantone UCAN RPC server with the service identity
 // and registers each command handler behind its group's authorization checks:
 // a command in the "ucanRoutes" group requires an invocation subjected to the
 // service and issued by someone else, while an admin command
-// ("ucanAdminRoutes") requires one issued by the service itself. The returned
+// ("ucanAdminRoutes") requires one issued by the service itself, and a provider
+// command ("ucanProviderRoutes") one a registered provider issued over itself.
+// The returned
 // *server.HTTPServer is an http.Handler mounted on the echo server (see
 // NewEchoServer).
 //
@@ -119,6 +136,16 @@ func NewUCANServer(p UCANServerParams) (*server.HTTPServer, error) {
 		hiltmiddleware.LogRejections(p.Logger),
 		middleware.OnlyIssuer(p.Identity.DID()),
 		middleware.OnlySubject(p.Identity.DID()),
+	)...)
+	// The provider commands are self-signed too, by a provider over itself. The
+	// subject is the provider, so the invocation claims nothing of the service's
+	// authority: the service acts on it because it knows the issuer.
+	routes = append(routes, middleware.Apply(p.ProviderRoutes,
+		hiltmiddleware.LogRejections(p.Logger),
+		hiltmiddleware.OnlySelfSignedByProvider(func(ctx context.Context, id did.DID) error {
+			_, err := p.Providers.Get(ctx, id)
+			return err
+		}),
 	)...)
 	// The invocation span wraps the authorization checks too, so a rejected
 	// invocation shows as a failure receipt on it.
