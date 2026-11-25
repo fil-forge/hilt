@@ -71,6 +71,20 @@ func Validate(provider did.DID, counts []EgressCount) error {
 	if provider == did.Undef {
 		return invalid("provider is required")
 	}
+	for _, c := range counts {
+		if c.Tenant == did.Undef {
+			return invalid("tenant is required")
+		}
+	}
+	return ValidateCounts(counts)
+}
+
+// ValidateCounts checks what a report says of each bucket and hour, whoever
+// the buckets belong to: every bucket is named, every hour is a whole hour,
+// no count exceeds [MaxBytes], and no bucket and hour appear twice. A caller
+// that stores only some of a report's counts checks all of them with it, so
+// the report is refused for a fault in a count it would not have stored.
+func ValidateCounts(counts []EgressCount) error {
 	type key struct {
 		bucket did.DID
 		hour   int64
@@ -80,8 +94,6 @@ func Validate(provider did.DID, counts []EgressCount) error {
 		switch {
 		case c.Bucket == did.Undef:
 			return invalid("bucket is required")
-		case c.Tenant == did.Undef:
-			return invalid("tenant is required")
 		case !c.Hour.Equal(c.Hour.Truncate(time.Hour)):
 			return invalid("hour must be a whole hour")
 		case c.Bytes > MaxBytes:

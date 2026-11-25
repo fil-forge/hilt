@@ -145,6 +145,29 @@ func TestReportUsageRefusesAReportThatIsNotWellFormed(t *testing.T) {
 	}
 }
 
+// A fault in the counts of a bucket that would be left out refuses the report
+// like any other: nothing is stored and no warning is returned.
+func TestReportUsageChecksTheCountsOfBucketsItLeavesOut(t *testing.T) {
+	f := newUsageFixture(t)
+	good := usage.HourEgress{Hour: usageHour0.Unix(), Bytes: 10}
+	unknown := testutil.RandomDID(t)
+	stranger, strangers := testutil.RandomDID(t), testutil.RandomDID(t)
+	require.NoError(t, f.buckets.Add(t.Context(), strangers, f.tenant, stranger, "elsewhere"))
+	mine := usage.SpaceEgress{Space: f.bucket, Hours: []usage.HourEgress{good}}
+
+	for name, bad := range map[string]usage.SpaceEgress{
+		"part of an hour":  {Space: unknown, Hours: []usage.HourEgress{{Hour: usageHour1.Unix() + 1, Bytes: 1}}},
+		"too large":        {Space: unknown, Hours: []usage.HourEgress{{Hour: usageHour1.Unix(), Bytes: usagestore.MaxBytes + 1}}},
+		"hour twice":       {Space: unknown, Hours: []usage.HourEgress{good, good}},
+		"another's, twice": {Space: strangers, Hours: []usage.HourEgress{good, good}},
+	} {
+		ok, err := f.report(t, f.provider, mine, bad)
+		require.ErrorIs(t, err, rpc.ErrInvalidUsageReport, name)
+		require.Nil(t, ok, name)
+		require.Empty(t, f.stored(t, f.bucket), name)
+	}
+}
+
 func TestReportUsageLimitsTheCountsInOneReport(t *testing.T) {
 	f := newUsageFixture(t)
 	many := make([]usage.HourEgress, rpc.MaxReportCounts/2+1)

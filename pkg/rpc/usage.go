@@ -78,7 +78,8 @@ func NewReportUsageHandler(logger *zap.Logger, buckets bucket.Store, counts usag
 // has gone.
 //
 // A report is refused whole, as [ErrInvalidUsageReport] or [ErrTooManyCounts],
-// only when it is not well formed.
+// only when it is not well formed. Every count is checked for that, those of
+// a bucket that would be left out included.
 func ReportUsage(ctx context.Context, log *zap.Logger, buckets BucketOwners, counts usagestore.Store, provider did.DID, args *usage.ReportArguments) (*usage.ReportOK, error) {
 	total := 0
 	for _, space := range args.Egress {
@@ -86,6 +87,16 @@ func ReportUsage(ctx context.Context, log *zap.Logger, buckets BucketOwners, cou
 	}
 	if total > MaxReportCounts {
 		return nil, ErrTooManyCounts
+	}
+
+	all := make([]usagestore.EgressCount, 0, total)
+	for _, space := range args.Egress {
+		for _, h := range space.Hours {
+			all = append(all, usagestore.EgressCount{Bucket: space.Space, Hour: time.Unix(h.Hour, 0).UTC(), Bytes: h.Bytes})
+		}
+	}
+	if err := usagestore.ValidateCounts(all); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidUsageReport, err)
 	}
 
 	warnings := []usage.Warning{}
