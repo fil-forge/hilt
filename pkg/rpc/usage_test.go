@@ -76,7 +76,7 @@ func TestReportUsageStoresAProvidersCounts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []usagestore.HourlyEgress{{Hour: usageHour0, Bytes: 10}, {Hour: usageHour1, Bytes: 20}}, tenantTotal)
 
-	// An hour reported again, grown, replaces what was held; a repeat changes nothing.
+	// An hour reported again, grown, takes the place of what was held; a repeat changes nothing.
 	for range 2 {
 		ok, err = f.report(t, f.provider, usage.SpaceEgress{Space: f.bucket, Hours: hours(10, 35)})
 		require.NoError(t, err)

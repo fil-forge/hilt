@@ -12,8 +12,9 @@ CREATE TABLE deleted_bucket (
 );
 
 -- The bytes of object data a provider's gateway sent to its clients from a
--- bucket in one hour, as the gateway reported them. A report replaces the
--- count, so the row always holds the hour's latest total.
+-- bucket in one hour, as the gateway reported them. A larger count
+-- takes the row's place and a smaller one is ignored, so the row holds the
+-- hour's largest reported total.
 CREATE TABLE egress_usage (
     provider_id TEXT        NOT NULL REFERENCES provider(id) ON DELETE RESTRICT, -- DID
     bucket_id   TEXT        NOT NULL, -- DID; no foreign key, the bucket may be deleted

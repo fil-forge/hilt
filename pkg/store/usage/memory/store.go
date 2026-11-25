@@ -54,7 +54,11 @@ func (s *Store) SetEgress(ctx context.Context, provider did.DID, counts []usage.
 	defer s.mutex.Unlock()
 
 	for _, c := range counts {
-		s.egress[key{provider, c.Bucket, c.Hour.Unix()}] = row{tenant: c.Tenant, bytes: c.Bytes}
+		k := key{provider, c.Bucket, c.Hour.Unix()}
+		if held, ok := s.egress[k]; ok && held.bytes >= c.Bytes {
+			continue
+		}
+		s.egress[k] = row{tenant: c.Tenant, bytes: c.Bytes}
 	}
 	return nil
 }

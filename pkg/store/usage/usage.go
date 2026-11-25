@@ -2,8 +2,9 @@
 // figures only a gateway knows, which the upload service cannot supply.
 //
 // It holds egress, the bytes of object data a gateway sent to its clients, by
-// bucket and by hour. A count is a total for its hour, and a later report for
-// the same hour replaces it.
+// bucket and by hour. A count is a total for its hour, which only grows, so
+// the store keeps the largest total reported for the hour: reports may be
+// repeated, and may arrive in any order.
 package usage
 
 import (
@@ -49,9 +50,10 @@ type HourlyEgress struct {
 }
 
 type Store interface {
-	// SetEgress stores the counts a provider reported, each replacing the
-	// count the provider last reported for its bucket and hour. The counts are
-	// stored together or not at all. It returns [store.ErrInvalidArgument] if
+	// SetEgress stores the counts a provider reported. A count larger than
+	// the one the provider last reported for its bucket and hour takes its
+	// place, and one that is not changes nothing. The counts are stored
+	// together or not at all. It returns [store.ErrInvalidArgument] if
 	// the provider, a bucket or a tenant is undef, an hour is not a whole
 	// hour, a count exceeds [MaxBytes], or a bucket and hour appear twice.
 	SetEgress(ctx context.Context, provider did.DID, counts []EgressCount) error
