@@ -199,6 +199,28 @@ func TestUsageStore(t *testing.T) {
 				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: usage.MaxBytes}}, got)
 			})
 
+			t.Run("a sum past the largest count is the largest count", func(t *testing.T) {
+				p1, p2, tenantID := f.seedProvider(t), f.seedProvider(t), f.seedTenant(t)
+				a, b := testutil.RandomDID(t), testutil.RandomDID(t)
+				require.NoError(t, s.SetEgress(t.Context(), p1, []usage.EgressCount{
+					{Bucket: a, Tenant: tenantID, Hour: h0, Bytes: usage.MaxBytes},
+					{Bucket: b, Tenant: tenantID, Hour: h0, Bytes: usage.MaxBytes},
+					{Bucket: b, Tenant: tenantID, Hour: h1, Bytes: 5},
+				}))
+				require.NoError(t, s.SetEgress(t.Context(), p2, []usage.EgressCount{
+					{Bucket: a, Tenant: tenantID, Hour: h0, Bytes: usage.MaxBytes},
+					{Bucket: b, Tenant: tenantID, Hour: h0, Bytes: 1},
+				}))
+
+				got, err := s.TenantEgress(t.Context(), tenantID, h0, h2)
+				require.NoError(t, err)
+				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: usage.MaxBytes}, {Hour: h1, Bytes: 5}}, got)
+
+				got, err = s.BucketEgress(t.Context(), a, h0, h1)
+				require.NoError(t, err)
+				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: usage.MaxBytes}}, got)
+			})
+
 			t.Run("a tenant's counts go when the tenant does", func(t *testing.T) {
 				if f.dropTenant == nil {
 					t.Skip("this backend does not learn of a deleted tenant")

@@ -73,7 +73,7 @@ type EgressSample struct {
 	// End is the instant the bucket closes.
 	End time.Time
 	// BytesEgressed is the bytes of object data sent to clients in the hours
-	// that start in the bucket.
+	// that start in the bucket. It is at most [usagestore.MaxBytes].
 	BytesEgressed uint64
 }
 
@@ -354,7 +354,7 @@ func egressSeries(hours []usagestore.HourlyEgress, from, end time.Time, window t
 		var sent uint64
 		for next < len(hours) && hours[next].Hour.Before(closes) {
 			if !hours[next].Hour.Before(start) {
-				sent += hours[next].Bytes
+				sent = usagestore.AddBytes(sent, hours[next].Bytes)
 			}
 			next++
 		}

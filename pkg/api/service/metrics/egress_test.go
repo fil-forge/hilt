@@ -91,6 +91,21 @@ func TestEgressSeriesIsDense(t *testing.T) {
 	}, got)
 }
 
+// A window whose hours sum past the largest count reports the largest count.
+func TestEgressWindowSumIsCapped(t *testing.T) {
+	f := setupEgress(t)
+	f.report(t, f.a, at(8, 0), usagestore.MaxBytes)
+	f.report(t, f.a, at(9, 0), usagestore.MaxBytes)
+	f.report(t, f.a, at(10, 0), 3)
+
+	got, err := f.svc.BucketEgress(t.Context(), "tenant-1", "bucket-a", at(8, 0), at(12, 0), 2*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, []metricssvc.EgressSample{
+		{End: at(10, 0), BytesEgressed: usagestore.MaxBytes},
+		{End: at(12, 0), BytesEgressed: 3},
+	}, got)
+}
+
 // A range running past the present ends at the present, with a short last
 // window, as the storage series does.
 func TestEgressRangeEndsAtThePresent(t *testing.T) {

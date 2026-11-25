@@ -64,7 +64,7 @@ func (s *Store) sum(from, to time.Time, match func(key, row) bool) []usage.Hourl
 		if k.hour < from.Unix() || k.hour >= to.Unix() || !match(k, r) {
 			continue
 		}
-		totals[k.hour] += r.bytes
+		totals[k.hour] = usage.AddBytes(totals[k.hour], r.bytes)
 	}
 	hours := make([]int64, 0, len(totals))
 	for h := range totals {

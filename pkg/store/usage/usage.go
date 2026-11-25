@@ -14,8 +14,18 @@ import (
 	"github.com/fil-forge/ucantone/did"
 )
 
-// MaxBytes is the largest count the store holds for one hour.
+// MaxBytes is the largest count the store holds for one hour, and the largest
+// total it returns: a sum that would exceed it is MaxBytes.
 const MaxBytes uint64 = math.MaxInt64
+
+// AddBytes returns the sum of two byte counts, or [MaxBytes] if the sum would
+// exceed it.
+func AddBytes(a, b uint64) uint64 {
+	if a > MaxBytes || b > MaxBytes-a {
+		return MaxBytes
+	}
+	return a + b
+}
 
 // EgressCount is the bytes a provider's gateway sent from one bucket in one
 // hour.
@@ -47,11 +57,11 @@ type Store interface {
 	SetEgress(ctx context.Context, provider did.DID, counts []EgressCount) error
 	// BucketEgress returns the bytes sent from a bucket in each hour starting
 	// in [from, to), summed across providers, in ascending order. An hour
-	// with no count is absent.
+	// with no count is absent. A sum is at most [MaxBytes].
 	BucketEgress(ctx context.Context, bucket did.DID, from, to time.Time) ([]HourlyEgress, error)
 	// TenantEgress returns the bytes sent from a tenant's buckets, deleted
 	// ones included, in each hour starting in [from, to), in ascending order.
-	// An hour with no count is absent.
+	// An hour with no count is absent. A sum is at most [MaxBytes].
 	TenantEgress(ctx context.Context, tenant did.DID, from, to time.Time) ([]HourlyEgress, error)
 }
 

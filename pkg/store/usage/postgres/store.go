@@ -67,12 +67,12 @@ func (s *Store) SetEgress(ctx context.Context, provider did.DID, counts []usage.
 
 func (s *Store) BucketEgress(ctx context.Context, bucket did.DID, from, to time.Time) ([]usage.HourlyEgress, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT hour, SUM(bytes_sent)::bigint
+		SELECT hour, LEAST(SUM(bytes_sent), $4::bigint)::bigint
 		FROM egress_usage
 		WHERE bucket_id = $1 AND hour >= $2 AND hour < $3
 		GROUP BY hour
 		ORDER BY hour
-	`, bucket.String(), from.UTC(), to.UTC())
+	`, bucket.String(), from.UTC(), to.UTC(), int64(usage.MaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading bucket egress: %w", err)
 	}
@@ -81,12 +81,12 @@ func (s *Store) BucketEgress(ctx context.Context, bucket did.DID, from, to time.
 
 func (s *Store) TenantEgress(ctx context.Context, tenant did.DID, from, to time.Time) ([]usage.HourlyEgress, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT hour, SUM(bytes_sent)::bigint
+		SELECT hour, LEAST(SUM(bytes_sent), $4::bigint)::bigint
 		FROM egress_usage
 		WHERE tenant_id = $1 AND hour >= $2 AND hour < $3
 		GROUP BY hour
 		ORDER BY hour
-	`, tenant.String(), from.UTC(), to.UTC())
+	`, tenant.String(), from.UTC(), to.UTC(), int64(usage.MaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading tenant egress: %w", err)
 	}
