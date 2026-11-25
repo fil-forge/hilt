@@ -169,8 +169,9 @@ func (c *Client) ListBuckets(ctx context.Context, req s3.Request, opts ...Method
 
 // ReportUsage invokes /s3/usage/report with the caller's own counts of the
 // bytes it sent from each bucket in each hour, and returns Hilt's warnings
-// about it: the buckets whose counts it did not store, and why. Each count is an hour's total so far and replaces the
-// last one reported, so a report that failed can be sent again unchanged.
+// about it: the buckets whose counts it did not store, and why. Each count is an hour's total so far and Hilt
+// keeps the largest reported, so a report that failed can be sent again
+// unchanged and reports may arrive in any order.
 //
 // Unlike the other commands, the issuer invokes this one on its own
 // authority: it is the subject as well as the issuer, Hilt is only the

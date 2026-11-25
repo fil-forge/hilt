@@ -48,7 +48,8 @@ func (s *Store) SetEgress(ctx context.Context, provider did.DID, counts []usage.
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
 	// One statement for the whole report. Validate has refused a bucket and
-	// hour named twice, which the upsert could not apply.
+	// hour named twice, which the upsert could not apply. A row keeps the
+	// larger of its total and the reported one.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO egress_usage (provider_id, bucket_id, hour, tenant_id, bytes_sent)
 		SELECT $1, c.bucket_id, c.hour, c.tenant_id, c.bytes_sent
@@ -56,6 +57,7 @@ func (s *Store) SetEgress(ctx context.Context, provider did.DID, counts []usage.
 			AS c(bucket_id, hour, tenant_id, bytes_sent)
 		ON CONFLICT (provider_id, bucket_id, hour) DO UPDATE
 		SET bytes_sent = EXCLUDED.bytes_sent, tenant_id = EXCLUDED.tenant_id, updated_at = NOW()
+		WHERE egress_usage.bytes_sent < EXCLUDED.bytes_sent
 	`, provider.String(), buckets, hours, tenants, sent); err != nil {
 		return fmt.Errorf("storing egress counts: %w", err)
 	}
