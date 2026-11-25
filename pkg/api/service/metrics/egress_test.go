@@ -171,4 +171,15 @@ func TestEgressRefusals(t *testing.T) {
 	got, err := f.svc.TenantEgress(t.Context(), "tenant-1", from.Add(time.Hour), egressNow, time.Hour)
 	require.NoError(t, err)
 	require.Len(t, got, metricssvc.MaxEgressSamples)
+
+	// A range longer than a duration can hold is counted in full: this one
+	// spans about 57,000 windows, and its first 292 years alone would pass.
+	ancient := time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err = f.svc.TenantEgress(t.Context(), "tenant-1", ancient, egressNow, 312*time.Hour)
+	require.ErrorIs(t, err, metricssvc.ErrTooManySamples)
+	_, err = f.svc.BucketEgress(t.Context(), "tenant-1", "bucket-a", ancient, egressNow, 312*time.Hour)
+	require.ErrorIs(t, err, metricssvc.ErrTooManySamples)
+
+	_, err = f.svc.TenantEgress(t.Context(), "tenant-1", at(9, 0), at(10, 0), time.Millisecond)
+	require.ErrorIs(t, err, metricssvc.ErrInvalidWindow)
 }

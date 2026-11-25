@@ -325,13 +325,23 @@ func (s *Service) TenantEgress(ctx context.Context, externalID string, from, to 
 }
 
 // checkEgressRange refuses a range that holds more windows than a series may.
+//
+// The windows are counted in whole seconds: a duration holds at most about
+// 292 years, so the difference of two times further apart than that would be
+// cut short and the range would pass for a smaller one. A part of a second in
+// the range rounds it up and one in the window rounds it down, so the count
+// is never below the number of samples the series would hold.
 func checkEgressRange(from, end time.Time, window time.Duration) error {
-	if window <= 0 {
+	every := int64(window / time.Second)
+	if every <= 0 {
 		return ErrInvalidWindow
 	}
-	span := end.Sub(from)
-	windows := span / window
-	if span%window != 0 {
+	span := end.Unix() - from.Unix()
+	if end.Nanosecond() > from.Nanosecond() {
+		span++
+	}
+	windows := span / every
+	if span%every != 0 {
 		windows++
 	}
 	if windows > MaxEgressSamples {
