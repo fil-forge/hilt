@@ -85,7 +85,9 @@ type StorageSample struct {
 	ObjectCount uint64    `json:"objectCount"`
 }
 
-// EgressSample is the bytes served during one window.
+// EgressSample is the bytes of object data the gateways sent to clients during
+// one window, as they reported them. A window nothing was reported for reads
+// zero.
 type EgressSample struct {
 	Timestamp     time.Time `json:"timestamp"`
 	BytesEgressed uint64    `json:"bytesEgressed"`
@@ -116,9 +118,9 @@ type IngressMetrics struct {
 // GET /tenants/{tenantId}/buckets/{bucketName}/metrics. All three series share
 // the range and window the request asked for.
 //
-// Egress is always empty: it is served by the storage nodes and accounted for by
-// the egress tracking service, which this API does not read. An empty series
-// says there is no reading rather than claiming nothing was served.
+// Egress is what the gateways report, by the hour and a few minutes behind, so
+// its latest window can read low until the next report arrives. It counts a
+// tenant's deleted buckets, which the other two series do not.
 type Metrics struct {
 	Storage StorageMetrics `json:"storage"`
 	Egress  EgressMetrics  `json:"egress"`

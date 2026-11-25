@@ -1,10 +1,11 @@
 // Package metrics provides the usage-metering business logic for the REST API:
-// the storage and ingress series a tenant or one of its buckets accrued over a
-// range of time.
+// the storage, ingress and egress series a tenant or one of its buckets accrued
+// over a range of time.
 //
-// The readings come from the upload service (Sprue), which holds them per space.
-// A bucket is a space, so a bucket's series is one call; a tenant's is the sum
-// of its buckets'. It returns the known errors in errors.go so handlers can map
+// The storage and ingress readings come from the upload service (Sprue), which
+// holds them per space. A bucket is a space, so a bucket's series is one call; a
+// tenant's is the sum of its buckets'. Egress comes from the counts the
+// gateways report, which this service stores itself (see pkg/store/usage). It returns the known errors in errors.go so handlers can map
 // them to HTTP responses; unexpected failures are returned wrapped for the
 // handler to log.
 package metrics
@@ -25,6 +26,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/bucket"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
+	usagestore "github.com/fil-forge/hilt/pkg/store/usage"
 	"github.com/fil-forge/hilt/pkg/vault"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
 	"github.com/fil-forge/ucantone/did"
@@ -62,6 +64,19 @@ type Sample struct {
 	ObjectCount uint64
 }
 
+// MaxEgressSamples is the most samples an egress series holds: a year of
+// hours.
+const MaxEgressSamples = 366 * 24
+
+// EgressSample is one bucket of an egress series.
+type EgressSample struct {
+	// End is the instant the bucket closes.
+	End time.Time
+	// BytesEgressed is the bytes of object data sent to clients in the hours
+	// that start in the bucket. It is at most [usagestore.MaxBytes].
+	BytesEgressed uint64
+}
+
 type Service struct {
 	logger      *zap.Logger
 	tenants     tenantstore.Store
@@ -69,6 +84,7 @@ type Service struct {
 	secrets     vault.Vault
 	uploads     UsageSampler
 	delegations delegationstore.Store
+	usage       usagestore.Store
 	now         func() time.Time
 }
 
@@ -93,6 +109,7 @@ func New(
 	secrets vault.Vault,
 	uploads UsageSampler,
 	delegations delegationstore.Store,
+	usage usagestore.Store,
 	opts ...Option,
 ) *Service {
 	s := &Service{
@@ -102,6 +119,7 @@ func New(
 		secrets:     secrets,
 		uploads:     uploads,
 		delegations: delegations,
+		usage:       usage,
 		now:         time.Now,
 	}
 	for _, opt := range opts {
@@ -245,6 +263,114 @@ func (s *Service) Tenant(ctx context.Context, externalID string, from, to time.T
 	}
 
 	return s.sum(runs), nil
+}
+
+// BucketEgress returns the egress series for one of the tenant's buckets, on
+// the grid [Service.Bucket] answers on: one sample for each window in the
+// range, timestamped at the window's end, the last one short when the window
+// does not divide the range. It may return [ErrTenantNotFound],
+// [ErrBucketNotFound] or [ErrTooManySamples]. A range starting in the future
+// returns no samples.
+//
+// A window in which the gateway reported nothing reads zero. Gateways report
+// every few minutes, so the latest window can read low until the next report
+// arrives, and longer after an outage.
+func (s *Service) BucketEgress(ctx context.Context, externalID, bucketName string, from, to time.Time, window time.Duration) ([]EgressSample, error) {
+	tenantRec, err := s.tenant(ctx, externalID)
+	if err != nil {
+		return nil, err
+	}
+	page, err := s.buckets.ListByTenant(ctx, tenantRec.ID, bucket.WithNames(bucketName))
+	if err != nil {
+		return nil, fmt.Errorf("listing buckets: %w", err)
+	}
+	if len(page.Results) == 0 {
+		return nil, ErrBucketNotFound
+	}
+	end := s.clamp(to)
+	if !end.After(from) {
+		return []EgressSample{}, nil
+	}
+	if err := checkEgressRange(from, end, window); err != nil {
+		return nil, err
+	}
+	hours, err := s.usage.BucketEgress(ctx, page.Results[0].ID, from, end)
+	if err != nil {
+		return nil, fmt.Errorf("reading bucket egress: %w", err)
+	}
+	return egressSeries(hours, from, end, window), nil
+}
+
+// TenantEgress returns the egress series for the tenant, on the grid
+// [Service.BucketEgress] describes. It counts every bucket the tenant has
+// held, deleted ones included, so a tenant holding no buckets still has a
+// series. It may return [ErrTenantNotFound] or [ErrTooManySamples].
+func (s *Service) TenantEgress(ctx context.Context, externalID string, from, to time.Time, window time.Duration) ([]EgressSample, error) {
+	tenantRec, err := s.tenant(ctx, externalID)
+	if err != nil {
+		return nil, err
+	}
+	end := s.clamp(to)
+	if !end.After(from) {
+		return []EgressSample{}, nil
+	}
+	if err := checkEgressRange(from, end, window); err != nil {
+		return nil, err
+	}
+	hours, err := s.usage.TenantEgress(ctx, tenantRec.ID, from, end)
+	if err != nil {
+		return nil, fmt.Errorf("reading tenant egress: %w", err)
+	}
+	return egressSeries(hours, from, end, window), nil
+}
+
+// checkEgressRange refuses a range that holds more windows than a series may.
+//
+// The windows are counted in whole seconds: a duration holds at most about
+// 292 years, so the difference of two times further apart than that would be
+// cut short and the range would pass for a smaller one. A part of a second in
+// the range rounds it up and one in the window rounds it down, so the count
+// is never below the number of samples the series would hold.
+func checkEgressRange(from, end time.Time, window time.Duration) error {
+	every := int64(window / time.Second)
+	if every <= 0 {
+		return ErrInvalidWindow
+	}
+	span := end.Unix() - from.Unix()
+	if end.Nanosecond() > from.Nanosecond() {
+		span++
+	}
+	windows := span / every
+	if span%every != 0 {
+		windows++
+	}
+	if windows > MaxEgressSamples {
+		return ErrTooManySamples
+	}
+	return nil
+}
+
+// egressSeries lays hourly counts, ascending, onto the windows of [from, end):
+// each window sums the hours that start in it. Every window gets a sample,
+// zero when it holds no count.
+func egressSeries(hours []usagestore.HourlyEgress, from, end time.Time, window time.Duration) []EgressSample {
+	samples := []EgressSample{}
+	next := 0
+	for start := from; start.Before(end); start = start.Add(window) {
+		closes := start.Add(window)
+		if closes.After(end) {
+			closes = end
+		}
+		var sent uint64
+		for next < len(hours) && hours[next].Hour.Before(closes) {
+			if !hours[next].Hour.Before(start) {
+				sent = usagestore.AddBytes(sent, hours[next].Bytes)
+			}
+			next++
+		}
+		samples = append(samples, EgressSample{End: closes, BytesEgressed: sent})
+	}
+	return samples
 }
 
 // sample reads one space's series, signing as the tenant that owns it.

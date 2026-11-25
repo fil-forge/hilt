@@ -16,6 +16,7 @@ import (
 	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/libforge/identity"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
@@ -44,6 +45,7 @@ func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 		rpc.NewBucketInfoHandler(zap.NewNop(), buckets),
 		rpc.NewListBucketsHandler(zap.NewNop(), buckets),
 		rpc.NewPolicyHandler(zap.NewNop(), buckets),
+		rpc.NewReportUsageHandler(zap.NewNop(), bucketmemory.New(), usagememory.New()),
 		rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), up),
 		rpc.NewSetProviderNodesHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), up),
 		rpc.NewListProvidersHandler(zap.NewNop(), id, providermemory.New()),
@@ -69,6 +71,7 @@ func TestHandlerCommands(t *testing.T) {
 		"/s3/bucket/info",
 		"/s3/bucket/list",
 		"/s3/bucket/policy",
+		"/s3/usage/report",
 		"/admin/provider/add",
 		"/admin/provider/nodes/set",
 		"/admin/provider/list",

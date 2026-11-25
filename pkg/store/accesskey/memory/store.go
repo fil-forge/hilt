@@ -9,12 +9,14 @@ import (
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 )
 
 type Store struct {
 	mutex      sync.RWMutex
 	keys       map[did.DID]accesskey.Record
+	tenants    tenantstore.Store
 	principals func(ctx context.Context, tenant did.DID, principal string, fn func() error) error
 }
 
@@ -30,6 +32,13 @@ type Option func(*Store)
 // Without it any principal may be named.
 func WithPrincipals(guard func(ctx context.Context, tenant did.DID, principal string, fn func() error) error) Option {
 	return func(s *Store) { s.principals = guard }
+}
+
+// WithTenants makes Add refuse a key for a disabled tenant with
+// [accesskey.ErrTenantDisabled], as the Postgres insert does. Without it any
+// tenant is accepted.
+func WithTenants(tenants tenantstore.Store) Option {
+	return func(s *Store) { s.tenants = tenants }
 }
 
 func New(opts ...Option) *Store {
@@ -48,17 +57,25 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 		return err
 	}
 	if in.Principal != nil && s.principals != nil {
-		return s.principals(ctx, in.Tenant, *in.Principal, func() error { return s.add(in) })
+		return s.principals(ctx, in.Tenant, *in.Principal, func() error { return s.add(ctx, in) })
 	}
-	return s.add(in)
+	return s.add(ctx, in)
 }
 
-func (s *Store) add(in accesskey.Input) error {
+func (s *Store) add(ctx context.Context, in accesskey.Input) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	if _, ok := s.keys[in.ID]; ok {
 		return store.ErrRecordExists
+	}
+	// Checked under the write lock ListByTenant also takes, so a tenant
+	// deletion's snapshot of its keys never misses one added here. An unknown
+	// tenant is allowed: this store does not enforce referential integrity.
+	if s.tenants != nil {
+		if rec, err := s.tenants.Get(ctx, in.Tenant); err == nil && rec.Status == tenantstore.Disabled {
+			return accesskey.ErrTenantDisabled
+		}
 	}
 	// A service key's name is unique within the tenant; a principal-bound key's
 	// name is unique within its principal. This mirrors the two partial unique

@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -65,9 +66,10 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 
 func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	t.Helper()
+	tenants := tenantmemory.New()
 	deps := &accessKeyDeps{
-		tenants:     tenantmemory.New(),
-		accessKeys:  accesskeymemory.New(),
+		tenants:     tenants,
+		accessKeys:  accesskeymemory.New(accesskeymemory.WithTenants(tenants)),
 		principals:  principalmemory.New(),
 		buckets:     bucketmemory.New(),
 		delegations: delegationmemory.New(),
@@ -253,6 +255,14 @@ func TestCreateAccessKeyHandler(t *testing.T) {
 		keys, err := deps.accessKeys.ListByTenant(ctx, deps.tenantID)
 		require.NoError(t, err)
 		require.Empty(t, keys)
+	})
+
+	t.Run("disabled tenant is 409", func(t *testing.T) {
+		e, deps := setupAccessKeys(t)
+		require.NoError(t, deps.tenants.SetStatus(t.Context(), deps.tenantID, tenant.Disabled))
+		rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+		require.Equal(t, http.StatusConflict, rec.Code)
+		require.Equal(t, api.Error{Code: "TenantDisabled", Message: "tenant is disabled"}, decodeError(t, rec))
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {
@@ -546,4 +556,33 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/missing/access-keys/z6MkWhatever", nil)
 		require.Equal(t, http.StatusNotFound, rec.Code)
 	})
+}
+
+// heldBeforeReplace answers Replace as if a policy write had rotated the key
+// meanwhile: the callback sees each audience already holding a delegation.
+// Only the count is read, so the held delegation is a placeholder.
+type heldBeforeReplace struct{ *delegationmemory.Store }
+
+func (h heldBeforeReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
+	current := make(map[did.DID][]ucan.Delegation, len(audiences))
+	for _, aud := range audiences {
+		current[aud] = make([]ucan.Delegation, 1)
+	}
+	_, err := next(ctx, current)
+	return err
+}
+
+func TestCreateAccessKeyRotatedMeanwhileHandler(t *testing.T) {
+	_, deps := setupAccessKeys(t)
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), heldBeforeReplace{deps.delegations}, deps.vault, &testutil.FakeSwarf{})
+	e := echo.New()
+	route := api.NewCreateAccessKeyHandler(zap.NewNop(), svc)
+	e.Add(route.Method, route.Path, route.Handler)
+
+	rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+
+	require.Equal(t, []any{http.StatusConflict, api.Error{
+		Code:    accesskeysvc.ConcurrentChangeErrorName,
+		Message: accesskeysvc.ErrConcurrentChange.Error(),
+	}}, []any{rec.Code, decodeError(t, rec)})
 }

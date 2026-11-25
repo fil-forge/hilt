@@ -17,6 +17,8 @@ import (
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	usagestore "github.com/fil-forge/hilt/pkg/store/usage"
+	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
 	"github.com/fil-forge/ucantone/did"
@@ -49,6 +51,7 @@ type metricsDeps struct {
 	vault       *vaultmemory.Store
 	sampler     *fakeSampler
 	delegations *delegationmemory.Store
+	usage       *usagememory.Store
 }
 
 func newMetricsDeps(t *testing.T) *metricsDeps {
@@ -59,12 +62,13 @@ func newMetricsDeps(t *testing.T) *metricsDeps {
 		vault:       vaultmemory.New(),
 		sampler:     &fakeSampler{series: map[did.DID][]metricscmds.SampleItem{}},
 		delegations: delegationmemory.New(),
+		usage:       usagememory.New(),
 	}
 }
 
 func (d *metricsDeps) service(t *testing.T) *metricssvc.Service {
 	t.Helper()
-	return metricssvc.New(zap.NewNop(), d.tenants, d.buckets, d.vault, d.sampler, d.delegations)
+	return metricssvc.New(zap.NewNop(), d.tenants, d.buckets, d.vault, d.sampler, d.delegations, d.usage)
 }
 
 // addMetricsTenant records a tenant with its signing key and the given buckets,
@@ -128,9 +132,41 @@ func TestGetBucketMetricsHandler(t *testing.T) {
 		require.Len(t, body.Ingress.Samples, 2)
 		require.Equal(t, uint64(1024), body.Ingress.Samples[0].BytesIngested)
 
-		// Egress has no source here, and says so rather than reporting zero.
-		require.NotNil(t, body.Egress.Samples)
-		require.Empty(t, body.Egress.Samples)
+		// No gateway has reported egress, so each window reads zero.
+		require.Len(t, body.Egress.Samples, 2)
+		require.Equal(t, "2026-01-01T01:00:00Z", body.Egress.Samples[0].Timestamp.UTC().Format(time.RFC3339))
+		require.Equal(t, "2026-01-01T02:00:00Z", body.Egress.Samples[1].Timestamp.UTC().Format(time.RFC3339))
+		require.Zero(t, body.Egress.Samples[0].BytesEgressed)
+		require.Zero(t, body.Egress.Samples[1].BytesEgressed)
+	})
+
+	t.Run("returns the egress the gateway reported for the bucket", func(t *testing.T) {
+		d := newMetricsDeps(t)
+		ids := addMetricsTenant(t, d, "tenant-1", "bucket-a", "bucket-b")
+		owner, err := d.buckets.Owner(t.Context(), ids[0])
+		require.NoError(t, err)
+		hour := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+		require.NoError(t, d.usage.SetEgress(t.Context(), owner.Provider, []usagestore.EgressCount{
+			{Bucket: ids[0], Tenant: owner.Tenant, Hour: hour, Bytes: 4096},
+			{Bucket: ids[1], Tenant: owner.Tenant, Hour: hour, Bytes: 100},
+		}))
+		e := serve(api.NewGetBucketMetricsHandler(zap.NewNop(), d.service(t)))
+
+		rec := doRequest(t, e, http.MethodGet, metricsTarget("/tenants/tenant-1/buckets/bucket-a/metrics"), nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		body := decodeMetrics(t, rec)
+		require.Len(t, body.Egress.Samples, 2)
+		require.Zero(t, body.Egress.Samples[0].BytesEgressed)
+		// The 01:00 hour starts in the second window, which closes at 02:00.
+		require.Equal(t, uint64(4096), body.Egress.Samples[1].BytesEgressed)
+
+		// The tenant's series holds both buckets'.
+		e = serve(api.NewGetTenantMetricsHandler(zap.NewNop(), d.service(t)))
+		rec = doRequest(t, e, http.MethodGet, metricsTarget("/tenants/tenant-1/metrics"), nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		body = decodeMetrics(t, rec)
+		require.Len(t, body.Egress.Samples, 2)
+		require.Equal(t, uint64(4196), body.Egress.Samples[1].BytesEgressed)
 	})
 
 	t.Run("a bucket of another tenant is not found", func(t *testing.T) {
@@ -178,7 +214,7 @@ func TestGetTenantMetricsHandler(t *testing.T) {
 		require.Equal(t, uint64(15), body.Ingress.Samples[0].BytesIngested)
 	})
 
-	t.Run("a tenant with no buckets reports nothing", func(t *testing.T) {
+	t.Run("a tenant with no buckets stores nothing and has sent nothing", func(t *testing.T) {
 		d := newMetricsDeps(t)
 		addMetricsTenant(t, d, "tenant-1")
 		e := serve(api.NewGetTenantMetricsHandler(zap.NewNop(), d.service(t)))
@@ -189,7 +225,11 @@ func TestGetTenantMetricsHandler(t *testing.T) {
 		body := decodeMetrics(t, rec)
 		require.Empty(t, body.Storage.Samples)
 		require.Empty(t, body.Ingress.Samples)
-		require.Empty(t, body.Egress.Samples)
+		// Egress counts buckets the tenant has deleted, so it has a series
+		// whatever the tenant holds now.
+		require.Len(t, body.Egress.Samples, 2)
+		require.Zero(t, body.Egress.Samples[0].BytesEgressed)
+		require.Zero(t, body.Egress.Samples[1].BytesEgressed)
 	})
 
 	t.Run("unknown tenant", func(t *testing.T) {

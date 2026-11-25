@@ -17,6 +17,8 @@ import (
 	memprovider "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	memtenant "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	"github.com/fil-forge/hilt/pkg/store/usage"
+	memusage "github.com/fil-forge/hilt/pkg/store/usage/memory"
 	"github.com/fil-forge/hilt/pkg/store/wrapkey"
 	memwrapkey "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
 	"go.uber.org/fx"
@@ -26,9 +28,9 @@ import (
 var Module = fx.Module("memory-store",
 	fx.Provide(
 		// The key store refuses a principal the principal store has removed,
-		// as the Postgres insert's lock on the principal row does.
-		fx.Annotate(func(principals *memprincipal.Store) *memaccesskey.Store {
-			return memaccesskey.New(memaccesskey.WithPrincipals(principals.WithLive))
+		// and a disabled tenant, as the Postgres insert's row locks do.
+		fx.Annotate(func(principals *memprincipal.Store, tenants tenant.Store) *memaccesskey.Store {
+			return memaccesskey.New(memaccesskey.WithPrincipals(principals.WithLive), memaccesskey.WithTenants(tenants))
 		}, fx.As(new(accesskey.Store))),
 		fx.Annotate(membucket.New, fx.As(new(bucket.Store)), fx.As(fx.Self())),
 		fx.Annotate(memdelegation.New, fx.As(new(delegation.Store))),
@@ -39,7 +41,12 @@ var Module = fx.Module("memory-store",
 		}, fx.As(new(bucketpolicy.Store))),
 		fx.Annotate(memprincipal.New, fx.As(new(principal.Store)), fx.As(fx.Self())),
 		fx.Annotate(memprovider.New, fx.As(new(provider.Store))),
-		fx.Annotate(memtenant.New, fx.As(new(tenant.Store))),
+		// Deleting a tenant drops what the bucket and usage stores keep for
+		// it, as the Postgres backend's foreign keys do.
+		fx.Annotate(func(buckets *membucket.Store, counts *memusage.Store) *memtenant.Store {
+			return memtenant.New(memtenant.WithOnDelete(buckets.ForgetTenant), memtenant.WithOnDelete(counts.ForgetTenant))
+		}, fx.As(new(tenant.Store))),
+		fx.Annotate(memusage.New, fx.As(new(usage.Store)), fx.As(fx.Self())),
 		fx.Annotate(memwrapkey.New, fx.As(new(wrapkey.Store))),
 	),
 )

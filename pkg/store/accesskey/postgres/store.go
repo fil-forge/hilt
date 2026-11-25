@@ -70,6 +70,21 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
 		return err
 	}
+	// FOR SHARE holds the tenant row until the insert commits, so a concurrent
+	// disable either lands first (and the key is refused) or waits for the key,
+	// which a tenant deletion's snapshot of its keys then includes. The FK alone
+	// takes only a KEY SHARE lock, which a status update does not wait for.
+	var disabled bool
+	err = tx.QueryRow(ctx, `
+		SELECT status = 'disabled' FROM tenant WHERE id = $1 FOR SHARE
+	`, in.Tenant.String()).Scan(&disabled)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && disabled) {
+		// A tenant only gets to be gone once disabled.
+		return accesskey.ErrTenantDisabled
+	}
+	if err != nil {
+		return fmt.Errorf("checking tenant: %w", err)
+	}
 	if in.Principal != nil {
 		// Lock the principal FOR SHARE so the insert waits for an in-flight
 		// removal and then sees its tombstone. The foreign key alone would let a

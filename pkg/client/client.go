@@ -11,6 +11,7 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
+	"github.com/fil-forge/libforge/commands/s3/usage"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/client"
@@ -164,6 +165,41 @@ func (c *Client) DeleteBucket(ctx context.Context, req s3.Request, opts ...Metho
 func (c *Client) ListBuckets(ctx context.Context, req s3.Request, opts ...MethodOption) (*s3bkt.ListOK, error) {
 	ok, _, err := invoke(ctx, c, s3bkt.List, &s3bkt.ListArguments{Request: req}, opts...)
 	return ok, err
+}
+
+// ReportUsage invokes /s3/usage/report with the caller's own counts of the
+// bytes it sent from each bucket in each hour, and returns Hilt's warnings
+// about it: the buckets whose counts it did not store, and why. Each count is an hour's total so far and replaces the
+// last one reported, so a report that failed can be sent again unchanged.
+//
+// Unlike the other commands, the issuer invokes this one on its own
+// authority: it is the subject as well as the issuer, Hilt is only the
+// audience, and no proofs are sent. Hilt accepts it from a registered
+// provider. [WithProofs] has no effect on it.
+func (c *Client) ReportUsage(ctx context.Context, egress []usage.SpaceEgress, opts ...MethodOption) (*usage.ReportOK, error) {
+	cfg := &methodConfig{issuer: c.Issuer}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	cmd := usage.Report
+	inv, err := cmd.Invoke(cfg.issuer, cfg.issuer.DID(), &usage.ReportArguments{Egress: egress},
+		invocation.WithAudience(c.ServiceID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("invoking %s: %w", cmd.Command, err)
+	}
+	log := zapucan.WithInvocation(c.Logger, inv)
+	log.Debug("executing invocation")
+	res, err := c.Executor.Execute(execution.NewRequest(ctx, inv))
+	if err != nil {
+		log.Error("failed to execute invocation", zap.Error(err))
+		return nil, fmt.Errorf("executing %s invocation: %w", cmd.Command, err)
+	}
+	ok, err := cmd.Unpack(res.Receipt())
+	if err != nil {
+		return nil, err
+	}
+	return ok, nil
 }
 
 // invoke runs one command: it fetches the proof chain from the issuer to the Hilt
