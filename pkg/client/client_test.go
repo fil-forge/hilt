@@ -12,6 +12,7 @@ import (
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
+	"github.com/fil-forge/libforge/commands/s3/usage"
 	"github.com/fil-forge/libforge/testutil"
 	ucanlib "github.com/fil-forge/libforge/ucan"
 	"github.com/fil-forge/ucantone/binding"
@@ -280,4 +281,58 @@ func TestClientErrors(t *testing.T) {
 		_, _, err = c.AuthorizeRequest(t.Context(), req)
 		require.Error(t, err)
 	})
+}
+
+// A usage report is the caller's own account of itself: it is issued over the
+// caller, addressed to Hilt, and carries no proofs.
+func TestClientReportUsage(t *testing.T) {
+	hilt := testutil.RandomIssuer(t)
+	ingot := testutil.RandomIssuer(t)
+	bucket, skippedBucket := testutil.RandomDID(t), testutil.RandomDID(t)
+
+	var gotIss, gotSub, gotAud did.DID
+	var gotProofs int
+	var gotArgs *usage.ReportArguments
+	srv := server.NewHTTP(hilt)
+	srv.Handle(usage.Report.Command, usage.Report.Handler(
+		func(req *binding.Request[*usage.ReportArguments], res *binding.Response[*usage.ReportOK]) error {
+			inv := req.Invocation()
+			gotIss, gotSub, gotAud = inv.Issuer(), inv.Subject(), inv.Audience()
+			gotProofs = len(inv.Proofs())
+			gotArgs = req.Task().Arguments()
+			return res.SetSuccess(&usage.ReportOK{Skipped: []did.DID{skippedBucket}})
+		}))
+
+	// The client holds no proofs at all, and the report does not need any.
+	c := newHiltClient(t, hilt, srv, ingot, ucanlib.NewContainerProofStore(container.New()))
+	egress := []usage.SpaceEgress{
+		{Space: bucket, Hours: []usage.HourEgress{{Hour: 1795600800, Bytes: 4096}}},
+		{Space: skippedBucket, Hours: []usage.HourEgress{{Hour: 1795600800, Bytes: 1}}},
+	}
+	ok, err := c.ReportUsage(t.Context(), egress)
+	require.NoError(t, err)
+	require.Equal(t, []did.DID{skippedBucket}, ok.Skipped)
+
+	require.Equal(t, ingot.DID(), gotIss)
+	require.Equal(t, ingot.DID(), gotSub)
+	require.Equal(t, hilt.DID(), gotAud)
+	require.Zero(t, gotProofs)
+	require.Equal(t, egress, gotArgs.Egress)
+}
+
+func TestClientReportUsageReturnsAFailure(t *testing.T) {
+	hilt := testutil.RandomIssuer(t)
+	ingot := testutil.RandomIssuer(t)
+
+	srv := server.NewHTTP(hilt)
+	srv.Handle(usage.Report.Command, usage.Report.Handler(
+		func(req *binding.Request[*usage.ReportArguments], res *binding.Response[*usage.ReportOK]) error {
+			return res.SetFailure(ucanerrors.New("TooManyCounts", "a usage report may carry at most 8192 counts"))
+		}))
+
+	c := newHiltClient(t, hilt, srv, ingot, ucanlib.NewContainerProofStore(container.New()))
+	_, err := c.ReportUsage(t.Context(), nil)
+	var named ucanerrors.Named
+	require.ErrorAs(t, err, &named)
+	require.Equal(t, "TooManyCounts", named.Name())
 }
