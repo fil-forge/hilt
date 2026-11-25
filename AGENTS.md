@@ -30,8 +30,8 @@ them. It exposes two APIs and talks to three external services:
   `/s3/usage/report` is the one command a provider invokes on its own
   authority: Ingot's own counts of the bytes it sent from each bucket in each
   hour, which the tenant and bucket metrics endpoints serve as their egress
-  series (`pkg/store/usage`). A count is an hour's total so far and replaces
-  the last one reported, so a report is safe to repeat. Counts for a bucket
+  series (`pkg/store/usage`). A count is an hour's total so far and Hilt keeps
+  the largest reported, so a report is safe to repeat or to deliver late. Counts for a bucket
   Hilt never knew, or one another provider serves, are left out and come
   back as a named warning beside the result rather than failing the report; a deleted bucket's are kept,
   attributed through `bucket.Store.Owner`, which outlives the bucket.

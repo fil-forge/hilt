@@ -112,7 +112,7 @@ func TestUsageStore(t *testing.T) {
 				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: 10}, {Hour: h1, Bytes: 20}}, got)
 			})
 
-			t.Run("a later report replaces an hour's count", func(t *testing.T) {
+			t.Run("an hour keeps the largest count reported for it", func(t *testing.T) {
 				provider, tenantID, bucket := f.seedProvider(t), f.seedTenant(t), testutil.RandomDID(t)
 				first := []usage.EgressCount{{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 10}}
 				require.NoError(t, s.SetEgress(t.Context(), provider, first))
@@ -122,13 +122,23 @@ func TestUsageStore(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: 10}}, got)
 
-				// The hour grows, and the new total stands in for the old one.
+				// The hour grows, and the larger total takes the old one's place.
 				require.NoError(t, s.SetEgress(t.Context(), provider, []usage.EgressCount{
 					{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 25},
 				}))
 				got, err = s.BucketEgress(t.Context(), bucket, h0, h1)
 				require.NoError(t, err)
 				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: 25}}, got)
+
+				// An older total arriving late changes nothing, while a
+				// larger one in the same report is still stored.
+				require.NoError(t, s.SetEgress(t.Context(), provider, []usage.EgressCount{
+					{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 10},
+					{Bucket: bucket, Tenant: tenantID, Hour: h1, Bytes: 7},
+				}))
+				got, err = s.BucketEgress(t.Context(), bucket, h0, h2)
+				require.NoError(t, err)
+				require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: 25}, {Hour: h1, Bytes: 7}}, got)
 			})
 
 			t.Run("the range takes hours starting in [from, to)", func(t *testing.T) {
@@ -174,7 +184,7 @@ func TestUsageStore(t *testing.T) {
 				tenantID, bucket := f.seedTenant(t), testutil.RandomDID(t)
 				require.NoError(t, s.SetEgress(t.Context(), p1, []usage.EgressCount{{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 10}}))
 				require.NoError(t, s.SetEgress(t.Context(), p2, []usage.EgressCount{{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 3}}))
-				// One provider's later report does not replace the other's.
+				// One provider's later report leaves the other's count alone.
 				require.NoError(t, s.SetEgress(t.Context(), p1, []usage.EgressCount{{Bucket: bucket, Tenant: tenantID, Hour: h0, Bytes: 11}}))
 
 				got, err := s.BucketEgress(t.Context(), bucket, h0, h1)
