@@ -1,13 +1,16 @@
 package middleware_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	"github.com/fil-forge/hilt/pkg/store"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/execution"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/fil-forge/ucantone/server/middleware"
@@ -116,5 +119,71 @@ func TestLogRejections(t *testing.T) {
 		require.NoError(t, r.Handler(items))
 		require.True(t, ran, "the invocation the checks accept still runs")
 		require.Len(t, logs.FilterMessage("rejecting invocation").All(), 2)
+	})
+}
+
+// providerRoute wraps a command in the check the server serves a provider's
+// own commands behind.
+func providerRoute(t *testing.T, registered hiltmiddleware.ProviderLookup, ran *bool) server.Route {
+	t.Helper()
+	routes := middleware.Apply([]server.Route{server.NewRoute(s3bkt.List.Command,
+		func(req execution.Request, res execution.Response) error {
+			*ran = true
+			return nil
+		},
+	)}, hiltmiddleware.OnlySelfSignedByProvider(registered))
+	require.Len(t, routes, 1)
+	return routes[0]
+}
+
+func TestOnlySelfSignedByProvider(t *testing.T) {
+	service := testutil.RandomIssuer(t)
+	provider := testutil.RandomIssuer(t)
+	stranger := testutil.RandomIssuer(t)
+	registered := func(_ context.Context, id did.DID) error {
+		if id == provider.DID() {
+			return nil
+		}
+		return store.ErrRecordNotFound
+	}
+
+	t.Run("admits a registered provider invoking over itself", func(t *testing.T) {
+		var ran bool
+		err := testutil.ExecuteRoute(t, providerRoute(t, registered, &ran), service, provider, provider.DID())
+		require.NoError(t, err)
+		require.True(t, ran)
+	})
+
+	t.Run("refuses a self-signed invocation from anyone else", func(t *testing.T) {
+		var ran bool
+		err := testutil.ExecuteRoute(t, providerRoute(t, registered, &ran), service, stranger, stranger.DID())
+		require.ErrorIs(t, err, middleware.ErrUnauthorized)
+		require.False(t, ran)
+	})
+
+	t.Run("refuses a provider invoking over another subject", func(t *testing.T) {
+		for _, subject := range []did.DID{service.DID(), stranger.DID()} {
+			var ran bool
+			err := testutil.ExecuteRoute(t, providerRoute(t, registered, &ran), service, provider, subject)
+			require.ErrorIs(t, err, middleware.ErrInvalidSubject)
+			require.False(t, ran)
+		}
+	})
+
+	t.Run("fails, and runs nothing, when the registry cannot be read", func(t *testing.T) {
+		down := errors.New("registry unavailable")
+		var ran bool
+		err := testutil.ExecuteRoute(t, providerRoute(t, func(context.Context, did.DID) error { return down }, &ran), service, provider, provider.DID())
+		require.ErrorIs(t, err, down)
+		require.False(t, ran)
+	})
+
+	t.Run("its rejections are logged", func(t *testing.T) {
+		core, logs := observer.New(zapcore.WarnLevel)
+		var ran bool
+		routes := middleware.Apply([]server.Route{providerRoute(t, registered, &ran)}, hiltmiddleware.LogRejections(zap.New(core)))
+		err := testutil.ExecuteRoute(t, routes[0], service, stranger, stranger.DID())
+		require.ErrorIs(t, err, middleware.ErrUnauthorized)
+		require.Len(t, logs.FilterMessage("rejecting invocation").All(), 1)
 	})
 }

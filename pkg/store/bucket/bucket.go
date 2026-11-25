@@ -43,6 +43,17 @@ type Record struct {
 	CreatedAt time.Time
 }
 
+// Owner is who a bucket belongs to and who serves it. It outlives the bucket:
+// see [Store.Owner].
+type Owner struct {
+	// Tenant the bucket belongs to, or belonged to.
+	Tenant did.DID
+	// Provider that serves the bucket, or served it.
+	Provider did.DID
+	// Deleted reports whether the bucket has been deleted.
+	Deleted bool
+}
+
 // ListConfig configures [Store.ListByTenant].
 type ListConfig struct {
 	store.PaginationConfig // promotes Cursor and Limit
@@ -116,6 +127,12 @@ type Store interface {
 	// last record it includes (see [WithCursor]).
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) (store.Page[Record], error)
 	// Delete removes the bucket record for a given ID. It is idempotent:
-	// deleting an absent record returns nil.
+	// deleting an absent record returns nil. The bucket's tenant and provider
+	// stay answerable through [Store.Owner].
 	Delete(ctx context.Context, id did.DID) error
+	// Owner returns the tenant and provider of a bucket by ID, whether the
+	// bucket exists or has been deleted. Usage a gateway reports late, for a
+	// bucket's last hours, is attributed and checked against it. It returns
+	// [store.ErrRecordNotFound] if no bucket ever had the ID.
+	Owner(ctx context.Context, id did.DID) (Owner, error)
 }

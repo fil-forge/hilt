@@ -57,7 +57,11 @@ func NewGetTenantMetricsHandler(logger *zap.Logger, metrics *metricssvc.Service)
 		if err != nil {
 			return metricsHTTPError(log, err)
 		}
-		return c.JSON(http.StatusOK, metricsResponse(samples))
+		egress, err := metrics.TenantEgress(c.Request().Context(), c.Param("tenantId"), from, to, window)
+		if err != nil {
+			return metricsHTTPError(log, err)
+		}
+		return c.JSON(http.StatusOK, metricsResponse(samples, egress))
 	})
 }
 
@@ -75,7 +79,11 @@ func NewGetBucketMetricsHandler(logger *zap.Logger, metrics *metricssvc.Service)
 		if err != nil {
 			return metricsHTTPError(log, err)
 		}
-		return c.JSON(http.StatusOK, metricsResponse(samples))
+		egress, err := metrics.BucketEgress(c.Request().Context(), c.Param("tenantId"), c.Param("bucketName"), from, to, window)
+		if err != nil {
+			return metricsHTTPError(log, err)
+		}
+		return c.JSON(http.StatusOK, metricsResponse(samples, egress))
 	})
 }
 
@@ -86,12 +94,8 @@ func metricsQuery(c echo.Context) (time.Time, time.Time, time.Duration, error) {
 	return metricssvc.ParseRange(c.QueryParam("from"), c.QueryParam("to"), c.QueryParam("window"))
 }
 
-// metricsResponse maps a usage series onto the wire.
-//
-// Egress is always an empty series. It is accounted for by the egress tracking
-// service, which this API does not read, and reporting zero would claim a
-// reading rather than admitting there is none.
-func metricsResponse(samples []metricssvc.Sample) Metrics {
+// metricsResponse maps a usage series and an egress series onto the wire.
+func metricsResponse(samples []metricssvc.Sample, egressSamples []metricssvc.EgressSample) Metrics {
 	storage := make([]StorageSample, 0, len(samples))
 	ingress := make([]IngressSample, 0, len(samples))
 	for _, s := range samples {
@@ -105,9 +109,13 @@ func metricsResponse(samples []metricssvc.Sample) Metrics {
 			BytesIngested: s.BytesIngested,
 		})
 	}
+	egress := make([]EgressSample, 0, len(egressSamples))
+	for _, s := range egressSamples {
+		egress = append(egress, EgressSample{Timestamp: s.End, BytesEgressed: s.BytesEgressed})
+	}
 	return Metrics{
 		Storage: StorageMetrics{Samples: storage},
-		Egress:  EgressMetrics{Samples: make([]EgressSample, 0)},
+		Egress:  EgressMetrics{Samples: egress},
 		Ingress: IngressMetrics{Samples: ingress},
 	}
 }

@@ -18,12 +18,16 @@ const defaultListLimit = 1000
 type Store struct {
 	mutex   sync.RWMutex
 	buckets map[did.DID]bucket.Record
+	// deleted is who each deleted bucket belonged to. Unlike the Postgres
+	// backend's, it is not dropped with the tenant: this store never learns
+	// that a tenant was deleted.
+	deleted map[did.DID]bucket.Owner
 }
 
 var _ bucket.Store = (*Store)(nil)
 
 func New() *Store {
-	return &Store{buckets: map[did.DID]bucket.Record{}}
+	return &Store{buckets: map[did.DID]bucket.Record{}, deleted: map[did.DID]bucket.Owner{}}
 }
 
 func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, provider did.DID, name string) error {
@@ -147,6 +151,22 @@ func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	if b, ok := s.buckets[id]; ok {
+		s.deleted[id] = bucket.Owner{Tenant: b.Tenant, Provider: b.Provider, Deleted: true}
+	}
 	delete(s.buckets, id)
 	return nil
+}
+
+func (s *Store) Owner(ctx context.Context, id did.DID) (bucket.Owner, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if b, ok := s.buckets[id]; ok {
+		return bucket.Owner{Tenant: b.Tenant, Provider: b.Provider}, nil
+	}
+	if o, ok := s.deleted[id]; ok {
+		return o, nil
+	}
+	return bucket.Owner{}, store.ErrRecordNotFound
 }

@@ -27,6 +27,14 @@ them. It exposes two APIs and talks to three external services:
   selects), reached with a service key holding the matching permission; a
   PUT's body must hash to the signed payload hash, and If-Match /
   If-None-Match are optional signed headers (absent means unconditional).
+  `/s3/usage/report` is the one command a provider invokes on its own
+  authority: Ingot's own counts of the bytes it sent from each bucket in each
+  hour, which the tenant and bucket metrics endpoints serve as their egress
+  series (`pkg/store/usage`). A count is an hour's total so far and replaces
+  the last one reported, so a report is safe to repeat. Counts for a bucket
+  Hilt never knew, or one another provider serves, are skipped and named in
+  the result rather than failing the report; a deleted bucket's are kept,
+  attributed through `bucket.Store.Owner`, which outlives the bucket.
   The admin commands are
   `/admin/provider/{add,list}` and `/admin/provider/nodes/set` (`hilt client admin`).
   The route takes no credential and an invocation's issuer is resolved before
@@ -114,7 +122,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
   tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
   key's set as its policies change. See the package doc.
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy}` —
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage}` —
   each an interface with `memory` and `postgres` backends.
 - `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
   lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
@@ -175,11 +183,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `OnlyIssuer(serviceDID)` + `OnlySubject(serviceDID)`, the shape they are
   invoked with. A self-signed invocation (issuer == subject) needs no proofs and
   carries unattenuated authority under the UCAN rules, which is why nothing but
-  the service's own key may issue one. Those checks are silent, so
+  the service's own key may issue one. The one exception is the
+  `ucanProviderRoutes` group (`asProviderUCANRoute`), served behind Hilt's own
+  `OnlySelfSignedByProvider`: a registered provider invoking over itself, with
+  Hilt as the audience. Its subject is the provider, so it claims none of
+  Hilt's authority, and it belongs there only when all the command does is
+  record what the provider says about itself. Those checks are silent, so
   `middleware.LogRejections` (`pkg/rpc/middleware`, Hilt's own) goes outermost
   and logs what they turn away. Register a new handler with `asUCANRoute` unless
-  the service invokes it on itself, and put the check in middleware rather than
-  in the handler.
+  the service invokes it on itself or a provider invokes it over itself, and put
+  the check in middleware rather than in the handler.
 - **Authorization**: signature-bearing S3 commands authenticate via the
   `auth.Authorizer` service (SigV4/SigV4a verify + time bounds + issuer == the
   provider registered for the request's signing region), which also classifies

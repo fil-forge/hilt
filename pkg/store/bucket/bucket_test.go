@@ -351,6 +351,40 @@ func TestBucketStore(t *testing.T) {
 
 				require.NoError(t, s.Delete(t.Context(), id))
 			})
+
+			t.Run("Owner answers for a bucket before and after it is deleted", func(t *testing.T) {
+				id := testutil.RandomDID(t)
+				tenantID := testutil.RandomDID(t)
+				seed(t, tenantID)
+				require.NoError(t, s.Add(t.Context(), id, tenantID, providerID, "owned"))
+
+				owner, err := s.Owner(t.Context(), id)
+				require.NoError(t, err)
+				require.Equal(t, bucket.Owner{Tenant: tenantID, Provider: providerID}, owner)
+
+				require.NoError(t, s.Delete(t.Context(), id))
+				owner, err = s.Owner(t.Context(), id)
+				require.NoError(t, err)
+				require.Equal(t, bucket.Owner{Tenant: tenantID, Provider: providerID, Deleted: true}, owner)
+
+				// Deleting again changes nothing about who it belonged to.
+				require.NoError(t, s.Delete(t.Context(), id))
+				owner, err = s.Owner(t.Context(), id)
+				require.NoError(t, err)
+				require.True(t, owner.Deleted)
+
+				// The name is free again, and the new bucket is its own.
+				reuse := testutil.RandomDID(t)
+				require.NoError(t, s.Add(t.Context(), reuse, tenantID, providerID, "owned"))
+				owner, err = s.Owner(t.Context(), reuse)
+				require.NoError(t, err)
+				require.False(t, owner.Deleted)
+			})
+
+			t.Run("Owner returns ErrRecordNotFound for an ID no bucket had", func(t *testing.T) {
+				_, err := s.Owner(t.Context(), testutil.RandomDID(t))
+				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			})
 		})
 	}
 }
