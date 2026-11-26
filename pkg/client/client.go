@@ -167,23 +167,24 @@ func (c *Client) ListBuckets(ctx context.Context, req s3.Request, opts ...Method
 	return ok, err
 }
 
-// ReportUsage invokes /s3/usage/report with the caller's own counts of the
-// bytes it sent from each bucket in each hour, and returns Hilt's warnings
-// about it: the buckets whose counts it did not store, and why. Each count is an hour's total so far and Hilt
-// keeps the largest reported, so a report that failed can be sent again
-// unchanged and reports may arrive in any order.
+// ReportUsage invokes /s3/usage/report with the caller's own counts: the
+// bytes it sent from each bucket in each hour, and the objects each bucket
+// has gained and lost. It returns Hilt's warnings about the report: the
+// buckets whose counts it did not store, and why. Each count is a total that
+// only grows and Hilt keeps the largest reported, so a report that failed can
+// be sent again unchanged and reports may arrive in any order.
 //
 // Unlike the other commands, the issuer invokes this one on its own
 // authority: it is the subject as well as the issuer, Hilt is only the
 // audience, and no proofs are sent. Hilt accepts it from a registered
 // provider. [WithProofs] has no effect on it.
-func (c *Client) ReportUsage(ctx context.Context, egress []usage.SpaceEgress, opts ...MethodOption) (*usage.ReportOK, error) {
+func (c *Client) ReportUsage(ctx context.Context, report *usage.ReportArguments, opts ...MethodOption) (*usage.ReportOK, error) {
 	cfg := &methodConfig{issuer: c.Issuer}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 	cmd := usage.Report
-	inv, err := cmd.Invoke(cfg.issuer, cfg.issuer.DID(), &usage.ReportArguments{Egress: egress},
+	inv, err := cmd.Invoke(cfg.issuer, cfg.issuer.DID(), report,
 		invocation.WithAudience(c.ServiceID),
 	)
 	if err != nil {

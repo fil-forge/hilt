@@ -104,6 +104,20 @@ func metricsTarget(path string) string {
 	return path + "?from=2026-01-01T00:00:00Z&to=2026-01-01T02:00:00Z&window=1h"
 }
 
+// reportMetricsObjects stores a gateway's report that a bucket had gained the
+// given number of objects, and lost none, as of the hour starting at the Unix
+// time given.
+func reportMetricsObjects(t *testing.T, d *metricsDeps, bucket did.DID, hour int64, added uint64) {
+	t.Helper()
+	// Reported by the bucket's own provider for its own tenant, which the
+	// counts' foreign keys require.
+	owner, err := d.buckets.Owner(t.Context(), bucket)
+	require.NoError(t, err)
+	require.NoError(t, d.usage.SetObjects(t.Context(), owner.Provider, []usagestore.ObjectCount{
+		{Bucket: bucket, Tenant: owner.Tenant, Hour: time.Unix(hour, 0).UTC(), Added: added},
+	}))
+}
+
 func decodeMetrics(t *testing.T, rec *httptest.ResponseRecorder) api.Metrics {
 	t.Helper()
 	var body api.Metrics
@@ -116,9 +130,13 @@ func TestGetBucketMetricsHandler(t *testing.T) {
 		d := newMetricsDeps(t)
 		ids := addMetricsTenant(t, d, "tenant-1", "bucket-a")
 		d.sampler.series[ids[0]] = []metricscmds.SampleItem{
-			{Timestamp: 1767225600, BytesStored: 1024, BytesIngested: 1024, UploadCount: 2},
-			{Timestamp: 1767229200, BytesStored: 2048, BytesIngested: 1024, UploadCount: 3},
+			{Timestamp: 1767225600, BytesStored: 1024, BytesIngested: 1024},
+			{Timestamp: 1767229200, BytesStored: 2048, BytesIngested: 1024},
 		}
+		// The objects are what the gateway reported: two as the first
+		// sample closes, and a third gained in the hour after.
+		reportMetricsObjects(t, d, ids[0], 1767225600-3600, 2)
+		reportMetricsObjects(t, d, ids[0], 1767225600, 3)
 		e := serve(api.NewGetBucketMetricsHandler(zap.NewNop(), d.service(t)))
 
 		rec := doRequest(t, e, http.MethodGet, metricsTarget("/tenants/tenant-1/buckets/bucket-a/metrics"), nil)
@@ -198,11 +216,13 @@ func TestGetTenantMetricsHandler(t *testing.T) {
 		d := newMetricsDeps(t)
 		ids := addMetricsTenant(t, d, "tenant-1", "bucket-a", "bucket-b")
 		d.sampler.series[ids[0]] = []metricscmds.SampleItem{
-			{Timestamp: 1767225600, BytesStored: 1000, BytesIngested: 10, UploadCount: 1},
+			{Timestamp: 1767225600, BytesStored: 1000, BytesIngested: 10},
 		}
 		d.sampler.series[ids[1]] = []metricscmds.SampleItem{
-			{Timestamp: 1767225600, BytesStored: 500, BytesIngested: 5, UploadCount: 2},
+			{Timestamp: 1767225600, BytesStored: 500, BytesIngested: 5},
 		}
+		reportMetricsObjects(t, d, ids[0], 1767225600-3600, 1)
+		reportMetricsObjects(t, d, ids[1], 1767225600-3600, 2)
 		e := serve(api.NewGetTenantMetricsHandler(zap.NewNop(), d.service(t)))
 
 		rec := doRequest(t, e, http.MethodGet, metricsTarget("/tenants/tenant-1/metrics"), nil)

@@ -29,7 +29,6 @@ import (
 	"github.com/fil-forge/libforge/commands/content"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
-	"github.com/fil-forge/libforge/commands/upload"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
@@ -416,7 +415,7 @@ func TestAuthorizeRequest(t *testing.T) {
 				"from the next one")
 			require.Greater(t, int64(*exp), keyExpiry.Unix(), "and outlives the key")
 		}
-		require.ElementsMatch(t, []string{blob.Remove.Command.String(), blob.Abort.Command.String(), upload.Remove.Command.String()}, cmds)
+		require.ElementsMatch(t, []string{blob.Remove.Command.String(), blob.Abort.Command.String()}, cmds)
 
 		// The bucket's root rides along, and each cleanup delegation's proof
 		// set entry is the chain through it.
