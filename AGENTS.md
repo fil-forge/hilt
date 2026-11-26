@@ -229,7 +229,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   its document on its own command. Command-specific S3-permission checks
   stay in each handler. Both key kinds re-delegate from the key to the gateway on `/s3/request/authorize`,
   each per-request delegation keyed to itself. The cleanup commands among
-  them (`/blob/remove`, `/blob/abort`, `/upload/remove`) are also issued by
+  them (`/blob/remove`, `/blob/abort`) are also issued by
   the tenant for `CleanupLifetime` (8 days) past the next UTC midnight plus
   the clock skew, when the gateway stops reusing the response, keyed to the
   chain through the
