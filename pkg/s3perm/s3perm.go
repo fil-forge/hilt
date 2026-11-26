@@ -8,7 +8,6 @@ import (
 	"github.com/fil-forge/libforge/commands/blob"
 	"github.com/fil-forge/libforge/commands/content"
 	"github.com/fil-forge/libforge/commands/index"
-	"github.com/fil-forge/libforge/commands/upload"
 	"github.com/fil-forge/ucantone/ucan"
 )
 
@@ -35,26 +34,16 @@ var (
 	// the superseded blobs' registrations leak in the space — invisible to the
 	// S3 client (removal is best-effort), but the space can never be emptied
 	// and keeps the tenant's bytes registered with no way to release them.
-	// Supersession retires the replaced version itself the same way, with
-	// /upload/remove: the space counts one content entry per object version, so
-	// without the grant an overwrite registers the new version and fails to
-	// retract the old, and the tenant's object count climbs with every
-	// overwrite instead of holding steady.
-	cmdsAdd = append([]ucan.Command{upload.Add.Command, upload.Remove.Command, blob.Abort.Command, blob.Remove.Command},
+	// The object count moves with neither: the gateway counts its own
+	// objects and reports them itself, so no write registers a version with
+	// the upload service.
+	cmdsAdd = append([]ucan.Command{blob.Abort.Command, blob.Remove.Command},
 		cmdsCatalogWrite...)
-	// The two deletes differ, so they get their own sets.
-	//
-	// A delete with no version id may write a delete marker, and a delete
-	// marker is a version like any other, counted the way AWS counts it — so
-	// registering it is an add, odd as that reads on a delete. Without the
-	// grant the gateway queues a change it can never send, and the object
-	// count drifts for every delete against a versioned bucket.
-	cmdsDeleteObject = append([]ucan.Command{blob.Remove.Command, upload.Add.Command, upload.Remove.Command},
+	// A delete releases the blobs of the version it removes, and changes the
+	// catalog, whether it names a version or writes a delete marker.
+	cmdsDeleteObject = append([]ucan.Command{blob.Remove.Command},
 		cmdsCatalogWrite...)
-	// Deleting one named version only ever removes. It mints no version, so it
-	// has nothing to register and no business holding the grant to.
-	cmdsDeleteObjectVersion = append([]ucan.Command{blob.Remove.Command, upload.Remove.Command},
-		cmdsCatalogWrite...)
+	cmdsDeleteObjectVersion = cmdsDeleteObject
 	// Setting retention or a legal hold rewrites one version's lock state and
 	// nothing else: no bytes stored, no version minted or retired, no blob
 	// released. The catalog write is the whole of it.
@@ -65,23 +54,13 @@ var (
 	// Stopping a multipart upload discards the parts uploaded so far: those still
 	// parked are abandoned with /blob/abort, those already accepted released with
 	// /blob/remove. Without the grant Ingot can release them only with authority
-	// left over from some earlier write. No /upload/remove: an abandoned upload
-	// never committed a version, so it has no content entry to retract.
+	// left over from some earlier write.
 	cmdsAbort = []ucan.Command{blob.Abort.Command, blob.Remove.Command}
 	// Deleting a bucket unwinds every blob its space still holds — in-flight
 	// multipart parts, deleted objects' bodies whose deferred release has not
 	// run, and shipped catalog segments — so it needs what an abort needs, and
 	// a bucket that saw no write has no captured authority to fall back on.
-	//
-	// It also needs /upload/remove. Emptying a bucket queues a retraction per
-	// object version, and the gateway applies whatever is still queued before
-	// asking to delete the space, because nothing else ever will: this delete
-	// checks that the space holds no blobs and never touches its content
-	// entries, and the upload service keeps a space's entries and counters
-	// after the space is gone. Those retractions normally travel on authority
-	// the original write left behind; this grant is what lets them go out when
-	// that authority has expired.
-	cmdsDeleteBucket = []ucan.Command{blob.Abort.Command, blob.Remove.Command, upload.Remove.Command}
+	cmdsDeleteBucket = []ucan.Command{blob.Abort.Command, blob.Remove.Command}
 )
 
 // permissionCommands maps each supported S3 permission to the Forge commands
