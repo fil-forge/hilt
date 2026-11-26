@@ -173,15 +173,12 @@ func setup(t *testing.T) *world {
 	require.NoError(t, w.delegations.PutBatch(ctx, []ucan.Delegation{w.root}))
 	w.putPolicy(t, "s3:GetObject")
 
-	w.keys = accesskeysvc.New(zap.NewNop(), w.tenants, w.accessKeys, principals, buckets, w.policies, w.delegations, w.secrets, w.swarf)
-	w.serviceKey = w.createKey(t, "service", []string{"s3:GetObject", "s3:PutObject"}, []string{bucketName}, nil)
-	who := principal
-	w.principalKey = w.createKey(t, "bound", nil, nil, &who)
-
 	w.runner = htestutil.StartTaskRunner(t, pool, func(r *taskrunner.Runner) {
 		_, err := tenantqueue.New(r, tenantqueue.Deps{
 			Tenants:     hookedTenants{w.tenants, w.hooks},
 			AccessKeys:  w.accessKeys,
+			Principals:  principals,
+			Buckets:     buckets,
 			Policies:    w.policies,
 			Delegations: hookedDelegations{w.delegations, w.hooks},
 			Secrets:     w.secrets,
@@ -195,6 +192,13 @@ func setup(t *testing.T) *world {
 		})
 		require.NoError(t, err)
 	})
+
+	w.keys = accesskeysvc.New(zap.NewNop(), w.tenants, w.accessKeys, principals, buckets, w.secrets, w.runner)
+	w.serviceKey = w.createKey(t, "service", []string{"s3:GetObject", "s3:PutObject"}, []string{bucketName}, nil)
+	who := principal
+	w.principalKey = w.createKey(t, "bound", nil, nil, &who)
+	// The creations read the tenant too; the count is of what a test does.
+	w.hooks.statusReads.Store(0)
 	return w
 }
 
@@ -259,9 +263,8 @@ func (w *world) awaitPublished(t *testing.T) {
 		"the revocations owed were not published")
 }
 
-// stray stores a grant for the key that no status change issued, as a policy
-// write or a key creation holding the key's delegation lock would, and
-// returns it.
+// stray stores a grant for the key that no task issued, as a policy write
+// holding the key's delegation lock would, and returns it.
 func (w *world) stray(t *testing.T, key did.DID) ucan.Delegation {
 	t.Helper()
 	dels, err := grant.Issue(w.tenant, key, []did.DID{w.bucket}, []string{"s3:DeleteObject"}, nil)

@@ -70,19 +70,33 @@ type Store interface {
 	// after the task read anything is withdrawn with the rest; the first
 	// statement takes the lock of every key of the tenant, as a Replace does,
 	// so one that is storing grants for a key finishes first and its grants
-	// are withdrawn too. The lock is there for the writers that store grants
-	// outside the tenant's task queue, key creation and policy writes; with
-	// none of those it has nothing to wait for. A delegation the tenant did
-	// not issue, such as a bucket's root delegation to the tenant, is left
-	// alone.
+	// are withdrawn too. The lock is there for the writers that change a
+	// key's grants outside the tenant's task queue, policy writes and
+	// principal removal; with neither it has nothing to wait for. A
+	// delegation the tenant did not issue, such as a bucket's root delegation
+	// to the tenant, is left alone.
 	WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement
+	// WithdrawGrantsOfKeyStatements is [Store.WithdrawKeyGrantsStatements]
+	// narrowed to one access key, for a task that deletes the key in its own
+	// commit: the delegations the tenant issued to the key leave the store
+	// and are recorded as revocations the tenant owes. The first statement
+	// takes the key's lock, for the same writers: a policy write that is
+	// rewriting the key's grants finishes first, so the grants it stored are
+	// withdrawn too, and one that waits for the lock finds the key gone and
+	// stores it none.
+	WithdrawGrantsOfKeyStatements(tenant, key did.DID) []store.Statement
 	// PutForKeysStatement returns the write that stores the delegations whose
 	// audience is an access key when the statement runs, for a task that
 	// issues grants in its own commit: a key deleted since the task listed
-	// the keys is left with none. It takes no lock of its own, so it follows
-	// the statements of [Store.WithdrawKeyGrantsStatements], which hold the
-	// keys' locks, in the same transaction. It returns
-	// [store.ErrInvalidArgument] if the batch contains a nil delegation.
+	// the keys is left with none. The filter is there for principal removal,
+	// which deletes keys outside the tenant's task queue. The statement takes
+	// no lock of its own. A task that issues grants to keys that exist
+	// already runs it after the statements of
+	// [Store.WithdrawKeyGrantsStatements], which hold the keys' locks, in
+	// the same transaction; a task that creates the key in the same commit
+	// needs no lock, since no other writer sees the key until then. It
+	// returns [store.ErrInvalidArgument] if the batch contains a nil
+	// delegation.
 	PutForKeysStatement(delegations []ucan.Delegation) (store.Statement, error)
 }
 

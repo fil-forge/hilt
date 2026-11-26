@@ -208,9 +208,11 @@ var errNamedAgain = errors.New("a policy names the principal again")
 // remove runs while the principal row is locked. A write naming the principal
 // now waits for the outcome, so it checks that no policy names the principal,
 // then revokes what the principal's keys hold and deletes their rows under the
-// keys' delegation locks, in one write: a creation storing a key's grants
-// meanwhile either lands first and is revoked here, or waits and finds the row
-// gone. Nothing here waits on a bucket. The revocations cover everything the
+// keys' delegation locks, in one write. A key creation commits its key and
+// the key's grants together, after share-locking the principal's row: one
+// that commits first is listed and revoked here, and one that waits on the
+// row finds the principal removed and creates nothing. Nothing here waits on
+// a bucket. The revocations cover everything the
 // removal changes, so the policy and key writes it makes publish none of their
 // own. It runs under the principal row's lock, so the whole of it is bounded at
 // [grant.BatchTimeout], below the wait a share-locked reader gives the row.

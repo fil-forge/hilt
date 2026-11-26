@@ -13,14 +13,22 @@
 //     key is issued the grants its creation would issue it now
 //     ([grant.ForKey]).
 //
-// Both queue queue-revocation.publish for the tenant, which publishes the
-// revocations after the commit. A change between active and write-locked
-// sets the status alone.
+// A change between active and write-locked sets the status alone.
 //
-// Key creation, policy writes, principal removal and key and bucket deletion
-// do not run here: they write the same grants under row and advisory locks.
-// The grants to withdraw are therefore chosen by the commit's own statements,
-// under the keys' delegation locks, and never from what the handler read.
+// queue-tenant.create-key creates an access key: its row and the grants it
+// holds, in one commit. queue-tenant.delete-key deletes one: the delegations
+// the tenant issued to it leave the delegation store and are recorded as
+// revocations owed, in the commit that deletes its row (keys.go).
+//
+// Every change that records revocations queues queue-revocation.publish for
+// the tenant, which publishes them after the commit.
+//
+// Policy writes, principal removal and bucket and tenant deletion do not run
+// here: they write the same keys and grants under row and advisory locks. A
+// task therefore chooses the grants it withdraws in the statements its
+// commit runs, under the keys' delegation locks, and never from what its
+// handler read, and a task that issues grants from what it read makes its
+// commit conditional on that still holding.
 package tenantqueue
 
 import (
@@ -32,8 +40,10 @@ import (
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
 	"github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
+	"github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
@@ -44,16 +54,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// ErrTenantNotFound is the outcome of a queue-tenant.set-status task whose
-// subject tenant does not exist.
+// ErrTenantNotFound is the outcome of a queue-tenant.set-status or
+// queue-tenant.create-key task whose subject tenant does not exist.
 var ErrTenantNotFound = errors.New("tenant not found")
 
 // Deps is what the queue's handlers need.
 type Deps struct {
 	// Tenants holds the tenants and their statuses.
 	Tenants tenant.Store
-	// AccessKeys lists the keys whose grants are issued.
+	// AccessKeys holds the tenants' access keys.
 	AccessKeys accesskey.Store
+	// Principals holds the principals a key can be bound to.
+	Principals principal.Store
+	// Buckets holds the buckets a service key can be scoped to.
+	Buckets bucket.Store
 	// Policies holds the bucket policies a principal-bound key's grants come
 	// from.
 	Policies bucketpolicy.Store
@@ -69,6 +83,8 @@ type Deps struct {
 type Queue struct {
 	tenants     tenant.Store
 	accessKeys  accesskey.Store
+	principals  principal.Store
+	buckets     bucket.Store
 	policies    bucketpolicy.Store
 	delegations delegation.Store
 	secrets     vault.Vault
@@ -80,6 +96,8 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 	q := &Queue{
 		tenants:     d.Tenants,
 		accessKeys:  d.AccessKeys,
+		principals:  d.Principals,
+		buckets:     d.Buckets,
 		policies:    d.Policies,
 		delegations: d.Delegations,
 		secrets:     d.Secrets,
@@ -90,6 +108,14 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 	}
 	if err := r.Handle(tasks.QueueTenant, tasks.ActionSetStatus, q.runSetStatus); err != nil {
 		return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, tasks.ActionSetStatus, err)
+	}
+	for action, h := range map[string]taskrunner.Handler{
+		tasks.ActionCreateKey: q.runCreateKey,
+		tasks.ActionDeleteKey: q.runDeleteKey,
+	} {
+		if err := r.Handle(tasks.QueueTenant, action, h); err != nil {
+			return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, action, err)
+		}
 	}
 	return q, nil
 }

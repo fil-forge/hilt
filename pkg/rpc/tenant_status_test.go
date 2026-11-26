@@ -12,6 +12,8 @@ import (
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
+	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
@@ -76,6 +78,41 @@ func (p *pausedTenants) Get(ctx context.Context, id did.DID) (tenant.Record, err
 	return p.Store.Get(ctx, id)
 }
 
+// pausedKeys is the access-key store queue-tenant.delete-key reads through.
+// It holds a read while a gate is set, as pausedTenants does, which keeps a
+// key deletion's task running for as long as a test needs it pending.
+type pausedKeys struct {
+	accesskey.Store
+	mu sync.Mutex
+	// entered is closed when a read reaches the gate, and release lets it go.
+	entered, release chan struct{}
+}
+
+// pause makes the next read wait, and returns the channels that report it
+// waiting and let it go.
+func (p *pausedKeys) pause() (entered <-chan struct{}, release chan<- struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.entered, p.release = make(chan struct{}), make(chan struct{})
+	return p.entered, p.release
+}
+
+func (p *pausedKeys) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
+	p.mu.Lock()
+	entered, release := p.entered, p.release
+	p.entered, p.release = nil, nil
+	p.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return accesskey.Record{}, ctx.Err()
+		}
+	}
+	return p.Store.Get(ctx, id, opts...)
+}
+
 // afterStatusRead is the tenant store the authorizer reads through. It runs
 // then, once, right after the authorizer has read the tenant's status, which
 // lands a change between that read and the reads that follow it.
@@ -101,8 +138,12 @@ type statusEnv struct {
 	authorizer  *auth.Authorizer
 	delegations *delegationpostgres.Store
 	swarf       *htestutil.FakeSwarf
+	// keys is the access-key service, on the same runner.
+	keys *accesskeysvc.Service
 	// queueTenants is the store the status task reads through.
 	queueTenants *pausedTenants
+	// queueKeys is the store the key deletion task reads through.
+	queueKeys *pausedKeys
 	// authTenants is the store the authorizer reads through.
 	authTenants *afterStatusRead
 	provider    did.DID
@@ -128,6 +169,7 @@ func setupStatus(t *testing.T) *statusEnv {
 		delegations:  delegations,
 		swarf:        swarf,
 		queueTenants: &pausedTenants{Store: tenants},
+		queueKeys:    &pausedKeys{Store: accessKeys},
 		authTenants:  &afterStatusRead{Store: tenants},
 		provider:     testutil.RandomDID(t),
 	}
@@ -147,22 +189,23 @@ func setupStatus(t *testing.T) *statusEnv {
 	require.NoError(t, err)
 	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 
-	keys := accesskeysvc.New(zap.NewNop(), tenants, accessKeys, principals, buckets, policies, delegations, secrets, swarf)
-	rec, _, err := keys.Create(ctx, "tenant-1", "service", []string{"s3:GetObject", "s3:DeleteObject"}, []string{statusBucket}, nil, nil)
+	runner := htestutil.StartTaskRunner(t, pool, func(r *taskrunner.Runner) {
+		_, err := tenantqueue.New(r, tenantqueue.Deps{
+			Tenants: env.queueTenants, AccessKeys: env.queueKeys, Principals: principals, Buckets: buckets,
+			Policies: policies, Delegations: delegations, Secrets: secrets,
+		})
+		require.NoError(t, err)
+		_, err = revocationqueue.New(r, revocationqueue.Deps{Owed: owed, Secrets: secrets, Publisher: swarf})
+		require.NoError(t, err)
+	})
+	env.keys = accesskeysvc.New(zap.NewNop(), tenants, accessKeys, principals, buckets, secrets, runner)
+	rec, _, err := env.keys.Create(ctx, "tenant-1", "service", []string{"s3:GetObject", "s3:DeleteObject"}, []string{statusBucket}, nil, nil)
 	require.NoError(t, err)
 	keyBytes, err := secrets.Read(ctx, vault.AccessKeyPath(env.tenant, rec.ID))
 	require.NoError(t, err)
 	env.key, err = ed25519.Decode(keyBytes)
 	require.NoError(t, err)
 
-	runner := htestutil.StartTaskRunner(t, pool, func(r *taskrunner.Runner) {
-		_, err := tenantqueue.New(r, tenantqueue.Deps{
-			Tenants: env.queueTenants, AccessKeys: accessKeys, Policies: policies, Delegations: delegations, Secrets: secrets,
-		})
-		require.NoError(t, err)
-		_, err = revocationqueue.New(r, revocationqueue.Deps{Owed: owed, Secrets: secrets, Publisher: swarf})
-		require.NoError(t, err)
-	})
 	env.svc = tenantsvc.New(zap.NewNop(), tenants, buckets, accessKeys, principals, policies, delegations, secrets,
 		wrapkeypostgres.New(pool), nil, nil, swarf, owed, runner)
 	env.authorizer = auth.NewAuthorizer(zap.NewNop(), accessKeys, env.authTenants, providers, buckets, principals, policies, secrets,
@@ -352,4 +395,52 @@ func TestAuthorizeAcrossAStatusChange(t *testing.T) {
 		_, _, err = env.authorize(t, env.get(t))
 		require.NoError(t, err)
 	})
+}
+
+// An authorization reads the access key before it waits for the tenant's
+// pending changes, since the key names the tenant. When the change it waited
+// for deleted the key, the request is refused as one with an unknown key.
+func TestAuthorizeAfterWaitingForItsKeysDeletion(t *testing.T) {
+	env := setupStatus(t)
+	ctx := t.Context()
+	_, _, err := env.authorize(t, env.get(t))
+	require.NoError(t, err)
+
+	// Delete the key, with the deletion's task held running.
+	entered, release := env.queueKeys.pause()
+	deleted := make(chan error, 1)
+	go func() { deleted <- env.keys.Delete(ctx, "tenant-1", env.key.KeyDID().Identifier()) }()
+	select {
+	case <-entered:
+	case err := <-deleted:
+		t.Fatalf("the deletion returned without running its task: %v", err)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the deletion did not start")
+	}
+	answered := make(chan error, 1)
+	go func() {
+		_, _, err := env.authorize(t, env.get(t))
+		answered <- err
+	}()
+	select {
+	case err := <-answered:
+		t.Fatalf("authorization answered while the deletion was pending: %v", err)
+	case err := <-deleted:
+		t.Fatalf("the deletion returned while its task was held: %v", err)
+	case <-time.After(htestutil.MinBlock):
+	}
+	close(release)
+	select {
+	case err := <-deleted:
+		require.NoError(t, err)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("the deletion did not finish")
+	}
+	select {
+	case err := <-answered:
+		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
+	case <-time.After(htestutil.WaitTimeout):
+		t.Fatal("authorization did not answer once the deletion finished")
+	}
+	require.Empty(t, env.grants(t))
 }

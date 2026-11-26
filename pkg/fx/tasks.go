@@ -7,8 +7,10 @@ import (
 	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
 	"github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
+	"github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/revocation"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
@@ -51,6 +53,8 @@ func NewTenantQueue(
 	runner *taskrunner.Runner,
 	tenants tenant.Store,
 	accessKeys accesskey.Store,
+	principals principal.Store,
+	buckets bucket.Store,
 	policies bucketpolicy.Store,
 	delegations delegation.Store,
 	secrets vault.Vault,
@@ -59,6 +63,8 @@ func NewTenantQueue(
 	return tenantqueue.New(runner, tenantqueue.Deps{
 		Tenants:     tenants,
 		AccessKeys:  accessKeys,
+		Principals:  principals,
+		Buckets:     buckets,
 		Policies:    policies,
 		Delegations: delegations,
 		Secrets:     secrets,

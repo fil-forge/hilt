@@ -19,13 +19,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// seeder creates the rows the access_key foreign keys reference, and whose
-// status Add checks: the parent tenant, and any principals a key is bound to.
-// disable sets a seeded tenant's status to disabled.
+// seeder creates the rows the access_key foreign keys reference: the parent
+// tenant, and any principals a key is bound to.
 type seeder struct {
 	tenant    func(t *testing.T, tenantID did.DID)
 	principal func(t *testing.T, tenantID did.DID, externalID string)
-	disable   func(t *testing.T, tenantID did.DID)
 }
 
 func makeStore(t *testing.T) (accesskey.Store, seeder) {
@@ -42,9 +40,6 @@ func newSeeder(pool *pgxpool.Pool) seeder {
 		},
 		principal: func(t *testing.T, tenantID did.DID, externalID string) {
 			require.NoError(t, principals.Add(t.Context(), tenantID, externalID))
-		},
-		disable: func(t *testing.T, tenantID did.DID) {
-			require.NoError(t, tenants.SetStatus(t.Context(), tenantID, tenant.Disabled))
 		},
 	}
 }
@@ -341,18 +336,6 @@ func TestAccessKeyStore(t *testing.T) {
 		require.Empty(t, got)
 	})
 
-	t.Run("Add returns ErrTenantDisabled for a disabled tenant", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed.tenant(t, tenantID)
-		seed.disable(t, tenantID)
-
-		err := s.Add(t.Context(), service(t, testutil.RandomDID(t), tenantID, "k", nil, "s3:GetObject"))
-		require.ErrorIs(t, err, accesskey.ErrTenantDisabled)
-		recs, err := s.ListByTenant(t.Context(), tenantID)
-		require.NoError(t, err)
-		require.Empty(t, recs)
-	})
-
 	t.Run("Delete removes the row and is idempotent", func(t *testing.T) {
 		id := testutil.RandomDID(t)
 		tenantID := testutil.RandomDID(t)
@@ -378,16 +361,6 @@ func TestAccessKeyStorePostgresIntegrity(t *testing.T) {
 		seed.tenant(t, tenantID)
 		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "ghost", "k"))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
-	})
-
-	t.Run("a key bound to a removed principal is rejected inside the transaction", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed.tenant(t, tenantID)
-		seed.principal(t, tenantID, "user-1")
-		require.NoError(t, principalpostgres.New(pool).Tombstone(t.Context(), tenantID, "user-1", nil))
-		err := s.Add(t.Context(), bound(t, testutil.RandomDID(t), tenantID, "user-1", "laptop"))
-		require.ErrorIs(t, err, store.ErrInvalidArgument)
-		require.ErrorContains(t, err, "was removed")
 	})
 
 	t.Run("a key bound to another tenant's principal is rejected", func(t *testing.T) {
@@ -442,33 +415,125 @@ func TestAccessKeyStorePostgresLocking(t *testing.T) {
 	require.Equal(t, id, rec.ID)
 }
 
-// TestAccessKeyStorePostgresTenantLock pins that Add waits for an uncommitted
-// disable of the tenant and then refuses the key, so a tenant deletion's
-// snapshot of its keys cannot miss one added concurrently.
-func TestAccessKeyStorePostgresTenantLock(t *testing.T) {
+// TestAccessKeyStoreStatements covers the writes a task runs in its own
+// commit, run here on the pool.
+func TestAccessKeyStoreStatements(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	s := accesskeypostgres.New(pool)
-	tenantID := testutil.RandomDID(t)
-	newSeeder(pool).tenant(t, tenantID)
+	seed := newSeeder(pool)
+	ctx := t.Context()
+	exec := func(t *testing.T, st store.Statement) (int64, error) {
+		t.Helper()
+		tag, err := pool.Exec(ctx, st.SQL, st.Args...)
+		return tag.RowsAffected(), err
+	}
 
-	tx, err := pool.Begin(t.Context())
-	require.NoError(t, err)
-	defer tx.Rollback(t.Context())
+	t.Run("AddStatement writes the record Add writes, with the creation time given", func(t *testing.T) {
+		tenantID, bucket := testutil.RandomDID(t), testutil.RandomDID(t)
+		seed.tenant(t, tenantID)
+		seed.principal(t, tenantID, "user-1")
+		created := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
+		expires := created.Add(48 * time.Hour)
 
-	committed, added := htestutil.RequireWaitsForWriter(t,
-		func(entered chan<- struct{}, release <-chan struct{}) error {
-			if _, err := tx.Exec(t.Context(), `UPDATE tenant SET status = 'disabled' WHERE id = $1`, tenantID.String()); err != nil {
-				return err
-			}
-			close(entered)
-			<-release
-			return tx.Commit(t.Context())
-		},
-		func() error {
-			return s.Add(context.Background(), service(t, testutil.RandomDID(t), tenantID, "k", nil, "s3:GetObject"))
-		})
-	require.NoError(t, committed)
-	require.ErrorIs(t, added, accesskey.ErrTenantDisabled)
+		in, err := accesskey.NewServiceKey(testutil.RandomDID(t), tenantID, "svc", []did.DID{bucket}, []string{"s3:GetObject"}, &expires)
+		require.NoError(t, err)
+		in.CreatedAt = created
+		st, err := s.AddStatement(in)
+		require.NoError(t, err)
+		n, err := exec(t, st)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, n)
+		got, err := s.Get(ctx, in.ID)
+		require.NoError(t, err)
+		require.Equal(t, "svc", got.Name)
+		require.Equal(t, []did.DID{bucket}, got.Buckets)
+		require.Equal(t, []string{"s3:GetObject"}, got.Permissions)
+		require.Nil(t, got.Principal)
+		require.True(t, created.Equal(got.CreatedAt), "created at %s, stored %s", created, got.CreatedAt)
+		require.True(t, expires.Equal(*got.ExpiresAt))
+
+		bound := bound(t, testutil.RandomDID(t), tenantID, "user-1", "laptop")
+		st, err = s.AddStatement(bound)
+		require.NoError(t, err)
+		_, err = exec(t, st)
+		require.NoError(t, err)
+		got, err = s.Get(ctx, bound.ID)
+		require.NoError(t, err)
+		require.Equal(t, "user-1", *got.Principal)
+		require.Nil(t, got.Permissions)
+		require.WithinDuration(t, time.Now(), got.CreatedAt, time.Minute, "a zero creation time records the time of the write")
+	})
+
+	t.Run("AddStatement refuses an inconsistent input", func(t *testing.T) {
+		_, err := s.AddStatement(accesskey.Input{ID: testutil.RandomDID(t), Tenant: testutil.RandomDID(t)})
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+	})
+
+	t.Run("AddStatement fails when it runs for a name already taken", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed.tenant(t, tenantID)
+		require.NoError(t, s.Add(ctx, service(t, testutil.RandomDID(t), tenantID, "dup", nil, "s3:GetObject")))
+		st, err := s.AddStatement(service(t, testutil.RandomDID(t), tenantID, "dup", nil, "s3:GetObject"))
+		require.NoError(t, err)
+		_, err = exec(t, st)
+		require.Error(t, err)
+	})
+
+	t.Run("HasName looks where the name must be unique", func(t *testing.T) {
+		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
+		seed.tenant(t, tenantID)
+		seed.tenant(t, other)
+		seed.principal(t, tenantID, "alice")
+		seed.principal(t, tenantID, "bob")
+		require.NoError(t, s.Add(ctx, service(t, testutil.RandomDID(t), tenantID, "svc", nil, "s3:GetObject")))
+		require.NoError(t, s.Add(ctx, bound(t, testutil.RandomDID(t), tenantID, "alice", "laptop")))
+		alice, bob := "alice", "bob"
+
+		for _, tc := range []struct {
+			name      string
+			tenant    did.DID
+			principal *string
+			key       string
+			want      bool
+		}{
+			{"a service key's name among the tenant's service keys", tenantID, nil, "svc", true},
+			{"a principal's key's name among that principal's keys", tenantID, &alice, "laptop", true},
+			{"a service key's name is free for a principal", tenantID, &alice, "svc", false},
+			{"a principal's key's name is free for a service key", tenantID, nil, "laptop", false},
+			{"a principal's key's name is free for another principal", tenantID, &bob, "laptop", false},
+			{"another tenant's names are its own", other, nil, "svc", false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := s.HasName(ctx, tc.tenant, tc.principal, tc.key)
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got)
+			})
+		}
+	})
+
+	t.Run("DeleteStatement removes the tenant's key and no other tenant's", func(t *testing.T) {
+		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
+		seed.tenant(t, tenantID)
+		seed.tenant(t, other)
+		id := testutil.RandomDID(t)
+		require.NoError(t, s.Add(ctx, service(t, id, tenantID, "del", nil, "s3:GetObject")))
+
+		n, err := exec(t, s.DeleteStatement(other, id))
+		require.NoError(t, err)
+		require.Zero(t, n, "the key is not the other tenant's to delete")
+		_, err = s.Get(ctx, id)
+		require.NoError(t, err)
+
+		n, err = exec(t, s.DeleteStatement(tenantID, id))
+		require.NoError(t, err)
+		require.EqualValues(t, 1, n)
+		_, err = s.Get(ctx, id)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+
+		n, err = exec(t, s.DeleteStatement(tenantID, id))
+		require.NoError(t, err)
+		require.Zero(t, n, "deleting an absent row is a no-op")
+	})
 }
 
 func TestNewServiceKey(t *testing.T) {

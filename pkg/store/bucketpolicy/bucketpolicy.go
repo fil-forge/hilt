@@ -107,6 +107,22 @@ type Store interface {
 	// rewrite the policies. Principal removal must strip the principal from each listed policy
 	// itself and must not rely on the cascade.
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]Record, error)
+	// RequireUnchangedStatement returns a statement for a task that issued
+	// grants from read, the result of [Store.ListByPrincipal] for the
+	// principal, to run in its commit with WriteConditional. It affects one
+	// row when the policies naming the principal are still exactly those,
+	// compared by bucket and ETag, and none otherwise, which fails the commit
+	// so the task runs again from the policies as they are then.
+	//
+	// It is there for policy writes, which run outside the tenant's task
+	// queue: one that commits after the task read the policies would
+	// otherwise leave the task storing grants from the older documents. It
+	// takes no lock, so it follows the principal store's
+	// RequireLiveStatement in the same commit: with the principal's row
+	// share-locked, a write that changes what the principal may do has
+	// either committed, and is seen here, or has yet to list the principal's
+	// keys.
+	RequireUnchangedStatement(tenant did.DID, principal string, read []Record) store.Statement
 }
 
 // CheckInputPrecondition applies [CheckPrecondition] to a Conditional in.

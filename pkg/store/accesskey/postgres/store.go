@@ -32,35 +32,17 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 const selectColumns = `SELECT id, tenant_id, name, buckets, permissions, principal_id, expires_at, created_at FROM access_key`
 
-// Add inserts the row in a short transaction so its wait is bounded at
-// [store.LockTimeout]: the principal foreign key takes FOR KEY SHARE on the
-// principal row, which a removal in progress holds FOR UPDATE across its
-// callback. A longer wait returns [store.ErrLockTimeout] and nothing is
-// written.
+// Add runs the insert [Store.AddStatement] builds. The principal foreign key
+// takes FOR KEY SHARE on the principal row, which a removal in progress holds
+// FOR UPDATE across its callback, so the insert runs in a short transaction
+// whose wait is bounded at [store.LockTimeout]. A longer wait returns
+// [store.ErrLockTimeout] and nothing is written.
 func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
-	if err := in.Validate(); err != nil {
+	st, err := s.AddStatement(in)
+	if err != nil {
 		return err
 	}
 	defer func() { err = pglock.MapError(err) }()
-	// A service key stores its lists, an empty bucket list meaning every bucket
-	// of the tenant. A principal-bound key holds no authority of its own and
-	// stores NULL for both; the schema's CHECK constraint enforces the split.
-	var bucketStrs, permissions []string
-	if in.Principal == nil {
-		bucketStrs = make([]string, len(in.Buckets))
-		for i, b := range in.Buckets {
-			bucketStrs[i] = b.String()
-		}
-		permissions = in.Permissions
-		if permissions == nil {
-			permissions = []string{}
-		}
-	}
-	var expires *time.Time
-	if in.ExpiresAt != nil {
-		e := in.ExpiresAt.UTC()
-		expires = &e
-	}
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -70,47 +52,7 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
 		return err
 	}
-	// FOR SHARE holds the tenant row until the insert commits, so a concurrent
-	// disable either lands first (and the key is refused) or waits for the key,
-	// which a tenant deletion's snapshot of its keys then includes. The FK alone
-	// takes only a KEY SHARE lock, which a status update does not wait for.
-	var disabled bool
-	err = tx.QueryRow(ctx, `
-		SELECT status = 'disabled' FROM tenant WHERE id = $1 FOR SHARE
-	`, in.Tenant.String()).Scan(&disabled)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && disabled) {
-		// A tenant only gets to be gone once disabled.
-		return accesskey.ErrTenantDisabled
-	}
-	if err != nil {
-		return fmt.Errorf("checking tenant: %w", err)
-	}
-	if in.Principal != nil {
-		// Lock the principal FOR SHARE so the insert waits for an in-flight
-		// removal and then sees its tombstone. The foreign key alone would let a
-		// key bind to a removed principal, which a later revive would make live.
-		var removed bool
-		err := tx.QueryRow(ctx, `
-			SELECT deleted_at IS NOT NULL
-			FROM principal
-			WHERE tenant_id = $1 AND external_id = $2
-			FOR SHARE
-		`, in.Tenant.String(), *in.Principal).Scan(&removed)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("principal %q is not a principal of tenant %s: %w", *in.Principal, in.Tenant, store.ErrInvalidArgument)
-		}
-		if err != nil {
-			return fmt.Errorf("checking principal: %w", err)
-		}
-		if removed {
-			return fmt.Errorf("principal %q of tenant %s was removed: %w", *in.Principal, in.Tenant, store.ErrInvalidArgument)
-		}
-	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO access_key (id, tenant_id, name, buckets, permissions, principal_id, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, in.ID.String(), in.Tenant.String(), in.Name, bucketStrs, permissions, in.Principal, expires)
-	if err != nil {
+	if _, err = tx.Exec(ctx, st.SQL, st.Args...); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			switch pgErr.Code {
@@ -132,6 +74,57 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
+}
+
+// AddStatement builds the insert. A service key stores its lists, an empty
+// bucket list meaning every bucket of the tenant. A principal-bound key holds
+// no authority of its own and stores NULL for both; the schema's CHECK
+// constraint enforces the split.
+func (s *Store) AddStatement(in accesskey.Input) (store.Statement, error) {
+	if err := in.Validate(); err != nil {
+		return store.Statement{}, err
+	}
+	var bucketStrs, permissions []string
+	if in.Principal == nil {
+		bucketStrs = make([]string, len(in.Buckets))
+		for i, b := range in.Buckets {
+			bucketStrs[i] = b.String()
+		}
+		permissions = in.Permissions
+		if permissions == nil {
+			permissions = []string{}
+		}
+	}
+	var expires, created *time.Time
+	if in.ExpiresAt != nil {
+		e := in.ExpiresAt.UTC()
+		expires = &e
+	}
+	if !in.CreatedAt.IsZero() {
+		c := in.CreatedAt.UTC()
+		created = &c
+	}
+	return store.Statement{
+		SQL: `
+			INSERT INTO access_key (id, tenant_id, name, buckets, permissions, principal_id, expires_at, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()))`,
+		Args: []any{in.ID.String(), in.Tenant.String(), in.Name, bucketStrs, permissions, in.Principal, expires, created},
+	}, nil
+}
+
+// HasName asks each kind of key in the terms of its own partial unique index,
+// which answers it.
+func (s *Store) HasName(ctx context.Context, tenant did.DID, principal *string, name string) (bool, error) {
+	query, args := `principal_id IS NULL`, []any{tenant.String(), name}
+	if principal != nil {
+		query, args = `principal_id = $3`, append(args, *principal)
+	}
+	var taken bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM access_key WHERE tenant_id = $1 AND name = $2 AND `+query+`)`, args...).Scan(&taken)
+	if err != nil {
+		return false, fmt.Errorf("looking up an access key by name: %w", err)
+	}
+	return taken, nil
 }
 
 // Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
@@ -222,6 +215,13 @@ func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) DeleteStatement(tenant, id did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM access_key WHERE id = $1 AND tenant_id = $2`,
+		Args: []any{id.String(), tenant.String()},
+	}
 }
 
 func scanRecord(row pgx.Row) (accesskey.Record, error) {

@@ -4,8 +4,10 @@
 // (PutBatch, Replace, ReplaceOver, DeleteByAudience) runs in a transaction holding that
 // audience's advisory lock, so the writes of one audience serialize. The
 // statements a task runs in its own commit keep to the same rule: those of
-// WithdrawKeyGrantsStatements open with the locks of every key of the tenant,
-// and PutForKeysStatement follows them in the same transaction.
+// WithdrawKeyGrantsStatements open with the locks of every key of the tenant
+// and those of WithdrawGrantsOfKeyStatements with the one key's, and
+// PutForKeysStatement follows the former in the same transaction or stores
+// the grants of a key its own transaction creates.
 package postgres
 
 import (
@@ -168,6 +170,30 @@ func (s *Store) WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement {
 				SELECT w.id, $1, w.data FROM withdrawn w
 				ON CONFLICT (id) DO NOTHING`,
 			Args: []any{tenant.String()},
+		},
+	}
+}
+
+// WithdrawGrantsOfKeyStatements takes the lock [lockAudiences] takes for the
+// key. The key's row is not read: the lock is the audience's, whether or not
+// the key still exists.
+func (s *Store) WithdrawGrantsOfKeyStatements(tenant, key did.DID) []store.Statement {
+	return []store.Statement{
+		{
+			SQL:  `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
+			Args: []any{lockNamespace, key.String()},
+		},
+		{
+			SQL: `
+				WITH withdrawn AS (
+					DELETE FROM delegation d
+					WHERE d.audience = $2 AND d.issuer = $1
+					RETURNING d.id, d.data
+				)
+				INSERT INTO revocation_owed (id, tenant_id, data)
+				SELECT w.id, $1, w.data FROM withdrawn w
+				ON CONFLICT (id) DO NOTHING`,
+			Args: []any{tenant.String(), key.String()},
 		},
 	}
 }

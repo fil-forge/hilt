@@ -270,6 +270,17 @@ func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) 
 	return nil
 }
 
+func (s *Store) RequireLiveStatement(tenant did.DID, externalID string) store.Statement {
+	return store.Statement{
+		SQL: `
+			SELECT 1
+			FROM principal
+			WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
+			FOR SHARE`,
+		Args: []any{tenant.String(), externalID},
+	}
+}
+
 func scanRecord(row pgx.Row) (principal.Record, error) {
 	var (
 		tenantStr  string

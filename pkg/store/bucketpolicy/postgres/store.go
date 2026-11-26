@@ -302,6 +302,37 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 	return collectRecords(rows)
 }
 
+// RequireUnchangedStatement compares the policies the index lists for the
+// principal now with those read, as a full join that leaves a row for each
+// policy on one side alone.
+func (s *Store) RequireUnchangedStatement(tenant did.DID, principal string, read []bucketpolicystore.Record) store.Statement {
+	buckets, etags := make([]string, len(read)), make([]string, len(read))
+	for i, rec := range read {
+		buckets[i], etags[i] = rec.Bucket.String(), rec.ETag
+	}
+	return store.Statement{
+		SQL: `
+			SELECT 1
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM (
+					SELECT p.bucket_id, p.etag
+					FROM bucket_policy p
+					WHERE EXISTS (
+						SELECT 1 FROM bucket_policy_principal i
+						WHERE i.bucket_id = p.bucket_id
+						  AND i.tenant_id = $1
+						  AND (i.principal_id = $2 OR i.principal_id IS NULL)
+					)
+				) stored
+				FULL JOIN unnest($3::text[], $4::text[]) AS seen(bucket_id, etag)
+					ON seen.bucket_id = stored.bucket_id AND seen.etag = stored.etag
+				WHERE stored.bucket_id IS NULL OR seen.bucket_id IS NULL
+			)`,
+		Args: []any{tenant.String(), principal, buckets, etags},
+	}
+}
+
 // collectRecords scans every row of a policy listing.
 func collectRecords(rows pgx.Rows) ([]bucketpolicystore.Record, error) {
 	var recs []bucketpolicystore.Record

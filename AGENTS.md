@@ -49,7 +49,7 @@ them. It exposes two APIs and talks to three external services:
   bucket's space is pointed at its provider's policy on creation.
 - **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke` to
   revoke delegations, every revocation of one write in a single request
-  (`PublishBatch`): a deleted key's grants, a deleted bucket's, and the grants
+  (`PublishBatch`): a deleted bucket's grants, and the grants
   a policy change or a principal removal takes off a principal-bound key
   (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate
   Swarf records once.
@@ -58,7 +58,8 @@ them. It exposes two APIs and talks to three external services:
   (`pkg/tasks/revocationqueue`). A tenant status change into or out of
   `disabled` records them: disabling withdraws every grant the tenant's keys
   hold, and leaving `disabled` withdraws whatever they hold and issues each
-  key fresh grants (`pkg/tasks/tenantqueue`). Tenant deletion publishes what
+  key fresh grants. An access key's deletion records the grants the key held
+  (`pkg/tasks/tenantqueue`). Tenant deletion publishes what
   is still owed itself, before it deactivates the tenant's DID, which Swarf
   verifies the revocations against.
 - **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
@@ -145,7 +146,13 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   subject of the tenant's DID string. Each queue's handlers live in a package
   under it (`tenantqueue`, `revocationqueue`). `queue-tenant.set-status` is
   the tenant status change, which `tenant.Service.SetStatus` submits and
-  waits for. The runner is built with the Postgres store
+  waits for. `queue-tenant.create-key` and `queue-tenant.delete-key` create
+  and delete an access key, submitted and waited for by
+  `accesskey.Service`, which keeps the key's secret to itself: it writes the
+  secret to the vault before it submits the creation and removes it when
+  the task fails. A task's arguments that carry more than one value are a
+  cbor-gen model under the queue's `datamodel` package (`go generate` in its
+  `gen` directory). The runner is built with the Postgres store
   module (`pkg/fx/store/postgres`), which creates its tables in the `public`
   schema after the goose migrations; `pkg/fx/tasks.go` registers the handlers
   and starts and stops it with the service.
@@ -196,13 +203,20 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   the one publish task a change queues (`revocationqueue.PublishSpec`)
   publishes everything the tenant owes, reading each batch after the last
   row of the one before, because its own deletes are not visible until it
-  commits. Key creation, policy writes, principal removal and key and bucket
-  deletion still write grants under locks, outside the queue. A task that
-  changes grants therefore chooses the rows in the statements its commit
+  commits. Policy writes, principal removal and bucket and tenant deletion
+  still write keys and grants under locks, outside the queue. A task that
+  withdraws grants therefore chooses the rows in the statements its commit
   runs, under the keys' delegation locks
-  (`delegation.Store.WithdrawKeyGrantsStatements`), never from a list its
-  handler read, and makes the write of a value it read conditional
-  (`ex.WriteConditional`). Tests build a runner on their test database with
+  (`delegation.Store.WithdrawKeyGrantsStatements`,
+  `WithdrawGrantsOfKeyStatements`), never from a list its handler read, and
+  makes the write of a value it read conditional (`ex.WriteConditional`). A
+  task that issues grants from what it read opens its commit with the
+  conditions that what it read still holds: a key creation share-locks its
+  principal's row (`principal.Store.RequireLiveStatement`) and then checks
+  the principal's policies are the ones it read
+  (`bucketpolicy.Store.RequireUnchangedStatement`). Each of these
+  safeguards names, in its doc comment, the writers it is there for, and
+  goes when they move onto the queue. Tests build a runner on their test database with
   `testutil.StartTaskRunner`, or `testutil.StartServiceTasks` for one with
   the service's handlers registered.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
@@ -244,8 +258,11 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `Authorize` asks the task runner for the tenant's unfinished tasks on
   `queue-tenant` and waits for all of them, for up to `store.LockTimeout`,
   so no request is answered from a state a queued change is about to
-  replace; a wait that runs out is `ErrTemporarilyUnavailable`. The tenant
-  status change is the one change queued there so far, and the share-locked
+  replace; a wait that runs out is `ErrTemporarilyUnavailable`. The access
+  key is read before the wait, because it names the tenant, so a request
+  that waited reads it again and is refused when the change it waited for
+  deleted the key. Tenant status changes and access key creation and
+  deletion are queued there, and the share-locked
   reads stay until the writes they wait on have moved onto the queue. The
   status is read before the policies and before the key's stored grants,
   and a status change commits its status and its grant changes together, so

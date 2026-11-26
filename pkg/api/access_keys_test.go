@@ -1,11 +1,13 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,12 +18,12 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -76,7 +78,10 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 	return tenantID, bucketID
 }
 
-func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
+// setupAccessKeys serves the access-key routes over a fresh database, with
+// the task runner key creation and deletion run on. Each wrap may replace
+// what the runner's queue-tenant handlers work through.
+func setupAccessKeys(t *testing.T, wrap ...func(*tenantqueue.Deps)) (*echo.Echo, *accessKeyDeps) {
 	t.Helper()
 	pool := testutil.PostgresOrSkip(t)
 	tenants := tenantpostgres.New(pool)
@@ -95,7 +100,8 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "alice"))
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicypostgres.New(pool), deps.delegations, deps.vault, &testutil.FakeSwarf{})
+	runner := testutil.StartServiceTasks(t, pool, deps.vault, &testutil.FakeSwarf{}, wrap...)
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, deps.vault, runner)
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
@@ -573,31 +579,57 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 	})
 }
 
-// heldBeforeReplace answers Replace as if a policy write had rotated the key
-// meanwhile: the callback sees each audience already holding a delegation.
-// Only the count is read, so the held delegation is a placeholder.
-type heldBeforeReplace struct{ *delegationpostgres.Store }
-
-func (h heldBeforeReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	current := make(map[did.DID][]ucan.Delegation, len(audiences))
-	for _, aud := range audiences {
-		current[aud] = make([]ucan.Delegation, 1)
-	}
-	_, err := next(ctx, current)
-	return err
+// heldTenants blocks the first Get until release is closed, having closed
+// entered: the task that makes it holds its tenant's queue meanwhile.
+type heldTenants struct {
+	tenant.Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
 }
 
-func TestCreateAccessKeyRotatedMeanwhileHandler(t *testing.T) {
-	_, deps := setupAccessKeys(t)
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicypostgres.New(deps.pool), heldBeforeReplace{deps.delegations}, deps.vault, &testutil.FakeSwarf{})
-	e := echo.New()
-	route := api.NewCreateAccessKeyHandler(zap.NewNop(), svc)
-	e.Add(route.Method, route.Path, route.Handler)
+func (s *heldTenants) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.Store.Get(ctx, id)
+}
 
-	rec := createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "k", Permissions: []string{"s3:GetObject"}})
+// A creation that is still waiting for its turn on the tenant's queue when
+// the request's deadline passes is answered as a concurrent change, for the
+// caller to repeat.
+func TestCreateAccessKeyAbandonedHandler(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	e, _ := setupAccessKeys(t, func(deps *tenantqueue.Deps) {
+		deps.Tenants = &heldTenants{Store: deps.Tenants, entered: entered, release: release}
+	})
+	first := make(chan int, 1)
+	go func() {
+		first <- createAccessKey(t, e, "tenant-1", api.CreateAccessKeyRequest{Name: "first", Permissions: []string{"s3:GetObject"}}).Code
+	}()
+	select {
+	case <-entered:
+	case code := <-first:
+		t.Fatalf("the first creation answered %d before its task ran", code)
+	case <-time.After(testutil.WaitTimeout):
+		t.Fatal("the first creation's task did not start")
+	}
+
+	body, err := json.Marshal(api.CreateAccessKeyRequest{Name: "second", Permissions: []string{"s3:GetObject"}})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), testutil.MinBlock)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/tenants/tenant-1/access-keys", bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
 
 	require.Equal(t, []any{http.StatusConflict, api.Error{
 		Code:    accesskeysvc.ConcurrentChangeErrorName,
 		Message: accesskeysvc.ErrConcurrentChange.Error(),
 	}}, []any{rec.Code, decodeError(t, rec)})
+
+	close(release)
+	require.Equal(t, http.StatusCreated, <-first)
 }

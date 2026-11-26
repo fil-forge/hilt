@@ -1081,3 +1081,77 @@ func TestPolicyStorePostgres(t *testing.T) {
 		}
 	})
 }
+
+// TestRequireUnchangedStatement covers the statement a key creation's commit
+// runs conditionally: it affects a row only while the policies naming the
+// principal are the ones read.
+func TestRequireUnchangedStatement(t *testing.T) {
+	s, f := makeStore(t)
+	ctx := t.Context()
+	affected := func(t *testing.T, tenantID did.DID, principal string, read []bucketpolicystore.Record) int64 {
+		t.Helper()
+		st := s.RequireUnchangedStatement(tenantID, principal, read)
+		tag, err := f.pool.Exec(ctx, st.SQL, st.Args...)
+		require.NoError(t, err)
+		return tag.RowsAffected()
+	}
+	put := func(t *testing.T, tenantID, bucket did.DID, d s3bkt.PolicyDocument) {
+		t.Helper()
+		_, err := s.Put(ctx, bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: d}, noCallback)
+		require.NoError(t, err)
+	}
+	list := func(t *testing.T, tenantID did.DID, principal string) []bucketpolicystore.Record {
+		t.Helper()
+		recs, err := s.ListByPrincipal(ctx, tenantID, principal)
+		require.NoError(t, err)
+		return recs
+	}
+
+	tenantID := f.tenant(t)
+	f.principal(t, tenantID, "alice")
+	f.principal(t, tenantID, "bob")
+	named, wild, bobs := f.bucket(t, tenantID), f.bucket(t, tenantID), f.bucket(t, tenantID)
+
+	require.EqualValues(t, 1, affected(t, tenantID, "alice", nil), "no policy read and none stored")
+
+	put(t, tenantID, named, doc(allow(only("alice"), "s3:GetObject")))
+	put(t, tenantID, wild, doc(allow(everyone, "s3:ListBucket")))
+	put(t, tenantID, bobs, doc(allow(only("bob"), "s3:GetObject")))
+	read := list(t, tenantID, "alice")
+	require.Len(t, read, 2)
+	require.EqualValues(t, 1, affected(t, tenantID, "alice", read), "the policies are the ones read")
+	require.Zero(t, affected(t, tenantID, "alice", nil), "policies were written since nothing was read")
+	require.Zero(t, affected(t, tenantID, "alice", read[:1]), "a policy names the principal that was not read")
+
+	t.Run("a policy naming another principal alone does not count", func(t *testing.T) {
+		put(t, tenantID, bobs, doc(allow(only("bob"), "s3:PutObject")))
+		require.EqualValues(t, 1, affected(t, tenantID, "alice", read))
+	})
+
+	t.Run("another tenant's policies do not count", func(t *testing.T) {
+		otherTenant := f.tenant(t)
+		put(t, otherTenant, f.bucket(t, otherTenant), doc(allow(everyone, "s3:GetObject")))
+		require.EqualValues(t, 1, affected(t, tenantID, "alice", read))
+	})
+
+	t.Run("a rewritten policy is a change", func(t *testing.T) {
+		put(t, tenantID, named, doc(allow(only("alice"), "s3:GetObject", "s3:PutObject")))
+		require.Zero(t, affected(t, tenantID, "alice", read))
+		read = list(t, tenantID, "alice")
+		require.EqualValues(t, 1, affected(t, tenantID, "alice", read))
+	})
+
+	t.Run("a policy that stops naming the principal is a change", func(t *testing.T) {
+		put(t, tenantID, named, doc(allow(only("bob"), "s3:GetObject")))
+		require.Zero(t, affected(t, tenantID, "alice", read))
+		read = list(t, tenantID, "alice")
+		require.Len(t, read, 1)
+		require.EqualValues(t, 1, affected(t, tenantID, "alice", read))
+	})
+
+	t.Run("a removed policy is a change", func(t *testing.T) {
+		require.NoError(t, s.Delete(ctx, wild, "", nil))
+		require.Zero(t, affected(t, tenantID, "alice", read))
+		require.EqualValues(t, 1, affected(t, tenantID, "alice", nil))
+	})
+}
