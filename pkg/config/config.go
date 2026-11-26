@@ -36,6 +36,20 @@ type Config struct {
 	Auth       AuthConfig       `mapstructure:"auth"`
 	Upload     UploadConfig     `mapstructure:"upload"`
 	Revocation RevocationConfig `mapstructure:"revocation"`
+	Tasks      TasksConfig      `mapstructure:"tasks"`
+}
+
+// TasksConfig sizes the durable task queues. Each count is the most queued
+// tasks of that queue this process runs at once, each for a different tenant:
+// a tenant's tasks on one queue always run one at a time. Zero runs none and
+// leaves the queue to other instances.
+type TasksConfig struct {
+	// TenantWorkers is the worker count of the queue of changes to a tenant's
+	// authority. Defaults to 4.
+	TenantWorkers int `mapstructure:"tenant_workers"`
+	// RevocationWorkers is the worker count of the queue that publishes
+	// revocations to the revocation service. Defaults to 4.
+	RevocationWorkers int `mapstructure:"revocation_workers"`
 }
 
 // RevocationConfig holds settings for the Swarf revocation service, which Hilt
@@ -179,6 +193,9 @@ func SetDefaults(v *viper.Viper) {
 
 	v.SetDefault("plc.directory", "https://plc.directory")
 
+	v.SetDefault("tasks.tenant_workers", 4)
+	v.SetDefault("tasks.revocation_workers", 4)
+
 	// upload.service_id, upload.service_url and upload.product_id have no
 	// default: every deployment names its own stage's Sprue and product, and
 	// `serve` refuses to start without them (see fx.NewUploadClient).
@@ -214,6 +231,8 @@ var flagBindings = map[string]string{
 	"upload.proofs":                    "upload-proofs",
 	"revocation.service_id":            "revocation-service-id",
 	"revocation.service_url":           "revocation-service-url",
+	"tasks.tenant_workers":             "tenant-task-workers",
+	"tasks.revocation_workers":         "revocation-task-workers",
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix. Each

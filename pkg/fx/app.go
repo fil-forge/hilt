@@ -23,6 +23,7 @@ func AppModule(cfg *config.Config) fx.Option {
 		RevocationModule,
 		APIModule,
 		RPCModule,
+		TasksModule,
 		ServerModule,
 	}
 

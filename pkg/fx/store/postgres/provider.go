@@ -22,21 +22,27 @@ import (
 	pgprincipal "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	pgprovider "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	"github.com/fil-forge/hilt/pkg/store/revocation"
+	pgrevocation "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	pgtenant "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/store/usage"
 	pgusage "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	"github.com/fil-forge/hilt/pkg/store/wrapkey"
 	pgwrapkey "github.com/fil-forge/hilt/pkg/store/wrapkey/postgres"
+	"github.com/fil-forge/hilt/pkg/tasks"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
 
-// Module provides the Postgres-backed store implementations.
+// Module provides the Postgres-backed store implementations and the task
+// runner, whose queues are tables in the same database.
 var Module = fx.Module("postgres-store",
 	fx.Provide(
 		NewPostgresPool,
+		NewTaskRunner,
 		NewMigratedPool,
 		NewAccessKeyStore,
 		NewBucketStore,
@@ -44,6 +50,7 @@ var Module = fx.Module("postgres-store",
 		NewPolicyStore,
 		NewPrincipalStore,
 		NewProviderStore,
+		NewRevocationStore,
 		NewTenantStore,
 		NewUsageStore,
 		NewWrapKeyStore,
@@ -100,10 +107,29 @@ func NewPostgresPool(cfg config.PostgresConfig, lc fx.Lifecycle, logger *zap.Log
 	return pool, nil
 }
 
-// NewMigratedPool registers an OnStart hook that runs goose migrations against
-// the pool (unless storage.postgres.skip_migrations is true) and returns a
-// *MigratedPool wrapper that store constructors depend on.
-func NewMigratedPool(lc fx.Lifecycle, cfg config.PostgresConfig, pool *pgxpool.Pool, logger *zap.Logger) *MigratedPool {
+// NewTaskRunner builds the runner of the durable task queues over the pool.
+// It runs nothing until it is started: handlers are registered with it first,
+// and [NewMigratedPool] creates its tables.
+func NewTaskRunner(cfg config.TasksConfig, pool *pgxpool.Pool, logger *zap.Logger) (*taskrunner.Runner, error) {
+	if cfg.TenantWorkers < 0 {
+		return nil, fmt.Errorf("tasks.tenant_workers must not be negative, got %d", cfg.TenantWorkers)
+	}
+	if cfg.RevocationWorkers < 0 {
+		return nil, fmt.Errorf("tasks.revocation_workers must not be negative, got %d", cfg.RevocationWorkers)
+	}
+	return taskrunner.New(pool, taskrunner.Options{
+		Schema: tasks.Schema,
+		Queues: tasks.Queues(cfg.TenantWorkers, cfg.RevocationWorkers),
+		Logger: logger.Named("tasks"),
+	})
+}
+
+// NewMigratedPool registers an OnStart hook that runs the goose migrations
+// against the pool and then creates the task queues' tables, which the runner
+// owns and versions itself (unless storage.postgres.skip_migrations is true,
+// which skips both), and returns a *MigratedPool wrapper that store
+// constructors depend on.
+func NewMigratedPool(lc fx.Lifecycle, cfg config.PostgresConfig, pool *pgxpool.Pool, runner *taskrunner.Runner, logger *zap.Logger) *MigratedPool {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			if cfg.SkipMigrations {
@@ -111,7 +137,13 @@ func NewMigratedPool(lc fx.Lifecycle, cfg config.PostgresConfig, pool *pgxpool.P
 				return nil
 			}
 			logger.Info("running postgres migrations")
-			return migrations.Up(ctx, pool, logger)
+			if err := migrations.Up(ctx, pool, logger); err != nil {
+				return err
+			}
+			if err := runner.Migrate(ctx); err != nil {
+				return fmt.Errorf("creating the task queues' tables: %w", err)
+			}
+			return nil
 		},
 	})
 	return &MigratedPool{Pool: pool}
@@ -139,6 +171,10 @@ func NewPrincipalStore(mdb *MigratedPool) principal.Store {
 
 func NewProviderStore(mdb *MigratedPool) provider.Store {
 	return pgprovider.New(mdb.Pool)
+}
+
+func NewRevocationStore(mdb *MigratedPool) revocation.Store {
+	return pgrevocation.New(mdb.Pool)
 }
 
 func NewTenantStore(mdb *MigratedPool) tenant.Store {

@@ -53,6 +53,9 @@ them. It exposes two APIs and talks to three external services:
   a policy change or a principal removal takes off a principal-bound key
   (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate
   Swarf records once.
+  Revocations recorded as owed (`pkg/store/revocation`) are published from
+  the task queue instead, in batches, and retried until Swarf takes them
+  (`pkg/tasks/revocationqueue`). Nothing records one yet.
 - **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
   provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
 
@@ -126,10 +129,19 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
   tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
   key's set as its policies change. See the package doc.
-- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage}` —
+- `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage,revocation}` —
   each an interface with its `postgres` implementation.
 - `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
   lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
+- `pkg/tasks` — the durable task queues, run on libforge's `taskrunner`
+  (read its README before writing a handler). `tasks.go` names the queues, in
+  order, and their actions: `queue-tenant` for changes to a tenant's
+  authority and `queue-revocation` for publishing revocations, both on the
+  subject of the tenant's DID string. Each queue's handlers live in a package
+  under it (`revocationqueue`). The runner is built with the Postgres store
+  module (`pkg/fx/store/postgres`), which creates its tables in the `public`
+  schema after the goose migrations; `pkg/fx/tasks.go` registers the handlers
+  and starts and stops it with the service.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
   key path helpers (`TenantKeyPath`, `AccessKeyPath`).
 - `pkg/client` — clients for external services: the Sprue `UploadClient`, and
@@ -168,6 +180,14 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
   `store.LockTimeout` and a statement that gives up returns
   `store.ErrLockTimeout`, which the caller retries.
+- **Tasks**: a handler reads through its stores and writes only through
+  `ex.Write`, with a `store.Statement` the store builds, so the write commits
+  with the task; it never reads a row its own task wrote. A task's arguments
+  and result are stored in Postgres, so no secret goes into either. Write an
+  action with its queue (`queue-revocation.publish`). The runner refuses a
+  task that queues its own action, so work that takes several tasks is queued
+  by whoever records it (`revocationqueue.PublishSpecs`). Tests build a
+  runner on their test database with `testutil.StartTaskRunner`.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an
@@ -203,6 +223,13 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   key's scope, and that provider. Tenants are region-free; a bucket is bound to
   the provider (region) it was created through and only that provider may act on
   it (`BucketRegionMismatchError` otherwise).
+  Once the request is authenticated and before the tenant's status is read,
+  `Authorize` asks the task runner for the tenant's unfinished tasks on
+  `queue-tenant` and waits for all of them, for up to `store.LockTimeout`,
+  so no request is answered from a state a queued change is about to
+  replace; a wait that runs out is `ErrTemporarilyUnavailable`. Nothing
+  queues such a change yet, and the share-locked reads stay until the writes
+  they wait on have moved onto the queue.
   Classification mirrors the gateway's router (`pkg/rpc/service/auth/operation.go`):
   `subresources` is S3's subresource vocabulary, each marked supported or
   not, and `bucketRoutes` / `objectRoutes` give the operation a supported

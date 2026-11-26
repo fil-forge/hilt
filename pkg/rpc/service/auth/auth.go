@@ -22,8 +22,10 @@ import (
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/vault"
 	s3 "github.com/fil-forge/libforge/commands/s3"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -84,6 +86,30 @@ type Authorizer struct {
 	principals principalstore.Store
 	policies   bucketpolicystore.Store
 	secrets    vault.Vault
+	// changes finds and waits for the queued changes to a tenant's authority.
+	// Nil skips the wait.
+	changes TenantChanges
+}
+
+// TenantChanges is what [Authorizer.Authorize] needs of the task runner to
+// hold a request back while a change to its tenant's authority is queued or
+// running. [*taskrunner.Runner] satisfies it.
+type TenantChanges interface {
+	// PendingOn returns the subject's unfinished tasks on the queue, running
+	// or waiting, oldest first.
+	PendingOn(ctx context.Context, queueName, subject string) ([]taskrunner.TaskID, error)
+	// WaitAll waits until every one of the tasks has finished, however it
+	// ended. Its error is the wait's own: ctx ended, or a read failed.
+	WaitAll(ctx context.Context, queueName string, ids ...taskrunner.TaskID) (map[taskrunner.TaskID]taskrunner.Completion, error)
+}
+
+// Option configures an [Authorizer].
+type Option func(*Authorizer)
+
+// WithTenantChanges makes [Authorizer.Authorize] wait for the tenant's
+// unfinished tasks on queue-tenant before it reads the tenant's state.
+func WithTenantChanges(changes TenantChanges) Option {
+	return func(a *Authorizer) { a.changes = changes }
 }
 
 // NewAuthorizer constructs the shared authorization service.
@@ -96,8 +122,9 @@ func NewAuthorizer(
 	principals principalstore.Store,
 	policies bucketpolicystore.Store,
 	secrets vault.Vault,
+	opts ...Option,
 ) *Authorizer {
-	return &Authorizer{
+	a := &Authorizer{
 		logger:     logger,
 		accessKeys: accessKeys,
 		tenants:    tenants,
@@ -107,6 +134,10 @@ func NewAuthorizer(
 		policies:   policies,
 		secrets:    secrets,
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Authorize authenticates and authorizes an S3 RPC request. It verifies the
@@ -123,6 +154,13 @@ func NewAuthorizer(
 // read with a share lock, so a request arriving while a change to any of them
 // is committing waits for the outcome and is answered from the new state. A
 // key whose principal was removed is refused ([ErrUnknownAccessKey]).
+//
+// A change to the tenant's authority that is queued or running on the task
+// runner holds the request back too (see [WithTenantChanges]): once the
+// request is authenticated, and before the tenant's status is read, Authorize
+// waits for every unfinished task on queue-tenant for the tenant, for up to
+// [store.LockTimeout], and answers from the state they leave. A wait that
+// runs out is [ErrTemporarilyUnavailable].
 //
 // Note that the caller must still check the operation matches the handler's
 // operation, since Authorize is operation-agnostic.
@@ -178,6 +216,10 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	if err := sigv4.ValidateTimeBounds(sr, time.Now()); err != nil {
 		log.Debug("rejecting request outside its validity window", zap.Error(err))
 		return nil, ErrSignatureExpired
+	}
+
+	if err := a.awaitTenantChanges(ctx, log, akRec.Tenant); err != nil {
+		return nil, err
 	}
 
 	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
@@ -258,6 +300,38 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		SourcePermission: sourcePermission,
 		Signed:           sr,
 	}, nil
+}
+
+// awaitTenantChanges waits for the tenant's unfinished tasks on queue-tenant,
+// each a change to what the tenant's keys may do, so that what is read after
+// it is the state they leave. With none pending, the usual case, it costs one
+// indexed read. A task that failed has finished and changed nothing, so how
+// each ended is not read. The wait is bounded by [store.LockTimeout], and one
+// that runs out is [ErrTemporarilyUnavailable]: nothing about the request was
+// decided, and the caller retries.
+func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
+	if a.changes == nil {
+		return nil
+	}
+	pending, err := a.changes.PendingOn(ctx, tasks.QueueTenant, tenantID.String())
+	if err != nil {
+		log.Error("looking up the tenant's pending changes", zap.Error(err))
+		return fmt.Errorf("looking up the tenant's pending changes: %w", err)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, store.LockTimeout)
+	defer cancel()
+	if _, err := a.changes.WaitAll(waitCtx, tasks.QueueTenant, pending...); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			log.Info("waited out a change to the tenant still pending", zap.Int("tasks", len(pending)))
+			return fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, store.LockTimeout)
+		}
+		log.Error("waiting for the tenant's pending changes", zap.Error(err))
+		return fmt.Errorf("waiting for the tenant's pending changes: %w", err)
+	}
+	return nil
 }
 
 // authorizeOperation decides what the credential may do: its own permission
