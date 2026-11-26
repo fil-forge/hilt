@@ -223,20 +223,25 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID) ([]ucan.Deleg
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	issuer, err := vault.TenantIssuer(ctx, q.secrets, tenantID)
-	if errors.Is(err, vault.ErrNotFound) {
-		return nil, taskrunner.Permanent(fmt.Errorf("the tenant's signing key is not in the vault: %w", err))
-	}
-	if err != nil {
-		return nil, err
-	}
 
 	now := time.Now()
 	policies := map[string][]bucketpolicy.Record{}
+	// The signing key is read for the first key that is to be issued grants,
+	// so a tenant with none to issue needs no signing key.
+	var issuer ucan.Issuer
 	var fresh []ucan.Delegation
 	for _, key := range keys {
 		if key.ExpiresAt != nil && !key.ExpiresAt.After(now) {
 			continue
+		}
+		if issuer == nil {
+			issuer, err = vault.TenantIssuer(ctx, q.secrets, tenantID)
+			if errors.Is(err, vault.ErrNotFound) {
+				return nil, taskrunner.Permanent(fmt.Errorf("the tenant's signing key is not in the vault: %w", err))
+			}
+			if err != nil {
+				return nil, err
+			}
 		}
 		var named []bucketpolicy.Record
 		if key.Principal != nil {
