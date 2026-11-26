@@ -5,6 +5,12 @@
 // bucket and by hour. A count is a total for its hour, which only grows, so
 // the store keeps the largest total reported for the hour: reports may be
 // repeated, and may arrive in any order.
+//
+// It also holds object counts, by bucket and by hour, as two totals over the
+// life of the bucket: the objects it has gained and the objects it has lost.
+// Each only grows, so the store keeps the largest of each reported for the
+// hour, and the objects a bucket holds at an instant are the difference in
+// the latest hour before it.
 package usage
 
 import (
@@ -49,6 +55,45 @@ type HourlyEgress struct {
 	Bytes uint64
 }
 
+// ObjectCount is the objects one bucket has gained and lost over its life, as
+// of one hour.
+type ObjectCount struct {
+	// Bucket the objects are in.
+	Bucket did.DID
+	// Tenant the bucket belongs to, or belonged to if it has been deleted.
+	Tenant did.DID
+	// Hour is the start of the hour. It must be a whole hour.
+	Hour time.Time
+	// Added is the objects the bucket has ever gained, as of the hour. It
+	// must not exceed [MaxObjects].
+	Added uint64
+	// Removed is the objects the bucket has ever lost, as of the hour. It
+	// must not exceed [MaxObjects].
+	Removed uint64
+}
+
+// MaxObjects is the largest total the store holds for an object count.
+const MaxObjects uint64 = math.MaxInt64
+
+// HourlyObjects is the objects a bucket had gained and lost as of one hour.
+type HourlyObjects struct {
+	// Hour is the start of the hour, in UTC.
+	Hour time.Time
+	// Added is the objects the bucket had ever gained.
+	Added uint64
+	// Removed is the objects the bucket had ever lost.
+	Removed uint64
+}
+
+// Held returns the objects the bucket held: those gained less those lost, and
+// none when more are recorded lost than gained.
+func (h HourlyObjects) Held() uint64 {
+	if h.Removed >= h.Added {
+		return 0
+	}
+	return h.Added - h.Removed
+}
+
 type Store interface {
 	// SetEgress stores the counts a provider reported. A count larger than
 	// the one the provider last reported for its bucket and hour takes its
@@ -65,6 +110,20 @@ type Store interface {
 	// ones included, in each hour starting in [from, to), in ascending order.
 	// An hour with no count is absent. A sum is at most [MaxBytes].
 	TenantEgress(ctx context.Context, tenant did.DID, from, to time.Time) ([]HourlyEgress, error)
+	// SetObjects stores the object counts a provider reported. A bucket and
+	// hour keep the largest of each total reported for them, whichever
+	// report it came in. The counts are stored together or not at all. It
+	// returns [store.ErrInvalidArgument] if the provider, a bucket or a
+	// tenant is undef, an hour is not a whole hour, a total exceeds
+	// [MaxObjects], or a bucket and hour appear twice.
+	SetObjects(ctx context.Context, provider did.DID, counts []ObjectCount) error
+	// BucketObjects returns what is needed to say how many objects a bucket
+	// held at any instant in (from, to]: the totals of the latest hour
+	// starting before from, if there is one, then those of each hour
+	// starting in [from, to), in ascending order. An hour in which the
+	// bucket did not change is absent, and the bucket held then what the
+	// hour before it says.
+	BucketObjects(ctx context.Context, bucket did.DID, from, to time.Time) ([]HourlyObjects, error)
 }
 
 // Validate checks the counts of one report as [Store.SetEgress] states. The
@@ -104,6 +163,47 @@ func ValidateCounts(counts []EgressCount) error {
 		k := key{c.Bucket, c.Hour.Unix()}
 		if _, ok := seen[k]; ok {
 			return invalid("a bucket and hour may appear once")
+		}
+		seen[k] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateObjects checks the object counts of one report as
+// [Store.SetObjects] states. It is shared by the backends so they refuse the
+// same reports.
+func ValidateObjects(provider did.DID, counts []ObjectCount) error {
+	if provider == did.Undef {
+		return invalidObjects("provider is required")
+	}
+	for _, c := range counts {
+		if c.Tenant == did.Undef {
+			return invalidObjects("tenant is required")
+		}
+	}
+	return ValidateObjectCounts(counts)
+}
+
+// ValidateObjectCounts checks what a report says of each bucket and hour,
+// whoever the buckets belong to, as [ValidateCounts] does for egress.
+func ValidateObjectCounts(counts []ObjectCount) error {
+	type key struct {
+		bucket did.DID
+		hour   int64
+	}
+	seen := make(map[key]struct{}, len(counts))
+	for _, c := range counts {
+		switch {
+		case c.Bucket == did.Undef:
+			return invalidObjects("bucket is required")
+		case !c.Hour.Equal(c.Hour.Truncate(time.Hour)):
+			return invalidObjects("hour must be a whole hour")
+		case c.Added > MaxObjects || c.Removed > MaxObjects:
+			return invalidObjects("count is too large")
+		}
+		k := key{c.Bucket, c.Hour.Unix()}
+		if _, ok := seen[k]; ok {
+			return invalidObjects("a bucket and hour may appear once")
 		}
 		seen[k] = struct{}{}
 	}
