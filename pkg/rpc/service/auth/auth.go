@@ -14,6 +14,8 @@ import (
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -47,7 +49,9 @@ type AuthorizedRequest struct {
 	// Permissions is the set of S3 actions the credential holds, which the
 	// operation's action is confirmed to be in. A service key holds its own
 	// permission set; a principal-bound key holds its principal's effective set
-	// on Bucket, or s3:ListAllMyBuckets alone for ListBuckets.
+	// on Bucket, or s3:ListAllMyBuckets alone for ListBuckets. For a
+	// write-locked tenant it is that set less the actions a write-locked
+	// tenant does not keep ([grant.LimitToTenantStatus]).
 	Permissions []string
 	// Operation is the S3 operation the (signature-verified) request performs. The
 	// access key is confirmed to hold its permissions, and those the request's
@@ -153,6 +157,15 @@ func NewAuthorizer(
 // ([ErrOperationNotPermitted]). A key whose principal was removed is refused
 // ([ErrUnknownAccessKey]).
 //
+// The tenant's status decides first. A disabled tenant is refused every
+// request ([ErrTenantDisabled]). A write-locked tenant is refused a request
+// that needs a permission it does not keep ([ErrTenantWriteLocked],
+// [s3perm.KeptWhenWriteLocked]), whatever the credential holds: an upload, a
+// copy, a bucket creation, a change to configuration. Its reads, listings
+// and deletions are decided as an active tenant's are, and the permissions
+// returned are the credential's less those the tenant does not keep, so the
+// set a gateway caches lets it refuse the same requests itself.
+//
 // The key, the principal and the policy rows are read with a share lock, so
 // a request arriving while one of the writes that hold those rows locked is
 // committing waits for the outcome and is answered from the new state. Those
@@ -179,7 +192,7 @@ func NewAuthorizer(
 // at that read.
 //
 // Note that the caller must still check the operation matches the handler's
-// operation, since Authorize is operation-agnostic.
+// operation: Authorize decides any operation, and a handler serves one.
 func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request) (*AuthorizedRequest, error) {
 	sr, err := sigv4.Parse(sigv4.Request{
 		Method:  req.Method,
@@ -269,6 +282,18 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	//     before the change would have had, without the key's grants.
 	//   - Read as disabled, then reactivated: the request is refused below,
 	//     whatever grants have been issued since.
+	//   - Read as write-locked, then active: the request is decided, and
+	//     its permissions reported, as write-locked, which is within what
+	//     an active tenant is allowed.
+	//   - Read as write-locked, then disabled: as the first case, the
+	//     key's stored grants are gone by the time they are read.
+	//   - Read as active, then write-locked: the request is decided as
+	//     active, as one that finished just before the change would have
+	//     been, and the permissions reported are the full set. This is the
+	//     one case the order does not narrow, because the grants a
+	//     write-locked key holds carry commands an upload uses too
+	//     ([s3perm.KeptWhenWriteLocked]): the gateway holds the full set
+	//     until it asks again.
 	//
 	// Keep the status read ahead of the others, and keep a status change's
 	// grant writes in the commit that writes the status.
@@ -278,8 +303,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, fmt.Errorf("looking up tenant: %w", err)
 	}
 	// Disabled is the hard lock-out state (lifecycle Active → Disabled → delete).
-	// WriteLocked still authenticates here so reads (like ListBuckets) work; write
-	// handlers gate WriteLocked themselves, since Authorize is operation-agnostic.
+	// A write-locked tenant is decided below, once the operation is known.
 	if tenantRec.Status == tenant.Disabled {
 		log.Debug("rejecting disabled tenant")
 		return nil, ErrTenantDisabled
@@ -326,10 +350,27 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, err
 	}
 
+	// A write-locked tenant is refused whatever needs a permission it does
+	// not keep, before the credential's own access is looked at: the refusal
+	// is the tenant's, the same for every key. It is decided here, after the
+	// headers and the body have added their permissions, so a delete is
+	// decided on everything it asks for.
+	if tenantRec.Status == tenant.WriteLocked {
+		for _, perm := range c.permissions() {
+			if !s3perm.KeptWhenWriteLocked(perm) {
+				log.Debug("rejecting operation a write-locked tenant does not keep", zap.Stringer("operation", op), zap.String("permission", perm))
+				return nil, ErrTenantWriteLocked
+			}
+		}
+	}
+
 	permissions, resolved, source, err := a.authorizeOperation(ctx, log, akRec, tenantRec, prov, c)
 	if err != nil {
 		return nil, err
 	}
+	// The gateway caches this set and decides later requests from it, so it
+	// carries only what the tenant's status keeps.
+	permissions = grant.LimitToTenantStatus(tenantRec.Status, permissions)
 	var sourcePermission string
 	if op.CopiesSource() {
 		sourcePermission = c.sourcePermission()

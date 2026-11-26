@@ -128,7 +128,7 @@ func TestCreateKey(t *testing.T) {
 		require.Equal(t, key.CreatedAt.UnixMicro(), rec.CreatedAt.UnixMicro())
 		require.Equal(t, expires.UnixMicro(), rec.ExpiresAt.UnixMicro())
 
-		want, err := grant.ForKey(w.tenant, rec, nil)
+		want, err := grant.ForKey(w.tenant, tenantstore.Active, rec, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, want)
 		require.Equal(t, shapes(want), shapes(w.held(t, key.ID)))
@@ -147,7 +147,7 @@ func TestCreateKey(t *testing.T) {
 		require.Nil(t, rec.Buckets)
 		named, err := w.policies.ListByPrincipal(t.Context(), w.tenant.DID(), principal)
 		require.NoError(t, err)
-		want, err := grant.ForKey(w.tenant, rec, named)
+		want, err := grant.ForKey(w.tenant, tenantstore.Active, rec, named)
 		require.NoError(t, err)
 		require.NotEmpty(t, want)
 		require.Equal(t, shapes(want), shapes(w.held(t, key.ID)))

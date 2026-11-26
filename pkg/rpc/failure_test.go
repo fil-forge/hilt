@@ -161,6 +161,7 @@ func TestAuthFailure(t *testing.T) {
 			name string
 		}{
 			{auth.ErrUnknownBucket, auth.UnknownBucketErrorName},
+			{auth.ErrTenantWriteLocked, auth.TenantWriteLockedErrorName},
 			{auth.ErrForeignBucket, auth.ForeignBucketErrorName},
 			{auth.ErrBucketNotPermitted, auth.BucketNotPermittedErrorName},
 			{auth.ErrUnsignedHeader, auth.UnsignedHeaderErrorName},

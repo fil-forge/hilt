@@ -15,7 +15,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue/datamodel"
@@ -219,9 +218,12 @@ func (q *Queue) currentPolicy(ctx context.Context, tenantID, bucket did.DID) (*b
 //   - The document is written, or the policy removed, with its index rows.
 //   - The publishing of the revocations is queued.
 //
-// A disabled tenant's keys hold no grants, so for one the change withdraws
-// and issues none; leaving disabled issues every key the grants of the
-// policies as they are then.
+// The grants issued are those the tenant's status keeps
+// ([grant.LimitToTenantStatus]): a write-locked tenant's keys are stored the
+// grants of the reads, listings and deletions doc gives their principals,
+// and a disabled tenant's keys hold no grants, so for one the change
+// withdraws and issues none. A change of the tenant's status issues every
+// key the grants of the policies as they are then.
 //
 // The tenant's other policy writes, its key creations and deletions and its
 // status changes are tasks on the same subject, so none runs between the
@@ -322,9 +324,12 @@ func (q *Queue) changePolicy(ctx context.Context, ex *taskrunner.Exec, tenantID,
 // (nil for no policy) gives every access key of the principals: for each key,
 // the delegations its principal's effective actions on the bucket map to. A
 // key whose principal is left no action is issued nothing, and so is one that
-// has expired, which authenticates no request. A disabled tenant's keys are
-// issued nothing. It fails for good when grants are to be issued and the
-// tenant's signing key is not in the vault.
+// has expired, which authenticates no request. The actions are reduced to
+// what the tenant's status keeps ([grant.LimitToTenantStatus]), so a
+// write-locked tenant's keys are issued the grants of their reads, listings
+// and deletions alone and a disabled tenant's keys nothing. It fails for
+// good when grants are to be issued and the tenant's signing key is not in
+// the vault.
 func (q *Queue) issueOver(ctx context.Context, tenantID, bucket did.DID, doc *s3bkt.PolicyDocument, principals []string) ([]ucan.Delegation, error) {
 	actions := make(map[string][]string, len(principals))
 	granted := false
@@ -342,7 +347,12 @@ func (q *Queue) issueOver(ctx context.Context, tenantID, bucket did.DID, doc *s3
 	if err != nil {
 		return nil, fmt.Errorf("looking up the tenant: %w", err)
 	}
-	if rec.Status == tenant.Disabled {
+	granted = false
+	for p, held := range actions {
+		actions[p] = grant.LimitToTenantStatus(rec.Status, held)
+		granted = granted || len(actions[p]) > 0
+	}
+	if !granted {
 		return nil, nil
 	}
 	keys, err := q.accessKeys.ListByTenant(ctx, tenantID, accesskey.WithPrincipals(principals...))

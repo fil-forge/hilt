@@ -259,10 +259,11 @@ func (s *Service) Get(ctx context.Context, externalID string) (tenantstore.Recor
 //
 // The change runs as a queue-tenant.set-status task on the tenant, behind
 // any other change to the tenant queued before it, and SetStatus returns
-// once it has committed or failed. Disabling the tenant withdraws every
-// grant its access keys hold, and leaving disabled issues them afresh, in
-// the same commit as the status ([tenantqueue]); the revocations are
-// published after it. An authorization for the tenant that arrives while the
+// once it has committed or failed. Every change withdraws the grants the
+// tenant's access keys hold and issues each key those of the new status, in
+// the same commit as the status ([tenantqueue]): all of them for active,
+// the grants of its reads, listings and deletions for write-locked, and none
+// for disabled. The revocations are published after it. An authorization for the tenant that arrives while the
 // task is queued or running waits for it. If ctx ends first the task stays
 // queued and a worker finishes it.
 func (s *Service) SetStatus(ctx context.Context, externalID, status string) error {
