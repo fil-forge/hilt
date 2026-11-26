@@ -194,7 +194,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("plc.directory", "https://plc.directory")
 
 	v.SetDefault("tasks.tenant_workers", 4)
-	v.SetDefault("tasks.revocation_workers", 4)
+	v.SetDefault("tasks.revocation_workers", 8)
 
 	// upload.service_id, upload.service_url and upload.product_id have no
 	// default: every deployment names its own stage's Sprue and product, and

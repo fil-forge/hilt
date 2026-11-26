@@ -74,7 +74,7 @@ func main() {
 
 	// task queue config
 	serveCmd.Flags().Int("tenant-task-workers", 4, "most queued changes to tenants' authority to run at once (0 runs none)")
-	serveCmd.Flags().Int("revocation-task-workers", 4, "most tenants to publish revocations for at once (0 runs none)")
+	serveCmd.Flags().Int("revocation-task-workers", 8, "most tenants to publish revocations for at once (0 runs none)")
 
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(client.Cmd)

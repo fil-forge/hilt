@@ -132,7 +132,7 @@ stage points at its own Swarf, which only knows that stage's tenants.
 | Key | Flag | Env var | Default |
 | --- | --- | --- | --- |
 | `tasks.tenant_workers` | `--tenant-task-workers` | `HILT_TASKS_TENANT_WORKERS` | `4` |
-| `tasks.revocation_workers` | `--revocation-task-workers` | `HILT_TASKS_REVOCATION_WORKERS` | `4` |
+| `tasks.revocation_workers` | `--revocation-task-workers` | `HILT_TASKS_REVOCATION_WORKERS` | `8` |
 
 Hilt runs durable task queues in its Postgres database, on the libforge task
 runner: `queue-tenant` for changes to a tenant's authority and
