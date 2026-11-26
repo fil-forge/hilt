@@ -511,6 +511,20 @@ func TestReactivating(t *testing.T) {
 		require.Equal(t, tenantstore.Disabled, w.status(t))
 		require.Empty(t, w.held(t, w.serviceKey))
 	})
+
+	t.Run("needs no signing key when every key has expired", func(t *testing.T) {
+		w := setup(t)
+		require.NoError(t, w.setStatus(t, tenantstore.Disabled))
+		_, err := w.pool.Exec(t.Context(), `UPDATE access_key SET expires_at = now() - interval '1 hour' WHERE tenant_id = $1`, w.tenant.DID().String())
+		require.NoError(t, err)
+		require.NoError(t, w.secrets.Delete(t.Context(), vault.TenantKeyPath(w.tenant.DID())))
+
+		require.NoError(t, w.setStatus(t, tenantstore.Active))
+
+		require.Equal(t, tenantstore.Active, w.status(t))
+		require.Empty(t, w.held(t, w.serviceKey))
+		require.Empty(t, w.held(t, w.principalKey))
+	})
 }
 
 func TestStatusAlone(t *testing.T) {
