@@ -311,7 +311,10 @@ func TestClientReportUsage(t *testing.T) {
 		{Space: bucket, Hours: []usage.HourEgress{{Hour: 1795600800, Bytes: 4096}}},
 		{Space: skippedBucket, Hours: []usage.HourEgress{{Hour: 1795600800, Bytes: 1}}},
 	}
-	ok, err := c.ReportUsage(t.Context(), egress)
+	objects := []usage.SpaceObjects{
+		{Space: bucket, Hours: []usage.HourObjects{{Hour: 1795600800, Added: 12, Removed: 3}}},
+	}
+	ok, err := c.ReportUsage(t.Context(), &usage.ReportArguments{Egress: egress, Objects: objects})
 	require.NoError(t, err)
 	require.Equal(t, []usage.Warning{{
 		Name: usage.UnknownBucketWarningName, Message: "no bucket has this space", Space: skippedBucket,
@@ -322,6 +325,7 @@ func TestClientReportUsage(t *testing.T) {
 	require.Equal(t, hilt.DID(), gotAud)
 	require.Zero(t, gotProofs)
 	require.Equal(t, egress, gotArgs.Egress)
+	require.Equal(t, objects, gotArgs.Objects)
 }
 
 func TestClientReportUsageReturnsAFailure(t *testing.T) {
@@ -335,7 +339,7 @@ func TestClientReportUsageReturnsAFailure(t *testing.T) {
 		}))
 
 	c := newHiltClient(t, hilt, srv, ingot, ucanlib.NewContainerProofStore(container.New()))
-	_, err := c.ReportUsage(t.Context(), nil)
+	_, err := c.ReportUsage(t.Context(), &usage.ReportArguments{})
 	var named ucanerrors.Named
 	require.ErrorAs(t, err, &named)
 	require.Equal(t, "TooManyCounts", named.Name())

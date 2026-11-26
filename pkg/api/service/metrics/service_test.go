@@ -14,6 +14,7 @@ import (
 	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	usagestore "github.com/fil-forge/hilt/pkg/store/usage"
 	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -41,6 +42,8 @@ type sampled struct {
 	// series overrides what a space's call returns, standing in for the upload
 	// service having clamped that call against a different instant.
 	series map[did.DID][]metricscmds.SampleItem
+	// usage is the store the service reads the gateways' counts from.
+	usage *usagememory.Store
 }
 
 // setup wires the metrics service over memory stores against an in-process Sprue
@@ -83,7 +86,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 	require.NoError(t, err)
 	sprue := multikey.NewIssuer(sprueSigner.KeyDID(), sprueSigner)
 
-	seen := &sampled{series: map[did.DID][]metricscmds.SampleItem{}}
+	seen := &sampled{series: map[did.DID][]metricscmds.SampleItem{}, usage: usagememory.New()}
 	srv := server.NewHTTP(sprue)
 	srv.Handle(metricscmds.Sample.Command, metricscmds.Sample.Handler(
 		func(req *binding.Request[*metricscmds.SampleArguments], res *binding.Response[*metricscmds.SampleOK]) error {
@@ -110,7 +113,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	return metricssvc.New(zap.NewNop(), tenants, buckets, secrets, client, delegations, usagememory.New(), opts...), bucketID, bucketBID, seen
+	return metricssvc.New(zap.NewNop(), tenants, buckets, secrets, client, delegations, seen.usage, opts...), bucketID, bucketBID, seen
 }
 
 // A bucket's proof chain is rooted in the delegation the bucket issued at
@@ -120,6 +123,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 func TestSampleUsesThePersistedProofChain(t *testing.T) {
 	svc, bucketID, _, seen := setup(t)
 	from := time.Now().Add(-2 * time.Hour).UTC()
+	reportObjects(t, seen, bucketID, from.Truncate(time.Hour), 3, 0)
 
 	samples, err := svc.Bucket(t.Context(), "tenant-1", "bucket-a", from, from.Add(time.Hour), time.Hour)
 	require.NoError(t, err)
@@ -240,6 +244,9 @@ func TestTenantSumsOnlyInstantsEveryBucketReported(t *testing.T) {
 		{Timestamp: now.Add(-time.Second).Unix(), BytesStored: 2000, BytesIngested: 200, UploadCount: 20},
 	}
 
+	reportObjects(t, seen, bucketA, from, 1, 0)
+	reportObjects(t, seen, bucketB, from, 12, 2)
+
 	samples, err := svc.Tenant(t.Context(), "tenant-1", from, now, time.Hour)
 	require.NoError(t, err)
 
@@ -266,11 +273,72 @@ func TestTenantSumsAlignedRunsWhole(t *testing.T) {
 		{Timestamp: second, BytesStored: 2000, BytesIngested: 200, UploadCount: 20},
 	}
 
+	reportObjects(t, seen, bucketA, from, 1, 0)
+	reportObjects(t, seen, bucketA, from.Add(time.Hour), 3, 1)
+	reportObjects(t, seen, bucketB, from, 10, 0)
+	reportObjects(t, seen, bucketB, from.Add(time.Hour), 25, 5)
+
 	samples, err := svc.Tenant(t.Context(), "tenant-1", from, now, time.Hour)
 	require.NoError(t, err)
 
 	require.Len(t, samples, 2)
 	require.Equal(t, uint64(1100), samples[0].BytesStored)
 	require.Equal(t, uint64(2200), samples[1].BytesStored)
+	require.Equal(t, uint64(11), samples[0].ObjectCount)
 	require.Equal(t, uint64(22), samples[1].ObjectCount)
+}
+
+// reportObjects stores what a gateway would report of a bucket's objects as
+// of an hour: how many it has ever gained and lost.
+func reportObjects(t *testing.T, seen *sampled, bucket did.DID, hour time.Time, added, removed uint64) {
+	t.Helper()
+	require.NoError(t, seen.usage.SetObjects(t.Context(), testutil.RandomDID(t), []usagestore.ObjectCount{
+		{Bucket: bucket, Tenant: testutil.RandomDID(t), Hour: hour, Added: added, Removed: removed},
+	}))
+}
+
+// A bucket's object count is what its gateway reported, held from the hour
+// of each report until the next. The upload service's own count of uploads
+// is not read.
+func TestObjectCountComesFromTheGatewaysReports(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 30, 0, 0, time.UTC)
+	svc, bucketA, _, seen := setup(t, metricssvc.WithClock(func() time.Time { return now }))
+	from := time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)
+	hour := func(h int) time.Time { return time.Date(2026, 1, 1, h, 0, 0, 0, time.UTC) }
+
+	items := []metricscmds.SampleItem{}
+	for _, end := range []time.Time{hour(9), hour(10), hour(11), hour(12), now} {
+		items = append(items, metricscmds.SampleItem{Timestamp: end.Unix(), UploadCount: 999})
+	}
+	seen.series[bucketA] = items
+
+	// Reported the day before, so it is what the bucket holds as the range opens.
+	reportObjects(t, seen, bucketA, hour(8).Add(-24*time.Hour), 5, 1)
+	// Nothing changed from 08:00 to 10:00. The bucket changed in the hour from 10:00.
+	reportObjects(t, seen, bucketA, hour(10), 9, 2)
+	// More recorded lost than gained reads as an empty bucket.
+	reportObjects(t, seen, bucketA, hour(11), 9, 12)
+	// The hour in progress, as far as it has been reported.
+	reportObjects(t, seen, bucketA, hour(12), 20, 12)
+
+	samples, err := svc.Bucket(t.Context(), "tenant-1", "bucket-a", from, now, time.Hour)
+	require.NoError(t, err)
+	got := []uint64{}
+	for _, s := range samples {
+		got = append(got, s.ObjectCount)
+	}
+	require.Equal(t, []uint64{4, 4, 7, 0, 8}, got)
+}
+
+// A bucket no gateway has reported on holds no objects, whatever the upload
+// service counts.
+func TestObjectCountIsZeroWithoutAReport(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	svc, _, _, _ := setup(t, metricssvc.WithClock(func() time.Time { return now }))
+
+	samples, err := svc.Bucket(t.Context(), "tenant-1", "bucket-a", now.Add(-time.Hour), now, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, samples, 1)
+	require.Equal(t, uint64(1024), samples[0].BytesStored)
+	require.Zero(t, samples[0].ObjectCount)
 }
