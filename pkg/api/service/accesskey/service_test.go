@@ -14,23 +14,17 @@ import (
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -90,33 +84,24 @@ type deps struct {
 	bucketRoot  ucan.Delegation
 }
 
-// setup is setupWith over the memory stores.
+// setup is setupWith over a fresh database.
 func setup(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
 	t.Helper()
-	return setupWith(t, memoryBackend(t), wrapAccessKeys...)
+	return setupWith(t, newBackend(t), wrapAccessKeys...)
 }
 
-func memoryBackend(t *testing.T) backend {
-	tenants := tenantmemory.New()
-	return backend{
-		tenants: tenants, accessKeys: accesskeymemory.New(accesskeymemory.WithTenants(tenants)), principals: principalmemory.New(),
-		buckets: bucketmemory.New(), delegations: delegationmemory.New(), policies: bucketpolicymemory.New(),
-		providerID: testutil.RandomDID(t),
-	}
-}
-
-// setupPostgres is setup over the Postgres stores, for what only a real
-// transaction shows. It skips without Docker.
-func setupPostgres(t *testing.T, wrapAccessKeys ...func(accesskeystore.Store) accesskeystore.Store) deps {
+// newBackend builds the stores over a fresh database and registers the
+// provider the tenant's bucket is placed with.
+func newBackend(t *testing.T) backend {
 	t.Helper()
 	pool := testutil.PostgresOrSkip(t)
 	providerID := testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, "region-1", nil))
-	return setupWith(t, backend{
+	return backend{
 		tenants: tenantpostgres.New(pool), accessKeys: accesskeypostgres.New(pool), principals: principalpostgres.New(pool),
 		buckets: bucketpostgres.New(pool), delegations: delegationpostgres.New(pool), policies: bucketpolicypostgres.New(pool),
 		providerID: providerID,
-	}, wrapAccessKeys...)
+	}
 }
 
 // backend is the stores setupWith builds the service over, and the provider
@@ -238,34 +223,29 @@ func TestCreate(t *testing.T) {
 		require.ErrorIs(t, err, accesskeysvc.ErrTenantNotFound)
 	})
 
-	for _, backend := range []struct {
-		name  string
-		setup func(*testing.T, ...func(accesskeystore.Store) accesskeystore.Store) deps
-	}{{"memory", setup}, {"postgres", setupPostgres}} {
-		for _, key := range []struct {
-			name      string
-			perms     []string
-			principal *string
-		}{
-			{"service key", []string{"s3:GetObject"}, nil},
-			{"principal-bound key", nil, new("alice")},
-		} {
-			t.Run("refuses a "+key.name+" for a disabled tenant on "+backend.name, func(t *testing.T) {
-				d := backend.setup(t)
-				require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
-				_, _, err := d.svc.Create(ctx, "tenant-1", "k1", key.perms, nil, key.principal, nil)
-				require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
-				keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
-				require.NoError(t, err)
-				require.Empty(t, keys)
-			})
-		}
+	for _, key := range []struct {
+		name      string
+		perms     []string
+		principal *string
+	}{
+		{"service key", []string{"s3:GetObject"}, nil},
+		{"principal-bound key", nil, new("alice")},
+	} {
+		t.Run("refuses a "+key.name+" for a disabled tenant", func(t *testing.T) {
+			d := setup(t)
+			require.NoError(t, d.tenants.SetStatus(ctx, d.tenantID, tenant.Disabled))
+			_, _, err := d.svc.Create(ctx, "tenant-1", "k1", key.perms, nil, key.principal, nil)
+			require.ErrorIs(t, err, accesskeysvc.ErrTenantDisabled)
+			keys, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+			require.NoError(t, err)
+			require.Empty(t, keys)
+		})
 	}
 
 	t.Run("rejects a tenant disabled after the lookup", func(t *testing.T) {
 		// The tenant is disabled between Create's lookup and the key's insert, the
 		// window in which a deletion could snapshot the tenant's keys without it.
-		b := memoryBackend(t)
+		b := newBackend(t)
 		b.tenants = disablingTenants{b.tenants}
 		d := setupWith(t, b)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil, nil)
@@ -625,7 +605,7 @@ func TestDeletePostgresRollsBackAfterRowDelete(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	wrap := &cancelAfterDelete{cancel: cancel}
-	d := setupPostgres(t, func(s accesskeystore.Store) accesskeystore.Store { wrap.Store = s; return wrap })
+	d := setup(t, func(s accesskeystore.Store) accesskeystore.Store { wrap.Store = s; return wrap })
 	rec, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, new("alice"), nil)
 	require.NoError(t, err)
 	page, err := d.delegations.ListByAudience(t.Context(), rec.ID)
@@ -698,7 +678,7 @@ func TestCreateLockTimeoutsAreConcurrentChanges(t *testing.T) {
 	}
 	for name, wrap := range cases {
 		t.Run(name, func(t *testing.T) {
-			b := memoryBackend(t)
+			b := newBackend(t)
 			wrap(&b)
 			d := setupWith(t, b)
 			_, _, err := d.svc.Create(t.Context(), "tenant-1", "k1", nil, nil, new("alice"), nil)
@@ -734,7 +714,7 @@ func (r *rotateBeforeReplace) Replace(ctx context.Context, audiences []did.DID, 
 // repeated.
 func TestCreateRotatedMeanwhile(t *testing.T) {
 	create := func(t *testing.T) (deps, *rotateBeforeReplace, error) {
-		b := memoryBackend(t)
+		b := newBackend(t)
 		rotating := &rotateBeforeReplace{Store: b.delegations, t: t}
 		b.delegations = rotating
 		d := setupWith(t, b)

@@ -9,14 +9,14 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
-	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	usagepostgres "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/libforge/identity"
 	swarfclient "github.com/fil-forge/swarf/pkg/client"
@@ -25,30 +25,31 @@ import (
 	"go.uber.org/zap"
 )
 
-// newRoutes builds every route the RPC server serves, backed by in-memory stores
+// newRoutes builds every route the RPC server serves, backed by a test database
 // and clients pointed at hosts no test reaches. It is the one place the handler
 // set is enumerated: a new handler belongs here (and in pkg/fx's RPCModule).
 func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 	t.Helper()
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), vaultmemory.New())
+	pool := testutil.PostgresOrSkip(t)
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeypostgres.New(pool), tenantpostgres.New(pool), providerpostgres.New(pool), bucketpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), vaultmemory.New())
 
-	up, err := upload.NewClient(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "sprue.test"}, testutil.RandomIssuer(t), upload.WithBaseProofs(delegationmemory.New()))
+	up, err := upload.NewClient(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "sprue.test"}, testutil.RandomIssuer(t), upload.WithBaseProofs(delegationpostgres.New(pool)))
 	require.NoError(t, err)
 	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
 	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketmemory.New(), delegationmemory.New(), accesskeymemory.New(), tenantmemory.New(), bucketpolicymemory.New(), providermemory.New(), up, revocations, nil)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketpostgres.New(pool), delegationpostgres.New(pool), accesskeypostgres.New(pool), tenantpostgres.New(pool), bucketpolicypostgres.New(pool), providerpostgres.New(pool), up, revocations, nil)
 
 	return []server.Route{
-		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, delegationmemory.New()),
+		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, delegationpostgres.New(pool)),
 		rpc.NewCreateBucketHandler(zap.NewNop(), buckets),
 		rpc.NewDeleteBucketHandler(zap.NewNop(), buckets),
 		rpc.NewBucketInfoHandler(zap.NewNop(), buckets),
 		rpc.NewListBucketsHandler(zap.NewNop(), buckets),
 		rpc.NewPolicyHandler(zap.NewNop(), buckets),
-		rpc.NewReportUsageHandler(zap.NewNop(), bucketmemory.New(), usagememory.New()),
-		rpc.NewAddProviderHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), up),
-		rpc.NewSetProviderNodesHandler(zap.NewNop(), id, providermemory.New(), delegationmemory.New(), up),
-		rpc.NewListProvidersHandler(zap.NewNop(), id, providermemory.New()),
+		rpc.NewReportUsageHandler(zap.NewNop(), bucketpostgres.New(pool), usagepostgres.New(pool)),
+		rpc.NewAddProviderHandler(zap.NewNop(), id, providerpostgres.New(pool), delegationpostgres.New(pool), up),
+		rpc.NewSetProviderNodesHandler(zap.NewNop(), id, providerpostgres.New(pool), delegationpostgres.New(pool), up),
+		rpc.NewListProvidersHandler(zap.NewNop(), id, providerpostgres.New(pool)),
 	}
 }
 

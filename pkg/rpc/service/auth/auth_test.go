@@ -14,20 +14,15 @@ import (
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -122,7 +117,7 @@ func signedRequestWith(t *testing.T, signer multikey.Signer, method, url string,
 // seedKey stores the credential's record and vault entry: a service key with
 // its own permissions and buckets unless principalBound, in which case a key
 // bound to "user-1", which holds neither.
-func seedKey(t *testing.T, accessKeys *accesskeymemory.Store, secrets *vaultmemory.Store, delegations *delegationmemory.Store, key multikey.Issuer, tenantID did.DID, cfg *setupConfig) {
+func seedKey(t *testing.T, accessKeys *accesskeypostgres.Store, secrets *vaultmemory.Store, delegations *delegationpostgres.Store, key multikey.Issuer, tenantID did.DID, cfg *setupConfig) {
 	t.Helper()
 	ctx := t.Context()
 	var expires *time.Time
@@ -192,20 +187,17 @@ func TestAuthorize(t *testing.T) {
 	// any of them unless setupConfig scopes it. setupWithPolicies also hands back
 	// the bucket DID and the policy store, so a subtest can grant the principal
 	// actions on the bucket the request addresses.
-	setupWithPolicies := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID, did.DID, *bucketpolicymemory.Store) {
+	setupWithPolicies := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providerpostgres.Store, did.DID, did.DID, *bucketpolicypostgres.Store) {
 		t.Helper()
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
-		principals, policies := principalmemory.New(), bucketpolicymemory.New()
-		dels := delegationmemory.New()
+		pool := htestutil.PostgresOrSkip(t)
+		accessKeys, tenants := accesskeypostgres.New(pool), tenantpostgres.New(pool)
+		providers, buckets, secrets := providerpostgres.New(pool), bucketpostgres.New(pool), vaultmemory.New()
+		principals, policies := principalpostgres.New(pool), bucketpolicypostgres.New(pool)
+		dels := delegationpostgres.New(pool)
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, providers.Add(ctx, provider2ID, region2, nil))
 		tenantID := testutil.RandomDID(t)
-		tenantStatus := tenant.Active
-		if setupConfig != nil && setupConfig.tenantStatus != "" {
-			tenantStatus = setupConfig.tenantStatus
-		}
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenantStatus))
+		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		// The bucket the happy-path request addresses (GET /bucket/object-key), a
 		// second bucket of the same tenant (copy destination), and another tenant's.
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "bucket"))
@@ -218,17 +210,21 @@ func TestAuthorize(t *testing.T) {
 			require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 		}
 		seedKey(t, accessKeys, secrets, dels, accessKey, tenantID, setupConfig)
+		// The status is set once the key exists: a disabled tenant takes no new key.
+		if setupConfig != nil && setupConfig.tenantStatus != "" {
+			require.NoError(t, tenants.SetStatus(ctx, tenantID, setupConfig.tenantStatus))
+		}
 		return auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets),
 			providers, tenantID, bucketID, policies
 	}
 
-	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providermemory.Store, did.DID) {
+	setup := func(t *testing.T, accessKey multikey.Issuer, setupConfig *setupConfig) (*auth.Authorizer, *providerpostgres.Store, did.DID) {
 		az, providers, tenantID, _, _ := setupWithPolicies(t, accessKey, setupConfig)
 		return az, providers, tenantID
 	}
 
 	// grant stores a policy on the bucket. statements are applied as given.
-	grant := func(t *testing.T, policies *bucketpolicymemory.Store, bucketID, tenantID did.DID, statements ...s3bkt.Statement) {
+	grant := func(t *testing.T, policies *bucketpolicypostgres.Store, bucketID, tenantID did.DID, statements ...s3bkt.Statement) {
 		t.Helper()
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
@@ -889,58 +885,42 @@ func TestAuthorize(t *testing.T) {
 		})
 	})
 
-	t.Run("a principal-bound key whose principal is gone is an unknown key", func(t *testing.T) {
-		// Seed a key bound to a principal the tenant does not have: what a removal
-		// leaves behind for the moment before it deletes the key.
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
-		require.NoError(t, providers.Add(ctx, providerID, region, nil))
-		tenantID := testutil.RandomDID(t)
-		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
-		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, testutil.RandomDID(t), "bucket"))
-		delegations := delegationmemory.New()
-		seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
-		gone := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets,
-			principalmemory.New(), bucketpolicymemory.New(), secrets)
-
-		_, err := gone.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
-		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
-	})
-
 	t.Run("a principal-bound key whose principal was removed is an unknown key", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
 		// The principal exists as a tombstone: removal marks the row rather than
 		// deleting it, and the authorizer must not see it.
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-		providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
+		accessKeys, tenants := accesskeypostgres.New(pool), tenantpostgres.New(pool)
+		providers, buckets, secrets := providerpostgres.New(pool), bucketpostgres.New(pool), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
-		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, testutil.RandomDID(t), "bucket"))
-		delegations := delegationmemory.New()
-		seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
-		principals := principalmemory.New()
+		require.NoError(t, buckets.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "bucket"))
+		delegations := delegationpostgres.New(pool)
+		principals := principalpostgres.New(pool)
 		require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
+		seedKey(t, accessKeys, secrets, delegations, accessKey, tenantID, &setupConfig{principalBound: true})
 		require.NoError(t, principals.Tombstone(ctx, tenantID, "user-1", nil))
 		gone := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets,
-			principals, bucketpolicymemory.New(), secrets)
+			principals, bucketpolicypostgres.New(pool), secrets)
 
 		_, err := gone.Authorize(ctx, providerID, signedObjectRequest(t, accessKey, "bucket", region))
 		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
 	})
 
 	t.Run("rejects an invalid signature", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
 		// The access key record exists, but the vault holds a different secret than
 		// the one that signed the request, so the recomputed signature won't match.
 		other, err := ed25519.GenerateIssuer()
 		require.NoError(t, err)
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-		providers, secrets := providermemory.New(), vaultmemory.New()
+		accessKeys, tenants := accesskeypostgres.New(pool), tenantpostgres.New(pool)
+		providers, secrets := providerpostgres.New(pool), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		require.NoError(t, secrets.Write(ctx, vault.AccessKeyPath(tenantID, accessKey.DID()), other.Bytes()))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), secrets)
 
 		_, err = az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrSignatureMismatch)
@@ -953,21 +933,23 @@ func TestAuthorize(t *testing.T) {
 	})
 
 	t.Run("rejects an unknown access key", func(t *testing.T) {
-		az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), vaultmemory.New())
+		pool := htestutil.PostgresOrSkip(t)
+		az := auth.NewAuthorizer(zap.NewNop(), accesskeypostgres.New(pool), tenantpostgres.New(pool), providerpostgres.New(pool), bucketpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), vaultmemory.New())
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrUnknownAccessKey)
 	})
 
 	t.Run("rejects when the access key secret is missing from the vault", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
 		// The access key record exists but its private key was never written to the
 		// vault — a store/vault inconsistency the signer load must reject.
-		accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-		providers, secrets := providermemory.New(), vaultmemory.New()
+		accessKeys, tenants := accesskeypostgres.New(pool), tenantpostgres.New(pool)
+		providers, secrets := providerpostgres.New(pool), vaultmemory.New()
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		tenantID := testutil.RandomDID(t)
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 		require.NoError(t, accessKeys.Add(ctx, accesskey.Input{ID: accessKey.DID(), Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketmemory.New(), principalmemory.New(), bucketpolicymemory.New(), secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, bucketpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), secrets)
 
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.Error(t, err)
@@ -1052,15 +1034,16 @@ func (l *lockedPolicies) Get(context.Context, did.DID, ...store.ReadOption) (buc
 // is the named, retryable failure rather than an internal error, at each of
 // the three reads that take the lock.
 func TestAuthorizeLockTimeout(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
 	ctx := t.Context()
 	const region = "us-west-2"
 	providerID := testutil.RandomDID(t)
 	accessKey, err := ed25519.GenerateIssuer()
 	require.NoError(t, err)
 
-	accessKeys, tenants := accesskeymemory.New(), tenantmemory.New()
-	providers, buckets, secrets := providermemory.New(), bucketmemory.New(), vaultmemory.New()
-	principals, policies, delegations := principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New()
+	accessKeys, tenants := accesskeypostgres.New(pool), tenantpostgres.New(pool)
+	providers, buckets, secrets := providerpostgres.New(pool), bucketpostgres.New(pool), vaultmemory.New()
+	principals, policies, delegations := principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool)
 	require.NoError(t, providers.Add(ctx, providerID, region, nil))
 	tenantID := testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
@@ -1094,9 +1077,10 @@ func TestAuthorizeLockTimeout(t *testing.T) {
 }
 
 func TestTenantIssuer(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
 	ctx := t.Context()
-	buckets, secrets := bucketmemory.New(), vaultmemory.New()
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeymemory.New(), tenantmemory.New(), providermemory.New(), buckets, principalmemory.New(), bucketpolicymemory.New(), secrets)
+	buckets, secrets := bucketpostgres.New(pool), vaultmemory.New()
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeypostgres.New(pool), tenantpostgres.New(pool), providerpostgres.New(pool), buckets, principalpostgres.New(pool), bucketpolicypostgres.New(pool), secrets)
 
 	tenantSigner, err := secp256k1.Generate()
 	require.NoError(t, err)

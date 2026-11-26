@@ -312,9 +312,8 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	// a policy write in flight finishes before the grants are listed, and one
 	// arriving later finds the bucket gone. The callback revokes the grants,
 	// removes the bucket's delegations (subject == bucket) and deletes the
-	// bucket record. On Postgres the bucket row's delete cascades to its
-	// policy, so no failure leaves a live bucket without one; the memory store
-	// removes the policy after the callback returns.
+	// bucket record. The bucket row's delete cascades to its policy, so no
+	// failure leaves a live bucket without one.
 	err = s.policies.DeleteByBucket(ctx, authz.Bucket.ID, func(ctx context.Context) error {
 		if err := s.revokeDelegations(ctx, authz.Tenant.ID, authz.Bucket.ID, account); err != nil {
 			return err

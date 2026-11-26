@@ -19,21 +19,15 @@ import (
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -42,7 +36,6 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -87,10 +80,11 @@ func (p *parkedPolicies) Put(ctx context.Context, in bucketpolicystore.Input, fn
 // growingPrincipals records a new principal for the tenant right after the
 // first ListIDsByTenant answers, so the list a write takes before the bucket lock
 // and the one its store callback takes differ: it stands in for a principal
-// created in that gap.
+// created in that gap. added, when set, runs once the principal exists.
 type growingPrincipals struct {
 	principalstore.Store
 	late   string
+	added  func()
 	listed bool
 }
 
@@ -102,6 +96,9 @@ func (g *growingPrincipals) ListIDsByTenant(ctx context.Context, tenant did.DID)
 	g.listed = true
 	if err := g.Store.Add(ctx, tenant, g.late); err != nil {
 		return nil, err
+	}
+	if g.added != nil {
+		g.added()
 	}
 	return ids, nil
 }
@@ -142,12 +139,15 @@ func (g *gatedPrincipals) ListIDsByTenant(ctx context.Context, tenant did.DID) (
 }
 
 type deps struct {
-	svc         *bucketpolicysvc.Service
-	buckets     *bucketmemory.Store
-	policies    *bucketpolicymemory.Store
-	principals  *principalmemory.Store
-	accessKeys  *accesskeymemory.Store
-	delegations *delegationmemory.Store
+	svc     *bucketpolicysvc.Service
+	tenants *tenantpostgres.Store
+	// providerID is the provider the tenant's buckets are placed with.
+	providerID  did.DID
+	buckets     *bucketpostgres.Store
+	policies    *bucketpolicypostgres.Store
+	principals  *principalpostgres.Store
+	accessKeys  *accesskeypostgres.Store
+	delegations *delegationpostgres.Store
 	secrets     *vaultmemory.Store
 	swarf       *testutil.FakeSwarf
 	tenantID    did.DID
@@ -160,24 +160,29 @@ type deps struct {
 	keys map[did.DID]string
 }
 
-// setup wires the service over memory stores with two tenants and one bucket,
-// "photos", owned by "tenant-1", whose key is in the vault so the grant
-// rotator can sign as it. wrapPrincipals, when given, wraps the memory
-// principal store the service is built over.
+// setup wires the service over a fresh database with two tenants and one
+// bucket, "photos", owned by "tenant-1", whose key is in the vault so the grant
+// rotator can sign as it. wrapPrincipals, when given, wraps the principal
+// store the service is built over.
 func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principalstore.Store) deps {
 	t.Helper()
 	ctx := t.Context()
-	tenants := tenantmemory.New()
+	pool := testutil.PostgresOrSkip(t)
+	tenants := tenantpostgres.New(pool)
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
 	tenantID, otherTenant := testutil.RandomDID(t), testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
 
 	d := deps{
-		buckets:     bucketmemory.New(),
-		policies:    bucketpolicymemory.New(),
-		principals:  principalmemory.New(),
-		accessKeys:  accesskeymemory.New(),
-		delegations: delegationmemory.New(),
+		tenants:     tenants,
+		providerID:  providerID,
+		buckets:     bucketpostgres.New(pool),
+		policies:    bucketpolicypostgres.New(pool),
+		principals:  principalpostgres.New(pool),
+		accessKeys:  accesskeypostgres.New(pool),
+		delegations: delegationpostgres.New(pool),
 		secrets:     vaultmemory.New(),
 		swarf:       &testutil.FakeSwarf{},
 		tenantID:    tenantID,
@@ -190,7 +195,7 @@ func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principals
 	require.NoError(t, err)
 	require.NoError(t, d.secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	d.tenant = multikey.NewIssuer(tenantID, signer)
-	require.NoError(t, d.buckets.Add(ctx, d.photos, tenantID, testutil.RandomDID(t), "photos"))
+	require.NoError(t, d.buckets.Add(ctx, d.photos, tenantID, providerID, "photos"))
 	var principals principalstore.Store = d.principals
 	for _, wrap := range wrapPrincipals {
 		principals = wrap(principals)
@@ -385,8 +390,7 @@ func TestPutAndGet(t *testing.T) {
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
 
-		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+		tenants := d.tenants
 		core, logs := observer.New(zapcore.WarnLevel)
 		svc := bucketpolicysvc.New(zap.New(core), tenants, d.buckets, d.principals, d.policies, d.rotator(d.swarf))
 
@@ -533,12 +537,12 @@ func TestRotations(t *testing.T) {
 		// "user-2" appears after the pre-lock list and before the write commits.
 		// Its first authorize waits on the bucket lock this write holds, so the
 		// rotation from inside the lock still reaches it in time.
-		d := setup(t, func(s principalstore.Store) principalstore.Store {
-			return &growingPrincipals{Store: s, late: "user-2"}
+		// user-2's key is created with the principal, for the rotation to find.
+		var d deps
+		d = setup(t, func(s principalstore.Store) principalstore.Store {
+			return &growingPrincipals{Store: s, late: "user-2", added: func() { d.key(t, "user-2") }}
 		})
 		d.principal(t, "user-1")
-		// user-2's key is there for the rotation to find once the principal is.
-		d.key(t, "user-2")
 
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
 			doc(allow(everyone, "s3:ListBucket")), createOnly)
@@ -630,8 +634,7 @@ func TestRotations(t *testing.T) {
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, createOnly)
 		require.NoError(t, err)
 
-		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+		tenants := d.tenants
 		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, d.policies, d.rotator(blockingSwarf{}))
 
 		start := time.Now()
@@ -654,10 +657,9 @@ func TestRotations(t *testing.T) {
 	t.Run("a principal removed between validation and the write is an invalid policy", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1")
-		tenants := tenantmemory.New()
-		require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+		tenants := d.tenants
 		// The store's index foreign key refuses a document naming a principal
-		// that is gone; the memory store does not check it, so stand in for it.
+		// that is gone; rejectingPolicies stands in for that refusal.
 		policies := &rejectingPolicies{Store: d.policies, err: store.ErrInvalidArgument}
 		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
 
@@ -689,7 +691,8 @@ func TestRotations(t *testing.T) {
 // removal of a principal it names: the write holds the bucket while it reads
 // and locks the principals, and the removal rewrites that bucket's policy. The
 // removal strips its policies before it locks the principal, so neither waits
-// on what the other holds and both finish.
+// on what the other holds and both return: the write commits, and the removal
+// finishes or reports a conflict its caller repeats.
 func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	reached, resume := make(chan struct{}), make(chan struct{})
 	d := setup(t, func(s principalstore.Store) principalstore.Store {
@@ -699,8 +702,7 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	})
 	d.principal(t, "user-1")
 
-	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", tenant.Active))
+	tenants := d.tenants
 	started := make(chan struct{})
 	// A principal removal revokes its keys' delegations first, so the first
 	// publish says the removal has started and is about to strip its policies.
@@ -723,15 +725,22 @@ func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
 	close(resume)
 
 	deadline := time.After(30 * time.Second)
+	conflicted := false
 	for range 2 {
 		select {
 		case err := <-put:
 			require.NoError(t, err)
 		case err := <-del:
-			require.NoError(t, err)
+			if err != nil {
+				require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
+				conflicted = true
+			}
 		case <-deadline:
 			t.Fatal("the policy write and the principal removal deadlocked")
 		}
+	}
+	if conflicted {
+		require.NoError(t, principals.Delete(t.Context(), "tenant-1", "user-1"), "a repeat finishes the removal")
 	}
 
 	// The removal ran last and took the policy with it: its only statement
@@ -748,8 +757,7 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 	ctx := t.Context()
 	d := setup(t)
 	d.principal(t, "user-1")
-	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
+	tenants := d.tenants
 	policies := &parkedPolicies{Store: d.policies, reached: make(chan struct{}), resume: make(chan struct{})}
 	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
 	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
@@ -780,20 +788,9 @@ func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
 // The add waits for the write to commit, and the key created for the
 // principal afterwards reads the committed policy and holds its grants.
 func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
-	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
 	d := setup(t)
-	// The rows the policy tables reference, under the memory setup's DIDs.
-	providerID := testutil.RandomDID(t)
-	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
-	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", tenant.Active))
-	bucketProvider := testutil.RandomDID(t)
-	require.NoError(t, providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil))
-	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, bucketProvider, "photos"))
-	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
-	principals := principalpostgres.New(pool)
-	policies := bucketpolicypostgres.New(pool)
+	tenants, principals, policies := d.tenants, d.principals, d.policies
 
 	// The second list is the one the policy store's callback makes.
 	reached, resume := make(chan struct{}), make(chan struct{})
@@ -817,53 +814,6 @@ func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
 	rec, _, err := keys.Create(ctx, "tenant-1", "key", nil, nil, new("user-2"), nil)
 	require.NoError(t, err)
 	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, rec.ID, d.photos), "the key is created from the committed policy")
-}
-
-// postgresDeps is the memory setup's world on Postgres: the rows the policy
-// tables reference under the setup's DIDs, and the stores a write's callback
-// joins the transaction of.
-type postgresDeps struct {
-	tenants     *tenantmemory.Store
-	principals  *principalpostgres.Store
-	policies    *bucketpolicypostgres.Store
-	accessKeys  *accesskeypostgres.Store
-	delegations *delegationpostgres.Store
-}
-
-func (d deps) postgres(t *testing.T, pool *pgxpool.Pool) postgresDeps {
-	t.Helper()
-	ctx := t.Context()
-	providerID := testutil.RandomDID(t)
-	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "us-east-1", nil))
-	require.NoError(t, tenantpostgres.New(pool).Add(ctx, d.tenantID, "tenant-1", tenant.Active))
-	bucketProvider := testutil.RandomDID(t)
-	require.NoError(t, providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil))
-	require.NoError(t, bucketpostgres.New(pool).Add(ctx, d.photos, d.tenantID, bucketProvider, "photos"))
-	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(ctx, d.tenantID, "tenant-1", tenant.Active))
-	return postgresDeps{
-		tenants:     tenants,
-		principals:  principalpostgres.New(pool),
-		policies:    bucketpolicypostgres.New(pool),
-		accessKeys:  accesskeypostgres.New(pool),
-		delegations: delegationpostgres.New(pool),
-	}
-}
-
-// over returns the commands the key holds over the bucket in the Postgres
-// delegation store, sorted.
-func (p postgresDeps) over(t *testing.T, key, bucket did.DID) []string {
-	t.Helper()
-	page, err := p.delegations.ListByAudience(t.Context(), key)
-	require.NoError(t, err)
-	var out []string
-	for _, dlg := range page.Results {
-		if dlg.Subject() == bucket {
-			out = append(out, dlg.Command().String())
-		}
-	}
-	slices.Sort(out)
-	return out
 }
 
 // afterLock calls after once, when the first WithLock returns: under a policy
@@ -890,33 +840,31 @@ func (a *afterLock) WithLock(ctx context.Context, tenant did.DID, ids []string, 
 // transaction, so the old policy stays with its own grants: a principal is
 // never left with the grants of a policy that was not stored.
 func TestPolicyWriteCancelledAfterRotationPostgres(t *testing.T) {
-	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
 	d := setup(t)
-	pg := d.postgres(t, pool)
-	require.NoError(t, pg.principals.Add(ctx, d.tenantID, "user-1"))
+	require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
 	key := testutil.RandomDID(t)
 	user := "user-1"
-	require.NoError(t, pg.accessKeys.Add(ctx, accesskeystore.Input{ID: key, Tenant: d.tenantID, Name: "laptop", Principal: &user}))
+	require.NoError(t, d.accessKeys.Add(ctx, accesskeystore.Input{ID: key, Tenant: d.tenantID, Name: "laptop", Principal: &user}))
 
-	rotator := grant.NewRotator(zap.NewNop(), pg.delegations, pg.accessKeys, d.secrets, d.swarf)
-	svc := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, pg.principals, pg.policies, rotator)
+	rotator := grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf)
+	svc := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, d.principals, d.policies, rotator)
 	etagA, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:ListBucket")), createOnly)
 	require.NoError(t, err)
-	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), pg.over(t, key, d.photos))
+	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), d.over(t, key, d.photos))
 
 	writeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	principals := &afterLock{Store: pg.principals, after: cancel}
-	cancelling := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, principals, pg.policies, rotator)
+	principals := &afterLock{Store: d.principals, after: cancel}
+	cancelling := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, principals, d.policies, rotator)
 	_, _, err = cancelling.Write(writeCtx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:ListBucket")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etagA)))
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, principals.after, "the rotation ran")
 
-	rec, err := pg.policies.Get(ctx, d.photos)
+	rec, err := d.policies.Get(ctx, d.photos)
 	require.NoError(t, err)
 	require.Equal(t, etagA, rec.ETag, "the document was not replaced")
-	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), pg.over(t, key, d.photos), "and the key keeps the stored policy's grants")
+	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), d.over(t, key, d.photos), "and the key keeps the stored policy's grants")
 }
 
 // TestKeyCreatedDuringPolicyCreatePostgres creates a key for an existing
@@ -925,22 +873,20 @@ func TestPolicyWriteCancelledAfterRotationPostgres(t *testing.T) {
 // until it commits, so the creation waits and then reads the committed policy,
 // and the key holds its grants.
 func TestKeyCreatedDuringPolicyCreatePostgres(t *testing.T) {
-	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
 	d := setup(t)
-	pg := d.postgres(t, pool)
-	require.NoError(t, pg.principals.Add(ctx, d.tenantID, "user-1"))
+	require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
 	// The principal holds a key already, so the write has a rotation to run.
 	user := "user-1"
-	require.NoError(t, pg.accessKeys.Add(ctx, accesskeystore.Input{ID: testutil.RandomDID(t), Tenant: d.tenantID, Name: "phone", Principal: &user}))
+	require.NoError(t, d.accessKeys.Add(ctx, accesskeystore.Input{ID: testutil.RandomDID(t), Tenant: d.tenantID, Name: "phone", Principal: &user}))
 
-	keys := accesskeysvc.New(zap.NewNop(), pg.tenants, pg.accessKeys, pg.principals, d.buckets, pg.policies, pg.delegations, d.secrets, d.swarf)
+	keys := accesskeysvc.New(zap.NewNop(), d.tenants, d.accessKeys, d.principals, d.buckets, d.policies, d.delegations, d.secrets, d.swarf)
 	var created accesskeystore.Record
 	written, added := testutil.RequireWaitsForWriter(t,
 		func(entered chan<- struct{}, release <-chan struct{}) error {
-			principals := &afterLock{Store: pg.principals, after: func() { close(entered); <-release }}
-			svc := bucketpolicysvc.New(zap.NewNop(), pg.tenants, d.buckets, principals, pg.policies,
-				grant.NewRotator(zap.NewNop(), pg.delegations, pg.accessKeys, d.secrets, d.swarf))
+			principals := &afterLock{Store: d.principals, after: func() { close(entered); <-release }}
+			svc := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, principals, d.policies,
+				grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf))
 			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 			return err
 		},
@@ -951,22 +897,16 @@ func TestKeyCreatedDuringPolicyCreatePostgres(t *testing.T) {
 		})
 	require.NoError(t, written)
 	require.NoError(t, added)
-	require.Equal(t, commandsFor("s3:GetObject"), pg.over(t, created.ID, d.photos), "the key is created from the committed policy")
+	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, created.ID, d.photos), "the key is created from the committed policy")
 }
 
 // TestPolicyWriteToMissingBucketPostgres writes a policy for a bucket the
-// service resolves but Postgres has no row for, standing in for a bucket
+// caller resolved but the store has no row for, standing in for a bucket
 // deleted between the lookup and the write. It is reported as a missing
 // bucket.
 func TestPolicyWriteToMissingBucketPostgres(t *testing.T) {
-	pool := testutil.PostgresOrSkip(t)
 	d := setup(t)
-	tenants := tenantmemory.New()
-	require.NoError(t, tenants.Add(t.Context(), d.tenantID, "tenant-1", tenant.Active))
-	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals,
-		bucketpolicypostgres.New(pool), d.rotator(d.swarf))
-
-	_, _, err := svc.Write(t.Context(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:ListBucket")), createOnly)
+	_, _, err := d.svc.Write(t.Context(), d.tenantID, testutil.RandomDID(t), "photos", doc(allow(everyone, "s3:ListBucket")), createOnly)
 	require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound)
 }
 
@@ -979,7 +919,7 @@ func TestPrincipalReads(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2")
 		backups := testutil.RandomDID(t)
-		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, testutil.RandomDID(t), "backups"))
+		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, d.providerID, "backups"))
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
 		onBackups := func(st s3bkt.Statement) s3bkt.Statement {

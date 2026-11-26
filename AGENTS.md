@@ -68,11 +68,18 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - Run locally: `go run ./cmd serve --upload-service-id=<did>
   --upload-service-url=<url> --upload-product-id=<did>
   --revocation-service-id=<did> --revocation-service-url=<url>` (all required,
-  no default; add `--storage=memory --vault=memory` to avoid external deps; see
-  `cmd/main.go` / `pkg/config`).
-- Postgres and OpenBao-backed tests use testcontainers and **skip when Docker is
-  unavailable** (`internal/testutil`). `go test ./...` passes without Docker but
-  only exercises the memory backends; run with Docker for full coverage.
+  no default; storage is always Postgres, `--postgres-dsn` names the database,
+  and `--vault=memory` avoids running OpenBao; see `cmd/main.go` /
+  `pkg/config`).
+- Every test that touches a store runs on Postgres, and the OpenBao tests on
+  OpenBao, both through testcontainers (`internal/testutil`). They **skip when
+  Docker is unavailable** (and fail on a Linux CI runner), so `go test ./...`
+  without Docker passes while covering little; run it with Docker. A test gets
+  its database from `testutil.PostgresOrSkip(t)`: each test binary starts one
+  Postgres container on first use and migrates a template database once, and
+  every call returns a pool on a fresh database copied from that template and
+  dropped when the test ends. Seed the rows the foreign keys reference
+  (provider, tenant, principal, bucket) before the rows that point at them.
 - Integration tests: `make itest`. The `itest/` package is gated by the `itest`
   build tag, so `go test ./...` never compiles or runs it. It boots the full
   Forge stack in Docker via `smelt/pkg/stack` (the working tree's hilt is
@@ -98,8 +105,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 ## Layout
 
 - `cmd/main.go` — cobra entrypoint (`serve`).
-- `pkg/fx` — uber-fx wiring. `AppModule` picks the storage (`memory`/`postgres`)
-  and vault (`memory`/`openbao`) backend from config; `ProvideConfigs` splits
+- `pkg/fx` — uber-fx wiring. `AppModule` wires the Postgres stores and picks
+  the vault (`memory`/`openbao`) backend from config; `ProvideConfigs` splits
   `config.Config` into injectable sub-configs; handlers/services are registered
   here. DI is **by type** — a constructor just declares the deps it needs and the
   provider must exist in the graph.
@@ -120,7 +127,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
   key's set as its policies change. See the package doc.
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage}` —
-  each an interface with `memory` and `postgres` backends.
+  each an interface with its `postgres` implementation.
 - `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
   lock waits, advisory locks, and the mapping to `store.ErrLockTimeout`.
 - `pkg/vault` (`memory`, `openbao`) — private-key storage; `paths.go` has the
@@ -140,10 +147,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 
 - **New packages go under `pkg/`**, not `internal/` (only test helpers live in
   `internal/`).
-- **Stores**: an interface in `pkg/store/<entity>` with `memory` + `postgres`
-  implementations kept in lockstep and exercised by one backend-parametrized test
-  suite (`<entity>_test.go`). Add a method to all three (interface + both backends)
-  and cover it in that suite.
+- **Stores**: an interface in `pkg/store/<entity>` with one implementation,
+  `postgres`, exercised by the suite in `<entity>_test.go`. Add a method to the
+  interface and the implementation and cover it in that suite.
 - **Locking and callbacks**: a write that another service must learn about runs
   in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
   caller-supplied callback (`fn`, which runs inside the write before it takes

@@ -357,8 +357,7 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 
 	// Cascade: buckets (records and their policies; bucket keys are discarded at
 	// creation). Postgres cascades a policy with its bucket row, so the row goes
-	// first and no failure leaves a bucket without its policy; the explicit
-	// delete keeps the memory backend in step.
+	// first and no failure leaves a bucket without its policy.
 	bucketIDs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[did.DID], error) {
 		var listOpts []bucket.ListOption
 		if opts.Cursor != nil {

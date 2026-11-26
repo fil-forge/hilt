@@ -65,9 +65,6 @@ type ReadConfig struct {
 	// The read needs no transaction of its own: a FOR SHARE in autocommit mode
 	// still waits on a conflicting FOR UPDATE. Without it a read never waits and
 	// may be answered from a snapshot that predates an in-flight write.
-	//
-	// The memory backends give the same guarantee with their own locks: a
-	// share-locked read there waits for a write in flight on the same record.
 	Share bool
 }
 

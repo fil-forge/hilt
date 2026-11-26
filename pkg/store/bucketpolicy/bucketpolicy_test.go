@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -29,60 +27,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type StoreKind string
-
-const (
-	Memory   StoreKind = "memory"
-	Postgres StoreKind = "postgres"
-)
-
-var storeKinds = []StoreKind{Memory, Postgres}
-
 // fixtures creates the rows the policy tables reference: the bucket
 // (bucket_policy.bucket_id), its tenant, and the principals a document names
-// (bucket_policy_principal's foreign key). The memory store checks only the
-// bucket, through the probe its fixtures hand it, and its fixtures otherwise
-// only hand out identifiers.
-type fixtures interface {
-	tenant(t *testing.T) did.DID
-	bucket(t *testing.T, tenant did.DID) did.DID
-	principal(t *testing.T, tenant did.DID, id string)
-}
-
-type memoryFixtures struct {
-	mu      sync.Mutex
-	buckets map[did.DID]bool
-}
-
-func (f *memoryFixtures) tenant(t *testing.T) did.DID { return testutil.RandomDID(t) }
-func (f *memoryFixtures) bucket(t *testing.T, _ did.DID) did.DID {
-	id := testutil.RandomDID(t)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.buckets[id] = true
-	return id
-}
-func (f *memoryFixtures) principal(*testing.T, did.DID, string) {}
-func (f *memoryFixtures) has(id did.DID) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.buckets[id]
-}
-
-type postgresFixtures struct {
+// (bucket_policy_principal's foreign key).
+type fixtures struct {
 	pool    *pgxpool.Pool
 	buckets atomic.Int64
 }
 
-func (f *postgresFixtures) tenant(t *testing.T) did.DID {
+func (f *fixtures) tenant(t *testing.T) did.DID {
 	tenantID := testutil.RandomDID(t)
-	providerID := testutil.RandomDID(t)
-	require.NoError(t, providerpostgres.New(f.pool).Add(t.Context(), providerID, tenantID.String(), nil))
 	require.NoError(t, tenantpostgres.New(f.pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 	return tenantID
 }
 
-func (f *postgresFixtures) bucket(t *testing.T, tenantID did.DID) did.DID {
+func (f *fixtures) bucket(t *testing.T, tenantID did.DID) did.DID {
 	id := testutil.RandomDID(t)
 	name := fmt.Sprintf("policy-test-%d", f.buckets.Add(1))
 	// A bucket is served by a provider, so one must exist for the foreign key.
@@ -92,20 +51,13 @@ func (f *postgresFixtures) bucket(t *testing.T, tenantID did.DID) did.DID {
 	return id
 }
 
-func (f *postgresFixtures) principal(t *testing.T, tenantID did.DID, id string) {
+func (f *fixtures) principal(t *testing.T, tenantID did.DID, id string) {
 	require.NoError(t, principalpostgres.New(f.pool).Add(t.Context(), tenantID, id))
 }
 
-func makeStore(t *testing.T, k StoreKind) (bucketpolicystore.Store, fixtures) {
-	switch k {
-	case Memory:
-		fx := &memoryFixtures{buckets: map[did.DID]bool{}}
-		return bucketpolicymemory.New(bucketpolicymemory.WithBuckets(fx.has)), fx
-	case Postgres:
-		pool := htestutil.PostgresOrSkip(t)
-		return bucketpolicypostgres.New(pool), &postgresFixtures{pool: pool}
-	}
-	panic("unknown store kind")
+func makeStore(t *testing.T) (bucketpolicystore.Store, *fixtures) {
+	pool := htestutil.PostgresOrSkip(t)
+	return bucketpolicypostgres.New(pool), &fixtures{pool: pool}
 }
 
 var everyone = s3bkt.Everyone()
@@ -129,534 +81,530 @@ func ptr(s string) *string { return &s }
 func noCallback(context.Context, *bucketpolicystore.Record) error { return nil }
 
 func TestPolicyStore(t *testing.T) {
-	for _, k := range storeKinds {
-		t.Run(string(k), func(t *testing.T) {
-			s, fx := makeStore(t, k)
+	s, fx := makeStore(t)
 
-			// newBucket seeds a tenant with the named principals and one bucket.
-			newBucket := func(t *testing.T, principals ...string) (tenantID, bucketID did.DID) {
-				tenantID = fx.tenant(t)
-				for _, p := range principals {
-					fx.principal(t, tenantID, p)
-				}
-				return tenantID, fx.bucket(t, tenantID)
-			}
-
-			t.Run("Put rejects a bucket that does not exist before running the callback", func(t *testing.T) {
-				tenantID := fx.tenant(t)
-				called := false
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: testutil.RandomDID(t), Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
-					Conditional: true,
-				}, func(context.Context, *bucketpolicystore.Record) error { called = true; return nil })
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				require.False(t, called, "the callback must not run for a missing bucket")
-			})
-
-			t.Run("a Put waits while DeleteByBucket runs its callback", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t)
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), Conditional: true}, nil)
-				require.NoError(t, err)
-
-				deleted, written := htestutil.RequireWaitsForWriter(t,
-					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.DeleteByBucket(context.Background(), bucketID, func(context.Context) error {
-							close(entered)
-							<-release
-							return nil
-						})
-					},
-					func() error {
-						_, err := s.Put(context.Background(), bucketpolicystore.Input{
-							Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:PutObject")),
-						}, nil)
-						return err
-					})
-				require.NoError(t, deleted)
-				require.NoError(t, written)
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, doc(allow(everyone, "s3:PutObject")), rec.Policy, "the Put landed after the deletion")
-			})
-
-			t.Run("DeleteByBucket returns its callback's error and keeps the policy", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t)
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), Conditional: true}, nil)
-				require.NoError(t, err)
-				boom := errors.New("boom")
-				err = s.DeleteByBucket(t.Context(), bucketID, func(context.Context) error { return boom })
-				require.ErrorIs(t, err, boom)
-				_, err = s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-			})
-
-			t.Run("Put creates a policy and Get returns it with its ETag", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject", "s3:ListBucket"))
-
-				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, noCallback)
-				require.NoError(t, err)
-				require.Equal(t, s3bkt.ETag(d), etag)
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, bucketID, rec.Bucket)
-				require.Equal(t, d, rec.Policy)
-				require.Equal(t, etag, rec.ETag)
-				require.False(t, rec.UpdatedAt.IsZero())
-			})
-
-			t.Run("Get honours the share lock option", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject"))
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				rec, err := s.Get(t.Context(), bucketID, store.WithShareLock())
-				require.NoError(t, err)
-				require.Equal(t, d, rec.Policy)
-			})
-
-			t.Run("Get returns ErrRecordNotFound for a bucket without a policy", func(t *testing.T) {
-				_, bucketID := newBucket(t)
-				_, err := s.Get(t.Context(), bucketID)
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				_, err = s.Get(t.Context(), bucketID, store.WithShareLock())
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-			})
-
-			t.Run("Put creating passes a nil old record to the callback", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				var calls int
-				var seen *bucketpolicystore.Record
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")),
-					Conditional: true,
-				}, func(_ context.Context, old *bucketpolicystore.Record) error {
-					calls++
-					seen = old
-					return nil
-				})
-				require.NoError(t, err)
-				require.Equal(t, 1, calls)
-				require.Nil(t, seen)
-			})
-
-			t.Run("Put with nil IfMatch fails when a policy exists and writes nothing", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				first := doc(allow(only("alice"), "s3:GetObject"))
-				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				called := false
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")),
-					Conditional: true,
-				}, func(context.Context, *bucketpolicystore.Record) error {
-					called = true
-					return nil
-				})
-				require.ErrorIs(t, err, store.ErrPreconditionFailed)
-				require.False(t, called, "the callback must not run when the precondition fails")
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, first, rec.Policy)
-				require.Equal(t, etag, rec.ETag)
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "bob")
-				require.NoError(t, err)
-				require.Empty(t, recs, "the index must not be rewritten")
-			})
-
-			t.Run("Put with a matching IfMatch replaces the policy and hands the callback the old record", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				first := doc(allow(only("alice"), "s3:GetObject"))
-				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				second := doc(allow(only("bob"), "s3:PutObject"))
-				var seen *bucketpolicystore.Record
-				etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(etag1),
-					Conditional: true,
-				}, func(_ context.Context, old *bucketpolicystore.Record) error {
-					seen = old
-					return nil
-				})
-				require.NoError(t, err)
-				require.Equal(t, s3bkt.ETag(second), etag2)
-				require.NotEqual(t, etag1, etag2)
-				require.NotNil(t, seen)
-				require.Equal(t, first, seen.Policy)
-				require.Equal(t, etag1, seen.ETag)
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, second, rec.Policy)
-				require.Equal(t, etag2, rec.ETag)
-			})
-
-			t.Run("Put without Conditional replaces whatever is stored and creates when nothing is", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				first := doc(allow(only("alice"), "s3:GetObject"))
-				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first}, nil)
-				require.NoError(t, err)
-				require.Equal(t, s3bkt.ETag(first), etag1)
-
-				second := doc(allow(only("bob"), "s3:PutObject"))
-				etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(`"stale"`),
-				}, nil)
-				require.NoError(t, err, "IfMatch is ignored")
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, second, rec.Policy)
-				require.Equal(t, etag2, rec.ETag)
-			})
-
-			t.Run("Delete with an empty ETag removes the policy unconditionally", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")), Conditional: true}, nil)
-				require.NoError(t, err)
-				require.NoError(t, s.Delete(t.Context(), bucketID, "", nil))
-				_, err = s.Get(t.Context(), bucketID)
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				require.ErrorIs(t, s.Delete(t.Context(), bucketID, "", nil), store.ErrRecordNotFound)
-			})
-
-			t.Run("Put with a stale IfMatch fails and writes nothing", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				first := doc(allow(only("alice"), "s3:GetObject"))
-				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
-				require.NoError(t, err)
-				second := doc(allow(only("alice"), "s3:GetObject", "s3:PutObject"))
-				etag2, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(etag1), Conditional: true}, nil)
-				require.NoError(t, err)
-
-				// A writer that read etag1 lost the race.
-				called := false
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag1),
-					Conditional: true,
-				}, func(context.Context, *bucketpolicystore.Record) error {
-					called = true
-					return nil
-				})
-				require.ErrorIs(t, err, store.ErrPreconditionFailed)
-				require.False(t, called)
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, second, rec.Policy)
-				require.Equal(t, etag2, rec.ETag)
-			})
-
-			t.Run("Put with IfMatch on a bucket without a policy fails", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")), IfMatch: ptr(`"nope"`),
-					Conditional: true,
-				}, nil)
-				require.ErrorIs(t, err, store.ErrPreconditionFailed)
-				_, err = s.Get(t.Context(), bucketID)
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-			})
-
-			t.Run("Put returns the callback error and writes nothing when creating", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				publishFailed := errors.New("publish failed")
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")),
-					Conditional: true,
-				}, func(context.Context, *bucketpolicystore.Record) error { return publishFailed })
-				require.ErrorIs(t, err, publishFailed)
-
-				_, err = s.Get(t.Context(), bucketID)
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Empty(t, recs)
-			})
-
-			t.Run("Put returns the callback error and keeps the old policy and index when replacing", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				first := doc(allow(only("alice"), "s3:GetObject"))
-				etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				publishFailed := errors.New("publish failed")
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag1),
-					Conditional: true,
-				}, func(context.Context, *bucketpolicystore.Record) error { return publishFailed })
-				require.ErrorIs(t, err, publishFailed)
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, first, rec.Policy)
-				require.Equal(t, etag1, rec.ETag)
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Len(t, recs, 1)
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "bob")
-				require.NoError(t, err)
-				require.Empty(t, recs)
-
-				// The failed write did not consume the tag: a retry with it succeeds.
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag1),
-					Conditional: true,
-				}, nil)
-				require.NoError(t, err)
-			})
-
-			t.Run("Put returns ErrInvalidArgument for an undef bucket or tenant", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject"))
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: did.Undef, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.ErrorIs(t, err, store.ErrInvalidArgument)
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: did.Undef, Policy: d, Conditional: true}, nil)
-				require.ErrorIs(t, err, store.ErrInvalidArgument)
-			})
-
-			t.Run("Put does not alias the caller's document", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject"))
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.NoError(t, err)
-				d.Statements[0].Actions["s3:PutObject"] = struct{}{}
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), rec.Policy.Statements[0].Actions)
-				rec.Policy.Statements[0].Actions["s3:DeleteObject"] = struct{}{}
-				again, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), again.Policy.Statements[0].Actions)
-			})
-
-			t.Run("Put stores the normalized document whatever the backend", func(t *testing.T) {
-				// A document built directly, without Decode, may repeat and misorder
-				// its sets; the ETag is computed from the normalized form either way.
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				d := doc(allow(only("bob", "alice", "bob"), "s3:PutObject", "s3:GetObject", "s3:PutObject"))
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				want, err := bucketpolicy.Decode(bucketpolicy.Canonical(d))
-				require.NoError(t, err)
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, want, rec.Policy)
-			})
-
-			t.Run("Delete with the current ETag removes the policy and hands the callback the old record", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject"))
-				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				var seen bucketpolicystore.Record
-				require.NoError(t, s.Delete(t.Context(), bucketID, etag, func(_ context.Context, old bucketpolicystore.Record) error {
-					seen = old
-					return nil
-				}))
-				require.Equal(t, d, seen.Policy)
-				require.Equal(t, etag, seen.ETag)
-
-				_, err = s.Get(t.Context(), bucketID)
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Empty(t, recs, "the index rows go with the policy")
-			})
-
-			t.Run("Delete with a stale ETag fails and keeps the policy", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject"))
-				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				called := false
-				err = s.Delete(t.Context(), bucketID, `"stale"`, func(context.Context, bucketpolicystore.Record) error {
-					called = true
-					return nil
-				})
-				require.ErrorIs(t, err, store.ErrPreconditionFailed)
-				require.False(t, called)
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, etag, rec.ETag)
-			})
-
-			t.Run("Delete returns ErrRecordNotFound for a bucket without a policy", func(t *testing.T) {
-				_, bucketID := newBucket(t)
-				called := false
-				err := s.Delete(t.Context(), bucketID, `"any"`, func(context.Context, bucketpolicystore.Record) error {
-					called = true
-					return nil
-				})
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				require.False(t, called)
-			})
-
-			t.Run("Delete returns the callback error and keeps the policy", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				d := doc(allow(only("alice"), "s3:GetObject"))
-				etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-				require.NoError(t, err)
-
-				publishFailed := errors.New("publish failed")
-				err = s.Delete(t.Context(), bucketID, etag, func(context.Context, bucketpolicystore.Record) error { return publishFailed })
-				require.ErrorIs(t, err, publishFailed)
-
-				rec, err := s.Get(t.Context(), bucketID)
-				require.NoError(t, err)
-				require.Equal(t, d, rec.Policy)
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Len(t, recs, 1)
-
-				// A retry completes the removal.
-				require.NoError(t, s.Delete(t.Context(), bucketID, etag, nil))
-			})
-
-			t.Run("DeleteByBucket removes the policy and its index rows and is idempotent", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"), allow(everyone, "s3:GetObject")),
-					Conditional: true,
-				}, nil)
-				require.NoError(t, err)
-
-				require.NoError(t, s.DeleteByBucket(t.Context(), bucketID, nil))
-				_, err = s.Get(t.Context(), bucketID)
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Empty(t, recs)
-
-				require.NoError(t, s.DeleteByBucket(t.Context(), bucketID, nil))
-				require.NoError(t, s.DeleteByBucket(t.Context(), testutil.RandomDID(t), nil))
-			})
-
-			t.Run("ListByPrincipal returns the policies naming the principal or the wildcard, by bucket", func(t *testing.T) {
-				tenantID := fx.tenant(t)
-				fx.principal(t, tenantID, "alice")
-				fx.principal(t, tenantID, "bob")
-				named := fx.bucket(t, tenantID)     // names alice
-				wildcard := fx.bucket(t, tenantID)  // names *
-				both := fx.bucket(t, tenantID)      // names alice and *
-				denied := fx.bucket(t, tenantID)    // names alice in a Deny only
-				other := fx.bucket(t, tenantID)     // names bob only
-				unpoliced := fx.bucket(t, tenantID) // no policy
-				_ = unpoliced
-
-				put := func(bucket did.DID, d s3bkt.PolicyDocument) {
-					_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: d, Conditional: true}, nil)
-					require.NoError(t, err)
-				}
-				put(named, doc(allow(only("alice"), "s3:GetObject")))
-				put(wildcard, doc(allow(everyone, "s3:GetObject")))
-				put(both, doc(allow(everyone, "s3:GetObject"), deny(only("alice"), "s3:GetObject")))
-				put(denied, doc(allow(only("bob"), "s3:GetObject"), deny(only("alice"), "s3:PutObject")))
-				put(other, doc(allow(only("bob"), "s3:GetObject")))
-
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				var got []did.DID
-				for _, r := range recs {
-					got = append(got, r.Bucket)
-				}
-				// A policy naming the principal in a Deny is listed: the index records
-				// which documents name it, whatever the effect. A policy naming both the
-				// principal and the wildcard is listed once.
-				require.ElementsMatch(t, []did.DID{named, wildcard, both, denied}, got)
-				require.IsIncreasing(t, func() []string {
-					var ids []string
-					for _, r := range recs {
-						ids = append(ids, r.Bucket.String())
-					}
-					return ids
-				}())
-				for _, r := range recs {
-					require.NotEmpty(t, r.ETag)
-					require.NotEmpty(t, r.Policy.Statements)
-				}
-
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "bob")
-				require.NoError(t, err)
-				got = got[:0]
-				for _, r := range recs {
-					got = append(got, r.Bucket)
-				}
-				require.ElementsMatch(t, []did.DID{wildcard, both, denied, other}, got)
-
-				// A principal named nowhere sees only the wildcard policies.
-				fx.principal(t, tenantID, "carol")
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "carol")
-				require.NoError(t, err)
-				got = got[:0]
-				for _, r := range recs {
-					got = append(got, r.Bucket)
-				}
-				require.ElementsMatch(t, []did.DID{wildcard, both}, got)
-
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "alice", store.WithShareLock())
-				require.NoError(t, err)
-				require.Len(t, recs, 4)
-			})
-
-			t.Run("ListByPrincipal isolates by tenant", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice")
-				otherTenant, otherBucket := newBucket(t, "alice")
-				_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), Conditional: true}, nil)
-				require.NoError(t, err)
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{Bucket: otherBucket, Tenant: otherTenant, Policy: doc(allow(only("alice"), "s3:GetObject")), Conditional: true}, nil)
-				require.NoError(t, err)
-
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Len(t, recs, 1)
-				require.Equal(t, bucketID, recs[0].Bucket)
-
-				recs, err = s.ListByPrincipal(t.Context(), testutil.RandomDID(t), "alice")
-				require.NoError(t, err)
-				require.Empty(t, recs)
-			})
-
-			t.Run("Put rewrites the index so a principal dropped from the document is no longer listed", func(t *testing.T) {
-				tenantID, bucketID := newBucket(t, "alice", "bob")
-				etag, err := s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"), allow(everyone, "s3:GetObject")),
-					Conditional: true,
-				}, nil)
-				require.NoError(t, err)
-
-				_, err = s.Put(t.Context(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag),
-					Conditional: true,
-				}, nil)
-				require.NoError(t, err)
-
-				recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
-				require.NoError(t, err)
-				require.Empty(t, recs, "neither the named row nor the wildcard row survives")
-				recs, err = s.ListByPrincipal(t.Context(), tenantID, "bob")
-				require.NoError(t, err)
-				require.Len(t, recs, 1)
-			})
-		})
+	// newBucket seeds a tenant with the named principals and one bucket.
+	newBucket := func(t *testing.T, principals ...string) (tenantID, bucketID did.DID) {
+		tenantID = fx.tenant(t)
+		for _, p := range principals {
+			fx.principal(t, tenantID, p)
+		}
+		return tenantID, fx.bucket(t, tenantID)
 	}
+
+	t.Run("Put rejects a bucket that does not exist before running the callback", func(t *testing.T) {
+		tenantID := fx.tenant(t)
+		called := false
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: testutil.RandomDID(t), Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
+			Conditional: true,
+		}, func(context.Context, *bucketpolicystore.Record) error { called = true; return nil })
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.False(t, called, "the callback must not run for a missing bucket")
+	})
+
+	t.Run("a Put waits while DeleteByBucket runs its callback", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t)
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), Conditional: true}, nil)
+		require.NoError(t, err)
+
+		deleted, written := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return s.DeleteByBucket(context.Background(), bucketID, func(context.Context) error {
+					close(entered)
+					<-release
+					return nil
+				})
+			},
+			func() error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{
+					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:PutObject")),
+				}, nil)
+				return err
+			})
+		require.NoError(t, deleted)
+		require.NoError(t, written)
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, doc(allow(everyone, "s3:PutObject")), rec.Policy, "the Put landed after the deletion")
+	})
+
+	t.Run("DeleteByBucket returns its callback's error and keeps the policy", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t)
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), Conditional: true}, nil)
+		require.NoError(t, err)
+		boom := errors.New("boom")
+		err = s.DeleteByBucket(t.Context(), bucketID, func(context.Context) error { return boom })
+		require.ErrorIs(t, err, boom)
+		_, err = s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+	})
+
+	t.Run("Put creates a policy and Get returns it with its ETag", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject", "s3:ListBucket"))
+
+		etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, noCallback)
+		require.NoError(t, err)
+		require.Equal(t, s3bkt.ETag(d), etag)
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, bucketID, rec.Bucket)
+		require.Equal(t, d, rec.Policy)
+		require.Equal(t, etag, rec.ETag)
+		require.False(t, rec.UpdatedAt.IsZero())
+	})
+
+	t.Run("Get honours the share lock option", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject"))
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		rec, err := s.Get(t.Context(), bucketID, store.WithShareLock())
+		require.NoError(t, err)
+		require.Equal(t, d, rec.Policy)
+	})
+
+	t.Run("Get returns ErrRecordNotFound for a bucket without a policy", func(t *testing.T) {
+		_, bucketID := newBucket(t)
+		_, err := s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, err = s.Get(t.Context(), bucketID, store.WithShareLock())
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("Put creating passes a nil old record to the callback", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		var calls int
+		var seen *bucketpolicystore.Record
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")),
+			Conditional: true,
+		}, func(_ context.Context, old *bucketpolicystore.Record) error {
+			calls++
+			seen = old
+			return nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, calls)
+		require.Nil(t, seen)
+	})
+
+	t.Run("Put with nil IfMatch fails when a policy exists and writes nothing", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		first := doc(allow(only("alice"), "s3:GetObject"))
+		etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		called := false
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")),
+			Conditional: true,
+		}, func(context.Context, *bucketpolicystore.Record) error {
+			called = true
+			return nil
+		})
+		require.ErrorIs(t, err, store.ErrPreconditionFailed)
+		require.False(t, called, "the callback must not run when the precondition fails")
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, first, rec.Policy)
+		require.Equal(t, etag, rec.ETag)
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "bob")
+		require.NoError(t, err)
+		require.Empty(t, recs, "the index must not be rewritten")
+	})
+
+	t.Run("Put with a matching IfMatch replaces the policy and hands the callback the old record", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		first := doc(allow(only("alice"), "s3:GetObject"))
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		second := doc(allow(only("bob"), "s3:PutObject"))
+		var seen *bucketpolicystore.Record
+		etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(etag1),
+			Conditional: true,
+		}, func(_ context.Context, old *bucketpolicystore.Record) error {
+			seen = old
+			return nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, s3bkt.ETag(second), etag2)
+		require.NotEqual(t, etag1, etag2)
+		require.NotNil(t, seen)
+		require.Equal(t, first, seen.Policy)
+		require.Equal(t, etag1, seen.ETag)
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, second, rec.Policy)
+		require.Equal(t, etag2, rec.ETag)
+	})
+
+	t.Run("Put without Conditional replaces whatever is stored and creates when nothing is", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		first := doc(allow(only("alice"), "s3:GetObject"))
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first}, nil)
+		require.NoError(t, err)
+		require.Equal(t, s3bkt.ETag(first), etag1)
+
+		second := doc(allow(only("bob"), "s3:PutObject"))
+		etag2, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(`"stale"`),
+		}, nil)
+		require.NoError(t, err, "IfMatch is ignored")
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, second, rec.Policy)
+		require.Equal(t, etag2, rec.ETag)
+	})
+
+	t.Run("Delete with an empty ETag removes the policy unconditionally", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")), Conditional: true}, nil)
+		require.NoError(t, err)
+		require.NoError(t, s.Delete(t.Context(), bucketID, "", nil))
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.ErrorIs(t, s.Delete(t.Context(), bucketID, "", nil), store.ErrRecordNotFound)
+	})
+
+	t.Run("Put with a stale IfMatch fails and writes nothing", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		first := doc(allow(only("alice"), "s3:GetObject"))
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
+		require.NoError(t, err)
+		second := doc(allow(only("alice"), "s3:GetObject", "s3:PutObject"))
+		etag2, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: second, IfMatch: ptr(etag1), Conditional: true}, nil)
+		require.NoError(t, err)
+
+		// A writer that read etag1 lost the race.
+		called := false
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag1),
+			Conditional: true,
+		}, func(context.Context, *bucketpolicystore.Record) error {
+			called = true
+			return nil
+		})
+		require.ErrorIs(t, err, store.ErrPreconditionFailed)
+		require.False(t, called)
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, second, rec.Policy)
+		require.Equal(t, etag2, rec.ETag)
+	})
+
+	t.Run("Put with IfMatch on a bucket without a policy fails", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")), IfMatch: ptr(`"nope"`),
+			Conditional: true,
+		}, nil)
+		require.ErrorIs(t, err, store.ErrPreconditionFailed)
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("Put returns the callback error and writes nothing when creating", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		publishFailed := errors.New("publish failed")
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject")),
+			Conditional: true,
+		}, func(context.Context, *bucketpolicystore.Record) error { return publishFailed })
+		require.ErrorIs(t, err, publishFailed)
+
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Empty(t, recs)
+	})
+
+	t.Run("Put returns the callback error and keeps the old policy and index when replacing", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		first := doc(allow(only("alice"), "s3:GetObject"))
+		etag1, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: first, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		publishFailed := errors.New("publish failed")
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag1),
+			Conditional: true,
+		}, func(context.Context, *bucketpolicystore.Record) error { return publishFailed })
+		require.ErrorIs(t, err, publishFailed)
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, first, rec.Policy)
+		require.Equal(t, etag1, rec.ETag)
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Len(t, recs, 1)
+		recs, err = s.ListByPrincipal(t.Context(), tenantID, "bob")
+		require.NoError(t, err)
+		require.Empty(t, recs)
+
+		// The failed write did not consume the tag: a retry with it succeeds.
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag1),
+			Conditional: true,
+		}, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("Put returns ErrInvalidArgument for an undef bucket or tenant", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject"))
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: did.Undef, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: did.Undef, Policy: d, Conditional: true}, nil)
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+	})
+
+	t.Run("Put does not alias the caller's document", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject"))
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.NoError(t, err)
+		d.Statements[0].Actions["s3:PutObject"] = struct{}{}
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), rec.Policy.Statements[0].Actions)
+		rec.Policy.Statements[0].Actions["s3:DeleteObject"] = struct{}{}
+		again, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, s3bkt.NewStringSet("s3:GetObject"), again.Policy.Statements[0].Actions)
+	})
+
+	t.Run("Put stores the normalized document", func(t *testing.T) {
+		// A document built directly, without Decode, may repeat and misorder
+		// its sets; the ETag is computed from the normalized form either way.
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		d := doc(allow(only("bob", "alice", "bob"), "s3:PutObject", "s3:GetObject", "s3:PutObject"))
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		want, err := bucketpolicy.Decode(bucketpolicy.Canonical(d))
+		require.NoError(t, err)
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, want, rec.Policy)
+	})
+
+	t.Run("Delete with the current ETag removes the policy and hands the callback the old record", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject"))
+		etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		var seen bucketpolicystore.Record
+		require.NoError(t, s.Delete(t.Context(), bucketID, etag, func(_ context.Context, old bucketpolicystore.Record) error {
+			seen = old
+			return nil
+		}))
+		require.Equal(t, d, seen.Policy)
+		require.Equal(t, etag, seen.ETag)
+
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Empty(t, recs, "the index rows go with the policy")
+	})
+
+	t.Run("Delete with a stale ETag fails and keeps the policy", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject"))
+		etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		called := false
+		err = s.Delete(t.Context(), bucketID, `"stale"`, func(context.Context, bucketpolicystore.Record) error {
+			called = true
+			return nil
+		})
+		require.ErrorIs(t, err, store.ErrPreconditionFailed)
+		require.False(t, called)
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, etag, rec.ETag)
+	})
+
+	t.Run("Delete returns ErrRecordNotFound for a bucket without a policy", func(t *testing.T) {
+		_, bucketID := newBucket(t)
+		called := false
+		err := s.Delete(t.Context(), bucketID, `"any"`, func(context.Context, bucketpolicystore.Record) error {
+			called = true
+			return nil
+		})
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.False(t, called)
+	})
+
+	t.Run("Delete returns the callback error and keeps the policy", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		d := doc(allow(only("alice"), "s3:GetObject"))
+		etag, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+		require.NoError(t, err)
+
+		publishFailed := errors.New("publish failed")
+		err = s.Delete(t.Context(), bucketID, etag, func(context.Context, bucketpolicystore.Record) error { return publishFailed })
+		require.ErrorIs(t, err, publishFailed)
+
+		rec, err := s.Get(t.Context(), bucketID)
+		require.NoError(t, err)
+		require.Equal(t, d, rec.Policy)
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Len(t, recs, 1)
+
+		// A retry completes the removal.
+		require.NoError(t, s.Delete(t.Context(), bucketID, etag, nil))
+	})
+
+	t.Run("DeleteByBucket removes the policy and its index rows and is idempotent", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"), allow(everyone, "s3:GetObject")),
+			Conditional: true,
+		}, nil)
+		require.NoError(t, err)
+
+		require.NoError(t, s.DeleteByBucket(t.Context(), bucketID, nil))
+		_, err = s.Get(t.Context(), bucketID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Empty(t, recs)
+
+		require.NoError(t, s.DeleteByBucket(t.Context(), bucketID, nil))
+		require.NoError(t, s.DeleteByBucket(t.Context(), testutil.RandomDID(t), nil))
+	})
+
+	t.Run("ListByPrincipal returns the policies naming the principal or the wildcard, by bucket", func(t *testing.T) {
+		tenantID := fx.tenant(t)
+		fx.principal(t, tenantID, "alice")
+		fx.principal(t, tenantID, "bob")
+		named := fx.bucket(t, tenantID)     // names alice
+		wildcard := fx.bucket(t, tenantID)  // names *
+		both := fx.bucket(t, tenantID)      // names alice and *
+		denied := fx.bucket(t, tenantID)    // names alice in a Deny only
+		other := fx.bucket(t, tenantID)     // names bob only
+		unpoliced := fx.bucket(t, tenantID) // no policy
+		_ = unpoliced
+
+		put := func(bucket did.DID, d s3bkt.PolicyDocument) {
+			_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: d, Conditional: true}, nil)
+			require.NoError(t, err)
+		}
+		put(named, doc(allow(only("alice"), "s3:GetObject")))
+		put(wildcard, doc(allow(everyone, "s3:GetObject")))
+		put(both, doc(allow(everyone, "s3:GetObject"), deny(only("alice"), "s3:GetObject")))
+		put(denied, doc(allow(only("bob"), "s3:GetObject"), deny(only("alice"), "s3:PutObject")))
+		put(other, doc(allow(only("bob"), "s3:GetObject")))
+
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		var got []did.DID
+		for _, r := range recs {
+			got = append(got, r.Bucket)
+		}
+		// A policy naming the principal in a Deny is listed: the index records
+		// which documents name it, whatever the effect. A policy naming both the
+		// principal and the wildcard is listed once.
+		require.ElementsMatch(t, []did.DID{named, wildcard, both, denied}, got)
+		require.IsIncreasing(t, func() []string {
+			var ids []string
+			for _, r := range recs {
+				ids = append(ids, r.Bucket.String())
+			}
+			return ids
+		}())
+		for _, r := range recs {
+			require.NotEmpty(t, r.ETag)
+			require.NotEmpty(t, r.Policy.Statements)
+		}
+
+		recs, err = s.ListByPrincipal(t.Context(), tenantID, "bob")
+		require.NoError(t, err)
+		got = got[:0]
+		for _, r := range recs {
+			got = append(got, r.Bucket)
+		}
+		require.ElementsMatch(t, []did.DID{wildcard, both, denied, other}, got)
+
+		// A principal named nowhere sees only the wildcard policies.
+		fx.principal(t, tenantID, "carol")
+		recs, err = s.ListByPrincipal(t.Context(), tenantID, "carol")
+		require.NoError(t, err)
+		got = got[:0]
+		for _, r := range recs {
+			got = append(got, r.Bucket)
+		}
+		require.ElementsMatch(t, []did.DID{wildcard, both}, got)
+
+		recs, err = s.ListByPrincipal(t.Context(), tenantID, "alice", store.WithShareLock())
+		require.NoError(t, err)
+		require.Len(t, recs, 4)
+	})
+
+	t.Run("ListByPrincipal isolates by tenant", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice")
+		otherTenant, otherBucket := newBucket(t, "alice")
+		_, err := s.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")), Conditional: true}, nil)
+		require.NoError(t, err)
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{Bucket: otherBucket, Tenant: otherTenant, Policy: doc(allow(only("alice"), "s3:GetObject")), Conditional: true}, nil)
+		require.NoError(t, err)
+
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Len(t, recs, 1)
+		require.Equal(t, bucketID, recs[0].Bucket)
+
+		recs, err = s.ListByPrincipal(t.Context(), testutil.RandomDID(t), "alice")
+		require.NoError(t, err)
+		require.Empty(t, recs)
+	})
+
+	t.Run("Put rewrites the index so a principal dropped from the document is no longer listed", func(t *testing.T) {
+		tenantID, bucketID := newBucket(t, "alice", "bob")
+		etag, err := s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("alice"), "s3:GetObject"), allow(everyone, "s3:GetObject")),
+			Conditional: true,
+		}, nil)
+		require.NoError(t, err)
+
+		_, err = s.Put(t.Context(), bucketpolicystore.Input{
+			Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(only("bob"), "s3:GetObject")), IfMatch: ptr(etag),
+			Conditional: true,
+		}, nil)
+		require.NoError(t, err)
+
+		recs, err := s.ListByPrincipal(t.Context(), tenantID, "alice")
+		require.NoError(t, err)
+		require.Empty(t, recs, "neither the named row nor the wildcard row survives")
+		recs, err = s.ListByPrincipal(t.Context(), tenantID, "bob")
+		require.NoError(t, err)
+		require.Len(t, recs, 1)
+	})
 }
 
-// TestPolicyStorePostgres covers what only the Postgres backend can show: the
+// TestPolicyStorePostgres covers what the store interface does not show: the
 // index rows themselves, referential integrity, and the locking contract the
 // authorizer relies on.
 func TestPolicyStorePostgres(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	s := bucketpolicypostgres.New(pool)
-	fx := &postgresFixtures{pool: pool}
+	fx := &fixtures{pool: pool}
 
 	// indexRows returns the (principal) index rows for a bucket, with the
 	// wildcard row as a nil principal.

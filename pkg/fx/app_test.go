@@ -14,11 +14,6 @@ func validate(cfg *config.Config) error {
 }
 
 func TestAppModuleStorageSelection(t *testing.T) {
-	t.Run("memory", func(t *testing.T) {
-		cfg := &config.Config{Storage: config.StorageConfig{Type: config.StorageTypeMemory}}
-		require.NoError(t, validate(cfg))
-	})
-
 	t.Run("postgres", func(t *testing.T) {
 		cfg := &config.Config{Storage: config.StorageConfig{
 			Type:     config.StorageTypePostgres,
@@ -35,16 +30,19 @@ func TestAppModuleStorageSelection(t *testing.T) {
 		require.NoError(t, validate(cfg))
 	})
 
-	t.Run("unknown type errors", func(t *testing.T) {
-		cfg := &config.Config{Storage: config.StorageConfig{Type: "bogus"}}
-		require.Error(t, validate(cfg))
-	})
+	for _, storageType := range []string{"bogus", "memory"} {
+		t.Run(storageType+" is refused, naming the valid type", func(t *testing.T) {
+			cfg := &config.Config{Storage: config.StorageConfig{Type: storageType}}
+			err := validate(cfg)
+			require.ErrorContains(t, err, `unknown storage.type "`+storageType+`" (valid: postgres)`)
+		})
+	}
 }
 
 func TestAppModuleVaultSelection(t *testing.T) {
 	cfg := func(vaultType string) *config.Config {
 		return &config.Config{
-			Storage: config.StorageConfig{Type: config.StorageTypeMemory},
+			Storage: config.StorageConfig{Type: config.StorageTypePostgres},
 			Vault:   config.VaultConfig{Type: vaultType},
 		}
 	}

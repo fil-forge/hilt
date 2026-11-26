@@ -7,13 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	adminprovider "github.com/fil-forge/hilt/pkg/commands/admin/provider"
 	adminnodes "github.com/fil-forge/hilt/pkg/commands/admin/provider/nodes"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/store"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	routingcmds "github.com/fil-forge/libforge/commands/routing"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
@@ -44,7 +45,8 @@ func TestAddProvider(t *testing.T) {
 	nodes := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}
 
 	t.Run("the service identity registers a provider and its routing policy", func(t *testing.T) {
-		providers, delegations, routing := providermemory.New(), delegationmemory.New(), &fakeRouting{}
+		pool := htestutil.PostgresOrSkip(t)
+		providers, delegations, routing := providerpostgres.New(pool), delegationpostgres.New(pool), &fakeRouting{}
 		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegations, routing,
 			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1", Nodes: nodes})
 		require.NoError(t, err)
@@ -74,8 +76,9 @@ func TestAddProvider(t *testing.T) {
 	})
 
 	t.Run("registers a provider without nodes and without a policy", func(t *testing.T) {
-		providers, routing := providermemory.New(), &fakeRouting{}
-		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
+		pool := htestutil.PostgresOrSkip(t)
+		providers, routing := providerpostgres.New(pool), &fakeRouting{}
+		ok, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationpostgres.New(pool), routing,
 			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1"})
 		require.NoError(t, err)
 		require.NotNil(t, ok)
@@ -87,9 +90,10 @@ func TestAddProvider(t *testing.T) {
 	})
 
 	t.Run("stores no provider when the upload service rejects the policy", func(t *testing.T) {
-		providers := providermemory.New()
+		pool := htestutil.PostgresOrSkip(t)
+		providers := providerpostgres.New(pool)
 		routing := &fakeRouting{err: errors.New("sprue unavailable")}
-		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
+		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationpostgres.New(pool), routing,
 			&adminprovider.AddArguments{Provider: providerID, Region: "us-east-1", Nodes: nodes})
 		require.Error(t, err)
 		_, err = providers.GetByRegion(ctx, "us-east-1")
@@ -97,10 +101,11 @@ func TestAddProvider(t *testing.T) {
 	})
 
 	t.Run("rejects a duplicate provider or region", func(t *testing.T) {
-		providers := providermemory.New()
+		pool := htestutil.PostgresOrSkip(t)
+		providers := providerpostgres.New(pool)
 		routing := &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
-		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
+		_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providers, delegationpostgres.New(pool), routing,
 			&adminprovider.AddArguments{Provider: testutil.RandomDID(t), Region: "us-east-1", Nodes: nodes})
 		require.ErrorIs(t, err, rpc.ErrProviderExists)
 		require.False(t, routing.called)
@@ -112,8 +117,9 @@ func TestAddProvider(t *testing.T) {
 			"missing region":   {Provider: providerID, Nodes: nodes},
 		} {
 			t.Run(name, func(t *testing.T) {
+				pool := htestutil.PostgresOrSkip(t)
 				routing := &fakeRouting{}
-				_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing, args)
+				_, err := rpc.AddProvider(ctx, zap.NewNop(), serviceID, providerpostgres.New(pool), delegationpostgres.New(pool), routing, args)
 				require.ErrorIs(t, err, store.ErrInvalidArgument)
 				require.False(t, routing.called)
 			})
@@ -129,9 +135,10 @@ func TestSetProviderNodes(t *testing.T) {
 	nodes := []did.DID{testutil.RandomDID(t)}
 
 	t.Run("puts the nodes as the provider's policy candidates", func(t *testing.T) {
-		providers, routing := providermemory.New(), &fakeRouting{}
+		pool := htestutil.PostgresOrSkip(t)
+		providers, routing := providerpostgres.New(pool), &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", &policy))
-		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
+		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationpostgres.New(pool), routing,
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.NoError(t, err)
 		require.NotNil(t, ok)
@@ -141,7 +148,8 @@ func TestSetProviderNodes(t *testing.T) {
 	})
 
 	t.Run("issues a policy for a provider that has none", func(t *testing.T) {
-		providers, delegations, routing := providermemory.New(), delegationmemory.New(), &fakeRouting{}
+		pool := htestutil.PostgresOrSkip(t)
+		providers, delegations, routing := providerpostgres.New(pool), delegationpostgres.New(pool), &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
 		ok, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegations, routing,
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
@@ -162,9 +170,10 @@ func TestSetProviderNodes(t *testing.T) {
 	})
 
 	t.Run("records no policy when the upload service rejects the put", func(t *testing.T) {
-		providers := providermemory.New()
+		pool := htestutil.PostgresOrSkip(t)
+		providers := providerpostgres.New(pool)
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", nil))
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), &fakeRouting{err: errors.New("sprue unavailable")},
+		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationpostgres.New(pool), &fakeRouting{err: errors.New("sprue unavailable")},
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.Error(t, err)
 
@@ -174,17 +183,19 @@ func TestSetProviderNodes(t *testing.T) {
 	})
 
 	t.Run("rejects an empty node set", func(t *testing.T) {
-		providers, routing := providermemory.New(), &fakeRouting{}
+		pool := htestutil.PostgresOrSkip(t)
+		providers, routing := providerpostgres.New(pool), &fakeRouting{}
 		require.NoError(t, providers.Add(ctx, providerID, "us-east-1", &policy))
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationmemory.New(), routing,
+		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providers, delegationpostgres.New(pool), routing,
 			&adminnodes.SetArguments{Provider: providerID})
 		require.ErrorIs(t, err, rpc.ErrInvalidNodes)
 		require.False(t, routing.called)
 	})
 
 	t.Run("rejects an unknown provider", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
 		routing := &fakeRouting{}
-		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providermemory.New(), delegationmemory.New(), routing,
+		_, err := rpc.SetProviderNodes(ctx, zap.NewNop(), serviceID, providerpostgres.New(pool), delegationpostgres.New(pool), routing,
 			&adminnodes.SetArguments{Provider: providerID, Nodes: nodes})
 		require.ErrorIs(t, err, rpc.ErrProviderNotFound)
 		require.False(t, routing.called)
@@ -195,14 +206,16 @@ func TestListProviders(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("reports an empty list when no provider is registered", func(t *testing.T) {
-		ok, err := rpc.ListProviders(ctx, zap.NewNop(), providermemory.New(), &adminprovider.ListArguments{})
+		pool := htestutil.PostgresOrSkip(t)
+		ok, err := rpc.ListProviders(ctx, zap.NewNop(), providerpostgres.New(pool), &adminprovider.ListArguments{})
 		require.NoError(t, err)
 		require.NotNil(t, ok.Providers)
 		require.Empty(t, ok.Providers)
 	})
 
 	t.Run("reports every provider with its region and policy, ordered by DID", func(t *testing.T) {
-		providers := providermemory.New()
+		pool := htestutil.PostgresOrSkip(t)
+		providers := providerpostgres.New(pool)
 		ids := []did.DID{testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)}
 		slices.SortFunc(ids, func(a, b did.DID) int { return strings.Compare(a.String(), b.String()) })
 		policy := testutil.RandomDID(t)

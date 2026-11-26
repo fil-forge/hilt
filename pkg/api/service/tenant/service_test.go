@@ -18,15 +18,16 @@ import (
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
-	wrapkeysmemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	wrapkeyspostgres "github.com/fil-forge/hilt/pkg/store/wrapkey/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
@@ -40,6 +41,7 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/ipfs/go-cid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -54,6 +56,7 @@ type provisionEnv struct {
 // *sprueFailed is set.
 func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 
 	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
@@ -91,8 +94,8 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), tenantmemory.New(), bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), plcClient, upload, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), tenantpostgres.New(pool), bucketpostgres.New(pool),
+		accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeyspostgres.New(pool), plcClient, upload, &testutil.FakeSwarf{})
 	return provisionEnv{svc: svc, sprueFailed: sprueFailed}
 }
 
@@ -133,20 +136,21 @@ func TestProvision(t *testing.T) {
 	})
 }
 
-// simpleService builds a service with the given tenant store and no PLC/upload
+// simpleService builds a service over pool with the given tenant store and no PLC/upload
 // clients — enough for Get and SetStatus, which never touch them.
-func simpleService(tenants tenant.Store) *tenantsvc.Service {
-	return tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(),
-		accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeysmemory.New(), nil, nil, &testutil.FakeSwarf{})
+func simpleService(pool *pgxpool.Pool, tenants tenant.Store) *tenantsvc.Service {
+	return tenantsvc.New(zap.NewNop(), tenants, bucketpostgres.New(pool),
+		accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeyspostgres.New(pool), nil, nil, &testutil.FakeSwarf{})
 }
 
 func TestGetAndSetStatus(t *testing.T) {
 	ctx := t.Context()
 
 	newWithTenant := func(t *testing.T) (*tenantsvc.Service, tenant.Store) {
-		tenants := tenantmemory.New()
+		pool := testutil.PostgresOrSkip(t)
+		tenants := tenantpostgres.New(pool)
 		require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", tenant.Active))
-		return simpleService(tenants), tenants
+		return simpleService(pool, tenants), tenants
 	}
 
 	t.Run("get returns the tenant", func(t *testing.T) {
@@ -209,10 +213,10 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type deleteEnv struct {
 	svc        *tenantsvc.Service
-	tenants    *tenantmemory.Store
-	buckets    *bucketmemory.Store
-	policies   *bucketpolicymemory.Store
-	principals *principalmemory.Store
+	tenants    *tenantpostgres.Store
+	buckets    *bucketpostgres.Store
+	policies   *bucketpolicypostgres.Store
+	principals *principalpostgres.Store
 	swarf      *testutil.FakeSwarf
 	// publisher is swarf as the service sees it, recording each publish's deadline.
 	publisher *deadlinePublisher
@@ -228,6 +232,7 @@ type deleteEnv struct {
 
 func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
 
 	signer, err := secp256k1.Generate()
@@ -255,18 +260,19 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	plcClient, err := plc.NewDirectoryClient(*endpoint)
 	require.NoError(t, err)
 
-	tenants := tenantmemory.New()
+	tenants := tenantpostgres.New(pool)
 	secrets := vaultmemory.New()
-	principals := principalmemory.New()
-	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", status))
+	principals := principalpostgres.New(pool)
+	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 
 	// One bucket with a policy, so the cascade over buckets and their policies
 	// is exercised.
-	buckets, policies := bucketmemory.New(), bucketpolicymemory.New()
-	bucketID := testutil.RandomDID(t)
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), "tenant-1-bucket"))
+	buckets, policies := bucketpostgres.New(pool), bucketpolicypostgres.New(pool)
+	bucketID, providerID := testutil.RandomDID(t), testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "region-1", nil))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "tenant-1-bucket"))
 	_, err = policies.Put(ctx, bucketpolicystore.Input{
 		Bucket: bucketID, Tenant: tenantID,
 		Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
@@ -277,7 +283,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	// One access key holding a grant over the bucket, so the revocations the
 	// removal publishes are observable.
-	accessKeys, delegations := accesskeymemory.New(), delegationmemory.New()
+	accessKeys, delegations := accesskeypostgres.New(pool), delegationpostgres.New(pool)
 	keyID := testutil.RandomDID(t)
 	require.NoError(t, accessKeys.Add(ctx, accesskeystore.Input{ID: keyID, Tenant: tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 	held, err := grant.Issue(multikey.NewIssuer(tenantID, signer), keyID, []did.DID{bucketID}, []string{"s3:GetObject"}, nil)
@@ -288,10 +294,13 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 		grants = append(grants, d.Link())
 	}
 
+	// The status is set once the key exists: a disabled tenant takes no new key.
+	require.NoError(t, tenants.SetStatus(ctx, tenantID, status))
+
 	swarf := &testutil.FakeSwarf{}
 	publisher := &deadlinePublisher{FakeSwarf: swarf}
 	svc := tenantsvc.New(zap.NewNop(), tenants, buckets,
-		accessKeys, principals, policies, delegations, secrets, wrapkeysmemory.New(), plcClient, nil, publisher)
+		accessKeys, principals, policies, delegations, secrets, wrapkeyspostgres.New(pool), plcClient, nil, publisher)
 	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
 		principals: principals, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
 		tombstone: tombstoneJSON.Bytes()}

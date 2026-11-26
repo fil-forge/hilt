@@ -67,8 +67,8 @@ type Store interface {
 	TenantEgress(ctx context.Context, tenant did.DID, from, to time.Time) ([]HourlyEgress, error)
 }
 
-// Validate checks the counts of one report as [Store.SetEgress] states. It is
-// shared by the backends so they refuse the same reports.
+// Validate checks the counts of one report as [Store.SetEgress] states. The
+// store applies it before writing.
 func Validate(provider did.DID, counts []EgressCount) error {
 	if provider == did.Undef {
 		return invalid("provider is required")

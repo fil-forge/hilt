@@ -13,12 +13,12 @@ import (
 	"github.com/fil-forge/hilt/pkg/api"
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/client/upload"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	usagestore "github.com/fil-forge/hilt/pkg/store/usage"
-	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
+	usagepostgres "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
 	"github.com/fil-forge/ucantone/did"
@@ -46,23 +46,26 @@ func (f *fakeSampler) SampleUsage(_ context.Context, space did.DID, _, _ time.Ti
 }
 
 type metricsDeps struct {
-	tenants     *tenantmemory.Store
-	buckets     *bucketmemory.Store
+	providerID  did.DID // the provider every bucket is placed with
+	tenants     *tenantpostgres.Store
+	buckets     *bucketpostgres.Store
 	vault       *vaultmemory.Store
 	sampler     *fakeSampler
-	delegations *delegationmemory.Store
-	usage       *usagememory.Store
+	delegations *delegationpostgres.Store
+	usage       *usagepostgres.Store
 }
 
 func newMetricsDeps(t *testing.T) *metricsDeps {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	return &metricsDeps{
-		tenants:     tenantmemory.New(),
-		buckets:     bucketmemory.New(),
+		providerID:  addProvider(t, pool),
+		tenants:     tenantpostgres.New(pool),
+		buckets:     bucketpostgres.New(pool),
 		vault:       vaultmemory.New(),
 		sampler:     &fakeSampler{series: map[did.DID][]metricscmds.SampleItem{}},
-		delegations: delegationmemory.New(),
-		usage:       usagememory.New(),
+		delegations: delegationpostgres.New(pool),
+		usage:       usagepostgres.New(pool),
 	}
 }
 
@@ -90,7 +93,7 @@ func addMetricsTenant(t *testing.T, d *metricsDeps, externalID string, bucketNam
 	ids := make([]did.DID, 0, len(bucketNames))
 	for _, name := range bucketNames {
 		id := testutil.RandomDID(t)
-		require.NoError(t, d.buckets.Add(ctx, id, tenantID, testutil.RandomDID(t), name))
+		require.NoError(t, d.buckets.Add(ctx, id, tenantID, d.providerID, name))
 		ids = append(ids, id)
 	}
 	return ids

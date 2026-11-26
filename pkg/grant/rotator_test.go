@@ -13,9 +13,12 @@ import (
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -31,8 +34,8 @@ import (
 
 type deps struct {
 	rotator     *grant.Rotator
-	delegations *delegationmemory.Store
-	accessKeys  *accesskeymemory.Store
+	delegations *delegationpostgres.Store
+	accessKeys  *accesskeypostgres.Store
 	secrets     *vaultmemory.Store
 	swarf       *htestutil.FakeSwarf
 	tenant      ucan.Issuer
@@ -46,13 +49,19 @@ type deps struct {
 func setup(t *testing.T, expiresAt *time.Time) deps {
 	t.Helper()
 	ctx := t.Context()
-	accessKeys, delegations, secrets := accesskeymemory.New(), delegationmemory.New(), vaultmemory.New()
+	pool := htestutil.PostgresOrSkip(t)
+	accessKeys, delegations, secrets := accesskeypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New()
 
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
 	tenant := multikey.NewIssuer(tenantID, signer)
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	// A key's tenant and principal must exist.
+	require.NoError(t, tenantpostgres.New(pool).Add(ctx, tenantID, "tenant-1", tenantstore.Active))
+	for _, principal := range []string{"alice", "bob"} {
+		require.NoError(t, principalpostgres.New(pool).Add(ctx, tenantID, principal))
+	}
 
 	d := deps{
 		delegations: delegations,
@@ -285,8 +294,9 @@ func TestRotate(t *testing.T) {
 		d := setup(t, nil)
 		gone, kept := d.alice[0], d.alice[1]
 		// The key goes between the rotation's listing and its lock, as a
-		// concurrent removal holding the lock first would have it.
-		dels := &deleteOnReplace{Store: d.delegations, del: func(ctx context.Context) error { return d.accessKeys.Delete(ctx, gone) }}
+		// concurrent removal holding the lock first would have it. The delete
+		// commits on its own, outside the transaction the callback's ctx carries.
+		dels := &deleteOnReplace{Store: d.delegations, del: func(context.Context) error { return d.accessKeys.Delete(ctx, gone) }}
 		rotator := grant.NewRotator(zap.NewNop(), dels, d.accessKeys, d.secrets, d.swarf)
 		require.NoError(t, rotator.Rotate(ctx, d.tenant.DID(), d.photos, map[string][]string{"alice": {"s3:PutObject"}}))
 

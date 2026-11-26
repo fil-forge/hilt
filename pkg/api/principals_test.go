@@ -14,13 +14,14 @@ import (
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -28,33 +29,37 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 type principalDeps struct {
-	principals  *principalmemory.Store
-	policies    *bucketpolicymemory.Store
-	accessKeys  *accesskeymemory.Store
+	pool        *pgxpool.Pool
+	principals  *principalpostgres.Store
+	policies    *bucketpolicypostgres.Store
+	accessKeys  *accesskeypostgres.Store
 	vault       *vaultmemory.Store
-	delegations *delegationmemory.Store
+	delegations *delegationpostgres.Store
 	revocations *testutil.FakeSwarf
 	tenantID    did.DID // "tenant-1"
 	tenant      ucan.Issuer
 }
 
-// setupPrincipals serves every principal route over memory stores with two
+// setupPrincipals serves every principal route over a test database with two
 // tenants.
 func setupPrincipals(t *testing.T) (*echo.Echo, *principalDeps) {
 	t.Helper()
-	tenants := tenantmemory.New()
+	pool := testutil.PostgresOrSkip(t)
+	tenants := tenantpostgres.New(pool)
 	deps := &principalDeps{
-		principals:  principalmemory.New(),
-		policies:    bucketpolicymemory.New(),
-		accessKeys:  accesskeymemory.New(),
+		pool:        pool,
+		principals:  principalpostgres.New(pool),
+		policies:    bucketpolicypostgres.New(pool),
+		accessKeys:  accesskeypostgres.New(pool),
 		vault:       vaultmemory.New(),
-		delegations: delegationmemory.New(),
+		delegations: delegationpostgres.New(pool),
 		revocations: &testutil.FakeSwarf{},
 		tenantID:    testutil.RandomDID(t),
 	}
@@ -245,6 +250,7 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		createPrincipal(t, e, "user-1")
 		keyID := addPrincipalKey(t, deps, "user-1", "laptop")
 		bucket := testutil.RandomDID(t)
+		require.NoError(t, bucketpostgres.New(deps.pool).Add(ctx, bucket, deps.tenantID, addProvider(t, deps.pool), "photos"))
 		_, err := deps.policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucket,
 			Tenant: deps.tenantID,

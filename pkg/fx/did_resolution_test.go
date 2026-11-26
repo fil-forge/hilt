@@ -13,7 +13,6 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
-	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
 	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
@@ -36,7 +35,7 @@ const notPermitted = "DID resolution is permitted for registered providers only"
 var listCommand = s3bkt.List.Command
 
 // hilt is the app's HTTP server as deployed: the UCAN RPC server mounted at
-// the unauthenticated POST /, over in-memory backends, resolving did:web over
+// the unauthenticated POST /, over a test database and the in-memory vault, resolving did:web over
 // plain HTTP so a test listener can stand in for a caller's host.
 type hilt struct {
 	url       *url.URL
@@ -46,9 +45,10 @@ type hilt struct {
 
 func newHilt(t *testing.T) hilt {
 	t.Helper()
+	storage, stores := testStorage(t)
 	cfg := &config.Config{
 		Server:     config.ServerConfig{InsecureDIDResolution: true},
-		Storage:    config.StorageConfig{Type: config.StorageTypeMemory},
+		Storage:    storage,
 		Vault:      config.VaultConfig{Type: config.VaultTypeMemory},
 		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test", ProductID: testutil.RandomDID(t).String()},
 		Revocation: config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
@@ -63,7 +63,7 @@ func newHilt(t *testing.T) hilt {
 		appfx.RevocationModule,
 		appfx.APIModule,
 		appfx.RPCModule,
-		storememory.Module,
+		stores,
 		vaultmemory.Module,
 		fx.NopLogger,
 		fx.Decorate(func(*zap.Logger) *zap.Logger { return zap.NewNop() }),

@@ -66,7 +66,7 @@ type Store interface {
 
 // CheckReplacement refuses a replacement that holds a nil delegation or one
 // filed under an audience other than its own, which would be written under an
-// audience the call did not lock. Both backends call it after next returns.
+// audience the call did not lock. The store calls it after next returns.
 func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delegation) error {
 	for _, aud := range audiences {
 		for _, d := range replacement[aud] {

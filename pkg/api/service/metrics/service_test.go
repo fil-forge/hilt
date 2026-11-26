@@ -10,11 +10,12 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/client/upload"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
-	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	usagepostgres "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
@@ -43,7 +44,7 @@ type sampled struct {
 	series map[did.DID][]metricscmds.SampleItem
 }
 
-// setup wires the metrics service over memory stores against an in-process Sprue
+// setup wires the metrics service against an in-process Sprue
 // that serves /metrics/sample, mirroring production: one tenant whose secp256k1
 // key is in the vault, owning two buckets, each of which has issued the
 // tenant top authority over itself. That root lives only in the delegation store, as
@@ -51,20 +52,23 @@ type sampled struct {
 // static set loaded from config and never contain it.
 func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DID, did.DID, *sampled) {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
-	tenants, buckets := tenantmemory.New(), bucketmemory.New()
-	delegations, secrets := delegationmemory.New(), vaultmemory.New()
+	tenants, buckets := tenantpostgres.New(pool), bucketpostgres.New(pool)
+	delegations, secrets := delegationpostgres.New(pool), vaultmemory.New()
 
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "region-1", nil))
 
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), "bucket-a"))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "bucket-a"))
 	root, err := delegation.Delegate(
 		multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)
@@ -73,7 +77,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 	bucketBSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketBID := bucketBSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketBID, tenantID, testutil.RandomDID(t), "bucket-b"))
+	require.NoError(t, buckets.Add(ctx, bucketBID, tenantID, providerID, "bucket-b"))
 	rootB, err := delegation.Delegate(
 		multikey.NewIssuer(bucketBID, bucketBSigner), tenantID, bucketBID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)
@@ -110,7 +114,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	return metricssvc.New(zap.NewNop(), tenants, buckets, secrets, client, delegations, usagememory.New(), opts...), bucketID, bucketBID, seen
+	return metricssvc.New(zap.NewNop(), tenants, buckets, secrets, client, delegations, usagepostgres.New(pool), opts...), bucketID, bucketBID, seen
 }
 
 // A bucket's proof chain is rooted in the delegation the bucket issued at

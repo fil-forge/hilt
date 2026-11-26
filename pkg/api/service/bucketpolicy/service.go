@@ -161,7 +161,7 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 			return err
 		}
 		// A principal removed since the validation above must not be named in
-		// the committed document. The memory store checks no principals itself.
+		// the committed document.
 		named, _ := bucketpolicy.Named(doc)
 		for _, p := range named {
 			if !slices.Contains(principals, p) {

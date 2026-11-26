@@ -10,11 +10,8 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Valid values for StorageConfig.Type.
-const (
-	StorageTypeMemory   = "memory"
-	StorageTypePostgres = "postgres"
-)
+// StorageTypePostgres is the one valid value for StorageConfig.Type.
+const StorageTypePostgres = "postgres"
 
 // Valid values for VaultConfig.Type.
 const (
@@ -112,7 +109,7 @@ type PLCConfig struct {
 
 // StorageConfig selects and configures the store backend.
 type StorageConfig struct {
-	// Type selects the backend: "memory" or "postgres". Defaults to "postgres".
+	// Type names the backend. "postgres" is the only one, and the default.
 	Type     string         `mapstructure:"type"`
 	Postgres PostgresConfig `mapstructure:"postgres"`
 }

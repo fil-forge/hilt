@@ -392,7 +392,7 @@ func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) (err error
 // command to prove the child's command (the segment-boundary prefix test from
 // command.Command.Proves). A delegation whose subject equals its issuer is the
 // trust root and terminates a path. The shortest complete path is returned
-// root-first, mirroring the in-memory store's use of libforge's ProofChain.
+// root-first, as libforge's ProofChain returns it.
 func (s *Store) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
 	if !sub.Defined() {
 		return nil, nil, fmt.Errorf("missing proof chain subject: %w", store.ErrInvalidArgument)
