@@ -56,30 +56,23 @@ func TestCommandsFor(t *testing.T) {
 		require.Contains(t, strs("s3:PutObject"), "/blob/remove")
 	})
 
-	t.Run("the write path can retire a superseded version", func(t *testing.T) {
-		// The same overwrite retires the replaced version's content entry with
-		// /upload/remove, so the space's object count holds instead of climbing
-		// with every overwrite.
-		require.Contains(t, strs("s3:PutObject"), "/upload/remove")
+	t.Run("no write registers a version with the upload service", func(t *testing.T) {
+		// The gateway counts its own objects and reports them itself, so an
+		// overwrite, a delete marker and a deleted version need no
+		// /upload/add or /upload/remove.
+		for _, p := range []string{"s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:AbortMultipartUpload"} {
+			require.NotContains(t, strs(p), "/upload/add", p)
+			require.NotContains(t, strs(p), "/upload/remove", p)
+		}
 	})
 
-	t.Run("a delete registers the delete marker it writes", func(t *testing.T) {
-		// A delete with no version id may write a delete marker, which is a
-		// version and is counted as one, so it has to be registrable — and it
-		// changes the catalog, so it owes the ship that change costs.
-		require.ElementsMatch(t,
-			[]string{"/blob/remove", "/upload/add", "/upload/remove", "/blob/add", "/index/add", "/content/retrieve"},
-			strs("s3:DeleteObject"))
-	})
-
-	t.Run("deleting one version registers nothing", func(t *testing.T) {
-		// A version-scoped delete mints no version, so it has nothing to
-		// register and does not hold the grant to. It still changes the
-		// catalog, so it still owes the ship.
-		require.ElementsMatch(t,
-			[]string{"/blob/remove", "/upload/remove", "/blob/add", "/index/add", "/content/retrieve"},
-			strs("s3:DeleteObjectVersion"))
-		require.NotContains(t, strs("s3:DeleteObjectVersion"), "/upload/add")
+	t.Run("a delete releases a body and ships the catalog change", func(t *testing.T) {
+		// A delete, of the current version or of one named, releases the
+		// removed version's blobs and changes the catalog, so it owes the
+		// ship that change costs.
+		want := []string{"/blob/remove", "/blob/add", "/index/add", "/content/retrieve"}
+		require.ElementsMatch(t, want, strs("s3:DeleteObject"))
+		require.ElementsMatch(t, want, strs("s3:DeleteObjectVersion"))
 	})
 
 	t.Run("setting a lock ships the catalog change it makes", func(t *testing.T) {
@@ -90,7 +83,6 @@ func TestCommandsFor(t *testing.T) {
 		require.ElementsMatch(t, want, strs("s3:PutObjectRetention"))
 		require.ElementsMatch(t, want, strs("s3:PutObjectLegalHold"))
 		for _, p := range []string{"s3:PutObjectRetention", "s3:PutObjectLegalHold"} {
-			require.NotContains(t, strs(p), "/upload/add", p)
 			require.NotContains(t, strs(p), "/blob/remove", p)
 		}
 	})
@@ -112,18 +104,11 @@ func TestCommandsFor(t *testing.T) {
 	})
 
 	t.Run("deleting a bucket unwinds the blobs its space holds", func(t *testing.T) {
-		// Parked parts are abandoned, everything else the space still
-		// registers is released, and the retractions the emptying owed are
-		// applied before the space goes — nothing else would ever send them.
+		// Parked parts are abandoned and everything else the space still
+		// registers is released.
 		require.ElementsMatch(t,
-			[]string{"/blob/abort", "/blob/remove", "/upload/remove"},
+			[]string{"/blob/abort", "/blob/remove"},
 			strs("s3:DeleteBucket"))
-	})
-
-	t.Run("abandoning a multipart upload retracts nothing", func(t *testing.T) {
-		// It never committed a version, so it has no content entry to retract
-		// and no reason to hold /upload/remove.
-		require.NotContains(t, strs("s3:AbortMultipartUpload"), "/upload/remove")
 	})
 
 	t.Run("deduplicates across permissions, preserving first-seen order", func(t *testing.T) {

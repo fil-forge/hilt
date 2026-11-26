@@ -2,10 +2,11 @@
 // the storage, ingress and egress series a tenant or one of its buckets accrued
 // over a range of time.
 //
-// The storage and ingress readings come from the upload service (Sprue), which
+// The bytes stored and ingested come from the upload service (Sprue), which
 // holds them per space. A bucket is a space, so a bucket's series is one call; a
-// tenant's is the sum of its buckets'. Egress comes from the counts the
-// gateways report, which this service stores itself (see pkg/store/usage). It returns the known errors in errors.go so handlers can map
+// tenant's is the sum of its buckets'. Egress and object counts come from the
+// counts the gateways report, which this service stores itself (see
+// pkg/store/usage). It returns the known errors in errors.go so handlers can map
 // them to HTTP responses; unexpected failures are returned wrapped for the
 // handler to log.
 package metrics
@@ -60,7 +61,10 @@ type Sample struct {
 	BytesStored uint64
 	// BytesIngested is the bytes written during the bucket.
 	BytesIngested uint64
-	// ObjectCount is the objects held as of End.
+	// ObjectCount is the objects held as of End, as the gateway serving the
+	// bucket last reported for an hour starting before End. It is by the
+	// hour: an End part way through an hour reads what the gateway has
+	// reported of that hour so far.
 	ObjectCount uint64
 }
 
@@ -379,6 +383,11 @@ func egressSeries(hours []usagestore.HourlyEgress, from, end time.Time, window t
 // issued when it was created, which lives in the delegation store. The client's
 // own proofs are the static set loaded from configuration and hold nothing about
 // a bucket, so the store has to be named per call.
+//
+// The upload service gives the grid and the bytes. The objects are laid onto
+// that grid from the gateway's reports. The upload service counts uploads
+// too, which the gateway does not register its objects as, so that count is
+// not read.
 func (s *Service) sample(ctx context.Context, issuer ucan.Issuer, space did.DID, from, to time.Time, window time.Duration) ([]Sample, error) {
 	ok, err := s.uploads.SampleUsage(ctx, space, from, to, window,
 		upload.WithIssuer(issuer), upload.WithProofs(s.delegations))
@@ -391,10 +400,32 @@ func (s *Service) sample(ctx context.Context, issuer ucan.Issuer, space did.DID,
 			End:           time.Unix(item.Timestamp, 0).UTC(),
 			BytesStored:   item.BytesStored,
 			BytesIngested: item.BytesIngested,
-			ObjectCount:   item.UploadCount,
 		})
 	}
+	if len(samples) == 0 {
+		return samples, nil
+	}
+	hours, err := s.usage.BucketObjects(ctx, space, from, samples[len(samples)-1].End)
+	if err != nil {
+		return nil, fmt.Errorf("reading bucket objects: %w", err)
+	}
+	holdObjects(samples, hours)
 	return samples, nil
+}
+
+// holdObjects sets each sample's object count from hourly totals, both
+// ascending: a sample holds what the latest hour starting before its end
+// says, and nothing when there is no such hour.
+func holdObjects(samples []Sample, hours []usagestore.HourlyObjects) {
+	next := 0
+	var held uint64
+	for i := range samples {
+		for next < len(hours) && hours[next].Hour.Before(samples[i].End) {
+			held = hours[next].Held()
+			next++
+		}
+		samples[i].ObjectCount = held
+	}
 }
 
 // sum folds the buckets' series into the tenant's. Each bucket holds its own

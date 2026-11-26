@@ -115,6 +115,11 @@ func TestUsageStore(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []usage.HourlyEgress{{Hour: h1, Bytes: 2}, {Hour: h2, Bytes: 4}}, got)
 
+		// The bounds are instants, so part of a second counts.
+		got, err = s.BucketEgress(t.Context(), bucket, h0.Add(time.Millisecond), h2.Add(time.Millisecond))
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyEgress{{Hour: h1, Bytes: 2}, {Hour: h2, Bytes: 4}}, got)
+
 		got, err = s.BucketEgress(t.Context(), bucket, h2.Add(time.Hour), h2.Add(2*time.Hour))
 		require.NoError(t, err)
 		require.Empty(t, got)
@@ -216,5 +221,136 @@ func TestUsageStore(t *testing.T) {
 		got, err = s.BucketEgress(t.Context(), kept, h0, h1)
 		require.NoError(t, err)
 		require.Equal(t, []usage.HourlyEgress{{Hour: h0, Bytes: 7}}, got)
+	})
+
+	t.Run("an hour keeps the largest of each object total reported for it", func(t *testing.T) {
+		provider, tenantID, bucket := f.seedProvider(t), f.seedTenant(t), testutil.RandomDID(t)
+		first := []usage.ObjectCount{{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: 10, Removed: 4}}
+		require.NoError(t, s.SetObjects(t.Context(), provider, first))
+		// Repeating a report changes nothing.
+		require.NoError(t, s.SetObjects(t.Context(), provider, first))
+		got, err := s.BucketObjects(t.Context(), bucket, h0, h1)
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{{Hour: h0, Added: 10, Removed: 4}}, got)
+
+		// The hour goes on, and each total that grew takes the old one's place.
+		require.NoError(t, s.SetObjects(t.Context(), provider, []usage.ObjectCount{
+			{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: 12, Removed: 9},
+		}))
+		// An older report arriving late changes nothing, while
+		// another hour in the same report is still stored.
+		require.NoError(t, s.SetObjects(t.Context(), provider, []usage.ObjectCount{
+			{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: 11, Removed: 4},
+			{Bucket: bucket, Tenant: tenantID, Hour: h1, Added: 13, Removed: 9},
+		}))
+		// Totals are kept apart: one that grew is stored beside one that did not.
+		require.NoError(t, s.SetObjects(t.Context(), provider, []usage.ObjectCount{
+			{Bucket: bucket, Tenant: tenantID, Hour: h1, Added: 2, Removed: 10},
+		}))
+		got, err = s.BucketObjects(t.Context(), bucket, h0, h2)
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{
+			{Hour: h0, Added: 12, Removed: 9},
+			{Hour: h1, Added: 13, Removed: 10},
+		}, got)
+	})
+
+	t.Run("a bucket's objects open with the latest hour before the range", func(t *testing.T) {
+		provider, tenantID := f.seedProvider(t), f.seedTenant(t)
+		bucket, other := testutil.RandomDID(t), testutil.RandomDID(t)
+		long := h0.Add(-90 * 24 * time.Hour)
+		require.NoError(t, s.SetObjects(t.Context(), provider, []usage.ObjectCount{
+			{Bucket: bucket, Tenant: tenantID, Hour: long, Added: 1},
+			{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: 5, Removed: 1},
+			{Bucket: bucket, Tenant: tenantID, Hour: h1, Added: 6, Removed: 1},
+			{Bucket: bucket, Tenant: tenantID, Hour: h2, Added: 9, Removed: 3},
+			{Bucket: other, Tenant: tenantID, Hour: h1, Added: 1000},
+		}))
+
+		// Only the latest of the hours before the range comes with it.
+		got, err := s.BucketObjects(t.Context(), bucket, h1, h2)
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{
+			{Hour: h0, Added: 5, Removed: 1},
+			{Hour: h1, Added: 6, Removed: 1},
+		}, got)
+
+		// A range in which the bucket did not change still says what it held.
+		got, err = s.BucketObjects(t.Context(), bucket, h0.Add(-2*time.Hour), h0.Add(-time.Hour))
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{{Hour: long, Added: 1}}, got)
+
+		// A range starting part way through an hour opens with that hour.
+		got, err = s.BucketObjects(t.Context(), bucket, h2.Add(time.Minute), h2.Add(time.Hour))
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{{Hour: h2, Added: 9, Removed: 3}}, got)
+
+		// A range ending part way through a second takes in the hour
+		// that starts on that second.
+		got, err = s.BucketObjects(t.Context(), bucket, h1, h2.Add(time.Millisecond))
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{
+			{Hour: h0, Added: 5, Removed: 1},
+			{Hour: h1, Added: 6, Removed: 1},
+			{Hour: h2, Added: 9, Removed: 3},
+		}, got)
+
+		// Nothing was reported before the bucket's first hour.
+		got, err = s.BucketObjects(t.Context(), bucket, long.Add(-2*time.Hour), long)
+		require.NoError(t, err)
+		require.Empty(t, got)
+	})
+
+	t.Run("refuses object counts it cannot store, and stores none of them", func(t *testing.T) {
+		provider, tenantID, bucket := f.seedProvider(t), f.seedTenant(t), testutil.RandomDID(t)
+		good := usage.ObjectCount{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: 10}
+		for name, bad := range map[string]usage.ObjectCount{
+			"no bucket":         {Tenant: tenantID, Hour: h1, Added: 1},
+			"no tenant":         {Bucket: bucket, Hour: h1, Added: 1},
+			"part of an hour":   {Bucket: bucket, Tenant: tenantID, Hour: h1.Add(time.Second), Added: 1},
+			"added too large":   {Bucket: bucket, Tenant: tenantID, Hour: h1, Added: usage.MaxObjects + 1},
+			"removed too large": {Bucket: bucket, Tenant: tenantID, Hour: h1, Removed: usage.MaxObjects + 1},
+			"named twice":       good,
+		} {
+			err := s.SetObjects(t.Context(), provider, []usage.ObjectCount{good, bad})
+			require.ErrorIs(t, err, store.ErrInvalidArgument, name)
+		}
+		require.ErrorIs(t, s.SetObjects(t.Context(), did.Undef, []usage.ObjectCount{good}), store.ErrInvalidArgument)
+
+		got, err := s.BucketObjects(t.Context(), bucket, h0, h2)
+		require.NoError(t, err)
+		require.Empty(t, got)
+	})
+
+	t.Run("accepts no object counts, the largest, and more lost than gained", func(t *testing.T) {
+		provider, tenantID, bucket := f.seedProvider(t), f.seedTenant(t), testutil.RandomDID(t)
+		require.NoError(t, s.SetObjects(t.Context(), provider, nil))
+		require.NoError(t, s.SetObjects(t.Context(), provider, []usage.ObjectCount{
+			{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: usage.MaxObjects, Removed: usage.MaxObjects},
+			{Bucket: bucket, Tenant: tenantID, Hour: h1, Added: 1, Removed: 3},
+		}))
+		got, err := s.BucketObjects(t.Context(), bucket, h0, h2)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Zero(t, got[0].Held())
+		// More lost than gained is stored as reported and read as nothing held.
+		require.Equal(t, usage.HourlyObjects{Hour: h1, Added: 1, Removed: 3}, got[1])
+		require.Zero(t, got[1].Held())
+	})
+
+	t.Run("a tenant's object counts go when the tenant does", func(t *testing.T) {
+		provider, tenantID, bucket := f.seedProvider(t), f.seedTenant(t), testutil.RandomDID(t)
+		other, kept := f.seedTenant(t), testutil.RandomDID(t)
+		require.NoError(t, s.SetObjects(t.Context(), provider, []usage.ObjectCount{
+			{Bucket: bucket, Tenant: tenantID, Hour: h0, Added: 10},
+			{Bucket: kept, Tenant: other, Hour: h0, Added: 7},
+		}))
+		f.dropTenant(t, tenantID)
+		got, err := s.BucketObjects(t.Context(), bucket, h0, h1)
+		require.NoError(t, err)
+		require.Empty(t, got)
+		got, err = s.BucketObjects(t.Context(), kept, h0, h1)
+		require.NoError(t, err)
+		require.Equal(t, []usage.HourlyObjects{{Hour: h0, Added: 7}}, got)
 	})
 }

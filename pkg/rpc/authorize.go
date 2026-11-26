@@ -13,7 +13,6 @@ import (
 	"github.com/fil-forge/libforge/commands/blob"
 	s3 "github.com/fil-forge/libforge/commands/s3"
 	s3req "github.com/fil-forge/libforge/commands/s3/request"
-	"github.com/fil-forge/libforge/commands/upload"
 	"github.com/fil-forge/ucantone/binding"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
@@ -189,9 +188,8 @@ func AuthorizeRequest(
 
 // cleanupCommands are the Forge commands a gateway runs long after the request
 // that caused them: releasing blobs a delete or overwrite left unreferenced,
-// abandoning blobs an upload never committed, and retracting a superseded
-// version's registration.
-var cleanupCommands = []ucan.Command{blob.Remove.Command, blob.Abort.Command, upload.Remove.Command}
+// and abandoning blobs an upload never committed.
+var cleanupCommands = []ucan.Command{blob.Remove.Command, blob.Abort.Command}
 
 // CleanupLifetime is how long the cleanup delegations last, counted from the
 // end of the day the gateway reuses them for. The gateway's longest delay
