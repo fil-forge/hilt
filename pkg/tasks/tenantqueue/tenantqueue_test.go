@@ -263,8 +263,8 @@ func (w *world) awaitPublished(t *testing.T) {
 		"the revocations owed were not published")
 }
 
-// stray stores a grant for the key that no task issued, as a policy write
-// holding the key's delegation lock would, and returns it.
+// stray stores a grant for the key that its creation did not issue, and
+// returns it.
 func (w *world) stray(t *testing.T, key did.DID) ucan.Delegation {
 	t.Helper()
 	dels, err := grant.Issue(w.tenant, key, []did.DID{w.bucket}, []string{"s3:DeleteObject"}, nil)

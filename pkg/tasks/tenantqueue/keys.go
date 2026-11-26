@@ -158,17 +158,19 @@ func (q *Queue) runCreateKey(ctx context.Context, ex *taskrunner.Exec, t taskrun
 // ([ErrKeyNameTaken]), a principal the tenant does not have
 // ([ErrUnknownPrincipal]) and a bucket it does not have
 // ([*UnknownBucketError]). The tenant's other key creations, its key
-// deletions and its status changes are tasks on the same subject, so none
-// runs between these reads and the commit, and the reads decide.
+// deletions, its policy writes and its status changes are tasks on the same
+// subject, so none runs between these reads and the commit, and the reads
+// decide.
 //
-// Policy writes and principal removal are not tasks, and either can commit
+// Principal removal and bucket deletion are not tasks, and either can commit
 // between the reads and the commit. For a principal-bound key the commit
 // therefore opens with two conditions, and runs the task again when one
 // fails: the principal is still live, checked under a share lock on its row
 // (principal.Store.RequireLiveStatement), and the policies naming it are
 // still the ones the grants were issued from
-// (bucketpolicy.Store.RequireUnchangedStatement). A service key's grants
-// come from its own arguments and need neither.
+// (bucketpolicy.Store.RequireUnchangedStatement), which a removal rewrites
+// and a bucket's deletion takes away. A service key's grants come from its
+// own arguments and need neither.
 func (q *Queue) createKey(ctx context.Context, ex *taskrunner.Exec, t taskrunner.Task) error {
 	tenantID, err := did.Parse(t.Subject)
 	if err != nil {
@@ -232,8 +234,8 @@ func (q *Queue) createKey(ctx context.Context, ex *taskrunner.Exec, t taskrunner
 	}
 
 	if key.Principal != nil {
-		// The principal's lock comes first: the check of the policies
-		// depends on holding it.
+		// The principal's row is locked first: a removal that holds it is
+		// waited for before the policies are compared.
 		live := q.principals.RequireLiveStatement(tenantID, *key.Principal)
 		if err := ex.WriteConditional(ctx, live.SQL, live.Args...); err != nil {
 			return err
@@ -321,11 +323,10 @@ func (q *Queue) checkBuckets(ctx context.Context, tenantID did.DID, ids []did.DI
 // alone and the task succeeds, which is also what a second run of a task
 // that committed does.
 //
-// The grants are chosen by the commit's statements under the key's
-// delegation lock (delegation.Store.WithdrawGrantsOfKeyStatements), so those
-// a policy write stores for the key beside the task are withdrawn with the
-// rest. A principal removal that deletes the key first leaves the commit
-// nothing to do.
+// The grants are chosen by the commit's statement
+// (delegation.Store.WithdrawGrantsOfKeyStatement), so the task withdraws
+// what the key holds when it commits. A principal removal that revokes the
+// key's grants and deletes the key first leaves the commit nothing to do.
 func (q *Queue) runDeleteKey(ctx context.Context, ex *taskrunner.Exec, t taskrunner.Task) ([]byte, error) {
 	tenantID, err := did.Parse(t.Subject)
 	if err != nil {
@@ -343,14 +344,13 @@ func (q *Queue) runDeleteKey(ctx context.Context, ex *taskrunner.Exec, t taskrun
 		return nil, fmt.Errorf("looking up the access key: %w", err)
 	}
 
-	for _, st := range q.delegations.WithdrawGrantsOfKeyStatements(tenantID, keyID) {
+	for _, st := range []store.Statement{
+		q.delegations.WithdrawGrantsOfKeyStatement(tenantID, keyID),
+		q.accessKeys.DeleteStatement(tenantID, keyID),
+	} {
 		if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
 			return nil, err
 		}
-	}
-	st := q.accessKeys.DeleteStatement(tenantID, keyID)
-	if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-		return nil, err
 	}
 	// How many grants the commit withdraws is not known here, so the publish
 	// is queued either way and finds nothing when none were.

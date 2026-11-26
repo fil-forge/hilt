@@ -3,8 +3,6 @@ package grant
 import (
 	"context"
 	"fmt"
-	"maps"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
@@ -17,16 +15,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// BatchTimeout caps one Rotate or Revoke call, which covers every key the
-// write touches. A policy write rotates the keys of each principal whose
-// actions changed, the wildcard fanning out to all of the tenant's, and a
-// principal removal revokes each of its keys' delegations; both hold a row
-// lock throughout, while a share-locked reader of that row gives up after
-// [store.LockTimeout]. Each call shortens its ctx to this deadline, below the
-// reader's bound (an earlier caller deadline still wins), so a large batch or
-// a stalled publish cannot lock the data path out. [PublishRevocations] applies
-// the same bound, so every publish made under a delegation lock, a bucket
-// deletion's and a tenant removal's included, has it.
+// BatchTimeout caps one Revoke call, which covers every key of the principal
+// being removed, and every publish made under a delegation lock. A principal
+// removal revokes each of its keys' delegations while it holds a row lock,
+// and a share-locked reader of that row gives up after [store.LockTimeout].
+// Revoke shortens its ctx to this deadline, below the reader's bound (an
+// earlier caller deadline still wins), so a large batch or a stalled publish
+// cannot lock the data path out. [PublishRevocations] applies the same bound,
+// so every publish made under a delegation lock, a bucket deletion's and a
+// tenant removal's included, has it.
 const BatchTimeout = 8 * time.Second
 
 // The batch bound must stay below the reader's; a negative difference fails
@@ -44,11 +41,12 @@ type RevocationPublisher interface {
 	PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error
 }
 
-// Rotator rewrites the stored delegations of principal-bound access keys as
-// the bucket policies change. The delegations a change replaces are revoked
-// through the revocation service, which makes the gateway drop what it cached
-// for the key, and the whole rewrite runs under the keys' delegation locks so
-// a concurrent rotation or deletion of one of the keys serializes behind it.
+// Rotator revokes the stored delegations of a principal's access keys when the
+// principal is removed. The delegations are revoked through the revocation
+// service, which makes the gateway drop what it cached for the keys, under
+// the keys' delegation locks. The grants a policy change takes away or adds
+// are written by the policy's task on the tenant's queue
+// (pkg/tasks/tenantqueue).
 type Rotator struct {
 	logger      *zap.Logger
 	delegations delegationstore.Store
@@ -57,8 +55,8 @@ type Rotator struct {
 	revocations RevocationPublisher
 }
 
-// NewRotator constructs a Rotator signing revocations and delegations as the
-// tenant, whose key it reads from secrets.
+// NewRotator constructs a Rotator signing revocations as the tenant, whose key
+// it reads from secrets.
 func NewRotator(
 	logger *zap.Logger,
 	delegations delegationstore.Store,
@@ -73,77 +71,6 @@ func NewRotator(
 		secrets:     secrets,
 		revocations: revocations,
 	}
-}
-
-// Rotate sets, for every key of each principal in actions, the key's
-// delegations over bucket to those the principal's actions map to, and leaves
-// its delegations over other buckets alone. The delegations replaced are
-// revoked in one request before anything is stored, so a publish failure
-// leaves every key unchanged; a key that held nothing over the bucket costs no
-// revocation. An empty action set leaves the key with nothing over the bucket.
-func (r *Rotator) Rotate(ctx context.Context, tenant, bucket did.DID, actions map[string][]string) (err error) {
-	start := time.Now()
-	log := r.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("bucket", bucket))
-	var keys []accesskeystore.Record
-	defer func() {
-		// The key count is what a rotation's cost follows, and [BatchTimeout]
-		// is what it runs out against, so both go in the log. The handler
-		// reports a deadline only as a concurrent change, so every failure is
-		// logged here, the listing's included. A policy write runs Rotate
-		// inside its own transaction, which commits after this returns, so
-		// success is logged as prepared: the write can still roll it back.
-		fields := []zap.Field{zap.Int("keys", len(keys)), zap.Duration("took", time.Since(start))}
-		if err != nil {
-			log.Warn("rotating delegations failed", append(fields, zap.Error(err))...)
-		} else if len(keys) > 0 {
-			log.Info("prepared delegation rotation", fields...)
-		}
-	}()
-	ctx, cancel := context.WithTimeout(ctx, BatchTimeout)
-	defer cancel()
-	keys, issuer, err := r.load(ctx, tenant, slices.Sorted(maps.Keys(actions))...)
-	if err != nil || len(keys) == 0 {
-		return err
-	}
-	principalOf := make(map[did.DID]string, len(keys))
-	for _, key := range keys {
-		principalOf[key.ID] = *key.Principal
-	}
-
-	// Only the delegations over bucket are read and rewritten: a key's grants
-	// over the principal's other buckets are not this write's to touch, and
-	// reading them too would make every write cost what the keys hold across
-	// all of those buckets.
-	return r.delegations.ReplaceOver(ctx, audiences(keys), bucket, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-		// The listing above is a snapshot: a key deleted while this waited on
-		// the lock is left with nothing rather than issued fresh grants. One
-		// read tells which keys remain, however many the principals hold.
-		remaining, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithIDs(audiences(keys)...))
-		if err != nil {
-			return nil, fmt.Errorf("looking up the rotated keys: %w", err)
-		}
-		live := make(map[did.DID]bool, len(remaining))
-		for _, key := range remaining {
-			live[key.ID] = true
-		}
-		var revoked []ucan.Delegation
-		next := make(map[did.DID][]ucan.Delegation, len(keys))
-		for _, key := range keys {
-			if !live[key.ID] {
-				continue
-			}
-			revoked = append(revoked, current[key.ID]...)
-			fresh, err := Issue(issuer, key.ID, []did.DID{bucket}, actions[principalOf[key.ID]], key.ExpiresAt)
-			if err != nil {
-				return nil, fmt.Errorf("issuing delegations of %s: %w", key.ID, err)
-			}
-			next[key.ID] = fresh
-		}
-		if err := PublishRevocations(ctx, log, r.revocations, issuer, revoked); err != nil {
-			return nil, err
-		}
-		return next, nil
-	})
 }
 
 // Revoke revokes every delegation of every key bound to the principal, in one
@@ -166,24 +93,19 @@ func (r *Rotator) Revoke(ctx context.Context, tenant did.DID, principal string) 
 	})
 }
 
-// load lists the keys bound to the principals, in one read, and, when there
-// are any, the tenant's issuer. No principals reads nothing. When reading the
-// issuer fails it still returns the keys it listed, so the caller's log counts
-// them.
-func (r *Rotator) load(ctx context.Context, tenant did.DID, principals ...string) ([]accesskeystore.Record, ucan.Issuer, error) {
-	if len(principals) == 0 {
-		return nil, nil, nil
-	}
-	keys, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipals(principals...))
+// load lists the keys bound to the principal and, when there are any, the
+// tenant's issuer.
+func (r *Rotator) load(ctx context.Context, tenant did.DID, principal string) ([]accesskeystore.Record, ucan.Issuer, error) {
+	keys, err := r.accessKeys.ListByTenant(ctx, tenant, accesskeystore.WithPrincipal(principal))
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing the keys of %d principals: %w", len(principals), err)
+		return nil, nil, fmt.Errorf("listing the principal's keys: %w", err)
 	}
 	if len(keys) == 0 {
 		return nil, nil, nil
 	}
 	issuer, err := vault.TenantIssuer(ctx, r.secrets, tenant)
 	if err != nil {
-		return keys, nil, err
+		return nil, nil, err
 	}
 	return keys, issuer, nil
 }
@@ -198,8 +120,8 @@ func audiences(keys []accesskeystore.Record) []did.DID {
 
 // PublishRevocations publishes a revocation for each unexpired delegation in
 // one request, signed by the tenant that issued them. It is the callback body
-// of a [delegationstore.Store.Replace] or ReplaceOver that removes or replaces
-// what keys hold, so it runs while their delegations are locked, and it
+// of a [delegationstore.Store.Replace] that removes what keys hold, so it
+// runs while their delegations are locked, and it
 // shortens its ctx to [BatchTimeout] itself: whoever calls it, a stalled
 // publish releases the locks at the bound. An earlier caller deadline still
 // wins.

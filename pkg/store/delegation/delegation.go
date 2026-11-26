@@ -52,39 +52,36 @@ type Store interface {
 	// writes inside it. The lock wait is bounded at [store.LockTimeout] and
 	// returns [store.ErrLockTimeout] when it runs out.
 	Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
-	// ReplaceOver is Replace narrowed to the delegations over subject: next is
-	// handed each audience's delegations over subject alone, and its result
-	// replaces those, leaving the audiences' delegations over every other
-	// subject as they are. On Postgres its cost follows what the audiences
-	// hold over subject, not everything they hold. It takes the same locks as Replace,
-	// so the two serialize. Besides Replace's checks, it returns
-	// [store.ErrInvalidArgument] for an undef subject and for a delegation from
-	// next over another subject, which would be written beside the set it
-	// leaves alone.
-	ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
 	// WithdrawKeyGrantsStatements returns the writes, to run in order in one
 	// transaction, that take every delegation the tenant issued to one of its
 	// access keys out of the store and record each as a revocation the tenant
 	// owes. They are for a task that withdraws a tenant's grants in its own
-	// commit. The rows are chosen when the statements run, so a grant stored
-	// after the task read anything is withdrawn with the rest; the first
-	// statement takes the lock of every key of the tenant, as a Replace does,
-	// so one that is storing grants for a key finishes first and its grants
-	// are withdrawn too. The lock is there for the writers that change a
-	// key's grants outside the tenant's task queue, policy writes and
-	// principal removal; with neither it has nothing to wait for. A
-	// delegation the tenant did not issue, such as a bucket's root delegation
-	// to the tenant, is left alone.
+	// commit. The rows are chosen when the statements run, so the task
+	// withdraws what the keys hold at its commit, whatever its handler read.
+	// The first statement takes the lock of every key of the tenant, as a
+	// Replace does. The lock is there for principal removal, which revokes
+	// and deletes a principal's keys under their locks outside the tenant's
+	// task queue: a task that goes on to store grants for the keys
+	// ([Store.PutForKeysStatement]) either waits for a removal that holds
+	// them and finds the keys gone, or commits first and has its grants
+	// revoked by the removal. A delegation the tenant did not issue, such as
+	// a bucket's root delegation to the tenant, is left alone.
 	WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement
-	// WithdrawGrantsOfKeyStatements is [Store.WithdrawKeyGrantsStatements]
+	// WithdrawGrantsOverStatements is [Store.WithdrawKeyGrantsStatements]
+	// narrowed to the delegations over subject held by the tenant's access
+	// keys that are bound to one of principals, for a task that changes what
+	// those principals may do on one bucket in its own commit. The keys'
+	// delegations over every other subject are left alone. The first
+	// statement takes the locks of those keys, for the same writer and the
+	// same reason.
+	WithdrawGrantsOverStatements(tenant, subject did.DID, principals []string) []store.Statement
+	// WithdrawGrantsOfKeyStatement is [Store.WithdrawKeyGrantsStatements]
 	// narrowed to one access key, for a task that deletes the key in its own
 	// commit: the delegations the tenant issued to the key leave the store
-	// and are recorded as revocations the tenant owes. The first statement
-	// takes the key's lock, for the same writers: a policy write that is
-	// rewriting the key's grants finishes first, so the grants it stored are
-	// withdrawn too, and one that waits for the lock finds the key gone and
-	// stores it none.
-	WithdrawGrantsOfKeyStatements(tenant, key did.DID) []store.Statement
+	// and are recorded as revocations the tenant owes. It takes no lock: the
+	// task stores the key nothing, and the writers outside the tenant's task
+	// queue only ever remove a key's delegations.
+	WithdrawGrantsOfKeyStatement(tenant, key did.DID) store.Statement
 	// PutForKeysStatement returns the write that stores the delegations whose
 	// audience is an access key when the statement runs, for a task that
 	// issues grants in its own commit: a key deleted since the task listed
@@ -92,7 +89,8 @@ type Store interface {
 	// which deletes keys outside the tenant's task queue. The statement takes
 	// no lock of its own. A task that issues grants to keys that exist
 	// already runs it after the statements of
-	// [Store.WithdrawKeyGrantsStatements], which hold the keys' locks, in
+	// [Store.WithdrawKeyGrantsStatements] or
+	// [Store.WithdrawGrantsOverStatements], which hold the keys' locks, in
 	// the same transaction; a task that creates the key in the same commit
 	// needs no lock, since no other writer sees the key until then. It
 	// returns [store.ErrInvalidArgument] if the batch contains a nil
@@ -111,22 +109,6 @@ func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delega
 			}
 			if d.Audience() != aud {
 				return fmt.Errorf("delegation %s is for %s, filed under %s: %w", d.Link(), d.Audience(), aud, store.ErrInvalidArgument)
-			}
-		}
-	}
-	return nil
-}
-
-// CheckReplacementOver is [CheckReplacement] for a ReplaceOver of subject: it
-// also refuses a delegation over another subject.
-func CheckReplacementOver(audiences []did.DID, subject did.DID, replacement map[did.DID][]ucan.Delegation) error {
-	if err := CheckReplacement(audiences, replacement); err != nil {
-		return err
-	}
-	for _, aud := range audiences {
-		for _, d := range replacement[aud] {
-			if d.Subject() != subject {
-				return fmt.Errorf("delegation %s is over %s, replacing those over %s: %w", d.Link(), d.Subject(), subject, store.ErrInvalidArgument)
 			}
 		}
 	}

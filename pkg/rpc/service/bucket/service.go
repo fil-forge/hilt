@@ -309,8 +309,9 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 	}
 
 	// DeleteByBucket holds the bucket's policy write lock across the callback:
-	// a policy write in flight finishes before the grants are listed, and one
-	// arriving later finds the bucket gone. The callback revokes the grants,
+	// a policy write that is committing finishes before the grants are
+	// listed, and one whose commit arrives later waits for the lock and
+	// finds the bucket gone. The callback revokes the grants,
 	// removes the bucket's delegations (subject == bucket) and deletes the
 	// bucket record. The bucket row's delete cascades to its policy, so no
 	// failure leaves a live bucket without one.
@@ -482,7 +483,7 @@ func (s *Service) List(ctx context.Context, issuer did.DID, args *s3bkt.ListArgu
 }
 
 // policyETag reads the bucket policy's entity tag share-locked, so a policy
-// write in flight is waited out and its ETag read once it commits. A bucket
+// write that is committing is waited out and its ETag read once it has. A bucket
 // with no policy reports "", as [auth.Authorizer.EffectiveActions] does. A
 // wait the store gave up on is [auth.ErrTemporarilyUnavailable].
 func (s *Service) policyETag(ctx context.Context, bucketID did.DID) (string, error) {
@@ -601,9 +602,9 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 	}
 
 	// The effective actions and the delegation reads above are not tied
-	// together: a policy write rotates the grants and commits them before the
-	// policy row it belongs to becomes visible, so one landing between them
-	// pairs the old actions with the new grants. ProofChain reads by command
+	// together: a policy write commits its document and the grants it
+	// rewrites at once, so one landing between the two reads pairs the old
+	// actions with the new grants. ProofChain reads by command
 	// and subject, so it too can return a chain the write just stored. Both
 	// s3:GetObject and s3:ListBucket map to /content/retrieve, so that pairing
 	// can report an action the write removed over a chain that still serves it.
@@ -622,9 +623,9 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		// between the reads leave it where it started while the grants, and
 		// the chains built from them, are the first write's, which the second
 		// revoked. The grants are listed again after the reread, which waited
-		// out any write in flight, so a write that rotated what Info read has
-		// committed its grants by now: a set that moved says the caller should
-		// ask again.
+		// out any write that was committing, so a write that rewrote what
+		// Info read has committed its grants by now: a set that moved says
+		// the caller should ask again.
 		current, err := listGrants()
 		if err != nil {
 			return nil, nil, err

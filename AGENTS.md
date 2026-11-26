@@ -50,7 +50,7 @@ them. It exposes two APIs and talks to three external services:
 - **Swarf** (the revocation service) — Hilt calls its `/ucan/revoke` to
   revoke delegations, every revocation of one write in a single request
   (`PublishBatch`): a deleted bucket's grants, and the grants
-  a policy change or a principal removal takes off a principal-bound key
+  a principal removal takes off a principal-bound key
   (`pkg/grant`). No revocation carries a nonce, so a retry is a duplicate
   Swarf records once.
   Revocations recorded as owed (`pkg/store/revocation`) are published from
@@ -58,7 +58,9 @@ them. It exposes two APIs and talks to three external services:
   (`pkg/tasks/revocationqueue`). A tenant status change into or out of
   `disabled` records them: disabling withdraws every grant the tenant's keys
   hold, and leaving `disabled` withdraws whatever they hold and issues each
-  key fresh grants. An access key's deletion records the grants the key held
+  key fresh grants. An access key's deletion records the grants the key held,
+  and a bucket policy's write or removal records the grants over the bucket
+  it takes off the affected principals' keys
   (`pkg/tasks/tenantqueue`). Tenant deletion publishes what
   is still owed itself, before it deactivates the tenant's DID, which Swarf
   verifies the revocations against.
@@ -133,8 +135,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   action allowlist live in libforge `commands/s3/bucket`. The package doc has
   the document shape.
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
-  tenant→key set both key kinds hold, `Rotator` rewrites a principal-bound
-  key's set as its policies change. See the package doc.
+  tenant→key set both key kinds hold, `ForKey` the set of one key, and
+  `Rotator` revokes what a removed principal's keys hold. See the package
+  doc.
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage,revocation}` —
   each an interface with its `postgres` implementation.
 - `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
@@ -150,7 +153,13 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   and delete an access key, submitted and waited for by
   `accesskey.Service`, which keeps the key's secret to itself: it writes the
   secret to the vault before it submits the creation and removes it when
-  the task fails. A task's arguments that carry more than one value are a
+  the task fails. `queue-tenant.put-policy` and `queue-tenant.delete-policy`
+  write and remove a bucket's policy, submitted and waited for by
+  `bucketpolicy.Service` (`pkg/api/service/bucketpolicy`): one commit writes
+  the document, withdraws the grants over the bucket of every key of each
+  principal whose effective actions change, and stores the grants the new
+  document gives them. A task's arguments that carry more than one value,
+  and a result that does, are a
   cbor-gen model under the queue's `datamodel` package (`go generate` in its
   `gen` directory). The runner is built with the Postgres store
   module (`pkg/fx/store/postgres`), which creates its tables in the `public`
@@ -176,20 +185,17 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - **Stores**: an interface in `pkg/store/<entity>` with one implementation,
   `postgres`, exercised by the suite in `<entity>_test.go`. Add a method to the
   interface and the implementation and cover it in that suite.
-- **Locking and callbacks**: a write that another service must learn about runs
-  in one transaction: lock the row (`SELECT … FOR UPDATE`), run the
-  caller-supplied callback (`fn`, which runs inside the write before it takes
-  effect), commit. The callback's ctx carries
+- **Locking and callbacks**: the writes that do not run as tasks yet
+  (principal removal, bucket deletion, tenant deletion) and must tell another
+  service run in one transaction: lock the row (`SELECT … FOR UPDATE`), run
+  the caller-supplied callback (`fn`, which runs inside the write before it
+  takes effect), commit. The callback's ctx carries
   the transaction (`pglock.WithTx`), and a store that opens its own through
   `pglock.Begin` joins it, so what the callback writes commits with the
-  caller's write or not at all. A policy write's callback rewrites the
-  affected keys' delegations and publishes the revocations before anything is
-  stored, so a failure before the commit, a failed publish included, rolls the
-  write and the rotation back together and leaves the principal with its old
-  access, never with more; a publish that succeeded followed by a commit that
-  failed leaves revoked grants without a replacement, the one window the
-  gateway's revoked set covers (`pkg/api/service/bucketpolicy` and
-  `grant.Rotator` document the sequence). A reader that
+  caller's write or not at all. A principal removal's callback publishes the
+  revocations of its keys' grants before it deletes the keys, and a bucket
+  deletion's those of the bucket's grants before it deletes the bucket, so a
+  failed publish rolls the write back and leaves it retryable. A reader that
   must not be answered from a snapshot older than an in-flight write passes
   `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
   `store.LockTimeout` and a statement that gives up returns
@@ -203,18 +209,24 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   the one publish task a change queues (`revocationqueue.PublishSpec`)
   publishes everything the tenant owes, reading each batch after the last
   row of the one before, because its own deletes are not visible until it
-  commits. Policy writes, principal removal and bucket and tenant deletion
-  still write keys and grants under locks, outside the queue. A task that
-  withdraws grants therefore chooses the rows in the statements its commit
-  runs, under the keys' delegation locks
-  (`delegation.Store.WithdrawKeyGrantsStatements`,
-  `WithdrawGrantsOfKeyStatements`), never from a list its handler read, and
+  commits. Principal removal and bucket and tenant deletion
+  still write keys, grants and policies under locks, outside the queue. A
+  task that withdraws grants therefore chooses the rows in the statements its
+  commit runs (`delegation.Store.WithdrawKeyGrantsStatements`,
+  `WithdrawGrantsOverStatements`, `WithdrawGrantsOfKeyStatement`), never from
+  a list its handler read, takes the keys' delegation locks first when it
+  goes on to store grants for them, stores grants only for keys that still
+  exist (`PutForKeysStatement`), and
   makes the write of a value it read conditional (`ex.WriteConditional`). A
-  task that issues grants from what it read opens its commit with the
-  conditions that what it read still holds: a key creation share-locks its
-  principal's row (`principal.Store.RequireLiveStatement`) and then checks
-  the principal's policies are the ones it read
-  (`bucketpolicy.Store.RequireUnchangedStatement`). Each of these
+  task that issues grants or writes a policy from what it read opens its
+  commit with the conditions that what it read still holds: a key creation
+  share-locks its principal's row (`principal.Store.RequireLiveStatement`)
+  and then checks the principal's policies are the ones it read
+  (`bucketpolicy.Store.RequireUnchangedStatement`); a policy write takes
+  the bucket's policy lock (`bucketpolicy.Store.LockStatement`), which a
+  bucket deletion holds while it revokes, share-locks the rows of the
+  principals its document names, and writes the document only over the
+  policy it read (`bucketpolicy.Store.PutStatements`). Each of these
   safeguards names, in its doc comment, the writers it is there for, and
   goes when they move onto the queue. Tests build a runner on their test database with
   `testutil.StartTaskRunner`, or `testutil.StartServiceTasks` for one with
@@ -261,9 +273,11 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   replace; a wait that runs out is `ErrTemporarilyUnavailable`. The access
   key is read before the wait, because it names the tenant, so a request
   that waited reads it again and is refused when the change it waited for
-  deleted the key. Tenant status changes and access key creation and
-  deletion are queued there, and the share-locked
-  reads stay until the writes they wait on have moved onto the queue. The
+  deleted the key. Tenant status changes, access key creation and
+  deletion and bucket policy writes and removals are queued there. The
+  share-locked reads of the key, the principal and the policy stay for
+  principal removal and bucket deletion, which hold those rows locked while
+  they revoke, until they have moved onto the queue. The
   status is read before the policies and before the key's stored grants,
   and a status change commits its status and its grant changes together, so
   a change that lands between two of those reads leaves the answer no wider

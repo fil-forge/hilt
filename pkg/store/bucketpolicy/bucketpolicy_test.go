@@ -16,7 +16,6 @@ import (
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
-	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -1003,46 +1002,6 @@ func TestPolicyStorePostgres(t *testing.T) {
 		require.Equal(t, doc(allow(everyone, "s3:GetObject")), rec.Policy, "the removal stripped alice from the policy the Put wrote")
 	})
 
-	t.Run("Put holds the tenant lock shared across its callback", func(t *testing.T) {
-		// A principal Add takes the tenant lock exclusive, so it waits for a
-		// Put in flight; another Put, taking it shared, does not.
-		tenantID := fx.tenant(t)
-		bucketID := fx.bucket(t, tenantID)
-
-		written, added := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				_, err := s.Put(context.Background(), bucketpolicystore.Input{
-					Bucket: bucketID, Tenant: tenantID, Policy: doc(allow(everyone, "s3:GetObject")),
-					Conditional: true,
-				}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
-					tx, err := pool.Begin(ctx)
-					if err != nil {
-						return err
-					}
-					if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, tenantID.String(), true); err != nil {
-						return fmt.Errorf("shared request during the Put: %w", err)
-					}
-					if err := tx.Rollback(ctx); err != nil { // released before the exclusive request starts
-						return err
-					}
-					close(entered)
-					<-release
-					return nil
-				})
-				return err
-			},
-			func() error {
-				tx, err := pool.Begin(context.Background())
-				if err != nil {
-					return err
-				}
-				defer tx.Rollback(context.Background())
-				return pglock.Advisory(context.Background(), tx, tenant.LockNamespace, tenantID.String(), false)
-			})
-		require.NoError(t, written)
-		require.NoError(t, added)
-	})
-
 	t.Run("a share-locked ListByPrincipal behind a stuck writer gives up", func(t *testing.T) {
 		// A writer parks in its callback holding the policy row; a share-locked
 		// listing gives up at the lock timeout, as a share-locked Get does.
@@ -1153,5 +1112,270 @@ func TestRequireUnchangedStatement(t *testing.T) {
 		require.NoError(t, s.Delete(ctx, wild, "", nil))
 		require.Zero(t, affected(t, tenantID, "alice", read))
 		require.EqualValues(t, 1, affected(t, tenantID, "alice", nil))
+	})
+}
+
+// commit runs the conditional statement and then the others in one
+// transaction, as a task's commit does, and reports whether the conditional
+// one affected a row. When it did not, nothing is committed.
+func commit(t *testing.T, pool *pgxpool.Pool, cas store.Statement, rest ...store.Statement) bool {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx) // no-op once committed
+	tag, err := tx.Exec(ctx, cas.SQL, cas.Args...)
+	require.NoError(t, err)
+	if tag.RowsAffected() == 0 {
+		return false
+	}
+	for _, st := range rest {
+		_, err := tx.Exec(ctx, st.SQL, st.Args...)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit(ctx))
+	return true
+}
+
+// park closes entered and waits for release. It gives up when the test ends,
+// so a test that fails while a writer is parked leaves nothing blocked.
+func park(t *testing.T, entered chan<- struct{}, release <-chan struct{}) {
+	close(entered)
+	select {
+	case <-release:
+	case <-t.Context().Done():
+	}
+}
+
+// TestPutAndDeleteStatements covers the writes a policy task's commit runs:
+// they store or remove the document with its index rows only while the
+// policy is the one the task read and the bucket is the tenant's.
+func TestPutAndDeleteStatements(t *testing.T) {
+	s, f := makeStore(t)
+	ctx := t.Context()
+	put := func(t *testing.T, tenantID, bucket did.DID, d s3bkt.PolicyDocument, read *bucketpolicystore.Record) bool {
+		t.Helper()
+		cas, index := s.PutStatements(tenantID, bucket, d, read)
+		return commit(t, f.pool, cas, index...)
+	}
+	get := func(t *testing.T, bucket did.DID) *bucketpolicystore.Record {
+		t.Helper()
+		rec, err := s.Get(ctx, bucket)
+		if errors.Is(err, store.ErrRecordNotFound) {
+			return nil
+		}
+		require.NoError(t, err)
+		return &rec
+	}
+	listed := func(t *testing.T, tenantID did.DID, principal string) []did.DID {
+		t.Helper()
+		recs, err := s.ListByPrincipal(ctx, tenantID, principal)
+		require.NoError(t, err)
+		var out []did.DID
+		for _, rec := range recs {
+			out = append(out, rec.Bucket)
+		}
+		return out
+	}
+	setup := func(t *testing.T) (tenantID, bucket did.DID) {
+		tenantID = f.tenant(t)
+		f.principal(t, tenantID, "alice")
+		f.principal(t, tenantID, "bob")
+		return tenantID, f.bucket(t, tenantID)
+	}
+	first, second := doc(allow(only("alice"), "s3:GetObject")), doc(allow(only("bob"), "s3:GetObject"), deny(everyone, "s3:PutObject"))
+
+	t.Run("creates the policy the way Put stores it", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		require.True(t, put(t, tenantID, bucket, first, nil))
+
+		rec := get(t, bucket)
+		require.NotNil(t, rec)
+		require.Equal(t, first, rec.Policy)
+		require.Equal(t, s3bkt.ETag(first), rec.ETag)
+		require.Equal(t, []did.DID{bucket}, listed(t, tenantID, "alice"))
+		require.Empty(t, listed(t, tenantID, "bob"))
+
+		other := f.bucket(t, tenantID)
+		_, err := s.Put(ctx, bucketpolicystore.Input{Bucket: other, Tenant: tenantID, Policy: first}, nil)
+		require.NoError(t, err)
+		stored := get(t, other)
+		require.Equal(t, stored.Policy, rec.Policy)
+		require.Equal(t, stored.ETag, rec.ETag)
+	})
+
+	t.Run("replaces the policy read and rewrites its index", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		require.True(t, put(t, tenantID, bucket, first, nil))
+		require.True(t, put(t, tenantID, bucket, second, get(t, bucket)))
+
+		rec := get(t, bucket)
+		require.Equal(t, second, rec.Policy)
+		require.Equal(t, s3bkt.ETag(second), rec.ETag)
+		require.Equal(t, []did.DID{bucket}, listed(t, tenantID, "alice"), "through the wildcard")
+		require.Equal(t, []did.DID{bucket}, listed(t, tenantID, "bob"))
+
+		require.True(t, put(t, tenantID, bucket, first, get(t, bucket)))
+		require.Empty(t, listed(t, tenantID, "bob"), "the wildcard row and bob's are gone")
+	})
+
+	t.Run("writing the document read again affects the row", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		require.True(t, put(t, tenantID, bucket, first, nil))
+		require.True(t, put(t, tenantID, bucket, first, get(t, bucket)))
+		require.Equal(t, first, get(t, bucket).Policy)
+	})
+
+	t.Run("a create affects no row when a policy was stored since the read", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		require.True(t, put(t, tenantID, bucket, first, nil))
+		require.False(t, put(t, tenantID, bucket, second, nil))
+		require.Equal(t, first, get(t, bucket).Policy)
+		require.Empty(t, listed(t, tenantID, "bob"), "the index is not rewritten either")
+	})
+
+	t.Run("a replace affects no row when the policy was rewritten or removed since the read", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		require.True(t, put(t, tenantID, bucket, first, nil))
+		read := get(t, bucket)
+		require.True(t, put(t, tenantID, bucket, second, read))
+
+		require.False(t, put(t, tenantID, bucket, first, read), "rewritten")
+		require.Equal(t, second, get(t, bucket).Policy)
+
+		require.NoError(t, s.Delete(ctx, bucket, "", nil))
+		require.False(t, put(t, tenantID, bucket, first, read), "removed")
+		require.Nil(t, get(t, bucket))
+	})
+
+	t.Run("a write affects no row for a bucket that is gone or another tenant's", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		other := f.tenant(t)
+		require.False(t, put(t, other, bucket, doc(allow(everyone, "s3:GetObject")), nil), "another tenant's bucket")
+		require.False(t, put(t, tenantID, testutil.RandomDID(t), first, nil), "no such bucket")
+
+		require.True(t, put(t, tenantID, bucket, first, nil))
+		read := get(t, bucket)
+		require.False(t, put(t, other, bucket, doc(allow(everyone, "s3:GetObject")), read), "another tenant's bucket, replacing")
+		require.NoError(t, bucketpostgres.New(f.pool).Delete(ctx, bucket))
+		require.False(t, put(t, tenantID, bucket, second, read), "deleted since the read")
+		require.False(t, put(t, tenantID, bucket, second, nil), "deleted, creating")
+	})
+
+	t.Run("a create behind the lock waits for one in flight and then affects no row", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		var affected int64
+		written, waited := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				_, err := s.Put(context.Background(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: first},
+					func(context.Context, *bucketpolicystore.Record) error {
+						park(t, entered, release)
+						return nil
+					})
+				return err
+			},
+			func() error {
+				ctx := context.Background()
+				tx, err := f.pool.Begin(ctx)
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback(ctx)
+				lock := s.LockStatement(bucket)
+				if _, err := tx.Exec(ctx, lock.SQL, lock.Args...); err != nil {
+					return err
+				}
+				cas, _ := s.PutStatements(tenantID, bucket, second, nil)
+				tag, err := tx.Exec(ctx, cas.SQL, cas.Args...)
+				affected = tag.RowsAffected()
+				return err
+			})
+		require.NoError(t, written)
+		require.NoError(t, waited)
+		require.Zero(t, affected)
+		require.Equal(t, first, get(t, bucket).Policy)
+	})
+
+	t.Run("removes the policy read with its index, and no other", func(t *testing.T) {
+		tenantID, bucket := setup(t)
+		require.True(t, put(t, tenantID, bucket, first, nil))
+		read := get(t, bucket)
+		require.True(t, put(t, tenantID, bucket, second, read))
+
+		cas, index := s.DeleteStatements(bucket, *read)
+		require.False(t, commit(t, f.pool, cas, index), "rewritten since the read")
+		require.Equal(t, second, get(t, bucket).Policy)
+		require.Equal(t, []did.DID{bucket}, listed(t, tenantID, "bob"))
+
+		cas, index = s.DeleteStatements(bucket, *get(t, bucket))
+		require.True(t, commit(t, f.pool, cas, index))
+		require.Nil(t, get(t, bucket))
+		require.Empty(t, listed(t, tenantID, "alice"))
+		require.Empty(t, listed(t, tenantID, "bob"))
+
+		require.False(t, commit(t, f.pool, cas, index), "removed already")
+	})
+}
+
+// TestLockStatement covers the statement that opens a policy task's commit:
+// it waits for a bucket deletion that holds the bucket's policy lock, and
+// holds one off until its transaction ends.
+func TestLockStatement(t *testing.T) {
+	s, f := makeStore(t)
+	tenantID := f.tenant(t)
+	bucket := f.bucket(t, tenantID)
+	lock := s.LockStatement(bucket)
+
+	t.Run("waits for a DeleteByBucket in flight", func(t *testing.T) {
+		deleted, locked := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return s.DeleteByBucket(context.Background(), bucket, func(context.Context) error {
+					park(t, entered, release)
+					return nil
+				})
+			},
+			func() error {
+				_, err := f.pool.Exec(context.Background(), lock.SQL, lock.Args...)
+				return err
+			})
+		require.NoError(t, deleted)
+		require.NoError(t, locked)
+	})
+
+	t.Run("holds off a DeleteByBucket and a share-locked Get until its transaction ends", func(t *testing.T) {
+		for name, wait := range map[string]func() error{
+			"DeleteByBucket": func() error { return s.DeleteByBucket(context.Background(), bucket, nil) },
+			"share-locked Get": func() error {
+				_, err := s.Get(context.Background(), bucket, store.WithShareLock())
+				if errors.Is(err, store.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			},
+		} {
+			tx, err := f.pool.Begin(t.Context())
+			require.NoError(t, err)
+			held, waited := htestutil.RequireWaitsForWriter(t,
+				func(entered chan<- struct{}, release <-chan struct{}) error {
+					if _, err := tx.Exec(context.Background(), lock.SQL, lock.Args...); err != nil {
+						return err
+					}
+					park(t, entered, release)
+					return tx.Commit(context.Background())
+				}, wait)
+			require.NoError(t, held, name)
+			require.NoError(t, waited, name)
+		}
+	})
+
+	t.Run("does not wait for another bucket's", func(t *testing.T) {
+		other := s.LockStatement(f.bucket(t, tenantID))
+		tx, err := f.pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer tx.Rollback(context.Background())
+		_, err = tx.Exec(t.Context(), lock.SQL, lock.Args...)
+		require.NoError(t, err)
+		_, err = f.pool.Exec(t.Context(), other.SQL, other.Args...)
+		require.NoError(t, err)
 	})
 }

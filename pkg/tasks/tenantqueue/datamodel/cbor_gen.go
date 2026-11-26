@@ -447,3 +447,549 @@ func (t *CreateKeyArgs) UnmarshalCBOR(r io.Reader) (err error) {
 
 	return nil
 }
+func (t *PutPolicyArgs) MarshalCBOR(w io.Writer) error {
+	if t == nil {
+		_, err := w.Write(cbg.CborNull)
+		return err
+	}
+
+	cw := cbg.NewCborWriter(w)
+
+	if _, err := cw.Write([]byte{165}); err != nil {
+		return err
+	}
+
+	// t.Name (string) (string)
+	if len("name") > 8192 {
+		return xerrors.Errorf("Value in field \"name\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("name"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("name")); err != nil {
+		return err
+	}
+
+	if len(t.Name) > 8192 {
+		return xerrors.Errorf("Value in field t.Name was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(t.Name))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string(t.Name)); err != nil {
+		return err
+	}
+
+	// t.Bucket (did.DID) (struct)
+	if len("bucket") > 8192 {
+		return xerrors.Errorf("Value in field \"bucket\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("bucket"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("bucket")); err != nil {
+		return err
+	}
+
+	if err := t.Bucket.MarshalCBOR(cw); err != nil {
+		return err
+	}
+
+	// t.IfMatch (string) (string)
+	if len("ifMatch") > 8192 {
+		return xerrors.Errorf("Value in field \"ifMatch\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("ifMatch"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("ifMatch")); err != nil {
+		return err
+	}
+
+	if t.IfMatch == nil {
+		if _, err := cw.Write(cbg.CborNull); err != nil {
+			return err
+		}
+	} else {
+		if len(*t.IfMatch) > 8192 {
+			return xerrors.Errorf("Value in field t.IfMatch was too long")
+		}
+
+		if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(*t.IfMatch))); err != nil {
+			return err
+		}
+		if _, err := cw.WriteString(string(*t.IfMatch)); err != nil {
+			return err
+		}
+	}
+
+	// t.Document (bucket.PolicyDocument) (struct)
+	if len("document") > 8192 {
+		return xerrors.Errorf("Value in field \"document\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("document"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("document")); err != nil {
+		return err
+	}
+
+	if err := t.Document.MarshalCBOR(cw); err != nil {
+		return err
+	}
+
+	// t.Conditional (bool) (bool)
+	if len("conditional") > 8192 {
+		return xerrors.Errorf("Value in field \"conditional\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("conditional"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("conditional")); err != nil {
+		return err
+	}
+
+	if err := cbg.WriteBool(w, t.Conditional); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *PutPolicyArgs) UnmarshalCBOR(r io.Reader) (err error) {
+	*t = PutPolicyArgs{}
+
+	cr := cbg.NewCborReader(r)
+
+	maj, extra, err := cr.ReadHeader()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+	}()
+
+	if maj != cbg.MajMap {
+		return fmt.Errorf("cbor input should be of type map")
+	}
+
+	if extra > cbg.MaxLength {
+		return fmt.Errorf("PutPolicyArgs: map struct too large (%d)", extra)
+	}
+
+	n := extra
+
+	nameBuf := make([]byte, 11)
+	for i := uint64(0); i < n; i++ {
+		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(cr, func(cid.Cid) {}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch string(nameBuf[:nameLen]) {
+		// t.Name (string) (string)
+		case "name":
+
+			{
+				sval, err := cbg.ReadStringWithMax(cr, 8192)
+				if err != nil {
+					return err
+				}
+
+				t.Name = string(sval)
+			}
+			// t.Bucket (did.DID) (struct)
+		case "bucket":
+
+			{
+
+				if err := t.Bucket.UnmarshalCBOR(cr); err != nil {
+					return xerrors.Errorf("unmarshaling t.Bucket: %w", err)
+				}
+
+			}
+			// t.IfMatch (string) (string)
+		case "ifMatch":
+
+			{
+				b, err := cr.ReadByte()
+				if err != nil {
+					return err
+				}
+				if b != cbg.CborNull[0] {
+					if err := cr.UnreadByte(); err != nil {
+						return err
+					}
+
+					sval, err := cbg.ReadStringWithMax(cr, 8192)
+					if err != nil {
+						return err
+					}
+
+					t.IfMatch = (*string)(&sval)
+				}
+			}
+			// t.Document (bucket.PolicyDocument) (struct)
+		case "document":
+
+			{
+
+				if err := t.Document.UnmarshalCBOR(cr); err != nil {
+					return xerrors.Errorf("unmarshaling t.Document: %w", err)
+				}
+
+			}
+			// t.Conditional (bool) (bool)
+		case "conditional":
+
+			maj, extra, err = cr.ReadHeader()
+			if err != nil {
+				return err
+			}
+			if maj != cbg.MajOther {
+				return fmt.Errorf("booleans must be major type 7")
+			}
+			switch extra {
+			case 20:
+				t.Conditional = false
+			case 21:
+				t.Conditional = true
+			default:
+				return fmt.Errorf("booleans are either major type 7, value 20 or 21 (got %d)", extra)
+			}
+
+		default:
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(r, func(cid.Cid) {}); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+func (t *PutPolicyResult) MarshalCBOR(w io.Writer) error {
+	if t == nil {
+		_, err := w.Write(cbg.CborNull)
+		return err
+	}
+
+	cw := cbg.NewCborWriter(w)
+
+	if _, err := cw.Write([]byte{162}); err != nil {
+		return err
+	}
+
+	// t.ETag (string) (string)
+	if len("etag") > 8192 {
+		return xerrors.Errorf("Value in field \"etag\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("etag"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("etag")); err != nil {
+		return err
+	}
+
+	if len(t.ETag) > 8192 {
+		return xerrors.Errorf("Value in field t.ETag was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(t.ETag))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string(t.ETag)); err != nil {
+		return err
+	}
+
+	// t.Created (bool) (bool)
+	if len("created") > 8192 {
+		return xerrors.Errorf("Value in field \"created\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("created"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("created")); err != nil {
+		return err
+	}
+
+	if err := cbg.WriteBool(w, t.Created); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *PutPolicyResult) UnmarshalCBOR(r io.Reader) (err error) {
+	*t = PutPolicyResult{}
+
+	cr := cbg.NewCborReader(r)
+
+	maj, extra, err := cr.ReadHeader()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+	}()
+
+	if maj != cbg.MajMap {
+		return fmt.Errorf("cbor input should be of type map")
+	}
+
+	if extra > cbg.MaxLength {
+		return fmt.Errorf("PutPolicyResult: map struct too large (%d)", extra)
+	}
+
+	n := extra
+
+	nameBuf := make([]byte, 7)
+	for i := uint64(0); i < n; i++ {
+		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(cr, func(cid.Cid) {}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch string(nameBuf[:nameLen]) {
+		// t.ETag (string) (string)
+		case "etag":
+
+			{
+				sval, err := cbg.ReadStringWithMax(cr, 8192)
+				if err != nil {
+					return err
+				}
+
+				t.ETag = string(sval)
+			}
+			// t.Created (bool) (bool)
+		case "created":
+
+			maj, extra, err = cr.ReadHeader()
+			if err != nil {
+				return err
+			}
+			if maj != cbg.MajOther {
+				return fmt.Errorf("booleans must be major type 7")
+			}
+			switch extra {
+			case 20:
+				t.Created = false
+			case 21:
+				t.Created = true
+			default:
+				return fmt.Errorf("booleans are either major type 7, value 20 or 21 (got %d)", extra)
+			}
+
+		default:
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(r, func(cid.Cid) {}); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+func (t *DeletePolicyArgs) MarshalCBOR(w io.Writer) error {
+	if t == nil {
+		_, err := w.Write(cbg.CborNull)
+		return err
+	}
+
+	cw := cbg.NewCborWriter(w)
+
+	if _, err := cw.Write([]byte{163}); err != nil {
+		return err
+	}
+
+	// t.Name (string) (string)
+	if len("name") > 8192 {
+		return xerrors.Errorf("Value in field \"name\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("name"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("name")); err != nil {
+		return err
+	}
+
+	if len(t.Name) > 8192 {
+		return xerrors.Errorf("Value in field t.Name was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(t.Name))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string(t.Name)); err != nil {
+		return err
+	}
+
+	// t.Bucket (did.DID) (struct)
+	if len("bucket") > 8192 {
+		return xerrors.Errorf("Value in field \"bucket\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("bucket"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("bucket")); err != nil {
+		return err
+	}
+
+	if err := t.Bucket.MarshalCBOR(cw); err != nil {
+		return err
+	}
+
+	// t.IfMatch (string) (string)
+	if len("ifMatch") > 8192 {
+		return xerrors.Errorf("Value in field \"ifMatch\" was too long")
+	}
+
+	if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len("ifMatch"))); err != nil {
+		return err
+	}
+	if _, err := cw.WriteString(string("ifMatch")); err != nil {
+		return err
+	}
+
+	if t.IfMatch == nil {
+		if _, err := cw.Write(cbg.CborNull); err != nil {
+			return err
+		}
+	} else {
+		if len(*t.IfMatch) > 8192 {
+			return xerrors.Errorf("Value in field t.IfMatch was too long")
+		}
+
+		if err := cw.WriteMajorTypeHeader(cbg.MajTextString, uint64(len(*t.IfMatch))); err != nil {
+			return err
+		}
+		if _, err := cw.WriteString(string(*t.IfMatch)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *DeletePolicyArgs) UnmarshalCBOR(r io.Reader) (err error) {
+	*t = DeletePolicyArgs{}
+
+	cr := cbg.NewCborReader(r)
+
+	maj, extra, err := cr.ReadHeader()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+	}()
+
+	if maj != cbg.MajMap {
+		return fmt.Errorf("cbor input should be of type map")
+	}
+
+	if extra > cbg.MaxLength {
+		return fmt.Errorf("DeletePolicyArgs: map struct too large (%d)", extra)
+	}
+
+	n := extra
+
+	nameBuf := make([]byte, 7)
+	for i := uint64(0); i < n; i++ {
+		nameLen, ok, err := cbg.ReadFullStringIntoBuf(cr, nameBuf, 8192)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(cr, func(cid.Cid) {}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch string(nameBuf[:nameLen]) {
+		// t.Name (string) (string)
+		case "name":
+
+			{
+				sval, err := cbg.ReadStringWithMax(cr, 8192)
+				if err != nil {
+					return err
+				}
+
+				t.Name = string(sval)
+			}
+			// t.Bucket (did.DID) (struct)
+		case "bucket":
+
+			{
+
+				if err := t.Bucket.UnmarshalCBOR(cr); err != nil {
+					return xerrors.Errorf("unmarshaling t.Bucket: %w", err)
+				}
+
+			}
+			// t.IfMatch (string) (string)
+		case "ifMatch":
+
+			{
+				b, err := cr.ReadByte()
+				if err != nil {
+					return err
+				}
+				if b != cbg.CborNull[0] {
+					if err := cr.UnreadByte(); err != nil {
+						return err
+					}
+
+					sval, err := cbg.ReadStringWithMax(cr, 8192)
+					if err != nil {
+						return err
+					}
+
+					t.IfMatch = (*string)(&sval)
+				}
+			}
+
+		default:
+			// Field doesn't exist on this type, so ignore it
+			if err := cbg.ScanForLinks(r, func(cid.Cid) {}); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}

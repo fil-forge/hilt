@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/store"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	"github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -52,7 +54,8 @@ func StartTaskRunner(t *testing.T, pool *pgxpool.Pool, register func(r *taskrunn
 
 // StartServiceTasks returns a running task runner over pool with the
 // service's own handlers registered: queue-tenant's, which change a tenant's
-// status, create and delete its access keys and change their grants, and
+// status, create and delete its access keys, write and remove its buckets'
+// policies and change the keys' grants, and
 // queue-revocation's, which publishes the revocations owed to publisher and
 // retries a failed publish within a test's patience. The handlers read the
 // tenants' signing keys from secrets. Each wrap may replace what
@@ -96,4 +99,27 @@ func AwaitPublished(t *testing.T, r *taskrunner.Runner, tenant did.DID) {
 	require.NoError(t, err)
 	_, err = r.WaitAll(ctx, tasks.QueueRevocation, pending...)
 	require.NoError(t, err, "the tenant's revocations were not published")
+}
+
+// BeforePolicyCommit returns a wrap for [StartServiceTasks] that calls before
+// on every pass of a queue-tenant.put-policy or queue-tenant.delete-policy
+// handler, once the handler has read everything it reads and before it
+// records its first write. What before does therefore lands between the
+// handler's reads and the task's commit.
+func BeforePolicyCommit(before func()) func(*tenantqueue.Deps) {
+	return func(deps *tenantqueue.Deps) {
+		deps.Policies = hookedPolicies{Store: deps.Policies, before: before}
+	}
+}
+
+// hookedPolicies runs before when a handler asks for the statement that
+// opens its commit, the first write a policy task records.
+type hookedPolicies struct {
+	bucketpolicy.Store
+	before func()
+}
+
+func (h hookedPolicies) LockStatement(bucket did.DID) store.Statement {
+	h.before()
+	return h.Store.LockStatement(bucket)
 }

@@ -142,7 +142,10 @@ waits for the result: disabling a tenant withdraws every grant its access keys
 hold and queues their revocations, and leaving `disabled` issues each key
 fresh grants. Creating and deleting an access key run there too. A deletion
 withdraws the key's grants and queues their revocations, so the request
-returns once the key is gone and Swarf is told moments later. With Swarf
+returns once the key is gone and Swarf is told moments later. Writing and
+removing a bucket policy run there as well: the write gives every affected
+principal's keys the grants of the new policy and queues the revocations of
+the ones they held. With Swarf
 unreachable these changes still succeed and the
 revocations are published once it returns. Each
 setting is the most queued tasks of that queue one instance runs at once. A

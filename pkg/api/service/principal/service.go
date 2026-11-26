@@ -112,9 +112,8 @@ func (s *Service) Create(ctx context.Context, externalID, principalID string) (p
 	if err := s.principals.Add(ctx, tenantID, principalID); errors.Is(err, store.ErrRecordExists) {
 		created = false
 	} else if errors.Is(err, store.ErrLockTimeout) {
-		// A removal holding the row, or a policy write holding the tenant,
-		// outlasted the lock timeout; nothing was recorded and the caller
-		// repeats the call.
+		// A removal holding the row outlasted the lock timeout; nothing was
+		// recorded and the caller repeats the call.
 		return principalstore.Record{}, false, ErrConcurrentChange
 	} else if err != nil {
 		return principalstore.Record{}, false, fmt.Errorf("recording principal: %w", err)
@@ -161,12 +160,13 @@ func (s *Service) Get(ctx context.Context, externalID, principalID string) (prin
 // Delete removes the principal, its access to every bucket, and its keys, in
 // two steps. It first revokes the delegations of the principal's keys and
 // strips the principal from every policy naming it, without locking the
-// principal row: a policy write holds its bucket while its rotation locks the
-// principals it changes, so a removal that held the row while it waited for a
-// bucket would wait on that write as it waited on the removal. The store then
-// holds the row locked while [Service.remove] finishes, so an authorize request
-// for the principal waits for the outcome. It is idempotent: a principal that
-// is already gone is a no-op.
+// principal row: a policy write's commit holds its bucket's policy lock while
+// it share-locks the principals its document names, so a removal that held
+// the row while it waited for a bucket would wait on that commit as it
+// waited on the removal. The store then holds the row locked while
+// [Service.remove] finishes, so an authorize request for the principal waits
+// for the outcome. It is idempotent: a principal that is already gone is a
+// no-op.
 func (s *Service) Delete(ctx context.Context, externalID, principalID string) error {
 	tenantID, err := s.tenant(ctx, externalID)
 	if err != nil {

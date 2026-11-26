@@ -12,11 +12,8 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/api"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/grant"
-	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
-	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -52,10 +49,10 @@ func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 	require.NoError(t, deps.buckets.Add(t.Context(), deps.photos, deps.tenantID, addProvider(t, pool), "photos"))
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "user-1"))
 
-	// No principal holds a key here, so the grant rotator has nothing to
+	// No principal holds a key here, so a policy write has no grant to
 	// issue; the routes are what is under test.
-	grants := grant.NewRotator(zap.NewNop(), delegationpostgres.New(pool), accesskeypostgres.New(pool), vaultmemory.New(), &testutil.FakeSwarf{})
-	svc := bucketpolicysvc.New(zap.NewNop(), tenants, deps.buckets, deps.principals, bucketpolicypostgres.New(pool), grants)
+	runner := testutil.StartServiceTasks(t, pool, vaultmemory.New(), &testutil.FakeSwarf{})
+	svc := bucketpolicysvc.New(zap.NewNop(), tenants, deps.buckets, deps.principals, bucketpolicypostgres.New(pool), runner)
 	deps.policies = svc
 	e := echo.New()
 	for _, r := range []api.Route{

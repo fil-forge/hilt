@@ -36,6 +36,16 @@ const ActionCreateKey = "create-key"
 // access key named in the task's arguments, withdrawing the grants it holds.
 const ActionDeleteKey = "delete-key"
 
+// ActionPutPolicy is queue-tenant.put-policy: store the policy in the task's
+// arguments for a bucket of the subject tenant, and give each access key of
+// the principals it affects the grants it now holds over the bucket.
+const ActionPutPolicy = "put-policy"
+
+// ActionDeletePolicy is queue-tenant.delete-policy: remove the policy of the
+// subject tenant's bucket named in the task's arguments, withdrawing the
+// grants it gave over the bucket.
+const ActionDeletePolicy = "delete-policy"
+
 // ActionPublish is queue-revocation.publish: publish every revocation the
 // subject tenant owes.
 const ActionPublish = "publish"

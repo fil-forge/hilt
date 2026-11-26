@@ -23,7 +23,12 @@ func tag(path string) {
 
 func main() {
 	const cborFile = "../cbor_gen.go"
-	if err := cbg.WriteMapEncodersToFile(cborFile, "datamodel", datamodel.CreateKeyArgs{}); err != nil {
+	if err := cbg.WriteMapEncodersToFile(cborFile, "datamodel",
+		datamodel.CreateKeyArgs{},
+		datamodel.PutPolicyArgs{},
+		datamodel.PutPolicyResult{},
+		datamodel.DeletePolicyArgs{},
+	); err != nil {
 		panic(err)
 	}
 	tag(cborFile)

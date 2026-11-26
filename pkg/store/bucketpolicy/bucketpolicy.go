@@ -3,13 +3,18 @@
 // writes are conditioned on, and an index from principal to the buckets whose
 // statements name it.
 //
-// Every write that changes a principal's access takes a callback, fn, that
-// runs inside the write, before it takes effect.
-// The Postgres backend runs it inside the write's transaction, after taking a
-// bucket-keyed advisory lock (and the row lock, when a row exists) and before
-// committing, so a caller can run a callback with the guarantee that
-// a share-locked read of the bucket (see [store.WithShareLock]) waits for the
-// outcome, whether the write creates, replaces or deletes the policy. A
+// A policy write or removal the tenant asks for is a task on the tenant's
+// queue, and writes through the statements this store builds for the task's
+// commit ([Store.LockStatement], [Store.PutStatements],
+// [Store.DeleteStatements]).
+//
+// Put, Delete and DeleteByBucket are the writes of principal removal and
+// bucket deletion, which run outside the queue. Each takes a callback, fn,
+// that runs inside the write, before it takes effect. The Postgres backend
+// runs it inside the write's transaction, after taking a bucket-keyed
+// advisory lock (and the row lock, when a row exists) and before committing,
+// so a share-locked read of the bucket (see [store.WithShareLock]) waits for
+// the outcome, whether the write creates, replaces or deletes the policy. A
 // callback error rolls the write back.
 package bucketpolicy
 
@@ -114,15 +119,51 @@ type Store interface {
 	// compared by bucket and ETag, and none otherwise, which fails the commit
 	// so the task runs again from the policies as they are then.
 	//
-	// It is there for policy writes, which run outside the tenant's task
-	// queue: one that commits after the task read the policies would
-	// otherwise leave the task storing grants from the older documents. It
-	// takes no lock, so it follows the principal store's
-	// RequireLiveStatement in the same commit: with the principal's row
-	// share-locked, a write that changes what the principal may do has
-	// either committed, and is seen here, or has yet to list the principal's
-	// keys.
+	// It is there for the two writers that change a policy outside the
+	// tenant's task queue: principal removal, which rewrites the policies
+	// naming the principal it removes, and bucket deletion, which takes the
+	// bucket's policy with it. One that commits after the task read the
+	// policies would otherwise leave the task storing grants from a document
+	// that is no longer stored. It takes no lock, so one that commits after
+	// the statement ran and before the task commits is not seen.
 	RequireUnchangedStatement(tenant did.DID, principal string, read []Record) store.Statement
+	// LockStatement returns the statement that opens the commit of a task
+	// that writes or removes the bucket's policy: it takes the bucket's
+	// policy write lock until the commit, the lock [Store.Put],
+	// [Store.Delete] and [Store.DeleteByBucket] hold.
+	//
+	// The lock is there for bucket deletion, which runs outside the tenant's
+	// task queue and holds it while it revokes the grants over the bucket
+	// and deletes the bucket ([Store.DeleteByBucket]). The task's commit
+	// waits for a deletion in flight and then finds the bucket gone, so it
+	// stores no grant the deletion did not revoke, and a deletion that
+	// starts later revokes what the task stored.
+	LockStatement(bucket did.DID) store.Statement
+	// PutStatements returns the writes that create or replace the policy of
+	// the tenant's bucket with doc, for a task to run in its commit: cas
+	// with WriteConditional, then index, in order, with Write. read is the
+	// policy the task's handler read, nil when the bucket had none.
+	//
+	// cas writes the document on the condition that the stored policy is
+	// still read (the same ETag, or still none) and that the bucket is
+	// the tenant's. It affects no row otherwise, which fails the commit, so
+	// the task runs again and decides from the policy as it is then. index
+	// replaces the bucket's index rows. Callers run [bucketpolicy.Validate]
+	// first, as for [Store.Put].
+	//
+	// The condition on the ETag is there for principal removal, which
+	// rewrites the policies naming the principal it removes outside the
+	// tenant's task queue. The condition on the bucket refuses a bucket of
+	// another tenant, and a bucket deleted since the read, with no row
+	// affected rather than a foreign key's error.
+	PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument, read *Record) (cas store.Statement, index []store.Statement)
+	// DeleteStatements returns the writes that remove the bucket's policy,
+	// for a task to run in its commit: cas with WriteConditional, then
+	// index with Write. cas deletes the policy on the condition that it is
+	// still read, the policy the task's handler read, compared by ETag, and
+	// affects no row otherwise, for the reasons [Store.PutStatements] gives.
+	// index removes the bucket's index rows.
+	DeleteStatements(bucket did.DID, read Record) (cas, index store.Statement)
 }
 
 // CheckInputPrecondition applies [CheckPrecondition] to a Conditional in.

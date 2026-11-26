@@ -40,7 +40,8 @@ var (
 	// ErrPreconditionFailed is returned when the bucket's policy is not in the
 	// state the request conditioned on. Nothing is written.
 	ErrPreconditionFailed = errors.New(PreconditionFailedErrorName, "the bucket's policy has changed")
-	// ErrConcurrentChange is returned when another write held a lock this call
-	// gave up waiting for. Nothing was written and the call can be repeated.
+	// ErrConcurrentChange is returned when other changes to the tenant kept
+	// the write waiting for its turn until the caller's deadline. Nothing was
+	// written and the call can be repeated.
 	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the policy is being changed concurrently, retry the request")
 )

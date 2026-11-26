@@ -33,7 +33,7 @@ type Store interface {
 	// ID with a fresh CreatedAt. It returns [store.ErrInvalidArgument] if the
 	// tenant is undef or the external ID is empty, and [store.ErrRecordExists]
 	// if the tenant already has a live principal with that external ID. The
-	// wait for a row an in-flight [Store.Delete] or [Store.Lock] holds is
+	// wait for a row an in-flight [Store.Tombstone] holds is
 	// bounded at [store.LockTimeout] and returns [store.ErrLockTimeout].
 	Add(ctx context.Context, tenant did.DID, externalID string) error
 	// Get returns the tenant's principal with the given external ID. It returns
@@ -65,33 +65,25 @@ type Store interface {
 	// Postgres fn's ctx carries the transaction, so a store that opens with
 	// pglock.Begin writes inside it.
 	Tombstone(ctx context.Context, tenant did.DID, externalID string, fn func(ctx context.Context) error) error
-	// WithLock runs fn while holding the tenant's live principals with the
-	// given external IDs against concurrent removals, revives and share-locked
-	// reads, and releases them when fn returns. A policy write uses it so that
-	// a key created for one of the principals meanwhile is either included in
-	// the write's rotation or created from the committed policy. IDs with no
-	// live row are skipped. fn follows the contract of [Store.Tombstone]'s fn.
-	// The wait for the rows is bounded at [store.LockTimeout] and returns
-	// [store.ErrLockTimeout].
-	WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) error
 	// DeleteByTenant deletes the rows of every principal of the tenant,
 	// tombstones included. It is idempotent. It waits for calls that hold any
 	// of the tenant's principals, bounded at [store.LockTimeout], and returns
 	// [store.ErrLockTimeout] when the wait runs out.
 	DeleteByTenant(ctx context.Context, tenant did.DID) error
-	// RequireLiveStatement returns a statement for a task that creates a key
-	// for the principal to run in its commit with WriteConditional, ahead of
-	// the write of the key. It share-locks the principal's live row until
-	// the commit and affects no row when the principal is missing or removed,
-	// which fails the commit so the task runs again and refuses the key.
+	// RequireLiveStatement returns a statement for a task whose commit
+	// depends on every one of the principals being live, to run in the commit
+	// with WriteConditional ahead of the task's writes: a key creation names
+	// the key's principal, and a policy write the principals its document
+	// names. It share-locks the principals' live rows until the commit and
+	// affects no row when one of them is missing or removed, which fails the
+	// commit so the task runs again and refuses the change. It needs at
+	// least one principal.
 	//
-	// The lock is there for the two writers that change a principal's keys
-	// outside the tenant's task queue. Principal removal holds the row while
-	// it deletes the principal's keys, so the statement waits for a removal
-	// in flight and then finds the row removed, and a removal that starts
-	// later lists the new key. A policy write holds the row from before it
-	// lists the principal's keys until it commits ([Store.WithLock]), so the
-	// statement waits for a write in flight to commit, and a write that
-	// starts later lists the new key and rewrites its grants.
-	RequireLiveStatement(tenant did.DID, externalID string) store.Statement
+	// The lock is there for principal removal, which runs outside the
+	// tenant's task queue and holds the principal's row while it checks that
+	// no policy names the principal and deletes the principal's keys. The
+	// statement waits for a removal in flight and then finds the row
+	// removed; a removal that starts later waits for the task's commit, and
+	// then finds the policy naming the principal, or lists the new key.
+	RequireLiveStatement(tenant did.DID, externalIDs ...string) store.Statement
 }

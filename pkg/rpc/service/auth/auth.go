@@ -150,13 +150,21 @@ func NewAuthorizer(
 // principal-bound key holds what the bucket's policy grants its principal: the
 // effective set is computed per request, an empty one hides the bucket
 // ([ErrUnknownBucket]) and an action outside a non-empty one is refused
-// ([ErrOperationNotPermitted]). The key, the principal and the policy rows are
-// read with a share lock, so a request arriving while a change to any of them
-// is committing waits for the outcome and is answered from the new state. A
-// key whose principal was removed is refused ([ErrUnknownAccessKey]).
+// ([ErrOperationNotPermitted]). A key whose principal was removed is refused
+// ([ErrUnknownAccessKey]).
+//
+// The key, the principal and the policy rows are read with a share lock, so
+// a request arriving while one of the writes that hold those rows locked is
+// committing waits for the outcome and is answered from the new state. Those
+// writes are the ones that run outside the tenant's task queue. A principal
+// removal holds its principal's row while it revokes and deletes the
+// principal's keys, whose rows it holds from their deletion on. A bucket
+// deletion holds the bucket's policy lock while it revokes the bucket's
+// grants and deletes the bucket.
 //
 // A change to the tenant's authority that is queued or running on the task
-// runner holds the request back too (see [WithTenantChanges]): once the
+// runner holds the request back too (see [WithTenantChanges]), a policy
+// write among them: once the
 // request is authenticated, and before the tenant's status is read, Authorize
 // waits for every unfinished task on queue-tenant for the tenant, for up to
 // [store.LockTimeout], and answers from the state they leave. The access key
@@ -538,7 +546,9 @@ func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, pri
 
 // effectiveActions computes the actions the principal holds on a bucket from
 // that bucket's policy, which is read with a share lock so a request arriving
-// while the policy is being changed waits for the outcome. A bucket with no
+// while the bucket is being deleted, which holds the policy's lock while it
+// revokes the bucket's grants, waits for the outcome. Authorize waits for a
+// policy write on the tenant's queue before it gets here. A bucket with no
 // policy grants nothing, and reports no ETag.
 func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, string, error) {
 	var doc *s3bkt.PolicyDocument

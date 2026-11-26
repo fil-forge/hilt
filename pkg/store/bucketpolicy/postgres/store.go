@@ -15,7 +15,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/pglock"
-	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -41,12 +40,14 @@ const selectColumns = `SELECT bucket_id, document, etag, updated_at FROM bucket_
 // lockNamespace is the first of the two 32-bit keys of the advisory lock this
 // store takes per bucket with [pglock.Advisory]; the second is the bucket DID.
 // A writer holds it, exclusive, across its row lock, precondition check,
-// beforeCommit callback and writes; a share-locked reader takes it shared.
+// beforeCommit callback and writes; a task that writes the policy takes it
+// when its commit opens ([Store.LockStatement]); a share-locked reader takes
+// it shared.
 //
-// The lock exists because a row lock cannot cover a create: there is no row
-// to lock until the INSERT commits, and an uncommitted INSERT is invisible to
-// a FOR SHARE reader, so without it a reader arriving between the publish and
-// the commit would answer "no policy" from the old state.
+// The lock exists because a row lock cannot cover a bucket with no policy:
+// there is no row to lock, so without it neither a reader nor a task's
+// commit could wait for a bucket deletion that is revoking the bucket's
+// grants.
 const lockNamespace int32 = 0x504f4c49 // "POLI"
 
 // Get reads the row. With [store.WithShareLock] the read runs in a short
@@ -77,23 +78,17 @@ func (s *Store) Get(ctx context.Context, bucket did.DID, opts ...store.ReadOptio
 	return pglock.Found(rec, err, "policy")
 }
 
-// Put runs in one transaction: it takes the tenant's advisory lock shared
-// ([tenant.LockNamespace]), checks the named principals (see
+// Put runs in one transaction: it checks the named principals (see
 // [requireLivePrincipals]), takes the bucket's advisory lock, locks the
 // current row FOR UPDATE when there is one, checks the precondition, runs
 // beforeCommit while holding the locks, writes the row and rewrites its index
 // rows, and commits. A share-locked read of the bucket (see [Store.Get])
 // waits for the commit or the rollback, on a create as much as on a replace.
 // Two concurrent creates serialize on the bucket's advisory lock; the second
-// finds the first's row and fails its precondition. The tenant lock holds off
-// a principal add for the whole transaction, so the tenant's principals do not
-// change between what beforeCommit lists and what is committed; concurrent
-// writes under one tenant share it and do not wait on each other.
+// finds the first's row and fails its precondition.
 //
 // A bucket with no row fails with store.ErrRecordNotFound before beforeCommit
-// runs. beforeCommit runs before the row and index writes, so a callback that
-// has published can still see a later write fail; the RFC treats such a record
-// as harmless.
+// runs. beforeCommit runs before the row and index writes.
 //
 // Every index row write takes a FOR KEY SHARE lock on the bucket row, which its
 // foreign key onto (id, tenant_id) requires: the write waits on an in-flight
@@ -118,9 +113,6 @@ func (s *Store) Put(ctx context.Context, in bucketpolicystore.Input, beforeCommi
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return "", err
-	}
-	if err := pglock.Advisory(ctx, tx, tenant.LockNamespace, in.Tenant.String(), true); err != nil {
 		return "", err
 	}
 	named, _ := bucketpolicy.Named(in.Policy)
@@ -333,6 +325,86 @@ func (s *Store) RequireUnchangedStatement(tenant did.DID, principal string, read
 	}
 }
 
+func (s *Store) LockStatement(bucket did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
+		Args: []any{lockNamespace, bucket.String()},
+	}
+}
+
+// ownedBucket is the condition, on a statement whose first parameter is the
+// bucket and whose parameter numbered by its verb is the tenant, that the
+// bucket exists and is the tenant's.
+const ownedBucket = `EXISTS (SELECT 1 FROM bucket b WHERE b.id = $1 AND b.tenant_id = $%d)`
+
+// PutStatements inserts when the handler read no policy and updates the row
+// it read otherwise. An insert that meets a row, one committed since the
+// read or one another transaction commits while the insert waits for it,
+// affects none.
+func (s *Store) PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument, read *bucketpolicystore.Record) (store.Statement, []store.Statement) {
+	canonical, etag := bucketpolicy.Canonical(doc), s3bkt.ETag(doc)
+	var cas store.Statement
+	if read == nil {
+		cas = store.Statement{
+			SQL: `
+				INSERT INTO bucket_policy (bucket_id, document, etag)
+				SELECT $1::text, $2::jsonb, $3::text
+				WHERE ` + fmt.Sprintf(ownedBucket, 4) + `
+				ON CONFLICT (bucket_id) DO NOTHING`,
+			Args: []any{bucket.String(), canonical, etag, tenant.String()},
+		}
+	} else {
+		cas = store.Statement{
+			SQL: `
+				UPDATE bucket_policy
+				SET document = $2, etag = $3, updated_at = NOW()
+				WHERE bucket_id = $1 AND etag = $5 AND ` + fmt.Sprintf(ownedBucket, 4),
+			Args: []any{bucket.String(), canonical, etag, tenant.String(), read.ETag},
+		}
+	}
+	index := []store.Statement{clearIndexStatement(bucket)}
+	if ids := indexed(doc); len(ids) > 0 {
+		index = append(index, store.Statement{SQL: insertIndexSQL, Args: []any{bucket.String(), tenant.String(), ids}})
+	}
+	return cas, index
+}
+
+func (s *Store) DeleteStatements(bucket did.DID, read bucketpolicystore.Record) (store.Statement, store.Statement) {
+	return store.Statement{
+		SQL:  `DELETE FROM bucket_policy WHERE bucket_id = $1 AND etag = $2`,
+		Args: []any{bucket.String(), read.ETag},
+	}, clearIndexStatement(bucket)
+}
+
+// clearIndexStatement removes the bucket's index rows.
+func clearIndexStatement(bucket did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`,
+		Args: []any{bucket.String()},
+	}
+}
+
+// insertIndexSQL inserts one index row for the bucket ($1) of the tenant ($2)
+// per principal in $3, a NULL standing for the wildcard.
+const insertIndexSQL = `
+		INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
+		SELECT $1::text, $2::text, p.principal_id FROM unnest($3::text[]) AS p(principal_id)
+	`
+
+// indexed returns the principals the document's index rows carry: one per
+// named principal and, when the document names the wildcard, a nil.
+func indexed(doc s3bkt.PolicyDocument) []*string {
+	named, wildcard := bucketpolicy.Named(doc)
+	ids := make([]*string, 0, len(named)+1)
+	for i := range named {
+		ids = append(ids, &named[i])
+	}
+	if wildcard {
+		ids = append(ids, nil)
+	}
+	return ids
+}
+
 // collectRecords scans every row of a policy listing.
 func collectRecords(rows pgx.Rows) ([]bucketpolicystore.Record, error) {
 	var recs []bucketpolicystore.Record
@@ -372,24 +444,15 @@ const bucketFKConstraint = "bucket_policy_principal_bucket_fkey"
 // and, when the document names the wildcard, one with a NULL principal, all
 // inserted in one statement.
 func writeIndex(ctx context.Context, tx pgx.Tx, bucket, tenant did.DID, doc s3bkt.PolicyDocument) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM bucket_policy_principal WHERE bucket_id = $1`, bucket.String()); err != nil {
+	old := clearIndexStatement(bucket)
+	if _, err := tx.Exec(ctx, old.SQL, old.Args...); err != nil {
 		return fmt.Errorf("clearing policy index: %w", err)
 	}
-	named, wildcard := bucketpolicy.Named(doc)
-	ids := make([]*string, 0, len(named)+1)
-	for i := range named {
-		ids = append(ids, &named[i])
-	}
-	if wildcard {
-		ids = append(ids, nil)
-	}
+	ids := indexed(doc)
 	if len(ids) == 0 {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO bucket_policy_principal (bucket_id, tenant_id, principal_id)
-		SELECT $1::text, $2::text, p.principal_id FROM unnest($3::text[]) AS p(principal_id)
-	`, bucket.String(), tenant.String(), ids); err != nil {
+	if _, err := tx.Exec(ctx, insertIndexSQL, bucket.String(), tenant.String(), ids); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
 			if pgErr.ConstraintName == bucketFKConstraint {
@@ -446,9 +509,7 @@ func scanRecord(row pgx.Row) (bucketpolicystore.Record, error) {
 // store. The row's foreign key cannot, because a tombstone still satisfies it.
 //
 // Put takes it before any other lock, so a removal whose callback rewrites
-// this bucket's policy never waits on a Put that waits on the removal. FOR KEY
-// SHARE conflicts only with FOR UPDATE, so it does not block the FOR NO KEY
-// UPDATE the principal store's WithLock takes from inside beforeCommit.
+// this bucket's policy never waits on a Put that waits on the removal.
 func requireLivePrincipals(ctx context.Context, tx pgx.Tx, tenant did.DID, named []string) error {
 	if len(named) == 0 {
 		return nil
