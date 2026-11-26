@@ -158,6 +158,11 @@ func TestUsageStore(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, []usage.HourlyEgress{{Hour: h1, Bytes: 2}, {Hour: h2, Bytes: 4}}, got)
 
+				// The bounds are instants, so part of a second counts.
+				got, err = s.BucketEgress(t.Context(), bucket, h0.Add(time.Millisecond), h2.Add(time.Millisecond))
+				require.NoError(t, err)
+				require.Equal(t, []usage.HourlyEgress{{Hour: h1, Bytes: 2}, {Hour: h2, Bytes: 4}}, got)
+
 				got, err = s.BucketEgress(t.Context(), bucket, h2.Add(time.Hour), h2.Add(2*time.Hour))
 				require.NoError(t, err)
 				require.Empty(t, got)
@@ -322,6 +327,16 @@ func TestUsageStore(t *testing.T) {
 				got, err = s.BucketObjects(t.Context(), bucket, h2.Add(time.Minute), h2.Add(time.Hour))
 				require.NoError(t, err)
 				require.Equal(t, []usage.HourlyObjects{{Hour: h2, Added: 9, Removed: 3}}, got)
+
+				// A range ending part way through a second takes in the hour
+				// that starts on that second.
+				got, err = s.BucketObjects(t.Context(), bucket, h1, h2.Add(time.Millisecond))
+				require.NoError(t, err)
+				require.Equal(t, []usage.HourlyObjects{
+					{Hour: h0, Added: 5, Removed: 1},
+					{Hour: h1, Added: 6, Removed: 1},
+					{Hour: h2, Added: 9, Removed: 3},
+				}, got)
 
 				// Nothing was reported before the bucket's first hour.
 				got, err = s.BucketObjects(t.Context(), bucket, long.Add(-2*time.Hour), long)

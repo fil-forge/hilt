@@ -95,7 +95,8 @@ func (s *Store) sum(from, to time.Time, match func(key, row) bool) []usage.Hourl
 
 	totals := map[int64]uint64{}
 	for k, r := range s.egress {
-		if k.hour < from.Unix() || k.hour >= to.Unix() || !match(k, r) {
+		hour := time.Unix(k.hour, 0)
+		if hour.Before(from) || !hour.Before(to) || !match(k, r) {
 			continue
 		}
 		totals[k.hour] = usage.AddBytes(totals[k.hour], r.bytes)
@@ -141,10 +142,10 @@ func (s *Store) BucketObjects(ctx context.Context, bucket did.DID, from, to time
 	var before *usage.HourlyObjects
 	out := []usage.HourlyObjects{}
 	for k, r := range s.objects {
-		if k.bucket != bucket || k.hour >= to.Unix() {
+		h := usage.HourlyObjects{Hour: time.Unix(k.hour, 0).UTC(), Added: r.added, Removed: r.removed}
+		if k.bucket != bucket || !h.Hour.Before(to) {
 			continue
 		}
-		h := usage.HourlyObjects{Hour: time.Unix(k.hour, 0).UTC(), Added: r.added, Removed: r.removed}
 		switch {
 		case !h.Hour.Before(from):
 			out = append(out, h)
