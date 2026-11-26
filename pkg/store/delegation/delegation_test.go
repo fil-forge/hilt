@@ -8,13 +8,18 @@ import (
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	dlgstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -656,6 +661,171 @@ func TestDelegationStore(t *testing.T) {
 		require.Empty(t, proofs)
 		require.Empty(t, links)
 	})
+}
+
+// keyFixture is a tenant with two access keys, and a second tenant with one,
+// over a database of its own.
+type keyFixture struct {
+	pool   *pgxpool.Pool
+	store  dlgstore.Store
+	tenant ucan.Issuer
+	// keys are the tenant's access keys.
+	keys []did.DID
+	// other is another tenant, and otherKey its access key.
+	other    ucan.Issuer
+	otherKey did.DID
+}
+
+func setupKeys(t *testing.T) keyFixture {
+	t.Helper()
+	pool := htestutil.PostgresOrSkip(t)
+	f := keyFixture{pool: pool, store: delegationpostgres.New(pool), tenant: testutil.RandomIssuer(t), other: testutil.RandomIssuer(t)}
+	tenants, accessKeys := tenantpostgres.New(pool), accesskeypostgres.New(pool)
+	addKey := func(tenantID did.DID, name string) did.DID {
+		id := testutil.RandomDID(t)
+		require.NoError(t, accessKeys.Add(t.Context(), accesskey.Input{ID: id, Tenant: tenantID, Name: name, Permissions: []string{"s3:GetObject"}}))
+		return id
+	}
+	require.NoError(t, tenants.Add(t.Context(), f.tenant.DID(), "tenant-1", tenant.Active))
+	require.NoError(t, tenants.Add(t.Context(), f.other.DID(), "tenant-2", tenant.Active))
+	f.keys = []did.DID{addKey(f.tenant.DID(), "k1"), addKey(f.tenant.DID(), "k2")}
+	f.otherKey = addKey(f.other.DID(), "k1")
+	return f
+}
+
+// run executes the statements in order in one transaction, as a task's
+// commit does.
+func (f keyFixture) run(t *testing.T, statements ...store.Statement) {
+	t.Helper()
+	tx, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer tx.Rollback(context.Background()) // no-op once committed
+	for _, st := range statements {
+		_, err := tx.Exec(t.Context(), st.SQL, st.Args...)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit(t.Context()))
+}
+
+func (f keyFixture) held(t *testing.T, audience did.DID) []string {
+	t.Helper()
+	page, err := f.store.ListByAudience(t.Context(), audience)
+	require.NoError(t, err)
+	return linkStrings(page.Results)
+}
+
+// owed returns the CIDs of the revocations owed, by tenant.
+func (f keyFixture) owed(t *testing.T) map[string][]string {
+	t.Helper()
+	rows, err := f.pool.Query(t.Context(), `SELECT tenant_id, id FROM revocation_owed ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var tenantID, id string
+		require.NoError(t, rows.Scan(&tenantID, &id))
+		out[tenantID] = append(out[tenantID], id)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+func TestWithdrawKeyGrantsStatements(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+
+	t.Run("moves what the tenant issued to its keys to the revocations owed, and nothing else", func(t *testing.T) {
+		f := setupKeys(t)
+		bucket := testutil.RandomIssuer(t)
+		grants := []ucan.Delegation{
+			makeDelegation(t, f.tenant, f.keys[0], bucket.DID(), read),
+			makeDelegation(t, f.tenant, f.keys[0], did.Undef, read),
+			makeDelegation(t, f.tenant, f.keys[1], bucket.DID(), read),
+		}
+		// Left alone: the bucket's root to the tenant, a delegation the
+		// tenant issued to something that is not one of its keys, one another
+		// party issued to one of its keys, and another tenant's grant.
+		root := makeDelegation(t, bucket, f.tenant.DID(), bucket.DID(), command.Top())
+		elsewhere := makeDelegation(t, f.tenant, testutil.RandomDID(t), bucket.DID(), read)
+		foreign := makeDelegation(t, bucket, f.keys[0], bucket.DID(), read)
+		theirs := makeDelegation(t, f.other, f.otherKey, bucket.DID(), read)
+		require.NoError(t, f.store.PutBatch(t.Context(), append(grants, root, elsewhere, foreign, theirs)))
+
+		f.run(t, f.store.WithdrawKeyGrantsStatements(f.tenant.DID())...)
+
+		require.Equal(t, linkStrings([]ucan.Delegation{foreign}), f.held(t, f.keys[0]))
+		require.Empty(t, f.held(t, f.keys[1]))
+		require.Equal(t, linkStrings([]ucan.Delegation{root}), f.held(t, f.tenant.DID()))
+		require.Equal(t, linkStrings([]ucan.Delegation{elsewhere}), f.held(t, elsewhere.Audience()))
+		require.Equal(t, linkStrings([]ucan.Delegation{theirs}), f.held(t, f.otherKey))
+		owed := f.owed(t)
+		require.ElementsMatch(t, linkStrings(grants), owed[f.tenant.DID().String()])
+		require.Len(t, owed, 1, "only the tenant owes anything")
+
+		// A second run finds nothing left to move.
+		f.run(t, f.store.WithdrawKeyGrantsStatements(f.tenant.DID())...)
+		require.Equal(t, owed, f.owed(t))
+	})
+
+	t.Run("waits for a Replace of one of the keys and withdraws what it stored", func(t *testing.T) {
+		f := setupKeys(t)
+		late := makeDelegation(t, f.tenant, f.keys[1], testutil.RandomDID(t), read)
+
+		writeErr, withdrawErr := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return replaceOne(t.Context(), f.store, f.keys[1], func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					close(entered)
+					<-release
+					return []ucan.Delegation{late}, nil
+				})
+			},
+			func() error {
+				tx, err := f.pool.Begin(t.Context())
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback(context.Background()) // no-op once committed
+				for _, st := range f.store.WithdrawKeyGrantsStatements(f.tenant.DID()) {
+					if _, err := tx.Exec(t.Context(), st.SQL, st.Args...); err != nil {
+						return err
+					}
+				}
+				return tx.Commit(t.Context())
+			},
+		)
+		require.NoError(t, writeErr)
+		require.NoError(t, withdrawErr)
+		require.Empty(t, f.held(t, f.keys[1]))
+		require.Equal(t, []string{late.Link().String()}, f.owed(t)[f.tenant.DID().String()])
+	})
+}
+
+func TestPutForKeysStatement(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+	f := setupKeys(t)
+	bucket := testutil.RandomDID(t)
+	kept := makeDelegation(t, f.tenant, f.keys[0], bucket, read)
+	powerline := makeDelegation(t, f.tenant, f.keys[1], did.Undef, read)
+	// Issued to a key that no longer exists by the time the statement runs.
+	gone := makeDelegation(t, f.tenant, testutil.RandomDID(t), bucket, read)
+
+	st, err := f.store.PutForKeysStatement([]ucan.Delegation{kept, powerline, gone})
+	require.NoError(t, err)
+	f.run(t, st)
+	require.Equal(t, []string{kept.Link().String()}, f.held(t, f.keys[0]))
+	require.Equal(t, []string{powerline.Link().String()}, f.held(t, f.keys[1]))
+	require.Empty(t, f.held(t, gone.Audience()))
+
+	// The subject column is stored as PutBatch stores it.
+	page, err := f.store.ListBySubject(t.Context(), bucket)
+	require.NoError(t, err)
+	require.Equal(t, []string{kept.Link().String()}, linkStrings(page.Results))
+
+	// A repeat stores nothing twice.
+	f.run(t, st)
+	require.Len(t, f.held(t, f.keys[0]), 1)
+
+	_, err = f.store.PutForKeysStatement([]ucan.Delegation{kept, nil})
+	require.ErrorIs(t, err, store.ErrInvalidArgument)
 }
 
 func replaceOne(ctx context.Context, s dlgstore.Store, audience did.DID, next func(ctx context.Context, current []ucan.Delegation) ([]ucan.Delegation, error)) error {

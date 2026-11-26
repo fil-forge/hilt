@@ -6,8 +6,13 @@ import (
 
 	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	"github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/revocation"
+	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/libforge/taskrunner"
 	"go.opentelemetry.io/otel"
@@ -19,7 +24,7 @@ import (
 // TasksModule registers the task queues' handlers with the runner the store
 // module provides, and starts and stops the runner with the service.
 var TasksModule = fx.Module("tasks",
-	fx.Provide(NewRevocationQueue),
+	fx.Provide(NewRevocationQueue, NewTenantQueue),
 	fx.Invoke(RegisterTaskRunnerLifecycle),
 )
 
@@ -40,6 +45,27 @@ func NewRevocationQueue(
 	})
 }
 
+// NewTenantQueue registers the handlers of the changes to a tenant's
+// authority with the runner.
+func NewTenantQueue(
+	runner *taskrunner.Runner,
+	tenants tenant.Store,
+	accessKeys accesskey.Store,
+	policies bucketpolicy.Store,
+	delegations delegation.Store,
+	secrets vault.Vault,
+	logger *zap.Logger,
+) (*tenantqueue.Queue, error) {
+	return tenantqueue.New(runner, tenantqueue.Deps{
+		Tenants:     tenants,
+		AccessKeys:  accessKeys,
+		Policies:    policies,
+		Delegations: delegations,
+		Secrets:     secrets,
+		Logger:      logger.Named("tenant-changes"),
+	})
+}
+
 // RegisterTaskRunnerLifecycle starts the runner when the service starts and
 // stops it on shutdown. Taking the queues is what makes fx register their
 // handlers before the runner starts, and taking the migrated pool orders this
@@ -52,6 +78,7 @@ func RegisterTaskRunnerLifecycle(
 	lc fx.Lifecycle,
 	runner *taskrunner.Runner,
 	revocations *revocationqueue.Queue,
+	_ *tenantqueue.Queue,
 	_ *storepostgres.MigratedPool,
 	logger *zap.Logger,
 ) {

@@ -100,6 +100,21 @@ func (s *Store) SetStatus(ctx context.Context, id did.DID, status tenant.Status)
 	return nil
 }
 
+func (s *Store) SetStatusStatement(id did.DID, from, to tenant.Status) (store.Statement, error) {
+	for _, status := range []tenant.Status{from, to} {
+		if !status.Valid() {
+			return store.Statement{}, fmt.Errorf("invalid tenant status %q: %w", status, store.ErrInvalidArgument)
+		}
+	}
+	return store.Statement{
+		SQL: `
+			UPDATE tenant
+			SET status = $1, updated_at = NOW()
+			WHERE id = $2 AND status = $3`,
+		Args: []any{string(to), id.String(), string(from)},
+	}, nil
+}
+
 func (s *Store) Delete(ctx context.Context, id did.DID) error {
 	if _, err := s.pool.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
 		return fmt.Errorf("deleting tenant: %w", err)

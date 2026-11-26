@@ -55,7 +55,12 @@ them. It exposes two APIs and talks to three external services:
   Swarf records once.
   Revocations recorded as owed (`pkg/store/revocation`) are published from
   the task queue instead, in batches, and retried until Swarf takes them
-  (`pkg/tasks/revocationqueue`). Nothing records one yet.
+  (`pkg/tasks/revocationqueue`). A tenant status change into or out of
+  `disabled` records them: disabling withdraws every grant the tenant's keys
+  hold, and leaving `disabled` withdraws whatever they hold and issues each
+  key fresh grants (`pkg/tasks/tenantqueue`). Tenant deletion publishes what
+  is still owed itself, before it deactivates the tenant's DID, which Swarf
+  verifies the revocations against.
 - **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
   provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
 
@@ -138,7 +143,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   order, and their actions: `queue-tenant` for changes to a tenant's
   authority and `queue-revocation` for publishing revocations, both on the
   subject of the tenant's DID string. Each queue's handlers live in a package
-  under it (`revocationqueue`). The runner is built with the Postgres store
+  under it (`tenantqueue`, `revocationqueue`). `queue-tenant.set-status` is
+  the tenant status change, which `tenant.Service.SetStatus` submits and
+  waits for. The runner is built with the Postgres store
   module (`pkg/fx/store/postgres`), which creates its tables in the `public`
   schema after the goose migrations; `pkg/fx/tasks.go` registers the handlers
   and starts and stops it with the service.
@@ -185,9 +192,19 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   with the task; it never reads a row its own task wrote. A task's arguments
   and result are stored in Postgres, so no secret goes into either. Write an
   action with its queue (`queue-revocation.publish`). The runner refuses a
-  task that queues its own action, so work that takes several tasks is queued
-  by whoever records it (`revocationqueue.PublishSpecs`). Tests build a
-  runner on their test database with `testutil.StartTaskRunner`.
+  task that queues its own action, so a task does all of its work itself:
+  the one publish task a change queues (`revocationqueue.PublishSpec`)
+  publishes everything the tenant owes, reading each batch after the last
+  row of the one before, because its own deletes are not visible until it
+  commits. Key creation, policy writes, principal removal and key and bucket
+  deletion still write grants under locks, outside the queue. A task that
+  changes grants therefore chooses the rows in the statements its commit
+  runs, under the keys' delegation locks
+  (`delegation.Store.WithdrawKeyGrantsStatements`), never from a list its
+  handler read, and makes the write of a value it read conditional
+  (`ex.WriteConditional`). Tests build a runner on their test database with
+  `testutil.StartTaskRunner`, or `testutil.StartServiceTasks` for one with
+  the service's handlers registered.
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an
@@ -227,9 +244,14 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `Authorize` asks the task runner for the tenant's unfinished tasks on
   `queue-tenant` and waits for all of them, for up to `store.LockTimeout`,
   so no request is answered from a state a queued change is about to
-  replace; a wait that runs out is `ErrTemporarilyUnavailable`. Nothing
-  queues such a change yet, and the share-locked reads stay until the writes
-  they wait on have moved onto the queue.
+  replace; a wait that runs out is `ErrTemporarilyUnavailable`. The tenant
+  status change is the one change queued there so far, and the share-locked
+  reads stay until the writes they wait on have moved onto the queue. The
+  status is read before the policies and before the key's stored grants,
+  and a status change commits its status and its grant changes together, so
+  a change that lands between two of those reads leaves the answer no wider
+  than the status read allows (the comment at the read in
+  `pkg/rpc/service/auth/auth.go` has the cases).
   Classification mirrors the gateway's router (`pkg/rpc/service/auth/operation.go`):
   `subresources` is S3's subresource vocabulary, each marked supported or
   not, and `bucketRoutes` / `objectRoutes` give the operation a supported

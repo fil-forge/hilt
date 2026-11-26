@@ -2,7 +2,10 @@
 // delegation.Store. Encoded delegation payloads are stored directly in the
 // delegation table's data column. Every write that mutates an audience's set
 // (PutBatch, Replace, ReplaceOver, DeleteByAudience) runs in a transaction holding that
-// audience's advisory lock, so the writes of one audience serialize.
+// audience's advisory lock, so the writes of one audience serialize. The
+// statements a task runs in its own commit keep to the same rule: those of
+// WithdrawKeyGrantsStatements open with the locks of every key of the tenant,
+// and PutForKeysStatement follows them in the same transaction.
 package postgres
 
 import (
@@ -72,13 +75,27 @@ func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) (er
 }
 
 // insert stores the delegations inside tx in one statement, leaving an
-// already-stored one alone. Each column travels as one array parameter, so
-// the statement's size and its round trip stay the same however many
-// delegations a key or a rotation carries.
+// already-stored one alone.
 func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
 	if len(dels) == 0 {
 		return nil
 	}
+	st, err := insertStatement(dels, "")
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, st.SQL, st.Args...); err != nil {
+		return fmt.Errorf("storing %d delegations: %w", len(dels), err)
+	}
+	return nil
+}
+
+// insertStatement builds the insert of the delegations, leaving an
+// already-stored one alone. Each column travels as one array parameter, so
+// the statement's size and its round trip stay the same however many
+// delegations a key or a rotation carries. where, when not empty, is a
+// condition on the row to insert, named d.
+func insertStatement(dels []ucan.Delegation, where string) (store.Statement, error) {
 	var (
 		ids        = make([]string, len(dels))
 		issuers    = make([]string, len(dels))
@@ -91,7 +108,7 @@ func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
 	for i, d := range dels {
 		data, err := delegation.Encode(d)
 		if err != nil {
-			return fmt.Errorf("encoding delegation %s: %w", d.Link(), err)
+			return store.Statement{}, fmt.Errorf("encoding delegation %s: %w", d.Link(), err)
 		}
 		ids[i], issuers[i], audiences[i], commands[i], datas[i] = d.Link().String(), d.Issuer().String(), d.Audience().String(), d.Command().String(), data
 		if d.Subject().Defined() {
@@ -103,15 +120,56 @@ func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
 			expiresAts[i] = &t
 		}
 	}
-
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
-		SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bytea[], $7::timestamptz[])
-		ON CONFLICT (id) DO NOTHING
-	`, ids, issuers, audiences, subjects, commands, datas, expiresAts); err != nil {
-		return fmt.Errorf("storing %d delegations: %w", len(dels), err)
+	if where != "" {
+		where = " WHERE " + where
 	}
-	return nil
+	return store.Statement{
+		SQL: `
+		INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
+		SELECT d.* FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bytea[], $7::timestamptz[])
+			AS d(id, issuer, audience, subject, command, data, expires_at)` + where + `
+		ON CONFLICT (id) DO NOTHING`,
+		Args: []any{ids, issuers, audiences, subjects, commands, datas, expiresAts},
+	}, nil
+}
+
+func (s *Store) PutForKeysStatement(delegations []ucan.Delegation) (store.Statement, error) {
+	if slices.Contains(delegations, nil) {
+		return store.Statement{}, fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
+	}
+	return insertStatement(delegations, `EXISTS (SELECT 1 FROM access_key k WHERE k.id = d.audience)`)
+}
+
+// WithdrawKeyGrantsStatements locks the keys in the order [lockAudiences]
+// does, by their DID strings' bytes, so the statement and a Replace of some
+// of the same keys queue for the shared ones in the same sequence. As with
+// [pglock.AdvisoryAll], Postgres takes the locks in the sorted order without
+// SQL promising it; a deadlock it breaks fails the transaction, which its
+// owner runs again.
+func (s *Store) WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement {
+	return []store.Statement{
+		{
+			SQL: `
+				SELECT pg_advisory_xact_lock($1, hashtext(k.id))
+				FROM access_key k
+				WHERE k.tenant_id = $2
+				ORDER BY k.id COLLATE "C"`,
+			Args: []any{lockNamespace, tenant.String()},
+		},
+		{
+			SQL: `
+				WITH withdrawn AS (
+					DELETE FROM delegation d
+					USING access_key k
+					WHERE k.tenant_id = $1 AND d.audience = k.id AND d.issuer = $1
+					RETURNING d.id, d.data
+				)
+				INSERT INTO revocation_owed (id, tenant_id, data)
+				SELECT w.id, $1, w.data FROM withdrawn w
+				ON CONFLICT (id) DO NOTHING`,
+			Args: []any{tenant.String()},
+		},
+	}
 }
 
 // lockNamespace is the first key of the advisory lock every audience-mutating

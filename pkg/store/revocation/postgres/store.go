@@ -14,7 +14,6 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/ipfs/go-cid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,29 +72,36 @@ func (s *Store) AddStatement(tenant did.DID, delegations []ucan.Delegation) (sto
 	}, nil
 }
 
-func (s *Store) Oldest(ctx context.Context, tenant did.DID, limit int) ([]ucan.Delegation, error) {
+func (s *Store) Oldest(ctx context.Context, tenant did.DID, after revocation.Cursor, limit int) ([]ucan.Delegation, revocation.Cursor, error) {
+	// The zero cursor's time is before every row's, so one query text serves
+	// the first page and the rest, on the (tenant_id, recorded_at, id) index.
 	rows, err := s.pool.Query(ctx, `
-		SELECT data FROM revocation_owed
-		WHERE tenant_id = $1
+		SELECT id, recorded_at, data FROM revocation_owed
+		WHERE tenant_id = $1 AND (recorded_at, id) > ($2, $3)
 		ORDER BY recorded_at, id
-		LIMIT $2
-	`, tenant.String(), limit)
+		LIMIT $4
+	`, tenant.String(), after.RecordedAt, after.ID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("reading revocations owed: %w", err)
+		return nil, after, fmt.Errorf("reading revocations owed: %w", err)
 	}
-	datas, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
-	if err != nil {
-		return nil, fmt.Errorf("reading revocations owed: %w", err)
-	}
-	out := make([]ucan.Delegation, 0, len(datas))
-	for _, data := range datas {
+	defer rows.Close()
+	var out []ucan.Delegation
+	next := after
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&next.ID, &next.RecordedAt, &data); err != nil {
+			return nil, after, fmt.Errorf("reading revocations owed: %w", err)
+		}
 		d, err := delegation.Decode(data)
 		if err != nil {
-			return nil, fmt.Errorf("decoding a delegation owed a revocation: %w", err)
+			return nil, after, fmt.Errorf("decoding a delegation owed a revocation: %w", err)
 		}
 		out = append(out, d)
 	}
-	return out, nil
+	if err := rows.Err(); err != nil {
+		return nil, after, fmt.Errorf("reading revocations owed: %w", err)
+	}
+	return out, next, nil
 }
 
 func (s *Store) Delete(ctx context.Context, ids []cid.Cid) error {

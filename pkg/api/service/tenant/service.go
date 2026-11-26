@@ -19,10 +19,14 @@ import (
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
+	"github.com/fil-forge/hilt/pkg/store/revocation"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
+	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/hilt/pkg/wrapkey"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
@@ -49,9 +53,13 @@ type Service struct {
 	plcClient   *plc.DirectoryClient
 	upload      *upload.Client
 	revocations grant.RevocationPublisher
+	owed        revocation.Store
+	runner      *taskrunner.Runner
 }
 
-// New constructs the tenant service.
+// New constructs the tenant service. runner runs the tenant's status
+// changes, and must have queue-tenant.set-status registered
+// ([tenantqueue.New]) and be started before SetStatus is called.
 func New(
 	logger *zap.Logger,
 	tenants tenantstore.Store,
@@ -65,6 +73,8 @@ func New(
 	plcClient *plc.DirectoryClient,
 	upload *upload.Client,
 	revocations grant.RevocationPublisher,
+	owed revocation.Store,
+	runner *taskrunner.Runner,
 ) *Service {
 	return &Service{
 		logger:      logger,
@@ -79,6 +89,8 @@ func New(
 		wrapKeys:    wrapKeys,
 		upload:      upload,
 		revocations: revocations,
+		owed:        owed,
+		runner:      runner,
 	}
 }
 
@@ -242,7 +254,17 @@ func (s *Service) Get(ctx context.Context, externalID string) (tenantstore.Recor
 	return rec, nil
 }
 
-// SetStatus updates the tenant's access mode. status must be a recognized status.
+// SetStatus updates the tenant's access mode. status must be a recognized
+// status.
+//
+// The change runs as a queue-tenant.set-status task on the tenant, behind
+// any other change to the tenant queued before it, and SetStatus returns
+// once it has committed or failed. Disabling the tenant withdraws every
+// grant its access keys hold, and leaving disabled issues them afresh, in
+// the same commit as the status ([tenantqueue]); the revocations are
+// published after it. An authorization for the tenant that arrives while the
+// task is queued or running waits for it. If ctx ends first the task stays
+// queued and a worker finishes it.
 func (s *Service) SetStatus(ctx context.Context, externalID, status string) error {
 	if !validStatus(tenantstore.Status(status)) {
 		return ErrInvalidStatus
@@ -253,8 +275,8 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	} else if err != nil {
 		return fmt.Errorf("looking up tenant: %w", err)
 	}
-	if err := s.tenants.SetStatus(ctx, rec.ID, tenantstore.Status(status)); err != nil {
-		if errors.Is(err, store.ErrRecordNotFound) {
+	if _, err := s.runner.Run(ctx, tenantqueue.SetStatusSpec(rec.ID, tenantstore.Status(status))); err != nil {
+		if errors.Is(err, tenantqueue.ErrTenantNotFound) {
 			return ErrTenantNotFound
 		}
 		return fmt.Errorf("updating tenant status: %w", err)
@@ -288,12 +310,13 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("listing access keys: %w", err)
 	}
 
-	// Revoke and remove every delegation the tenant's keys hold, in one
-	// request and one delegation-store write, before the did:plc goes: the
-	// tenant signs the revocations and Swarf verifies them against its DID. A
-	// warm key would otherwise keep serving from the gateway's cache until the
-	// next UTC midnight. A failed publish leaves everything in place for a
-	// retry. A DID an earlier attempt already deactivated skips both: that
+	// Publish the revocations the tenant still owes, then revoke and remove
+	// every delegation its keys hold, in one request and one
+	// delegation-store write, all before the did:plc goes: the tenant signs
+	// the revocations and Swarf verifies them against its DID, and the rows
+	// owed go with the tenant row. A warm key would otherwise keep serving
+	// from the gateway's cache until the next UTC midnight. A failed publish
+	// leaves everything in place for a retry. A DID an earlier attempt already deactivated skips both: that
 	// attempt published first, and Swarf could not verify a new publish against
 	// the tombstone anyway. A tenant tombstoned by a removal that predates the
 	// publish, and that then failed in its cascade, is the one case nothing
@@ -305,6 +328,9 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		if err != nil {
 			log.Error("fetching the tenant DID's last operation", zap.Error(err))
 			return ErrDIDDeactivation
+		}
+		if err := s.publishOwed(ctx, log, rec.ID); err != nil {
+			return err
 		}
 		if err := s.revokeKeyDelegations(ctx, log, rec.ID, keys); err != nil {
 			return err
@@ -398,6 +424,23 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		log.Warn("removing signing key from vault", zap.Error(err))
 	}
 	log.Info("deleted tenant")
+	return nil
+}
+
+// publishOwed publishes every revocation the tenant owes, as
+// queue-revocation.publish does, and deletes each batch's rows once the
+// revocation service has taken it. The queue is not used: the revocations
+// must be with the revocation service before the caller deactivates the
+// tenant's DID. A task of the queue publishing the same rows meanwhile
+// repeats revocations the service records once.
+func (s *Service) publishOwed(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
+	done, err := revocationqueue.Drain(ctx, log, s.owed, s.secrets, s.revocations, tenantID, s.owed.Delete)
+	if err != nil {
+		return fmt.Errorf("publishing the tenant's revocations owed: %w", err)
+	}
+	if done.Published+done.Expired > 0 {
+		log.Info("published the revocations owed before deleting the tenant", zap.Int("published", done.Published), zap.Int("expired", done.Expired))
+	}
 	return nil
 }
 

@@ -79,7 +79,7 @@ func TestRevocationStore(t *testing.T) {
 		dels := issue(t, d.tenant, 3)
 		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), dels))
 
-		got, err := d.store.Oldest(t.Context(), d.tenant.DID(), 10)
+		got, _, err := d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 10)
 		require.NoError(t, err)
 		require.ElementsMatch(t, links(dels), links(got))
 		// What comes back is the delegation itself, fit to be revoked.
@@ -148,19 +148,47 @@ func TestRevocationStore(t *testing.T) {
 		backdate(t, d.pool, old, 2*time.Hour)
 		backdate(t, d.pool, theirs, 3*time.Hour)
 
-		got, err := d.store.Oldest(t.Context(), d.tenant.DID(), 4)
+		got, _, err := d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 4)
 		require.NoError(t, err)
 		require.Len(t, got, 4)
 		require.ElementsMatch(t, links(old), links(got[:2]))
 		require.ElementsMatch(t, links(mid), links(got[2:]))
 
-		all, err := d.store.Oldest(t.Context(), d.tenant.DID(), 100)
+		all, _, err := d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 100)
 		require.NoError(t, err)
 		require.Len(t, all, 6, "another tenant's rows are not this tenant's")
 
-		none, err := d.store.Oldest(t.Context(), testutil.RandomDID(t), 100)
+		none, _, err := d.store.Oldest(t.Context(), testutil.RandomDID(t), revocation.Cursor{}, 100)
 		require.NoError(t, err)
 		require.Empty(t, none)
+	})
+
+	t.Run("Oldest pages through rows recorded together, each once, as read rows are deleted", func(t *testing.T) {
+		d := setup(t)
+		// One Add stamps every row with the same time, so the CID orders them.
+		dels := issue(t, d.tenant, 7)
+		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), dels))
+
+		var seen []cid.Cid
+		var after revocation.Cursor
+		for page := 0; ; page++ {
+			got, next, err := d.store.Oldest(t.Context(), d.tenant.DID(), after, 3)
+			require.NoError(t, err)
+			if len(got) == 0 {
+				require.Equal(t, after, next, "an empty page leaves the cursor where it was")
+				break
+			}
+			require.Equal(t, got[len(got)-1].Link().String(), next.ID)
+			seen = append(seen, links(got)...)
+			// Deleting every other page shows the cursor does not depend on
+			// the rows before it still being there.
+			if page%2 == 0 {
+				require.NoError(t, d.store.Delete(t.Context(), links(got)))
+			}
+			after = next
+		}
+		require.ElementsMatch(t, links(dels), seen)
+		require.Len(t, seen, len(dels), "no row is read twice")
 	})
 
 	t.Run("Delete removes the named rows and ignores an unknown CID", func(t *testing.T) {
@@ -169,7 +197,7 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), dels))
 
 		require.NoError(t, d.store.Delete(t.Context(), append(links(dels[:2]), testutil.RandomCID(t))))
-		got, err := d.store.Oldest(t.Context(), d.tenant.DID(), 10)
+		got, _, err := d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 10)
 		require.NoError(t, err)
 		require.Equal(t, links(dels[2:]), links(got))
 
@@ -183,14 +211,14 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, err)
 		_, err = d.pool.Exec(t.Context(), st.SQL, st.Args...)
 		require.NoError(t, err)
-		got, err := d.store.Oldest(t.Context(), d.tenant.DID(), 10)
+		got, _, err := d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 10)
 		require.NoError(t, err)
 		require.ElementsMatch(t, links(dels), links(got))
 
 		st = d.store.DeleteStatement(links(dels))
 		_, err = d.pool.Exec(t.Context(), st.SQL, st.Args...)
 		require.NoError(t, err)
-		got, err = d.store.Oldest(t.Context(), d.tenant.DID(), 10)
+		got, _, err = d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 10)
 		require.NoError(t, err)
 		require.Empty(t, got)
 

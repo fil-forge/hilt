@@ -77,8 +77,9 @@ func TestAppStartsTaskRunner(t *testing.T) {
 	// A publish for a tenant that owes nothing ends at once and without
 	// error, which takes a started runner with the handler registered.
 	tenant := testutil.RandomDID(t)
-	ids, err := runner.SubmitAll(t.Context(), revocationqueue.PublishSpecs(tenant, 1))
+	id, err := runner.Submit(t.Context(), revocationqueue.PublishSpec(tenant))
 	require.NoError(t, err)
+	ids := []taskrunner.TaskID{id}
 	waitCtx, cancelWait := context.WithTimeout(t.Context(), htestutil.WaitTimeout)
 	defer cancelWait()
 	ended, err := runner.WaitAll(waitCtx, tasks.QueueRevocation, ids...)

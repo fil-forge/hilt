@@ -136,7 +136,12 @@ stage points at its own Swarf, which only knows that stage's tenants.
 
 Hilt runs durable task queues in its Postgres database, on the libforge task
 runner: `queue-tenant` for changes to a tenant's authority and
-`queue-revocation` for publishing the revocations a tenant owes to Swarf. Each
+`queue-revocation` for publishing the revocations a tenant owes to Swarf. A
+tenant's status change runs on `queue-tenant`, and the request that makes it
+waits for the result: disabling a tenant withdraws every grant its access keys
+hold and queues their revocations, and leaving `disabled` issues each key
+fresh grants. With Swarf unreachable the status change still succeeds and the
+revocations are published once it returns. Each
 setting is the most queued tasks of that queue one instance runs at once. A
 tenant's tasks on a queue always run one at a time, so the count is the number
 of tenants worked on together. `0` runs none and leaves the queue to other
