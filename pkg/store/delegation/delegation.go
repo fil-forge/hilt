@@ -70,8 +70,11 @@ type Store interface {
 	// after the task read anything is withdrawn with the rest; the first
 	// statement takes the lock of every key of the tenant, as a Replace does,
 	// so one that is storing grants for a key finishes first and its grants
-	// are withdrawn too. A delegation the tenant did not issue, such as a
-	// bucket's root delegation to the tenant, is left alone.
+	// are withdrawn too. The lock is there for the writers that store grants
+	// outside the tenant's task queue, key creation and policy writes; with
+	// none of those it has nothing to wait for. A delegation the tenant did
+	// not issue, such as a bucket's root delegation to the tenant, is left
+	// alone.
 	WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement
 	// PutForKeysStatement returns the write that stores the delegations whose
 	// audience is an access key when the statement runs, for a task that
