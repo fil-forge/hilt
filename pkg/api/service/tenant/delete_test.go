@@ -346,7 +346,14 @@ func (e deleteEnv) requireGone(t *testing.T) {
 // there, as the setup left them.
 func (e deleteEnv) requireIntact(t *testing.T) {
 	t.Helper()
-	require.Equal(t, map[string]int{
+	e.requireIntactBut(t)
+}
+
+// requireIntactBut is requireIntact for every table but the ones named, which
+// are expected empty.
+func (e deleteEnv) requireIntactBut(t *testing.T, emptied ...string) {
+	t.Helper()
+	want := map[string]int{
 		"tenant":                  1,
 		"access_key":              2,
 		"principal":               2,
@@ -356,7 +363,11 @@ func (e deleteEnv) requireIntact(t *testing.T) {
 		"delegation":              len(e.grants) + 1,
 		"wrap_key":                1,
 		"revocation_owed":         len(e.owed),
-	}, e.left(t))
+	}
+	for _, table := range emptied {
+		delete(want, table)
+	}
+	require.Equal(t, want, e.left(t))
 	require.ElementsMatch(t, e.vaultPaths, e.vaultLeft(t))
 }
 
@@ -448,7 +459,7 @@ func TestDelete(t *testing.T) {
 		env.requirePublishedFirst(t)
 	})
 
-	t.Run("a failed deactivation after the publish leaves everything, and a retry publishes again first", func(t *testing.T) {
+	t.Run("a failed deactivation after the publish leaves everything but the revocations it published, and a retry publishes again first", func(t *testing.T) {
 		env := deleteSetup(t, tenant.Disabled)
 		env.directory.fail(0, http.StatusInternalServerError)
 
@@ -456,7 +467,8 @@ func TestDelete(t *testing.T) {
 		require.NotEmpty(t, env.swarf.Calls(), "the publish ran")
 		require.Subset(t, env.swarf.Revoked(), append(slices.Clone(env.owed), env.grants...))
 		require.Zero(t, env.directory.tombstones())
-		env.requireIntact(t)
+		// The revocations owed went as each batch was taken; the rest stays.
+		env.requireIntactBut(t, "revocation_owed")
 
 		env.directory.fail(0, 0)
 		first := env.swarf.Calls()

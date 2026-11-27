@@ -26,7 +26,6 @@ import (
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -294,7 +293,7 @@ func commandsFor(actions ...string) []string {
 // owedLinks returns the CIDs of the revocations the tenant owes, sorted.
 func (d deps) owedLinks(t *testing.T) []string {
 	t.Helper()
-	dels, _, err := d.owed.Oldest(t.Context(), d.tenantID, revocation.Cursor{}, 10_000)
+	dels, err := d.owed.Oldest(t.Context(), d.tenantID, 10_000)
 	require.NoError(t, err)
 	return links(dels)
 }

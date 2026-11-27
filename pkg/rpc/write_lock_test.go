@@ -29,7 +29,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -287,7 +286,7 @@ func (e *lockEnv) commands(t *testing.T, key ed25519.Signer, subject did.DID) []
 // owedLinks returns the CIDs of the revocations the tenant owes.
 func (e *lockEnv) owedLinks(t *testing.T) []cid.Cid {
 	t.Helper()
-	dels, _, err := e.owed.Oldest(t.Context(), e.tenant, revocation.Cursor{}, 10_000)
+	dels, err := e.owed.Oldest(t.Context(), e.tenant, 10_000)
 	require.NoError(t, err)
 	return cids(dels)
 }
