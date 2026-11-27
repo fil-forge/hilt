@@ -51,7 +51,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -90,18 +89,8 @@ type Deps struct {
 	Delegations delegation.Store
 	// Secrets holds the tenants' signing keys.
 	Secrets vault.Vault
-	// Uploads tells whether a bucket's space is empty, before its deletion.
-	// Nil fails every bucket deletion.
-	Uploads Uploads
 	// Logger is optional; defaults to zap.NewNop().
 	Logger *zap.Logger
-}
-
-// Uploads is what queue-tenant.delete-bucket needs of the upload service
-// (Sprue). [*upload.Client] satisfies it.
-type Uploads interface {
-	// SpaceEmpty reports whether the space holds no blob.
-	SpaceEmpty(ctx context.Context, space did.DID, opts ...upload.MethodOption) (bool, error)
 }
 
 // Queue runs queue-tenant.
@@ -113,7 +102,6 @@ type Queue struct {
 	policies    bucketpolicy.Store
 	delegations delegation.Store
 	secrets     vault.Vault
-	uploads     Uploads
 	logger      *zap.Logger
 }
 
@@ -127,7 +115,6 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		policies:    d.Policies,
 		delegations: d.Delegations,
 		secrets:     d.Secrets,
-		uploads:     d.Uploads,
 		logger:      d.Logger,
 	}
 	if q.logger == nil {

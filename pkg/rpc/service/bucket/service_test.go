@@ -451,7 +451,7 @@ func TestDelete(t *testing.T) {
 		require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root, grant, other, powerline}))
 
 		swarf := &gatedSwarf{}
-		runner := htestutil.StartServiceTasks(t, pool, secrets, swarf, func(d *tenantqueue.Deps) { d.Uploads = sprue })
+		runner := htestutil.StartServiceTasks(t, pool, secrets, swarf)
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets,
 			auth.WithTenantChanges(runner), auth.WithSnapshots(pglock.NewSnapshots(pool)))
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, runner)
@@ -554,32 +554,24 @@ func TestDelete(t *testing.T) {
 		require.Len(t, d.swarf.Revocations(), 2)
 	})
 
-	t.Run("a policy write issued during the deletion waits for it and finds the bucket gone", func(t *testing.T) {
+	t.Run("a change to the tenant goes ahead while Sprue is asked, and the deletion takes it with the bucket", func(t *testing.T) {
+		// The emptiness check runs before the deletion takes its turn on the
+		// tenant's queue, so a slow Sprue holds up no other change.
 		sprue := &fakeSprue{empty: true}
 		d := setup(t, []string{"s3:DeleteBucket"}, false, sprue)
-		written := make(chan error, 1)
 		sprue.onEmpty = func() {
-			go func() {
-				_, _, err := d.policyWrites.Write(context.Background(), d.tenantID, d.bucketID, bucketName, everyone(bucketName))
-				written <- err
-			}()
-			select {
-			case err := <-written:
-				t.Errorf("the write finished while the deletion was running: %v", err)
-			case <-time.After(htestutil.MinBlock):
-			}
+			// Bounded, so a write held behind the deletion fails the test
+			// rather than hanging it.
+			wctx, cancel := context.WithTimeout(context.Background(), htestutil.WaitTimeout)
+			defer cancel()
+			_, _, err := d.policyWrites.Write(wctx, d.tenantID, d.bucketID, bucketName, everyone(bucketName))
+			require.NoError(t, err, "the write completes while the emptiness is being asked")
 		}
 
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))
 		require.NoError(t, err)
-		select {
-		case err := <-written:
-			require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound, "the write ran after the deletion and found no bucket")
-		case <-time.After(htestutil.WaitTimeout):
-			t.Fatal("the write did not finish")
-		}
 		_, err = d.policies.Get(ctx, d.bucketID)
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.ErrorIs(t, err, store.ErrRecordNotFound, "the policy written meanwhile goes with the bucket")
 	})
 
 	t.Run("rejects a key without s3:DeleteBucket", func(t *testing.T) {

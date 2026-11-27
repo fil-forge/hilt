@@ -48,12 +48,12 @@ import (
 // page size when the parameter is absent.
 const maxListBuckets = 10000
 
-// UploadClient is the subset of the upload service (Sprue) bucket creation
-// needs. It is satisfied by [*upload.Client]; the interface lets the logic be
-// unit tested without a live Sprue. A bucket's deletion asks Sprue whether
-// the bucket is empty from its task ([tenantqueue.Uploads]).
+// UploadClient is the subset of the upload service (Sprue) the bucket operations
+// need. It is satisfied by [*upload.Client]; the interface lets the logic be
+// unit tested without a live Sprue.
 type UploadClient interface {
 	ProvisionSpace(ctx context.Context, account ucan.Issuer, space did.DID) (string, error)
+	SpaceEmpty(ctx context.Context, space did.DID, opts ...upload.MethodOption) (bool, error)
 	UseRoutingPolicy(ctx context.Context, space did.DID, policy *did.DID, opts ...upload.MethodOption) error
 }
 
@@ -291,22 +291,34 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	}, blocks, nil
 }
 
+// DeleteTimeout is the longest a bucket deletion waits for its turn on the
+// tenant's queue. A deletion that has not started by then is abandoned with
+// nothing written, and the caller repeats the call.
+const DeleteTimeout = 30 * time.Second
+
 // Delete authenticates the request, checks it is a DeleteBucket the key may
-// make, and deletes the bucket. The deletion is a queue-tenant.delete-bucket
-// task ([tenantqueue]), which Delete waits for, behind any other change to
-// the tenant: it asks Sprue, as the tenant, whether the bucket's space is
-// empty, refuses a bucket that is not ([ErrBucketNotEmpty]), and otherwise,
-// in one commit, records every delegation the tenant issued over the bucket
-// as a revocation owed and deletes the bucket's delegations and the bucket,
-// which takes its policy with it. The revocations are published after the
+// make, asks Sprue, as the tenant, whether the bucket's space is empty,
+// refuses a bucket that is not ([ErrBucketNotEmpty]), and deletes the
+// bucket. The deletion is a queue-tenant.delete-bucket task ([tenantqueue]),
+// which Delete waits for, behind any other change to the tenant: in one
+// commit it records every delegation the tenant issued over the bucket as a
+// revocation owed and deletes the bucket's delegations and the bucket, which
+// takes its policy with it. The revocations are published after the
 // commit, by the task the commit queues, and retried until the revocation
 // service takes them, so Delete returns before the gateway has been told of
 // them, and succeeds while the revocation service is down. The policy goes
 // without a revocation of its own: the gateway refuses a bucket it no longer
 // knows, so nothing cached for it can be used.
 //
-// A deletion still waiting for its turn at ctx's deadline is abandoned with
-// nothing written and reported as [auth.ErrTemporarilyUnavailable].
+// Sprue is asked before the task is queued, so a slow answer holds up this
+// call alone and not every change and authorization for the tenant. Asking
+// inside the task would be no safer: uploads are not on the tenant's queue,
+// so the space can gain a blob between the answer and the commit either
+// way, as it could before the deletion was a task.
+//
+// A deletion still waiting for its turn after [DeleteTimeout], or at ctx's
+// deadline if that is sooner, is abandoned with nothing written and reported
+// as [auth.ErrTemporarilyUnavailable].
 func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.DeleteArguments) (*s3bkt.DeleteOK, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -317,11 +329,28 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 		return nil, fmt.Errorf("%w: %s", ErrOperationMismatch, authz.Operation)
 	}
 
-	if _, err := s.runner.Run(ctx, tenantqueue.DeleteBucketSpec(authz.Tenant.ID, authz.Bucket.ID)); err != nil {
-		switch {
-		case errors.Is(err, tenantqueue.ErrBucketNotEmpty):
-			return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
-		case errors.Is(err, taskrunner.ErrExpired):
+	// The bucket's root delegation to the tenant authorizes the /blob/list
+	// invocation that lists the space's blobs.
+	account, err := s.authorizer.TenantIssuer(ctx, authz.Tenant.ID)
+	if err != nil {
+		return nil, err
+	}
+	empty, err := s.uploads.SpaceEmpty(ctx, authz.Bucket.ID, upload.WithIssuer(account), upload.WithProofs(s.delegations))
+	if err != nil {
+		return nil, fmt.Errorf("checking bucket is empty: %w", err)
+	}
+	if !empty {
+		return nil, fmt.Errorf("%w: %q", ErrBucketNotEmpty, authz.BucketName)
+	}
+
+	spec := tenantqueue.DeleteBucketSpec(authz.Tenant.ID, authz.Bucket.ID)
+	expires := time.Now().Add(DeleteTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+		expires = deadline
+	}
+	spec.Expires = &expires
+	if _, err := s.runner.Run(ctx, spec); err != nil {
+		if errors.Is(err, taskrunner.ErrExpired) {
 			return nil, fmt.Errorf("%w: other changes to the tenant held the deletion of %q", auth.ErrTemporarilyUnavailable, authz.BucketName)
 		}
 		return nil, fmt.Errorf("deleting bucket %q: %w", authz.BucketName, err)
