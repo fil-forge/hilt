@@ -24,7 +24,6 @@ import (
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -247,7 +246,7 @@ func (w *world) held(t *testing.T, audience did.DID) []ucan.Delegation {
 // owedLinks returns the CIDs of the revocations the tenant owes.
 func (w *world) owedLinks(t *testing.T) []cid.Cid {
 	t.Helper()
-	dels, _, err := w.owed.Oldest(t.Context(), w.tenant.DID(), revocation.Cursor{}, 10_000)
+	dels, err := w.owed.Oldest(t.Context(), w.tenant.DID(), 10_000)
 	require.NoError(t, err)
 	return links(dels)
 }
