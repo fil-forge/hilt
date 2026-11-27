@@ -57,35 +57,6 @@ func Collect[T any](ctx context.Context, getPage GetPageFunc[T]) ([]T, error) {
 	return items, nil
 }
 
-// ReadConfig is the row lock a read takes. The zero value takes none.
-type ReadConfig struct {
-	// Share reads the row with SELECT ... FOR SHARE. A write in flight on the
-	// same row (held FOR UPDATE inside its transaction) blocks the read until it
-	// commits or rolls back, so the read is answered from the committed state.
-	// The read needs no transaction of its own: a FOR SHARE in autocommit mode
-	// still waits on a conflicting FOR UPDATE. Without it a read never waits and
-	// may be answered from a snapshot that predates an in-flight write.
-	Share bool
-}
-
-type ReadOption func(cfg *ReadConfig)
-
-// WithShareLock reads with [ReadConfig.Share].
-func WithShareLock() ReadOption {
-	return func(cfg *ReadConfig) {
-		cfg.Share = true
-	}
-}
-
-// NewReadConfig applies opts to the zero ReadConfig.
-func NewReadConfig(opts ...ReadOption) ReadConfig {
-	var cfg ReadConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-	return cfg
-}
-
 // Statement is one SQL write a store builds without running it. A task handler
 // hands it to its task, so that the write commits with the task or not at all.
 type Statement struct {
@@ -98,10 +69,10 @@ type Statement struct {
 // LockTimeout bounds how long a locking statement in a Postgres store waits
 // for a conflicting lock before giving up with [ErrLockTimeout].
 //
-// Writes hold their locks across a caller-supplied callback that publishes to
-// the revocation service, and a removal's callback opens further transactions
-// that lock other rows. Two such writes can therefore wait on each other
-// through an application-level edge Postgres cannot see in its own deadlock
-// graph, and an unbounded wait would hang both and pin their pool connections.
-// The bound turns that into an error the caller can retry.
+// A delegation-store Replace holds its audiences' locks across a
+// caller-supplied callback that publishes to the revocation service, so a
+// write that waits on them waits on a network call Postgres knows nothing
+// of, and an unbounded wait would pin its pool connection. The bound turns
+// that into an error the caller can retry. Authorization waits for a
+// tenant's pending changes for as long.
 const LockTimeout = 10 * time.Second

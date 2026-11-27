@@ -1,24 +1,13 @@
 package principal_test
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"testing"
 	"time"
 
-	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
-
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
-	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
-	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
@@ -30,11 +19,6 @@ import (
 // seedFunc creates a tenant, which principal.tenant_id references.
 type seedFunc func(t *testing.T, tenantID did.DID)
 
-func makeStore(t *testing.T) (principal.Store, seedFunc) {
-	pool := htestutil.PostgresOrSkip(t)
-	return principalpostgres.New(pool), seeder(pool)
-}
-
 func seeder(pool *pgxpool.Pool) seedFunc {
 	tenants := tenantpostgres.New(pool)
 	return func(t *testing.T, tenantID did.DID) {
@@ -42,8 +26,19 @@ func seeder(pool *pgxpool.Pool) seedFunc {
 	}
 }
 
+// tombstone runs the principal's TombstoneStatement on its own and returns
+// how many rows it affected.
+func tombstone(t *testing.T, pool *pgxpool.Pool, s principal.Store, tenantID did.DID, externalID string) int64 {
+	t.Helper()
+	st := s.TombstoneStatement(tenantID, externalID)
+	tag, err := pool.Exec(t.Context(), st.SQL, st.Args...)
+	require.NoError(t, err)
+	return tag.RowsAffected()
+}
+
 func TestPrincipalStore(t *testing.T) {
-	s, seed := makeStore(t)
+	pool := htestutil.PostgresOrSkip(t)
+	s, seed := principalpostgres.New(pool), seeder(pool)
 
 	t.Run("adds and retrieves a principal", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
@@ -57,22 +52,10 @@ func TestPrincipalStore(t *testing.T) {
 		require.False(t, rec.CreatedAt.IsZero())
 	})
 
-	t.Run("Get honours the share lock option", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "user-1"))
-
-		rec, err := s.Get(t.Context(), tenantID, "user-1", store.WithShareLock())
-		require.NoError(t, err)
-		require.Equal(t, "user-1", rec.ExternalID)
-	})
-
 	t.Run("Get returns ErrRecordNotFound for an unknown principal", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		_, err := s.Get(t.Context(), tenantID, "nobody")
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
-		_, err = s.Get(t.Context(), tenantID, "nobody", store.WithShareLock())
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
@@ -141,7 +124,7 @@ func TestPrincipalStore(t *testing.T) {
 		for _, id := range []string{"c", "a", "gone", "b"} {
 			require.NoError(t, s.Add(t.Context(), tenantID, id))
 		}
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "gone", nil))
+		tombstone(t, pool, s, tenantID, "gone")
 		require.NoError(t, s.Add(t.Context(), other, "z"))
 
 		ids, err := s.ListIDsByTenant(t.Context(), tenantID)
@@ -159,7 +142,7 @@ func TestPrincipalStore(t *testing.T) {
 		require.NoError(t, s.Add(t.Context(), tenantID, "again"))
 		first, err := s.Get(t.Context(), tenantID, "again")
 		require.NoError(t, err)
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "again", nil))
+		tombstone(t, pool, s, tenantID, "again")
 
 		recs, err := s.ListByTenant(t.Context(), tenantID)
 		require.NoError(t, err)
@@ -173,90 +156,21 @@ func TestPrincipalStore(t *testing.T) {
 		require.ErrorIs(t, s.Add(t.Context(), tenantID, "again"), store.ErrRecordExists)
 	})
 
-	t.Run("Tombstone runs the callback once, removes the row and is idempotent", func(t *testing.T) {
+	t.Run("TombstoneStatement removes the principal once, leaving its row to revive", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		require.NoError(t, s.Add(t.Context(), tenantID, "del"))
+		require.NoError(t, s.Add(t.Context(), tenantID, "kept"))
 
-		calls := 0
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
-			calls++
-			return nil
-		}))
-		require.Equal(t, 1, calls)
+		require.EqualValues(t, 1, tombstone(t, pool, s, tenantID, "del"))
 		_, err := s.Get(t.Context(), tenantID, "del")
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
-
-		// Deleting an absent principal is a no-op: nothing to publish, so the
-		// callback does not run.
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
-			calls++
-			return nil
-		}))
-		require.Equal(t, 1, calls)
-	})
-
-	t.Run("Tombstone holds only the removal: ListByTenant answers, a share-locked Get waits", func(t *testing.T) {
-		// The locking the store owes the two writers that cross here:
-		// a policy write lists the tenant's principals from inside its own
-		// lock while a removal's callback rewrites that tenant's policies.
-		// The list must not wait on the removal, and a share-locked read
-		// must.
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-		deleted, got := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Tombstone(context.Background(), tenantID, "held", func(ctx context.Context) error {
-					recs, err := s.ListByTenant(ctx, tenantID)
-					if err != nil {
-						return err
-					}
-					if len(recs) != 1 {
-						return fmt.Errorf("listed %d principals during the removal, want the live one", len(recs))
-					}
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() error {
-				_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
-				return err
-			})
-		require.NoError(t, deleted)
-		require.ErrorIs(t, got, store.ErrRecordNotFound, "the tombstone is visible once the removal commits")
-	})
-
-	t.Run("Tombstone accepts a nil callback", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "nil-cb"))
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "nil-cb", nil))
-		_, err := s.Get(t.Context(), tenantID, "nil-cb")
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
-	})
-
-	t.Run("Tombstone returns the callback error and leaves the row", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "keep"))
-
-		publishFailed := errors.New("publish failed")
-		err := s.Tombstone(t.Context(), tenantID, "keep", func(context.Context) error {
-			return publishFailed
-		})
-		require.ErrorIs(t, err, publishFailed)
-
-		rec, err := s.Get(t.Context(), tenantID, "keep")
+		ids, err := s.ListIDsByTenant(t.Context(), tenantID)
 		require.NoError(t, err)
-		require.Equal(t, "keep", rec.ExternalID)
+		require.Equal(t, []string{"kept"}, ids)
 
-		// A retry after the failure completes the removal.
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "keep", nil))
-		_, err = s.Get(t.Context(), tenantID, "keep")
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.Zero(t, tombstone(t, pool, s, tenantID, "del"), "a removed principal is not removed again")
+		require.Zero(t, tombstone(t, pool, s, tenantID, "missing"))
 	})
 
 	t.Run("DeleteByTenant removes every principal of the tenant and is idempotent", func(t *testing.T) {
@@ -277,314 +191,5 @@ func TestPrincipalStore(t *testing.T) {
 		require.Len(t, recs, 1)
 
 		require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
-	})
-}
-
-// TestPrincipalStorePostgresLocking pins the locking contract the authorizer
-// relies on: a share-locked Get waits for a transaction that holds the row FOR
-// UPDATE, and is answered once that transaction commits.
-func TestPrincipalStorePostgresLocking(t *testing.T) {
-	pool := htestutil.PostgresOrSkip(t)
-	s := principalpostgres.New(pool)
-	seed := seeder(pool)
-
-	t.Run("a FOR UPDATE holder blocks a share-locked Get until commit", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "locked"))
-
-		tx, err := pool.Begin(t.Context())
-		require.NoError(t, err)
-		defer tx.Rollback(t.Context())
-
-		var rec principal.Record
-		committed, got := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				var found bool
-				if err := tx.QueryRow(t.Context(),
-					`SELECT TRUE FROM principal WHERE tenant_id = $1 AND external_id = $2 FOR UPDATE`,
-					tenantID.String(), "locked").Scan(&found); err != nil {
-					return err
-				}
-				// An unlocked read is answered from the snapshot and never waits.
-				if _, err := s.Get(t.Context(), tenantID, "locked"); err != nil {
-					return fmt.Errorf("unlocked Get during the hold: %w", err)
-				}
-				close(entered)
-				<-release
-				return tx.Commit(t.Context())
-			},
-			func() error {
-				var err error
-				rec, err = s.Get(context.Background(), tenantID, "locked", store.WithShareLock())
-				return err
-			})
-		require.NoError(t, committed)
-		require.NoError(t, got)
-		require.Equal(t, "locked", rec.ExternalID)
-	})
-
-	t.Run("a share-locked Get during Tombstone sees the row once the callback fails", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "rollback"))
-
-		var rec principal.Record
-		deleted, got := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Tombstone(context.Background(), tenantID, "rollback", func(context.Context) error {
-					close(entered)
-					<-release
-					return errors.New("publish failed")
-				})
-			},
-			func() error {
-				var err error
-				rec, err = s.Get(context.Background(), tenantID, "rollback", store.WithShareLock())
-				return err
-			})
-		require.Error(t, deleted)
-		require.NoError(t, got, "the rolled-back delete must leave the row readable")
-		require.Equal(t, "rollback", rec.ExternalID)
-	})
-
-	t.Run("a share-locked Get during Tombstone reports the row gone once it commits", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "gone"))
-
-		deleted, got := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Tombstone(context.Background(), tenantID, "gone", func(context.Context) error {
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() error {
-				_, err := s.Get(context.Background(), tenantID, "gone", store.WithShareLock())
-				return err
-			})
-		require.NoError(t, deleted)
-		require.ErrorIs(t, got, store.ErrRecordNotFound)
-	})
-}
-
-// TestPrincipalStorePostgresLockTimeout pins the bounded wait that keeps a
-// principal removal and the writes that reach onto its row from hanging on
-// each other. Removal holds the principal row FOR UPDATE across a callback
-// that rewrites policies in transactions of its own, while a policy write
-// reaches back onto the same row through the bucket_policy_principal foreign
-// key; re-adding the principal and adding a
-// key bound to it (FOR KEY SHARE through the access_key foreign key) take the
-// row itself. Neither edge is visible to Postgres, so the wait is bounded and
-// one side is told to retry. Each case holds the row from a raw transaction.
-func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
-	pool := htestutil.PostgresOrSkip(t)
-	principals := principalpostgres.New(pool)
-	seed := seeder(pool)
-
-	// Each case is one statement that waits on the held principal row; op runs
-	// it and unwritten checks that its transaction left nothing behind.
-	cases := []struct {
-		name      string
-		op        func(ctx context.Context, tenantID did.DID) error
-		unwritten func(t *testing.T, tenantID did.DID)
-	}{
-		{
-			name: "a policy write naming the principal",
-			op: func(ctx context.Context, tenantID did.DID) error {
-				bucketID := testutil.RandomDID(t)
-				bucketProvider := testutil.RandomDID(t)
-				if err := providerpostgres.New(pool).Add(ctx, bucketProvider, "region-"+bucketProvider.String(), nil); err != nil {
-					return err
-				}
-				if err := bucketpostgres.New(pool).Add(ctx, bucketID, tenantID, bucketProvider, "lock-timeout-bucket"); err != nil {
-					return err
-				}
-				_, err := bucketpolicypostgres.New(pool).Put(ctx, bucketpolicystore.Input{
-					Bucket: bucketID,
-					Tenant: tenantID,
-					Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
-						Effect:    s3bkt.Allow,
-						Principal: s3bkt.Only("held"),
-						Actions:   s3bkt.NewStringSet("s3:GetObject"),
-						Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
-					}}},
-					Conditional: true,
-				}, nil)
-				return err
-			},
-			unwritten: func(t *testing.T, tenantID did.DID) {
-				recs, err := bucketpolicypostgres.New(pool).ListByPrincipal(t.Context(), tenantID, "held")
-				require.NoError(t, err)
-				require.Empty(t, recs)
-			},
-		},
-		{
-			name: "re-adding the principal",
-			op: func(ctx context.Context, tenantID did.DID) error {
-				return principals.Add(ctx, tenantID, "held")
-			},
-			unwritten: func(t *testing.T, tenantID did.DID) {
-				recs, err := principals.ListByTenant(t.Context(), tenantID)
-				require.NoError(t, err)
-				require.Len(t, recs, 1, "the live row is untouched")
-			},
-		},
-		{
-			name: "adding a key bound to the principal",
-			op: func(ctx context.Context, tenantID did.DID) error {
-				principal := "held"
-				return accesskeypostgres.New(pool).Add(ctx, accesskey.Input{
-					ID: testutil.RandomDID(t), Tenant: tenantID, Name: "laptop", Principal: &principal,
-				})
-			},
-			unwritten: func(t *testing.T, tenantID did.DID) {
-				recs, err := accesskeypostgres.New(pool).ListByTenant(t.Context(), tenantID)
-				require.NoError(t, err)
-				require.Empty(t, recs)
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tenantID := testutil.RandomDID(t)
-			seed(t, tenantID)
-			require.NoError(t, principals.Add(t.Context(), tenantID, "held"))
-
-			// Stand in for a removal in progress: hold the principal row FOR UPDATE.
-			tx, err := pool.Begin(t.Context())
-			require.NoError(t, err)
-			defer tx.Rollback(t.Context())
-			var found bool
-			require.NoError(t, tx.QueryRow(t.Context(),
-				`SELECT TRUE FROM principal WHERE tenant_id = $1 AND external_id = $2 FOR UPDATE`,
-				tenantID.String(), "held").Scan(&found))
-
-			type result struct {
-				err     error
-				elapsed time.Duration
-			}
-			done := make(chan result, 1)
-			go func() {
-				start := time.Now()
-				err := tc.op(context.Background(), tenantID)
-				done <- result{err, time.Since(start)}
-			}()
-
-			select {
-			case res := <-done:
-				require.ErrorIs(t, res.err, store.ErrLockTimeout)
-				require.Greater(t, res.elapsed, store.LockTimeout/2,
-					"the write failed before it could have waited out the lock timeout")
-			case <-time.After(store.LockTimeout + 10*time.Second):
-				t.Fatal("the write did not give up waiting for the principal row lock")
-			}
-			// Nothing was written: the transaction rolled back with its failed lock.
-			tc.unwritten(t, tenantID)
-		})
-	}
-}
-
-// TestRequireLiveStatement covers the statement a task's commit runs
-// conditionally: it affects a row only when every principal it names is
-// live, and it waits for a removal that holds one of their rows.
-func TestRequireLiveStatement(t *testing.T) {
-	pool := htestutil.PostgresOrSkip(t)
-	s := principalpostgres.New(pool)
-	seed := seeder(pool)
-	// affected runs the statement in a transaction of its own and returns
-	// the number of rows it affected.
-	affected := func(ctx context.Context, tenantID did.DID, ids ...string) (int64, error) {
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return 0, err
-		}
-		defer tx.Rollback(context.Background())
-		st := s.RequireLiveStatement(tenantID, ids...)
-		tag, err := tx.Exec(ctx, st.SQL, st.Args...)
-		if err != nil {
-			return 0, err
-		}
-		return tag.RowsAffected(), tx.Commit(ctx)
-	}
-
-	t.Run("affects one row when every principal is live and none when one is missing or removed", func(t *testing.T) {
-		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
-		seed(t, tenantID)
-		seed(t, other)
-		require.NoError(t, s.Add(t.Context(), tenantID, "alice"))
-		require.NoError(t, s.Add(t.Context(), tenantID, "bob"))
-		require.NoError(t, s.Add(t.Context(), tenantID, "gone"))
-		require.NoError(t, s.Tombstone(t.Context(), tenantID, "gone", nil))
-
-		for _, tc := range []struct {
-			ids  []string
-			want int64
-		}{
-			{[]string{"alice"}, 1},
-			{[]string{"gone"}, 0},
-			{[]string{"nobody"}, 0},
-			{[]string{"alice", "bob"}, 1},
-			{[]string{"bob", "alice", "bob"}, 1},
-			{[]string{"alice", "gone"}, 0},
-			{[]string{"alice", "bob", "nobody"}, 0},
-			{nil, 0},
-		} {
-			n, err := affected(t.Context(), tenantID, tc.ids...)
-			require.NoError(t, err)
-			require.Equal(t, tc.want, n, tc.ids)
-		}
-		n, err := affected(t.Context(), other, "alice")
-		require.NoError(t, err)
-		require.Zero(t, n, "another tenant's principal")
-	})
-
-	t.Run("waits for a removal in flight and then finds the principal removed", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "alice"))
-		require.NoError(t, s.Add(t.Context(), tenantID, "bob"))
-
-		var n int64
-		removed, checked := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Tombstone(t.Context(), tenantID, "alice", func(context.Context) error {
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() (err error) {
-				n, err = affected(context.Background(), tenantID, "alice", "bob")
-				return err
-			})
-		require.NoError(t, removed)
-		require.NoError(t, checked)
-		require.Zero(t, n)
-	})
-
-	t.Run("holds off a removal until its transaction ends", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "alice"))
-
-		tx, err := pool.Begin(t.Context())
-		require.NoError(t, err)
-		defer tx.Rollback(context.Background())
-		held, removed := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				st := s.RequireLiveStatement(tenantID, "alice")
-				if _, err := tx.Exec(t.Context(), st.SQL, st.Args...); err != nil {
-					return err
-				}
-				close(entered)
-				<-release
-				return tx.Commit(t.Context())
-			},
-			func() error { return s.Tombstone(context.Background(), tenantID, "alice", nil) })
-		require.NoError(t, held)
-		require.NoError(t, removed)
 	})
 }

@@ -12,12 +12,12 @@ import (
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
-	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
@@ -97,7 +97,7 @@ func (p *pausedKeys) pause() (entered <-chan struct{}, release chan<- struct{}) 
 	return p.entered, p.release
 }
 
-func (p *pausedKeys) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskey.Record, error) {
+func (p *pausedKeys) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
 	p.mu.Lock()
 	entered, release := p.entered, p.release
 	p.entered, p.release = nil, nil
@@ -110,7 +110,7 @@ func (p *pausedKeys) Get(ctx context.Context, id did.DID, opts ...store.ReadOpti
 			return accesskey.Record{}, ctx.Err()
 		}
 	}
-	return p.Store.Get(ctx, id, opts...)
+	return p.Store.Get(ctx, id)
 }
 
 // afterStatusRead is the tenant store the authorizer reads through. It runs
@@ -209,7 +209,7 @@ func setupStatus(t *testing.T) *statusEnv {
 	env.svc = tenantsvc.New(zap.NewNop(), tenants, buckets, accessKeys, principals, policies, delegations, secrets,
 		wrapkeypostgres.New(pool), nil, nil, swarf, owed, runner)
 	env.authorizer = auth.NewAuthorizer(zap.NewNop(), accessKeys, env.authTenants, providers, buckets, principals, policies, secrets,
-		auth.WithTenantChanges(runner))
+		auth.WithTenantChanges(runner), auth.WithSnapshots(pglock.NewSnapshots(pool)))
 	return env
 }
 

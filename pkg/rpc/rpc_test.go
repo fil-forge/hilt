@@ -13,13 +13,13 @@ import (
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	usagepostgres "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/libforge/identity"
-	swarfclient "github.com/fil-forge/swarf/pkg/client"
 	"github.com/fil-forge/ucantone/server"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -31,13 +31,12 @@ import (
 func newRoutes(t *testing.T, id identity.Identity) []server.Route {
 	t.Helper()
 	pool := testutil.PostgresOrSkip(t)
-	az := auth.NewAuthorizer(zap.NewNop(), accesskeypostgres.New(pool), tenantpostgres.New(pool), providerpostgres.New(pool), bucketpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), vaultmemory.New())
+	az := auth.NewAuthorizer(zap.NewNop(), accesskeypostgres.New(pool), tenantpostgres.New(pool), providerpostgres.New(pool), bucketpostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), vaultmemory.New(),
+		auth.WithSnapshots(pglock.NewSnapshots(pool)))
 
 	up, err := upload.NewClient(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "sprue.test"}, testutil.RandomIssuer(t), upload.WithBaseProofs(delegationpostgres.New(pool)))
 	require.NoError(t, err)
-	revocations, err := swarfclient.New(testutil.RandomDID(t), url.URL{Scheme: "http", Host: "swarf.test"})
-	require.NoError(t, err)
-	buckets := bucketsvc.New(zap.NewNop(), az, bucketpostgres.New(pool), delegationpostgres.New(pool), accesskeypostgres.New(pool), tenantpostgres.New(pool), bucketpolicypostgres.New(pool), providerpostgres.New(pool), up, revocations, nil)
+	buckets := bucketsvc.New(zap.NewNop(), az, bucketpostgres.New(pool), delegationpostgres.New(pool), accesskeypostgres.New(pool), tenantpostgres.New(pool), bucketpolicypostgres.New(pool), providerpostgres.New(pool), up, nil, nil)
 
 	return []server.Route{
 		rpc.NewAuthorizeRequestHandler(zap.NewNop(), az, delegationpostgres.New(pool)),

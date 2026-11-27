@@ -1,15 +1,10 @@
 // Package postgres provides a PostgreSQL-backed implementation of
 // delegation.Store. Encoded delegation payloads are stored directly in the
 // delegation table's data column. Every write that mutates an audience's set
-// (PutBatch, Replace, DeleteByAudience) runs in a transaction holding that
-// audience's advisory lock, so the writes of one audience serialize. The
-// statements with which a task stores grants in its own commit keep to the
-// same rule: those of WithdrawKeyGrantsStatements open with the locks of
-// every key of the tenant and those of WithdrawGrantsOverStatements with the
-// locks of the named principals' keys, and PutForKeysStatement follows one
-// of them in the same transaction or stores the grants of a key its own
-// transaction creates. WithdrawGrantsOfKeyStatement only removes, and takes
-// no lock.
+// outside a task (PutBatch, Replace, DeleteByAudience) runs in a transaction
+// holding that audience's advisory lock, so those writes of one audience
+// serialize. The statements a task writes through take no lock: the tasks
+// that change a tenant's grants run one at a time on the tenant's queue.
 package postgres
 
 import (
@@ -144,64 +139,33 @@ func (s *Store) PutForKeysStatement(delegations []ucan.Delegation) (store.Statem
 	return insertStatement(delegations, `EXISTS (SELECT 1 FROM access_key k WHERE k.id = d.audience)`)
 }
 
-// WithdrawKeyGrantsStatements locks the keys in the order [lockAudiences]
-// does, by their DID strings' bytes, so the statement and a Replace of some
-// of the same keys queue for the shared ones in the same sequence. As with
-// [pglock.AdvisoryAll], Postgres takes the locks in the sorted order without
-// SQL promising it; a deadlock it breaks fails the transaction, which its
-// owner runs again.
-func (s *Store) WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement {
-	return []store.Statement{
-		{
-			SQL: `
-				SELECT pg_advisory_xact_lock($1, hashtext(k.id))
-				FROM access_key k
-				WHERE k.tenant_id = $2
-				ORDER BY k.id COLLATE "C"`,
-			Args: []any{lockNamespace, tenant.String()},
-		},
-		{
-			SQL: `
-				WITH withdrawn AS (
-					DELETE FROM delegation d
-					USING access_key k
-					WHERE k.tenant_id = $1 AND d.audience = k.id AND d.issuer = $1
-					RETURNING d.id, d.data
-				)
-				INSERT INTO revocation_owed (id, tenant_id, data)
-				SELECT w.id, $1, w.data FROM withdrawn w
-				ON CONFLICT (id) DO NOTHING`,
-			Args: []any{tenant.String()},
-		},
+// withdrawSQL moves the rows of delegation d the condition the caller
+// appends selects, with the tenant as $1 and the alias k free for a joined
+// access_key, to revocation_owed.
+const withdrawSQL = `
+	WITH withdrawn AS (
+		DELETE FROM delegation d
+		%s
+		RETURNING d.id, d.data
+	)
+	INSERT INTO revocation_owed (id, tenant_id, data)
+	SELECT w.id, $1, w.data FROM withdrawn w
+	ON CONFLICT (id) DO NOTHING`
+
+func (s *Store) WithdrawKeyGrantsStatement(tenant did.DID) store.Statement {
+	return store.Statement{
+		SQL: fmt.Sprintf(withdrawSQL, `USING access_key k
+		WHERE k.tenant_id = $1 AND d.audience = k.id AND d.issuer = $1`),
+		Args: []any{tenant.String()},
 	}
 }
 
-// WithdrawGrantsOverStatements locks the keys in the order
-// [Store.WithdrawKeyGrantsStatements] does.
-func (s *Store) WithdrawGrantsOverStatements(tenant, subject did.DID, principals []string) []store.Statement {
-	return []store.Statement{
-		{
-			SQL: `
-				SELECT pg_advisory_xact_lock($1, hashtext(k.id))
-				FROM access_key k
-				WHERE k.tenant_id = $2 AND k.principal_id = ANY($3)
-				ORDER BY k.id COLLATE "C"`,
-			Args: []any{lockNamespace, tenant.String(), principals},
-		},
-		{
-			SQL: `
-				WITH withdrawn AS (
-					DELETE FROM delegation d
-					USING access_key k
-					WHERE k.tenant_id = $1 AND k.principal_id = ANY($3)
-					  AND d.audience = k.id AND d.subject = $2 AND d.issuer = $1
-					RETURNING d.id, d.data
-				)
-				INSERT INTO revocation_owed (id, tenant_id, data)
-				SELECT w.id, $1, w.data FROM withdrawn w
-				ON CONFLICT (id) DO NOTHING`,
-			Args: []any{tenant.String(), subject.String(), principals},
-		},
+func (s *Store) WithdrawGrantsOverStatement(tenant, subject did.DID, principals []string) store.Statement {
+	return store.Statement{
+		SQL: fmt.Sprintf(withdrawSQL, `USING access_key k
+		WHERE k.tenant_id = $1 AND k.principal_id = ANY($3)
+		  AND d.audience = k.id AND d.subject = $2 AND d.issuer = $1`),
+		Args: []any{tenant.String(), subject.String(), principals},
 	}
 }
 
@@ -209,16 +173,21 @@ func (s *Store) WithdrawGrantsOverStatements(tenant, subject did.DID, principals
 // are the audience's, whether or not the key still exists.
 func (s *Store) WithdrawGrantsOfKeyStatement(tenant, key did.DID) store.Statement {
 	return store.Statement{
-		SQL: `
-			WITH withdrawn AS (
-				DELETE FROM delegation d
-				WHERE d.audience = $2 AND d.issuer = $1
-				RETURNING d.id, d.data
-			)
-			INSERT INTO revocation_owed (id, tenant_id, data)
-			SELECT w.id, $1, w.data FROM withdrawn w
-			ON CONFLICT (id) DO NOTHING`,
+		SQL:  fmt.Sprintf(withdrawSQL, `WHERE d.audience = $2 AND d.issuer = $1`),
 		Args: []any{tenant.String(), key.String()},
+	}
+}
+
+func (s *Store) WithdrawSubjectStatements(tenant, subject did.DID) []store.Statement {
+	return []store.Statement{
+		{
+			SQL:  fmt.Sprintf(withdrawSQL, `WHERE d.subject = $2 AND d.issuer = $1`),
+			Args: []any{tenant.String(), subject.String()},
+		},
+		{
+			SQL:  `DELETE FROM delegation WHERE subject = $1`,
+			Args: []any{subject.String()},
+		},
 	}
 }
 
@@ -327,22 +296,10 @@ func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx 
 // is interpolated into the query text.
 type listColumn string
 
-const (
-	byAudience listColumn = "audience"
-	bySubject  listColumn = "subject"
-)
+const byAudience listColumn = "audience"
 
 func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
 	return s.listBy(ctx, byAudience, audience.String(), opts)
-}
-
-func (s *Store) ListBySubject(ctx context.Context, subject did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error) {
-	if !subject.Defined() {
-		return store.Page[ucan.Delegation]{}, fmt.Errorf("cannot list powerline delegations: %w", store.ErrInvalidArgument)
-	}
-	// Powerline delegations store a NULL subject, which never matches an equality
-	// filter, so they are excluded for free.
-	return s.listBy(ctx, bySubject, subject.String(), opts)
 }
 
 // listBy returns a page of delegations whose column equals value, ordered by id so
@@ -369,7 +326,7 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 	}
 	query += ` ORDER BY id ASC LIMIT $2`
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
 		return store.Page[ucan.Delegation]{}, fmt.Errorf("querying delegations by %s: %w", column, err)
 	}
@@ -433,40 +390,6 @@ func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) (err err
 	return nil
 }
 
-// DeleteBySubject locks the audiences holding delegations over the subject
-// before deleting them, so it does not interleave with a Replace of one of
-// those audiences.
-func (s *Store) DeleteBySubject(ctx context.Context, subject did.DID) (err error) {
-	if !subject.Defined() {
-		return fmt.Errorf("cannot delete powerline delegations: %w", store.ErrInvalidArgument)
-	}
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	rows, err := tx.Query(ctx, `SELECT DISTINCT audience FROM delegation WHERE subject = $1`, subject.String())
-	if err != nil {
-		return fmt.Errorf("querying delegation audiences by subject: %w", err)
-	}
-	audiences, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return fmt.Errorf("scanning delegation audiences: %w", err)
-	}
-	if err := lockAudiences(ctx, tx, audiences...); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE subject = $1`, subject.String()); err != nil {
-		return fmt.Errorf("deleting delegations by subject: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
-}
-
 // ProofChain builds the proof chain from aud toward sub for cmd in a single
 // recursive query. The walk follows edges audience -> issuer, matching the
 // fixed subject (or NULL powerline delegations) and requiring each delegation's
@@ -514,7 +437,7 @@ SELECT datas FROM chain WHERE complete ORDER BY depth ASC LIMIT 1
 `
 
 	var datas [][]byte
-	err := s.pool.QueryRow(ctx, query, aud.String(), cmd.String(), sub.String()).Scan(&datas)
+	err := pglock.Reader(ctx, s.pool).QueryRow(ctx, query, aud.String(), cmd.String(), sub.String()).Scan(&datas)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil, nil

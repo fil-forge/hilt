@@ -1,9 +1,11 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
@@ -16,14 +18,16 @@ import (
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	"github.com/fil-forge/hilt/pkg/store/revocation"
+	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
@@ -42,9 +46,25 @@ type principalDeps struct {
 	accessKeys  *accesskeypostgres.Store
 	vault       *vaultmemory.Store
 	delegations *delegationpostgres.Store
-	revocations *testutil.FakeSwarf
+	owed        *revocationpostgres.Store
+	revocations *outageSwarf
+	runner      *taskrunner.Runner
 	tenantID    did.DID // "tenant-1"
 	tenant      ucan.Issuer
+}
+
+// outageSwarf is a revocation service that refuses every publish while down
+// is set.
+type outageSwarf struct {
+	testutil.FakeSwarf
+	down atomic.Bool
+}
+
+func (o *outageSwarf) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
+	if o.down.Load() {
+		return errors.New("swarf unreachable")
+	}
+	return o.FakeSwarf.PublishBatch(ctx, revoker, revoked)
 }
 
 // setupPrincipals serves every principal route over a test database with two
@@ -60,20 +80,21 @@ func setupPrincipals(t *testing.T) (*echo.Echo, *principalDeps) {
 		accessKeys:  accesskeypostgres.New(pool),
 		vault:       vaultmemory.New(),
 		delegations: delegationpostgres.New(pool),
-		revocations: &testutil.FakeSwarf{},
+		owed:        revocationpostgres.New(pool),
+		revocations: &outageSwarf{},
 		tenantID:    testutil.RandomDID(t),
 	}
 	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", tenant.Active))
-	// The tenant's key is in the vault: the grant rotator signs revocations as
-	// the tenant.
+	// The tenant's key is in the vault: the tasks sign revocations as the
+	// tenant.
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	require.NoError(t, deps.vault.Write(t.Context(), vault.TenantKeyPath(deps.tenantID), signer.Bytes()))
 	deps.tenant = multikey.NewIssuer(deps.tenantID, signer)
 
-	grants := grant.NewRotator(zap.NewNop(), deps.delegations, deps.accessKeys, deps.vault, deps.revocations)
-	svc := principalsvc.New(zap.NewNop(), tenants, deps.principals, deps.policies, deps.accessKeys, deps.delegations, deps.vault, deps.revocations, grants)
+	deps.runner = testutil.StartServiceTasks(t, pool, deps.vault, deps.revocations)
+	svc := principalsvc.New(zap.NewNop(), tenants, deps.principals, deps.vault, deps.runner)
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreatePrincipalHandler(zap.NewNop(), svc),
@@ -251,21 +272,16 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		keyID := addPrincipalKey(t, deps, "user-1", "laptop")
 		bucket := testutil.RandomDID(t)
 		require.NoError(t, bucketpostgres.New(deps.pool).Add(ctx, bucket, deps.tenantID, addProvider(t, deps.pool), "photos"))
-		_, err := deps.policies.Put(ctx, bucketpolicystore.Input{
-			Bucket: bucket,
-			Tenant: deps.tenantID,
-			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
-				{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
-			}},
-			Conditional: true,
-		}, nil)
-		require.NoError(t, err)
+		testutil.PutPolicy(t, deps.pool, deps.tenantID, bucket, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
+			{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
+		}})
 
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/principals/user-1", nil)
 		require.Equal(t, http.StatusNoContent, rec.Code)
+		testutil.AwaitPublished(t, deps.runner, deps.tenantID)
 		require.Len(t, deps.revocations.Revoked(), 1, "the key's delegation is revoked")
 
-		_, err = deps.accessKeys.Get(ctx, keyID)
+		_, err := deps.accessKeys.Get(ctx, keyID)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 		dels, err := deps.delegations.ListByAudience(ctx, keyID)
 		require.NoError(t, err)
@@ -279,22 +295,27 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		require.Equal(t, http.StatusNoContent, again.Code, "a principal already gone is 204")
 	})
 
-	t.Run("a failed revocation is 500 and changes nothing", func(t *testing.T) {
+	t.Run("an unreachable revocation service still removes the principal, and owes the revocations", func(t *testing.T) {
 		e, deps := setupPrincipals(t)
 		createPrincipal(t, e, "user-1")
 		keyID := addPrincipalKey(t, deps, "user-1", "laptop")
-		deps.revocations.Err = errors.New("swarf unreachable")
+		held, err := deps.delegations.ListByAudience(ctx, keyID)
+		require.NoError(t, err)
+		require.Len(t, held.Results, 1)
+		deps.revocations.down.Store(true)
 
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1/principals/user-1", nil)
-		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		require.Equal(t, http.StatusNoContent, rec.Code)
 
 		get := doRequest(t, e, http.MethodGet, "/tenants/tenant-1/principals/user-1", nil)
-		require.Equal(t, http.StatusOK, get.Code)
-		_, err := deps.accessKeys.Get(ctx, keyID)
-		require.NoError(t, err, "the key must survive")
-		dels, err := deps.delegations.ListByAudience(ctx, keyID)
+		require.Equal(t, http.StatusNotFound, get.Code)
+		_, err = deps.accessKeys.Get(ctx, keyID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		owed, _, err := deps.owed.Oldest(ctx, deps.tenantID, revocation.Cursor{}, 10)
 		require.NoError(t, err)
-		require.Len(t, dels.Results, 1, "its delegation must survive")
+		require.Len(t, owed, 1)
+		require.Equal(t, held.Results[0].Link(), owed[0].Link())
+		require.Empty(t, deps.revocations.Revoked())
 	})
 
 	t.Run("unknown tenant is 404", func(t *testing.T) {

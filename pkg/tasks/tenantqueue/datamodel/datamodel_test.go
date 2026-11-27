@@ -152,3 +152,21 @@ func TestDeletePolicyArgs(t *testing.T) {
 		require.Error(t, got.UnmarshalCBOR(bytes.NewReader(nil)))
 	})
 }
+
+func TestRemovePrincipalResult(t *testing.T) {
+	for name, res := range map[string]datamodel.RemovePrincipalResult{
+		"no keys":  {},
+		"two keys": {Keys: []did.DID{testutil.RandomDID(t), testutil.RandomDID(t)}},
+	} {
+		t.Run(name+" round trips", func(t *testing.T) {
+			var wire bytes.Buffer
+			require.NoError(t, res.MarshalCBOR(&wire))
+			var got datamodel.RemovePrincipalResult
+			require.NoError(t, got.UnmarshalCBOR(bytes.NewReader(wire.Bytes())))
+			require.Equal(t, len(res.Keys), len(got.Keys))
+			for i := range res.Keys {
+				require.Equal(t, res.Keys[i], got.Keys[i])
+			}
+		})
+	}
+}

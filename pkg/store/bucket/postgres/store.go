@@ -58,7 +58,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, tenant did.DID, provider di
 }
 
 func (s *Store) GetByName(ctx context.Context, name string) (bucket.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.Reader(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, tenant_id, provider_id, name, created_at
 		FROM bucket
 		WHERE name = $1
@@ -123,7 +123,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	}
 	query += ` ORDER BY name ASC LIMIT $2`
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
 		return store.Page[bucket.Record]{}, fmt.Errorf("listing buckets by tenant: %w", err)
 	}
@@ -150,32 +150,32 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...bucket
 	return store.Page[bucket.Record]{Cursor: cursor, Results: recs}, nil
 }
 
-// Delete removes the bucket row, and with it, by cascade, its policy, and
-// records who the bucket belonged to (see [Store.Owner]). Inside a callback
-// whose ctx carries a transaction (see [pglock.WithTx]) the delete joins that
-// transaction.
+// Delete removes the bucket row, and with it, by cascade, its policy and the
+// policy's index rows, and records who the bucket belonged to (see
+// [Store.Owner]), in one statement, so the bucket is never gone without its
+// owner recorded.
 func (s *Store) Delete(ctx context.Context, id did.DID) error {
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(deleteSQL, ""), id.String()); err != nil {
+		return fmt.Errorf("deleting bucket: %w", err)
 	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
+	return nil
+}
 
-	// One statement, so the bucket is never gone without its owner recorded.
-	if _, err := tx.Exec(ctx, `
+// deleteSQL deletes the bucket $1, with the condition the caller appends,
+// and records its owner.
+const deleteSQL = `
 		WITH gone AS (
-			DELETE FROM bucket WHERE id = $1 RETURNING id, tenant_id, provider_id
+			DELETE FROM bucket WHERE id = $1 %s RETURNING id, tenant_id, provider_id
 		)
 		INSERT INTO deleted_bucket (id, tenant_id, provider_id)
 		SELECT id, tenant_id, provider_id FROM gone
-		ON CONFLICT (id) DO NOTHING
-	`, id.String()); err != nil {
-		return fmt.Errorf("deleting bucket: %w", err)
+		ON CONFLICT (id) DO NOTHING`
+
+func (s *Store) DeleteStatement(tenant, id did.DID) store.Statement {
+	return store.Statement{
+		SQL:  fmt.Sprintf(deleteSQL, `AND tenant_id = $2`),
+		Args: []any{id.String(), tenant.String()},
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) Owner(ctx context.Context, id did.DID) (bucket.Owner, error) {

@@ -18,7 +18,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
@@ -106,11 +105,11 @@ type hookedDelegations struct {
 	h *hooks
 }
 
-func (s hookedDelegations) WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement {
+func (s hookedDelegations) WithdrawKeyGrantsStatement(tenant did.DID) store.Statement {
 	if s.h.beforeWrites != nil {
 		s.h.writesOnce.Do(s.h.beforeWrites)
 	}
-	return s.Store.WithdrawKeyGrantsStatements(tenant)
+	return s.Store.WithdrawKeyGrantsStatement(tenant)
 }
 
 // world is one active tenant with a bucket, a service key that may read and
@@ -206,14 +205,13 @@ func setup(t *testing.T) *world {
 // actions, without rewriting any key's grants.
 func (w *world) putPolicy(t *testing.T, actions ...string) {
 	t.Helper()
-	_, err := w.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: w.bucket, Tenant: w.tenant.DID(), Policy: s3bkt.PolicyDocument{
+	htestutil.PutPolicy(t, w.pool, w.tenant.DID(), w.bucket, s3bkt.PolicyDocument{
 		Version: s3bkt.Version2012,
 		Statements: []s3bkt.Statement{{
 			Effect: s3bkt.Allow, Principal: s3bkt.Only(principal), Actions: s3bkt.NewStringSet(actions...),
 			Resources: s3bkt.NewStringSet(s3bkt.BucketARN(bucketName), s3bkt.ObjectsARN(bucketName)),
 		}},
-	}}, nil)
-	require.NoError(t, err)
+	})
 }
 
 func (w *world) createKey(t *testing.T, name string, permissions, buckets []string, principalID *string) did.DID {
@@ -368,32 +366,6 @@ func TestDisabling(t *testing.T) {
 		require.Empty(t, w.held(t, w.serviceKey))
 		w.awaitPublished(t)
 		require.Contains(t, w.swarf.Revoked(), late.Link())
-	})
-
-	t.Run("waits for a writer holding a key's delegation lock and withdraws what it stores", func(t *testing.T) {
-		w := setup(t)
-		late, err := grant.Issue(w.tenant, w.serviceKey, []did.DID{w.bucket}, []string{"s3:DeleteObject"}, nil)
-		require.NoError(t, err)
-
-		writeErr, changeErr := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return w.delegations.Replace(t.Context(), []did.DID{w.serviceKey}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-					close(entered)
-					<-release
-					return map[did.DID][]ucan.Delegation{w.serviceKey: append(current[w.serviceKey], late...)}, nil
-				})
-			},
-			func() error { return w.setStatus(t, tenantstore.Disabled) },
-		)
-		require.NoError(t, writeErr)
-		require.NoError(t, changeErr)
-
-		require.Equal(t, tenantstore.Disabled, w.status(t))
-		require.Empty(t, w.held(t, w.serviceKey), "the writer's grants did not outlive the change it raced")
-		w.awaitPublished(t)
-		for _, d := range late {
-			require.Contains(t, w.swarf.Revoked(), d.Link())
-		}
 	})
 
 	t.Run("runs again when the status changed under it", func(t *testing.T) {

@@ -74,3 +74,11 @@ type DeletePolicyArgs struct {
 	// removal to proceed (If-Match). Nil removes whatever is stored.
 	IfMatch *string `cborgen:"ifMatch"`
 }
+
+// RemovePrincipalResult is the result of a queue-tenant.remove-principal
+// task.
+type RemovePrincipalResult struct {
+	// Keys are the DIDs of the access keys the task deleted with the
+	// principal, whose secrets the caller removes from the vault.
+	Keys []did.DID `cborgen:"keys"`
+}

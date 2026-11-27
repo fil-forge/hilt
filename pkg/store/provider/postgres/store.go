@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
@@ -59,7 +60,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, region string, policy *did.
 }
 
 func (s *Store) Get(ctx context.Context, id did.DID) (provider.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.Reader(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, region, policy, created_at, updated_at
 		FROM provider
 		WHERE id = $1
@@ -93,7 +94,7 @@ func (s *Store) SetPolicy(ctx context.Context, id did.DID, policy did.DID) error
 }
 
 func (s *Store) GetByRegion(ctx context.Context, region string) (provider.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.Reader(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, region, policy, created_at, updated_at
 		FROM provider
 		WHERE region = $1

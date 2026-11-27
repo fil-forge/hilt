@@ -205,18 +205,81 @@ func (q *Queue) currentPolicy(ctx context.Context, tenantID, bucket did.DID) (*b
 }
 
 // changePolicy records the writes that replace the bucket's policy old (nil
-// for none) with doc (nil to remove it), and returns how many grants it
-// issued. principals are the tenant's. Everything commits together:
+// for none) with doc (nil to remove it) and returns how many grants it
+// issued. principals are the tenant's. [Queue.policyWrites] builds the writes,
+// and when the change alters a principal's actions the publishing of the
+// revocations it records is queued with them.
+func (q *Queue) changePolicy(ctx context.Context, ex *taskrunner.Exec, tenantID, bucket did.DID, old *bucketpolicystore.Record, doc *s3bkt.PolicyDocument, principals []string) (int, error) {
+	change, err := q.policyWrites(ctx, tenantID, bucket, old, doc, principals)
+	if err != nil {
+		return 0, err
+	}
+	if err := record(ctx, ex, change.writes); err != nil {
+		return 0, err
+	}
+	if change.affected {
+		// How many grants the commit withdraws is not known here, so the
+		// publish is queued for any change to a principal's actions and
+		// finds nothing when none were.
+		if _, err := ex.Submit(ctx, revocationqueue.PublishSpec(tenantID)); err != nil {
+			return 0, fmt.Errorf("queueing the publishing of the tenant's revocations: %w", err)
+		}
+	}
+	return change.issued, nil
+}
+
+// write is one statement a task records, with whether its commit depends on
+// it affecting a row.
+type write struct {
+	store.Statement
+	// conditional records the statement with WriteConditional.
+	conditional bool
+}
+
+// record records the writes in order.
+func record(ctx context.Context, ex *taskrunner.Exec, writes []write) error {
+	for _, w := range writes {
+		var err error
+		if w.conditional {
+			err = ex.WriteConditional(ctx, w.SQL, w.Args...)
+		} else {
+			err = ex.Write(ctx, w.SQL, w.Args...)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// policyChange is the writes that replace one bucket's policy.
+type policyChange struct {
+	// writes are the statements to record, in order.
+	writes []write
+	// issued is how many grants the writes store.
+	issued int
+	// affected is whether the change alters any principal's actions, and so
+	// may withdraw grants.
+	affected bool
+}
+
+// policyWrites builds, without recording any, the writes that replace the
+// bucket's policy old (nil for none) with doc (nil to remove it). principals
+// are the tenant's principals whose grants the change may alter. Run
+// together they:
 //
-//   - For every access key of each principal whose effective actions on the
-//     bucket the change alters ([bucketpolicy.Changed]), the delegations the
-//     tenant issued to the key over the bucket leave the delegation store
-//     and are recorded as revocations owed, and the key is stored the grants
-//     doc gives its principal there. Its delegations over other buckets are
-//     left alone. A change that alters no principal's actions withdraws and
-//     issues nothing.
-//   - The document is written, or the policy removed, with its index rows.
-//   - The publishing of the revocations is queued.
+//   - For every access key of each of principals whose effective actions on
+//     the bucket the change alters ([bucketpolicy.Changed]), take the
+//     delegations the tenant issued to the key over the bucket out of the
+//     delegation store, record them as revocations owed, and store the key
+//     the grants doc gives its principal there. Its delegations over other
+//     buckets are left alone. A change that alters no principal's actions
+//     withdraws and issues nothing.
+//   - Write the document, or remove the policy, with its index rows. Either
+//     is conditional, on the bucket still being the tenant's or on the
+//     policy still being there, so a bucket that tenant deletion took
+//     meanwhile runs the task again, which then finds the bucket or its
+//     policy gone.
 //
 // The grants issued are those the tenant's status keeps
 // ([grant.LimitToTenantStatus]): a write-locked tenant's keys are stored the
@@ -225,99 +288,45 @@ func (q *Queue) currentPolicy(ctx context.Context, tenantID, bucket did.DID) (*b
 // withdraws and issues none. A change of the tenant's status issues every
 // key the grants of the policies as they are then.
 //
-// The tenant's other policy writes, its key creations and deletions and its
-// status changes are tasks on the same subject, so none runs between the
-// handler's reads and the commit. Principal removal and bucket deletion are
-// not tasks, and either can commit in between. The commit is therefore built
-// to hold whatever they do, and runs the task again when what it read no
-// longer stands:
-//
-//   - It opens by taking the bucket's policy write lock
-//     (bucketpolicy.Store.LockStatement), which a bucket deletion holds while
-//     it revokes the bucket's grants.
-//   - The principals doc names must still be live, checked under a share
-//     lock on their rows (principal.Store.RequireLiveStatement), so a
-//     document never names a principal whose removal has finished.
-//   - The grants withdrawn are chosen by the commit's statements, under the
-//     keys' delegation locks
-//     (delegation.Store.WithdrawGrantsOverStatements), and the grants issued
-//     are stored only for the keys that still exist
-//     (delegation.Store.PutForKeysStatement), so a key a principal removal
-//     deletes is left with none.
-//   - The document is written only if the policy is still the one read and
-//     the bucket still the tenant's (bucketpolicy.Store.PutStatements,
-//     DeleteStatements), so a removal that rewrote the policy, or a deletion
-//     that took the bucket, is not written over.
-func (q *Queue) changePolicy(ctx context.Context, ex *taskrunner.Exec, tenantID, bucket did.DID, old *bucketpolicystore.Record, doc *s3bkt.PolicyDocument, principals []string) (int, error) {
+// The tenant's other changes are tasks on the same subject, so none commits
+// between the handler's reads and its commit, and what the handler read
+// decides.
+func (q *Queue) policyWrites(ctx context.Context, tenantID, bucket did.DID, old *bucketpolicystore.Record, doc *s3bkt.PolicyDocument, principals []string) (policyChange, error) {
 	var oldDoc *s3bkt.PolicyDocument
 	if old != nil {
 		oldDoc = &old.Policy
 	}
-	affected := bucketpolicy.Changed(oldDoc, doc, principals)
-	var fresh []ucan.Delegation
+	affected := slices.DeleteFunc(bucketpolicy.Changed(oldDoc, doc, principals), func(p string) bool {
+		return !slices.Contains(principals, p)
+	})
+	var change policyChange
 	if len(affected) > 0 {
-		var err error
-		if fresh, err = q.issueOver(ctx, tenantID, bucket, doc, affected); err != nil {
-			return 0, err
+		change.affected = true
+		fresh, err := q.issueOver(ctx, tenantID, bucket, doc, affected)
+		if err != nil {
+			return policyChange{}, err
 		}
-	}
-
-	lock := q.policies.LockStatement(bucket)
-	if err := ex.Write(ctx, lock.SQL, lock.Args...); err != nil {
-		return 0, err
-	}
-	if doc != nil {
-		if named, _ := bucketpolicy.Named(*doc); len(named) > 0 {
-			live := q.principals.RequireLiveStatement(tenantID, named...)
-			if err := ex.WriteConditional(ctx, live.SQL, live.Args...); err != nil {
-				return 0, err
-			}
-		}
-	}
-	if len(affected) > 0 {
-		for _, st := range q.delegations.WithdrawGrantsOverStatements(tenantID, bucket, affected) {
-			if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-				return 0, err
-			}
-		}
+		change.writes = append(change.writes, write{Statement: q.delegations.WithdrawGrantsOverStatement(tenantID, bucket, affected)})
 		if len(fresh) > 0 {
 			put, err := q.delegations.PutForKeysStatement(fresh)
 			if err != nil {
-				return 0, fmt.Errorf("building the write of the keys' grants: %w", err)
+				return policyChange{}, fmt.Errorf("building the write of the keys' grants: %w", err)
 			}
-			if err := ex.Write(ctx, put.SQL, put.Args...); err != nil {
-				return 0, err
-			}
+			change.writes = append(change.writes, write{Statement: put})
+			change.issued = len(fresh)
 		}
 	}
-
-	var cas store.Statement
-	var index []store.Statement
 	if doc != nil {
-		cas, index = q.policies.PutStatements(tenantID, bucket, *doc, old)
+		put, index := q.policies.PutStatements(tenantID, bucket, *doc)
+		change.writes = append(change.writes, write{Statement: put, conditional: true})
+		for _, st := range index {
+			change.writes = append(change.writes, write{Statement: st})
+		}
 	} else {
-		var unindex store.Statement
-		cas, unindex = q.policies.DeleteStatements(bucket, *old)
-		index = []store.Statement{unindex}
+		del, index := q.policies.DeleteStatements(bucket)
+		change.writes = append(change.writes, write{Statement: del, conditional: true}, write{Statement: index})
 	}
-	if err := ex.WriteConditional(ctx, cas.SQL, cas.Args...); err != nil {
-		return 0, err
-	}
-	for _, st := range index {
-		if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-			return 0, err
-		}
-	}
-
-	if len(affected) > 0 {
-		// How many grants the commit withdraws is not known here, so the
-		// publish is queued for any change to a principal's actions and
-		// finds nothing when none were.
-		if _, err := ex.Submit(ctx, revocationqueue.PublishSpec(tenantID)); err != nil {
-			return 0, fmt.Errorf("queueing the publishing of the tenant's revocations: %w", err)
-		}
-	}
-	return len(fresh), nil
+	return change, nil
 }
 
 // issueOver issues, signed by the tenant, the grants over the bucket that doc

@@ -7,6 +7,7 @@ import (
 
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/config"
+	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
@@ -14,9 +15,11 @@ import (
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/libforge/identity"
@@ -43,6 +46,7 @@ var RPCModule = fx.Module("rpc",
 			NewUploadClient,
 			fx.As(fx.Self()),
 			fx.As(new(bucketsvc.UploadClient)),
+			fx.As(new(tenantqueue.Uploads)),
 			fx.As(new(rpc.RoutingClient)),
 			fx.As(new(metricssvc.UsageSampler)),
 		),
@@ -63,7 +67,8 @@ var RPCModule = fx.Module("rpc",
 
 // NewAuthorizer builds the shared authorization service, which holds a
 // request back while a change to its tenant's authority is queued or running
-// on the task runner.
+// on the task runner, and then reads what it decides in one snapshot of the
+// database.
 func NewAuthorizer(
 	logger *zap.Logger,
 	accessKeys accesskeystore.Store,
@@ -74,8 +79,10 @@ func NewAuthorizer(
 	policies bucketpolicystore.Store,
 	secrets vault.Vault,
 	runner *taskrunner.Runner,
+	pool *storepostgres.MigratedPool,
 ) *auth.Authorizer {
-	return auth.NewAuthorizer(logger, accessKeys, tenants, providers, buckets, principals, policies, secrets, auth.WithTenantChanges(runner))
+	return auth.NewAuthorizer(logger, accessKeys, tenants, providers, buckets, principals, policies, secrets,
+		auth.WithTenantChanges(runner), auth.WithSnapshots(pglock.NewSnapshots(pool.Pool)))
 }
 
 // asUCANRoute annotates a handler constructor so its result joins the

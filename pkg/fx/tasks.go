@@ -58,6 +58,7 @@ func NewTenantQueue(
 	policies bucketpolicy.Store,
 	delegations delegation.Store,
 	secrets vault.Vault,
+	uploads tenantqueue.Uploads,
 	logger *zap.Logger,
 ) (*tenantqueue.Queue, error) {
 	return tenantqueue.New(runner, tenantqueue.Deps{
@@ -68,6 +69,7 @@ func NewTenantQueue(
 		Policies:    policies,
 		Delegations: delegations,
 		Secrets:     secrets,
+		Uploads:     uploads,
 		Logger:      logger.Named("tenant-changes"),
 	})
 }

@@ -20,7 +20,6 @@ import (
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -287,13 +286,7 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 	bucketID, providerID := testutil.RandomDID(t), testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "region-1", nil))
 	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "tenant-1-bucket"))
-	_, err = policies.Put(ctx, bucketpolicystore.Input{
-		Bucket: bucketID, Tenant: tenantID,
-		Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}},
-
-		Conditional: true,
-	}, nil)
-	require.NoError(t, err)
+	testutil.PutPolicy(t, pool, tenantID, bucketID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}})
 
 	// One access key holding a grant over the bucket, so the revocations the
 	// removal publishes are observable.

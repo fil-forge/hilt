@@ -382,9 +382,8 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 		return fmt.Errorf("deleting wrap keys: %w", err)
 	}
 
-	// Cascade: buckets (records and their policies; bucket keys are discarded at
-	// creation). Postgres cascades a policy with its bucket row, so the row goes
-	// first and no failure leaves a bucket without its policy.
+	// Cascade: buckets (records and, by cascade, their policies; bucket keys
+	// are discarded at creation).
 	bucketIDs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[did.DID], error) {
 		var listOpts []bucket.ListOption
 		if opts.Cursor != nil {
@@ -406,9 +405,6 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 	for _, id := range bucketIDs {
 		if err := s.buckets.Delete(ctx, id); err != nil {
 			return fmt.Errorf("deleting bucket: %w", err)
-		}
-		if err := s.policies.DeleteByBucket(ctx, id, nil); err != nil {
-			return fmt.Errorf("deleting bucket policy: %w", err)
 		}
 	}
 
@@ -462,7 +458,7 @@ func (s *Service) revokeKeyDelegations(ctx context.Context, log *zap.Logger, ten
 		return err
 	}
 	// The publish runs while the keys' delegations are locked, so the whole
-	// write is bounded at the batch deadline, as the rotator's is.
+	// write is bounded at the batch deadline.
 	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
 	defer cancel()
 	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {

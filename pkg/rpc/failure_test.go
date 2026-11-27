@@ -104,10 +104,9 @@ func TestBucketFailure(t *testing.T) {
 		requireName(t, f.got, auth.OperationNotPermittedErrorName)
 	})
 
-	t.Run("a wrapped lock timeout is set as the retryable failure", func(t *testing.T) {
-		// Info reads the bucket policy share-locked, so it can return this too.
+	t.Run("a deletion held from its turn is set as the retryable failure", func(t *testing.T) {
 		f := &recordingFailer{}
-		err := fmt.Errorf("%w: looking up bucket policy: %w", auth.ErrTemporarilyUnavailable, store.ErrLockTimeout)
+		err := fmt.Errorf("%w: other changes to the tenant held the deletion of %q", auth.ErrTemporarilyUnavailable, "photos")
 		require.NoError(t, bucketFailure(f, err))
 		require.True(t, f.called)
 		requireName(t, f.got, auth.TemporarilyUnavailableErrorName)
@@ -183,15 +182,14 @@ func TestAuthFailure(t *testing.T) {
 		requireName(t, f.got, auth.BucketNotPermittedErrorName)
 	})
 
-	t.Run("a lock timeout is set as failure under its retryable name", func(t *testing.T) {
+	t.Run("a wait that ran out is set as failure under its retryable name", func(t *testing.T) {
 		f := &recordingFailer{}
-		// As Authorize returns it: the named sentinel first, the store's timeout
-		// wrapped after it, so the receipt carries the retryable name.
-		err := fmt.Errorf("%w: looking up access key: %w", auth.ErrTemporarilyUnavailable, store.ErrLockTimeout)
+		// As Authorize returns it: the named sentinel first, with the wait
+		// after it, so the receipt carries the retryable name.
+		err := fmt.Errorf("%w: waited %s for a change to the tenant", auth.ErrTemporarilyUnavailable, store.LockTimeout)
 		require.NoError(t, authFailure(f, err))
 		require.True(t, f.called)
 		requireName(t, f.got, auth.TemporarilyUnavailableErrorName)
-		require.ErrorIs(t, f.got, store.ErrLockTimeout)
 	})
 
 	t.Run("a wrapped error that encodes its own CBOR is set as itself", func(t *testing.T) {

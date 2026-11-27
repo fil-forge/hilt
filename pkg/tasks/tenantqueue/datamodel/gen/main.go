@@ -28,6 +28,7 @@ func main() {
 		datamodel.PutPolicyArgs{},
 		datamodel.PutPolicyResult{},
 		datamodel.DeletePolicyArgs{},
+		datamodel.RemovePrincipalResult{},
 	); err != nil {
 		panic(err)
 	}

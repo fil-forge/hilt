@@ -167,7 +167,9 @@ func TestCreateKey(t *testing.T) {
 		principals := principalpostgres.New(pool)
 		require.NoError(t, principals.Add(ctx, other, "carol"))
 		require.NoError(t, principals.Add(ctx, w.tenant.DID(), "gone"))
-		require.NoError(t, principals.Tombstone(ctx, w.tenant.DID(), "gone", nil))
+		gone := principals.TombstoneStatement(w.tenant.DID(), "gone")
+		_, err := pool.Exec(ctx, gone.SQL, gone.Args...)
+		require.NoError(t, err)
 		missing := testutil.RandomDID(t)
 		long := make([]byte, tenantqueue.MaxKeyNameLength+1)
 		for i := range long {

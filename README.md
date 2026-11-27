@@ -151,8 +151,11 @@ withdraws the key's grants and queues their revocations, so the request
 returns once the key is gone and Swarf is told moments later. Writing and
 removing a bucket policy run there as well: the write gives every affected
 principal's keys the grants of the new policy and queues the revocations of
-the ones they held. With Swarf
-unreachable these changes still succeed and the
+the ones they held. Removing a principal runs there: it strips the principal
+from the policies naming it, deletes its keys and queues the revocations of
+their grants. Deleting a bucket runs there too: once Sprue reports the bucket
+empty it deletes the bucket with its policy and queues the revocations of the
+grants over it. With Swarf unreachable these changes still succeed and the
 revocations are published once it returns. Each
 setting is the most queued tasks of that queue one instance runs at once. A
 tenant's tasks on a queue always run one at a time, so the count is the number

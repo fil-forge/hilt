@@ -163,11 +163,8 @@ type Store interface {
 	// nil, and among the principal's keys otherwise.
 	HasName(ctx context.Context, tenant did.DID, principal *string, name string) (bool, error)
 	// Get retrieves the record for a given ID. It returns
-	// [store.ErrRecordNotFound] if no record exists for the specified ID. With
-	// [store.WithShareLock] the read waits for a transaction holding the row to
-	// commit or roll back; on Postgres the wait is bounded at
-	// [store.LockTimeout] and returns [store.ErrLockTimeout] when it runs out.
-	Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (Record, error)
+	// [store.ErrRecordNotFound] if no record exists for the specified ID.
+	Get(ctx context.Context, id did.DID) (Record, error)
 	// ListByTenant retrieves the tenant's records, optionally restricted to the
 	// keys of one principal or several (see [WithPrincipal], [WithPrincipals])
 	// or to given keys (see [WithIDs]).

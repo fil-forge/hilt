@@ -111,14 +111,11 @@ var (
 	// signed checksum header. The wrapped message says which.
 	ErrInvalidBody = errors.New(InvalidBodyErrorName, "the request body cannot be authorized on")
 	// ErrTemporarilyUnavailable is returned when the state a request is
-	// authorized on was still being changed when the wait for it ran out: the
-	// share-locked read of the key, its principal or the bucket's policy
-	// waited out the store's lock timeout behind a write still committing, in
-	// which case the returned error wraps [store.ErrLockTimeout] as well, or
-	// a change to the tenant's authority was still queued or running on the
-	// task runner after the same bound. Nothing about the request was
+	// authorized on was still being changed when the wait for it ran out: a
+	// change to the tenant's authority was still queued or running on the
+	// task runner after [store.LockTimeout]. Nothing about the request was
 	// decided; a retry is answered from whichever state the change leaves.
-	// Bucket info also returns it, without the store's timeout, when the
-	// policy or the key's grants moved between its reads.
+	// A bucket deletion also returns it when other changes to the tenant held
+	// it from its turn until the caller's deadline.
 	ErrTemporarilyUnavailable = errors.New(TemporarilyUnavailableErrorName, "authorization state is being changed, retry the request")
 )
