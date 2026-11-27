@@ -998,6 +998,154 @@ func TestAuthorize(t *testing.T) {
 		_, err := az.Authorize(ctx, providerID, signedRequest(t, accessKey, region, time.Now(), time.Hour))
 		require.ErrorIs(t, err, auth.ErrTenantDisabled)
 	})
+
+	// everyPermission is a service key that holds whatever a request in
+	// writeLockCases needs, so the tenant's status is the only thing that
+	// decides between them.
+	everyPermission := []string{
+		"s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:ListBucket", "s3:ListBucketVersions",
+		"s3:ListAllMyBuckets", "s3:ListBucketMultipartUploads", "s3:ListMultipartUploadParts",
+		"s3:GetBucketPolicy", "s3:GetBucketVersioning",
+		"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:AbortMultipartUpload",
+		"s3:PutObject", "s3:CreateBucket",
+		"s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutEncryptionConfiguration", "s3:PutBucketCORS",
+		"s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutBucketObjectLockConfiguration",
+		"s3:PutObjectRetention", "s3:PutObjectLegalHold", "s3:PutObjectTagging", "s3:DeleteObjectTagging",
+		"s3:BypassGovernanceRetention",
+	}
+	keptPermissions := []string{
+		"s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:ListBucket", "s3:ListBucketVersions",
+		"s3:ListAllMyBuckets", "s3:ListBucketMultipartUploads", "s3:ListMultipartUploadParts",
+		"s3:GetBucketPolicy", "s3:GetBucketVersioning",
+		"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:AbortMultipartUpload",
+		"s3:BypassGovernanceRetention",
+	}
+	plain := func(method, path string) func(*testing.T) s3.Request {
+		return func(t *testing.T) s3.Request {
+			return signedRequestWith(t, accessKey, method, "https://s3.fil.one"+path, nil, region)
+		}
+	}
+	withHeader := func(method, path, header, value string) func(*testing.T) s3.Request {
+		return func(t *testing.T) s3.Request {
+			return signedRequestWith(t, accessKey, method, "https://s3.fil.one"+path, map[string]string{header: value}, region, header)
+		}
+	}
+	writeLockCases := []struct {
+		name    string
+		request func(*testing.T) s3.Request
+		op      auth.Operation
+		// kept is whether a write-locked tenant is still authorized.
+		kept bool
+	}{
+		{"GetObject", plain("GET", "/bucket/object-key"), auth.OpGetObject, true},
+		{"HeadObject", plain("HEAD", "/bucket/object-key"), auth.OpGetObject, true},
+		{"GetObjectVersion", plain("GET", "/bucket/object-key?versionId=v1"), auth.OpGetObjectVersion, true},
+		{"GetObjectTagging", plain("GET", "/bucket/object-key?tagging"), auth.OpGetObjectTagging, true},
+		{"ListBucket", plain("GET", "/bucket"), auth.OpListBucket, true},
+		{"ListBucketVersions", plain("GET", "/bucket?versions"), auth.OpListBucketVersions, true},
+		{"ListBuckets", plain("GET", "/"), auth.OpListBuckets, true},
+		{"ListBucketMultipartUploads", plain("GET", "/bucket?uploads"), auth.OpListBucketMultipartUploads, true},
+		{"ListMultipartUploadParts", plain("GET", "/bucket/object-key?uploadId=u"), auth.OpListMultipartUploadParts, true},
+		{"GetBucketPolicy", plain("GET", "/bucket?policy"), auth.OpGetBucketPolicy, true},
+		{"GetBucketVersioning", plain("GET", "/bucket?versioning"), auth.OpGetBucketVersioning, true},
+		{"DeleteObject", plain("DELETE", "/bucket/object-key"), auth.OpDeleteObject, true},
+		{"DeleteObjectVersion", plain("DELETE", "/bucket/object-key?versionId=v1"), auth.OpDeleteObjectVersion, true},
+		{"DeleteObjects naming a version", func(t *testing.T) s3.Request {
+			return signedBodyRequest(t, accessKey, "POST", "https://s3.fil.one/bucket?delete",
+				"<Delete><Object><Key>one</Key><VersionId>v1</VersionId></Object></Delete>", region, true)
+		}, auth.OpDeleteObjects, true},
+		{"AbortMultipartUpload", plain("DELETE", "/bucket/object-key?uploadId=u"), auth.OpAbortMultipartUpload, true},
+		{"DeleteBucket", plain("DELETE", "/bucket"), auth.OpDeleteBucket, true},
+
+		{"PutObject", plain("PUT", "/bucket/object-key"), auth.OpPutObject, false},
+		{"CopyObject", func(t *testing.T) s3.Request {
+			return signedCopyRequest(t, accessKey, "bucket", "bucket2", region, true)
+		}, auth.OpCopyObject, false},
+		{"CreateMultipartUpload", plain("POST", "/bucket/object-key?uploads"), auth.OpCreateMultipartUpload, false},
+		{"UploadPart", plain("PUT", "/bucket/object-key?uploadId=u&partNumber=1"), auth.OpUploadPart, false},
+		{"UploadPartCopy", withHeader("PUT", "/bucket/object-key?uploadId=u&partNumber=1", "x-amz-copy-source", "/bucket2/object-key"), auth.OpUploadPartCopy, false},
+		{"CompleteMultipartUpload", plain("POST", "/bucket/object-key?uploadId=u"), auth.OpCompleteMultipartUpload, false},
+		{"CreateBucket", plain("PUT", "/newbucket"), auth.OpCreateBucket, false},
+		{"PutBucketPolicy", plain("PUT", "/bucket?policy"), auth.OpPutBucketPolicy, false},
+		{"DeleteBucketPolicy", plain("DELETE", "/bucket?policy"), auth.OpDeleteBucketPolicy, false},
+		{"PutBucketEncryption", plain("PUT", "/bucket?encryption"), auth.OpPutBucketEncryption, false},
+		{"DeleteBucketEncryption", plain("DELETE", "/bucket?encryption"), auth.OpDeleteBucketEncryption, false},
+		{"PutBucketCors", plain("PUT", "/bucket?cors"), auth.OpPutBucketCors, false},
+		{"DeleteBucketCors", plain("DELETE", "/bucket?cors"), auth.OpDeleteBucketCors, false},
+		{"PutBucketTagging", plain("PUT", "/bucket?tagging"), auth.OpPutBucketTagging, false},
+		{"DeleteBucketTagging", plain("DELETE", "/bucket?tagging"), auth.OpDeleteBucketTagging, false},
+		{"PutBucketVersioning", plain("PUT", "/bucket?versioning"), auth.OpPutBucketVersioning, false},
+		{"PutObjectLockConfiguration", plain("PUT", "/bucket?object-lock"), auth.OpPutObjectLockConfiguration, false},
+		{"PutObjectRetention", plain("PUT", "/bucket/object-key?retention"), auth.OpPutObjectRetention, false},
+		{"PutObjectLegalHold", plain("PUT", "/bucket/object-key?legal-hold"), auth.OpPutObjectLegalHold, false},
+		{"PutObjectTagging", plain("PUT", "/bucket/object-key?tagging"), auth.OpPutObjectTagging, false},
+		{"DeleteObjectTagging", plain("DELETE", "/bucket/object-key?tagging"), auth.OpDeleteObjectTagging, false},
+		{"DeleteObject bypassing governance retention", withHeader("DELETE", "/bucket/object-key?versionId=v1", "x-amz-bypass-governance-retention", "true"), auth.OpDeleteObjectVersion, true},
+	}
+
+	t.Run("a write-locked tenant keeps its reads, listings and deletions and is refused the rest", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked, accessKeyPermissions: everyPermission})
+		for _, tc := range writeLockCases {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := az.Authorize(ctx, providerID, tc.request(t))
+				if !tc.kept {
+					require.ErrorIs(t, err, auth.ErrTenantWriteLocked)
+					require.Nil(t, got)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tc.op, got.Operation)
+				require.Equal(t, keptPermissions, got.Permissions, "the permissions the gateway caches are the kept ones")
+			})
+		}
+	})
+
+	t.Run("an active tenant is authorized all of them, with its full permissions", func(t *testing.T) {
+		az, _, _ := setup(t, accessKey, &setupConfig{accessKeyPermissions: everyPermission})
+		for _, tc := range writeLockCases {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := az.Authorize(ctx, providerID, tc.request(t))
+				require.NoError(t, err)
+				require.Equal(t, tc.op, got.Operation)
+				require.Equal(t, everyPermission, got.Permissions)
+			})
+		}
+	})
+
+	t.Run("a write-locked tenant is refused as write-locked whatever its key holds", func(t *testing.T) {
+		// The key may only read, so an active tenant's upload is refused for
+		// the key; a write-locked tenant's is refused for the tenant.
+		active, _, _ := setup(t, accessKey, nil)
+		_, err := active.Authorize(ctx, providerID, plain("PUT", "/bucket/object-key")(t))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+
+		locked, _, _ := setup(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked})
+		_, err = locked.Authorize(ctx, providerID, plain("PUT", "/bucket/object-key")(t))
+		require.ErrorIs(t, err, auth.ErrTenantWriteLocked)
+		// A kept operation the key lacks is still the key's refusal.
+		_, err = locked.Authorize(ctx, providerID, plain("DELETE", "/bucket/object-key")(t))
+		require.ErrorIs(t, err, auth.ErrOperationNotPermitted)
+	})
+
+	t.Run("a write-locked tenant's principal-bound key keeps the kept part of its policy", func(t *testing.T) {
+		az, _, tenantID, bucketID, policies := setupWithPolicies(t, accessKey, &setupConfig{tenantStatus: tenant.WriteLocked, principalBound: true})
+		grant(t, policies, bucketID, tenantID, s3bkt.Statement{Effect: s3bkt.Allow, Principal: s3bkt.Only("user-1"),
+			Actions:   s3bkt.NewStringSet("s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectTagging"),
+			Resources: s3bkt.NewStringSet(s3bkt.ObjectsARN("bucket"))})
+
+		for _, kept := range []func(*testing.T) s3.Request{plain("GET", "/bucket/object-key"), plain("DELETE", "/bucket/object-key")} {
+			got, err := az.Authorize(ctx, providerID, kept(t))
+			require.NoError(t, err)
+			require.ElementsMatch(t, []string{"s3:GetObject", "s3:DeleteObject"}, got.Permissions)
+		}
+		for _, lost := range []func(*testing.T) s3.Request{plain("PUT", "/bucket/object-key"), plain("DELETE", "/bucket/object-key?tagging"), plain("PUT", "/newbucket")} {
+			_, err := az.Authorize(ctx, providerID, lost(t))
+			require.ErrorIs(t, err, auth.ErrTenantWriteLocked)
+		}
+		got, err := az.Authorize(ctx, providerID, plain("GET", "/")(t))
+		require.NoError(t, err)
+		require.Equal(t, []string{"s3:ListAllMyBuckets"}, got.Permissions)
+	})
 }
 
 // lockedAccessKeys, lockedPrincipals and lockedPolicies fail every Get with

@@ -60,10 +60,11 @@ them. It exposes two APIs and talks to three external services:
   Swarf records once.
   Revocations recorded as owed (`pkg/store/revocation`) are published from
   the task queue instead, in batches, and retried until Swarf takes them
-  (`pkg/tasks/revocationqueue`). A tenant status change into or out of
-  `disabled` records them: disabling withdraws every grant the tenant's keys
-  hold, and leaving `disabled` withdraws whatever they hold and issues each
-  key fresh grants. An access key's deletion records the grants the key held,
+  (`pkg/tasks/revocationqueue`). A tenant status change records them: every
+  change withdraws the grants the tenant's keys hold and issues each key the
+  grants of the new status, all of them for `active`, those of the S3
+  actions a write-locked tenant keeps for `write-locked`, and none for
+  `disabled`. An access key's deletion records the grants the key held,
   and a bucket policy's write or removal records the grants over the bucket
   it takes off the affected principals' keys
   (`pkg/tasks/tenantqueue`). Tenant deletion publishes what
@@ -132,7 +133,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `Authorizer` service.
 - `pkg/sigv4` — stdlib-only SigV4 / SigV4a verification, key derivation
   (`DeriveKey`), and local verification (`VerifyWithKey`).
-- `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`).
+- `pkg/s3perm` — S3-permission → Forge-command mapping (shared by `api` and `rpc`),
+  and the one rule for write-locking: `KeptWhenWriteLocked` says, for each
+  S3 permission, whether a write-locked tenant keeps it (reads, listings and
+  the deletions that release storage) or not (uploads, bucket creation, every
+  configuration or object-protection change, and anything unknown). A new
+  permission needs an entry in `writeLockedKeeps`, which a test pins.
 - `pkg/bucketpolicy` — bucket policy evaluation over libforge's
   `s3bkt.BucketPolicy` (`Decode`, `Validate`, `Canonical`, `Effective`,
   `Changed`); pure, no store or transport dependencies. The document type,
@@ -140,9 +146,11 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   action allowlist live in libforge `commands/s3/bucket`. The package doc has
   the document shape.
 - `pkg/grant` — an access key's stored delegations: `Issue` builds the
-  tenant→key set both key kinds hold, `ForKey` the set of one key, and
-  `Rotator` revokes what a removed principal's keys hold. See the package
-  doc.
+  tenant→key set both key kinds hold, `ForKey` the set of one key under its
+  tenant's status, and `Rotator` revokes what a removed principal's keys
+  hold. `LimitToTenantStatus` reduces a set of S3 actions to what a tenant's
+  status keeps; every place that issues grants or reports a key's
+  permissions to the gateway goes through it. See the package doc.
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage,revocation}` —
   each an interface with its `postgres` implementation.
 - `pkg/store/pglock` — the Postgres locking helpers the stores share: bounded
@@ -154,7 +162,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   subject of the tenant's DID string. Each queue's handlers live in a package
   under it (`tenantqueue`, `revocationqueue`). `queue-tenant.set-status` is
   the tenant status change, which `tenant.Service.SetStatus` submits and
-  waits for. `queue-tenant.create-key` and `queue-tenant.delete-key` create
+  waits for: in one commit it withdraws every grant the tenant's keys hold,
+  stores each key the grants of the new status, and writes the status. A
+  task that issues grants reads the tenant's status and narrows them to it
+  (`grant.ForKey`, `grant.LimitToTenantStatus`); status changes, key
+  creations and policy writes are all tasks on the tenant, so no lock orders
+  them. `queue-tenant.create-key` and `queue-tenant.delete-key` create
   and delete an access key, submitted and waited for by
   `accesskey.Service`, which keeps the key's secret to itself: it writes the
   secret to the vault before it submits the creation and removes it when
@@ -287,8 +300,23 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   status is read before the policies and before the key's stored grants,
   and a status change commits its status and its grant changes together, so
   a change that lands between two of those reads leaves the answer no wider
-  than the status read allows (the comment at the read in
+  than the status read allows, with one exception: a request read as
+  `active` just before a write-lock commits is answered as active, full
+  permission set included (the comment at the read in
   `pkg/rpc/service/auth/auth.go` has the cases).
+  **Tenant statuses**: `active` is read and write. `disabled` refuses every
+  request (`ErrTenantDisabled`). `write-locked` is read-only: once the
+  operation is classified, with the permissions its headers and body add, a
+  request needing a permission `s3perm.KeptWhenWriteLocked` does not keep is
+  refused as `ErrTenantWriteLocked` (`TenantWriteLocked` on the wire, which
+  the gateway maps to an S3 403), whatever the key holds, and the permission
+  set returned is the key's less what the tenant does not keep. The gateway
+  must decide cached requests on that S3 permission set: a delete changes the
+  catalog, so the grants a write-locked key keeps carry the Forge commands an
+  upload uses, and a proof chain alone does not tell the two apart.
+  `/s3/bucket/info` and `/s3/bucket/create` filter the permissions they
+  report the same way, on a status read after the key's proof chains
+  (`bucket.Service.permissionsUnderStatus`).
   Classification mirrors the gateway's router (`pkg/rpc/service/auth/operation.go`):
   `subresources` is S3's subresource vocabulary, each marked supported or
   not, and `bucketRoutes` / `objectRoutes` give the operation a supported
@@ -329,7 +357,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   must be the provider of the bucket's tenant, and the access key in the
   arguments must belong to that same tenant. It answers the proof chains from
   the bucket root through the key's stored grants over the bucket, and a
-  principal-bound key's effective actions as its permissions.
+  principal-bound key's effective actions as its permissions, either kind's
+  reduced to what the tenant's status keeps.
 - **Identities & keys**: tenants are secp256k1 → did:plc; access keys and buckets
   are ed25519 → did:key. Build issuers with `multikey.NewIssuer(did, signer)`. Bucket
   keys are **ephemeral** — used once to sign the bucket→tenant root delegation, then

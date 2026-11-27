@@ -106,6 +106,11 @@ func New(
 // provider's storage nodes, and returns the AuthorizeOK: the new bucket DID, the
 // access key's permissions and derived verification key, and the proof chains for
 // the access key's powerline delegations (which now reach the new bucket).
+//
+// A write-locked tenant creates no bucket: Authorize refuses the request
+// ([auth.ErrTenantWriteLocked]). The permissions returned are those the
+// tenant's status keeps when the proof chains have been read
+// ([Service.permissionsUnderStatus]).
 func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.CreateArguments) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {
@@ -261,12 +266,18 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 		}
 	}
 
+	permissions, err := s.permissionsUnderStatus(ctx, authz.Tenant.ID, authz.Permissions)
+	if err != nil {
+		rollback()
+		return nil, nil, err
+	}
+
 	log.Debug("created bucket", zap.Int("delegations", len(proofSet)))
 	return &s3req.AuthorizeOK{
 		Bucket: &bucketID,
 		Tenant: authz.Tenant.ID,
 		Permissions: s3.PermissionSet{Entries: map[did.DID][]string{
-			accessKeyID: authz.Permissions,
+			accessKeyID: permissions,
 		}},
 		Keys: s3.KeySet{Entries: map[did.DID][]s3.VerificationKey{
 			accessKeyID: {{Kind: kind, Data: key}},
@@ -333,6 +344,28 @@ func (s *Service) Delete(ctx context.Context, issuer did.DID, args *s3bkt.Delete
 
 	s.logger.Debug("deleted bucket", zap.Stringer("bucket", authz.Bucket.ID), zap.String("name", authz.BucketName))
 	return &s3bkt.DeleteOK{}, nil
+}
+
+// permissionsUnderStatus reduces the S3 permissions of one of the tenant's
+// access keys to those the tenant's status keeps
+// ([grant.LimitToTenantStatus]): all of them while it is active, the reads,
+// listings and deletions while it is write-locked, none while it is
+// disabled. The gateway caches the result beside the key's proof chains and
+// decides requests from it without asking again.
+//
+// Call it after the proof chains it is returned with have been read. A
+// status change commits its status with the grants it withdraws and issues,
+// so the status read here is at least as new as the chains, and the pair
+// allows no more than that status does: chains read before a change are
+// revoked by it, and a write-locked key's chains, which carry commands an
+// upload uses too, are never paired with the permissions of an active
+// tenant unless the tenant is active again.
+func (s *Service) permissionsUnderStatus(ctx context.Context, tenantID did.DID, permissions []string) ([]string, error) {
+	rec, err := s.tenants.Get(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("looking up tenant: %w", err)
+	}
+	return grant.LimitToTenantStatus(rec.Status, permissions), nil
 }
 
 // sameLinks reports whether the two sets of delegations hold the same CIDs.
@@ -505,6 +538,11 @@ func (s *Service) policyETag(ctx context.Context, bucketID did.DID) (string, err
 // It carries no signed S3 request, so there is no signature to authenticate:
 // what it checks is the caller, which must be the provider acting for the
 // bucket's tenant, and the access key, which must belong to that tenant.
+//
+// The permissions are those the tenant's status keeps
+// ([Service.permissionsUnderStatus]): a write-locked tenant's key is
+// reported its reads, listings and deletions, and a disabled tenant's key
+// none.
 func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArguments) (*s3bkt.InfoOK, []ucan.Delegation, error) {
 	b, err := s.buckets.GetByName(ctx, args.Name)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -633,6 +671,12 @@ func (s *Service) Info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		if !sameLinks(stored, current) {
 			return nil, nil, fmt.Errorf("%w: the access key's grants were rewritten", auth.ErrTemporarilyUnavailable)
 		}
+	}
+
+	// The status is read last, after every read of the key's grants.
+	permissions, err = s.permissionsUnderStatus(ctx, b.Tenant, permissions)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	s.logger.Debug("bucket info",

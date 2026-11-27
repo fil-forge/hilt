@@ -9,6 +9,11 @@
 // (pkg/tasks/tenantqueue). [ForKey] issues either kind's set, for a key being
 // created and for one whose grants are issued again. Rotator revokes what a
 // removed principal's keys hold.
+//
+// The set is narrower while the key's tenant is not active: every issue
+// reduces the key's actions to what the tenant's status keeps
+// ([LimitToTenantStatus]), and a change of status withdraws the set and
+// issues the one for the new status.
 package grant
 
 import (
@@ -18,6 +23,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
@@ -48,20 +54,28 @@ func Issue(issuer ucan.Issuer, key did.DID, subjects []did.DID, actions []string
 	return dels, nil
 }
 
-// ForKey returns the issuer→key delegations the access key holds, issued
-// afresh by the tenant as issuer. A service key's come from its own
-// permissions and buckets, and policies is not read. A principal-bound key's
-// come from policies, the tenant's bucket policies that name its principal:
-// over each bucket, the delegations for the principal's effective actions
-// there, and none over a bucket whose policy leaves it no action. Only the
-// key's ID, Buckets, Permissions, Principal and ExpiresAt are read.
-func ForKey(issuer ucan.Issuer, key accesskeystore.Record, policies []bucketpolicystore.Record) ([]ucan.Delegation, error) {
+// ForKey returns the issuer→key delegations the access key holds while its
+// tenant has the status, issued afresh by the tenant as issuer. A service
+// key's come from its own permissions and buckets, and policies is not read.
+// A principal-bound key's come from policies, the tenant's bucket policies
+// that name its principal: over each bucket, the delegations for the
+// principal's effective actions there, and none over a bucket whose policy
+// leaves it no action. Either kind's actions are first reduced to what the
+// status keeps ([LimitToTenantStatus]), so a write-locked tenant's key holds
+// the delegations of its reads, listings and deletions alone, and a disabled
+// tenant's holds none. Only the key's ID, Buckets, Permissions, Principal
+// and ExpiresAt are read.
+func ForKey(issuer ucan.Issuer, status tenant.Status, key accesskeystore.Record, policies []bucketpolicystore.Record) ([]ucan.Delegation, error) {
 	if key.Principal == nil {
-		return Issue(issuer, key.ID, key.Buckets, key.Permissions, key.ExpiresAt)
+		actions := LimitToTenantStatus(status, key.Permissions)
+		if len(actions) == 0 {
+			return nil, nil
+		}
+		return Issue(issuer, key.ID, key.Buckets, actions, key.ExpiresAt)
 	}
 	var dels []ucan.Delegation
 	for _, p := range policies {
-		eff := bucketpolicy.Effective(&p.Policy, *key.Principal)
+		eff := LimitToTenantStatus(status, bucketpolicy.Effective(&p.Policy, *key.Principal))
 		if len(eff) == 0 {
 			continue
 		}

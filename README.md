@@ -138,9 +138,15 @@ Hilt runs durable task queues in its Postgres database, on the libforge task
 runner: `queue-tenant` for changes to a tenant's authority and
 `queue-revocation` for publishing the revocations a tenant owes to Swarf. A
 tenant's status change runs on `queue-tenant`, and the request that makes it
-waits for the result: disabling a tenant withdraws every grant its access keys
-hold and queues their revocations, and leaving `disabled` issues each key
-fresh grants. Creating and deleting an access key run there too. A deletion
+waits for the result. A tenant is `active` (read and write), `write-locked`
+(read-only: reads, listings and deletes succeed, and uploads, bucket creation
+and configuration changes are refused as `TenantWriteLocked`) or `disabled`
+(everything refused as `TenantDisabled`). Every change withdraws the grants
+the tenant's access keys hold, queues their revocations, and issues each key
+the grants of the new status: all of them for `active`, those of its reads,
+listings and deletes for `write-locked`, none for `disabled`. A key created,
+or a bucket policy written, for a write-locked tenant gets the narrower
+grants too. Creating and deleting an access key run there too. A deletion
 withdraws the key's grants and queues their revocations, so the request
 returns once the key is gone and Swarf is told moments later. Writing and
 removing a bucket policy run there as well: the write gives every affected

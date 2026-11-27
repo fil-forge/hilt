@@ -3,20 +3,20 @@
 // tenant never run at once. Authorization waits for a tenant's unfinished
 // tasks here before it answers for that tenant.
 //
-// queue-tenant.set-status changes a tenant's status. A change into or out of
-// disabled also changes the grants the tenant's keys hold, in the same
-// commit as the status:
+// queue-tenant.set-status changes a tenant's status. What the tenant's keys
+// may do differs in every status, so every change also replaces the grants
+// they hold, in the same commit as the status:
 //
-//   - Into disabled, every delegation the tenant issued to one of its access
-//     keys leaves the delegation store and is recorded as a revocation owed.
-//   - Out of disabled, the same happens to whatever the keys hold, and each
-//     key is issued the grants its creation would issue it now
-//     ([grant.ForKey]).
-//
-// A change between active and write-locked sets the status alone.
+//   - Every delegation the tenant issued to one of its access keys leaves
+//     the delegation store and is recorded as a revocation owed.
+//   - Each key is issued the grants its creation would issue it under the
+//     new status ([grant.ForKey]): the full set when the tenant becomes
+//     active, the grants of its reads, listings and deletions when it
+//     becomes write-locked ([grant.LimitToTenantStatus]), and none when it
+//     becomes disabled.
 //
 // queue-tenant.create-key creates an access key: its row and the grants it
-// holds, in one commit. queue-tenant.delete-key deletes one: the delegations
+// holds under the tenant's status, in one commit. queue-tenant.delete-key deletes one: the delegations
 // the tenant issued to it leave the delegation store and are recorded as
 // revocations owed, in the commit that deletes its row (keys.go).
 //
@@ -24,8 +24,8 @@
 // queue-tenant.delete-policy removes one. In the commit that writes the
 // document, every access key of each principal whose effective actions on
 // the bucket change has its grants over the bucket withdrawn, recorded as
-// revocations owed, and is stored the grants of the new document
-// (policies.go).
+// revocations owed, and is stored the grants of the new document under the
+// tenant's status (policies.go).
 //
 // Every change that records revocations queues queue-revocation.publish for
 // the tenant, which publishes them after the commit.
@@ -146,14 +146,18 @@ func SetStatusSpec(tenantID did.DID, status tenant.Status) taskrunner.Spec {
 // tenant has it already, which is also what makes a second run of a task
 // that committed change nothing.
 //
-// Everything it writes commits together. A change into or out of disabled
-// first withdraws every delegation the tenant issued to its keys, recording
-// each as a revocation owed, and queues their publishing. A change out of
-// disabled then stores fresh grants for every key; withdrawing first leaves
-// each key with exactly one set, whatever it held. The status is written
-// last, on the
-// condition that it is still the one read here; when it is not, the commit
-// fails and the task runs again from what is there then.
+// Everything it writes commits together. It first withdraws every
+// delegation the tenant issued to its keys, recording each as a revocation
+// owed, and queues their publishing. Unless the tenant is being disabled it
+// then stores, for every key, the grants the new status gives it;
+// withdrawing first leaves each key with exactly one set, whatever it held.
+// The status is written last, on the condition that it is still the one
+// read here; when it is not, the commit fails and the task runs again from
+// what is there then.
+//
+// The grants are issued afresh on every change, a change to active from
+// write-locked included: the ones withdrawn are revoked, and a revoked
+// delegation is never stored again.
 //
 // It fails for good when the tenant is gone ([ErrTenantNotFound]), and when
 // grants are to be issued and the tenant's signing key is not in the vault.
@@ -179,34 +183,30 @@ func (q *Queue) runSetStatus(ctx context.Context, ex *taskrunner.Exec, t taskrun
 		return nil, nil
 	}
 
-	issued := 0
-	if rec.Status == tenant.Disabled || want == tenant.Disabled {
-		var fresh []ucan.Delegation
-		if rec.Status == tenant.Disabled {
-			if fresh, err = q.issueGrants(ctx, tenantID); err != nil {
-				return nil, err
-			}
-			issued = len(fresh)
+	var fresh []ucan.Delegation
+	if want != tenant.Disabled {
+		if fresh, err = q.issueGrants(ctx, tenantID, want); err != nil {
+			return nil, err
 		}
-		for _, st := range q.delegations.WithdrawKeyGrantsStatements(tenantID) {
-			if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-				return nil, err
-			}
+	}
+	for _, st := range q.delegations.WithdrawKeyGrantsStatements(tenantID) {
+		if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
+			return nil, err
 		}
-		if len(fresh) > 0 {
-			st, err := q.delegations.PutForKeysStatement(fresh)
-			if err != nil {
-				return nil, fmt.Errorf("building the write of the keys' grants: %w", err)
-			}
-			if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-				return nil, err
-			}
+	}
+	if len(fresh) > 0 {
+		st, err := q.delegations.PutForKeysStatement(fresh)
+		if err != nil {
+			return nil, fmt.Errorf("building the write of the keys' grants: %w", err)
 		}
-		// How many grants the commit withdraws is not known here, so the
-		// publish is queued either way and finds nothing when none were.
-		if _, err := ex.Submit(ctx, revocationqueue.PublishSpec(tenantID)); err != nil {
-			return nil, fmt.Errorf("queueing the publishing of the tenant's revocations: %w", err)
+		if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
+			return nil, err
 		}
+	}
+	// How many grants the commit withdraws is not known here, so the
+	// publish is queued either way and finds nothing when none were.
+	if _, err := ex.Submit(ctx, revocationqueue.PublishSpec(tenantID)); err != nil {
+		return nil, fmt.Errorf("queueing the publishing of the tenant's revocations: %w", err)
 	}
 
 	st, err := q.tenants.SetStatusStatement(tenantID, rec.Status, want)
@@ -216,16 +216,17 @@ func (q *Queue) runSetStatus(ctx context.Context, ex *taskrunner.Exec, t taskrun
 	if err := ex.WriteConditional(ctx, st.SQL, st.Args...); err != nil {
 		return nil, err
 	}
-	log.Info("changing the tenant's status", zap.String("from", string(rec.Status)), zap.Int("grants_issued", issued))
+	log.Info("changing the tenant's status", zap.String("from", string(rec.Status)), zap.Int("grants_issued", len(fresh)))
 	return nil, nil
 }
 
 // issueGrants issues, signed by the tenant, the grants every access key of
-// the tenant holds: what [grant.ForKey] gives each from its stored
-// permissions and buckets, or from the tenant's bucket policies as they are
-// now. The policies are read once for each principal that has a key. A key
-// that has expired authenticates no request and is issued nothing.
-func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID) ([]ucan.Delegation, error) {
+// the tenant holds while the tenant has the status: what [grant.ForKey]
+// gives each from its stored permissions and buckets, or from the tenant's
+// bucket policies as they are now. The policies are read once for each
+// principal that has a key. A key that has expired authenticates no request
+// and is issued nothing.
+func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID, status tenant.Status) ([]ucan.Delegation, error) {
 	keys, err := q.accessKeys.ListByTenant(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing the tenant's access keys: %w", err)
@@ -263,7 +264,7 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID) ([]ucan.Deleg
 				policies[*key.Principal] = named
 			}
 		}
-		dels, err := grant.ForKey(issuer, key, named)
+		dels, err := grant.ForKey(issuer, status, key, named)
 		if err != nil {
 			return nil, fmt.Errorf("issuing the grants of %s: %w", key.ID, err)
 		}

@@ -142,9 +142,11 @@ func DeleteKeySpec(tenant, key did.DID) taskrunner.Spec {
 
 // runCreateKey is queue-tenant.create-key. It creates the access key in the
 // task's arguments for the subject tenant: the key's row and the grants
-// [grant.ForKey] gives it, in one commit. The key's secret is the caller's
-// to write to the vault before it submits the task, and to remove when the
-// task fails.
+// [grant.ForKey] gives it under the tenant's status, in one commit, so a key
+// created for a write-locked tenant holds the grants of its reads, listings
+// and deletions alone until the tenant is active again. The key's secret is
+// the caller's to write to the vault before it submits the task, and to
+// remove when the task fails.
 //
 // Every failure is final, and is marked so ([taskrunner.Permanent]). The
 // caller alone holds the secret, so the creation is never finished by a
@@ -222,7 +224,7 @@ func (q *Queue) createKey(ctx context.Context, ex *taskrunner.Exec, t taskrunner
 	if err != nil {
 		return err
 	}
-	dels, err := grant.ForKey(issuer, accesskey.Record{
+	dels, err := grant.ForKey(issuer, rec.Status, accesskey.Record{
 		ID:          key.ID,
 		Buckets:     key.Buckets,
 		Permissions: key.Permissions,

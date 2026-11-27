@@ -411,27 +411,25 @@ func TestDisabling(t *testing.T) {
 }
 
 func TestReactivating(t *testing.T) {
-	for _, to := range []tenantstore.Status{tenantstore.Active, tenantstore.WriteLocked} {
-		t.Run("to "+string(to)+" issues each key the grants its creation gave it", func(t *testing.T) {
-			w := setup(t)
-			service, bound := w.held(t, w.serviceKey), w.held(t, w.principalKey)
-			require.NoError(t, w.setStatus(t, tenantstore.Disabled))
-			w.awaitPublished(t)
+	t.Run("issues each key the grants its creation gave it", func(t *testing.T) {
+		w := setup(t)
+		service, bound := w.held(t, w.serviceKey), w.held(t, w.principalKey)
+		require.NoError(t, w.setStatus(t, tenantstore.Disabled))
+		w.awaitPublished(t)
 
-			require.NoError(t, w.setStatus(t, to))
+		require.NoError(t, w.setStatus(t, tenantstore.Active))
 
-			require.Equal(t, to, w.status(t))
-			freshService, freshBound := w.held(t, w.serviceKey), w.held(t, w.principalKey)
-			require.Equal(t, shapes(service), shapes(freshService))
-			require.Equal(t, shapes(bound), shapes(freshBound))
-			// Each is a new delegation: the ones withdrawn are revoked, and
-			// revoking them must not reach these.
-			for _, d := range append(freshService, freshBound...) {
-				require.NotContains(t, w.swarf.Revoked(), d.Link())
-			}
-			require.Len(t, w.held(t, w.tenant.DID()), 1)
-		})
-	}
+		require.Equal(t, tenantstore.Active, w.status(t))
+		freshService, freshBound := w.held(t, w.serviceKey), w.held(t, w.principalKey)
+		require.Equal(t, shapes(service), shapes(freshService))
+		require.Equal(t, shapes(bound), shapes(freshBound))
+		// Each is a new delegation: the ones withdrawn are revoked, and
+		// revoking them must not reach these.
+		for _, d := range append(freshService, freshBound...) {
+			require.NotContains(t, w.swarf.Revoked(), d.Link())
+		}
+		require.Len(t, w.held(t, w.tenant.DID()), 1)
+	})
 
 	t.Run("issues a principal-bound key's grants from the policies as they are now", func(t *testing.T) {
 		w := setup(t)
@@ -530,36 +528,179 @@ func TestReactivating(t *testing.T) {
 	})
 }
 
-func TestStatusAlone(t *testing.T) {
-	t.Run("between active and write-locked leaves the grants as they are", func(t *testing.T) {
-		w := setup(t)
-		service, bound := links(w.held(t, w.serviceKey)), links(w.held(t, w.principalKey))
-
-		for _, to := range []tenantstore.Status{tenantstore.WriteLocked, tenantstore.Active} {
-			require.NoError(t, w.setStatus(t, to))
-			require.Equal(t, to, w.status(t))
-			require.ElementsMatch(t, service, links(w.held(t, w.serviceKey)))
-			require.ElementsMatch(t, bound, links(w.held(t, w.principalKey)))
-		}
-		require.Empty(t, w.owedLinks(t))
-		pending, err := w.runner.Pending(t.Context(), tasks.QueueRevocation, []string{w.tenant.DID().String()})
+// wantGrants is what the world's two keys hold while the tenant has the
+// status: what [grant.ForKey] issues each from the key's row and the
+// bucket's policy as they are stored.
+func (w *world) wantGrants(t *testing.T, status tenantstore.Status) (service, bound []string) {
+	t.Helper()
+	named, err := w.policies.ListByPrincipal(t.Context(), w.tenant.DID(), principal)
+	require.NoError(t, err)
+	for i, key := range []did.DID{w.serviceKey, w.principalKey} {
+		rec, err := w.accessKeys.Get(t.Context(), key)
 		require.NoError(t, err)
-		require.Empty(t, pending)
-		require.Zero(t, w.swarf.Calls())
+		dels, err := grant.ForKey(w.tenant, status, rec, named)
+		require.NoError(t, err)
+		if i == 0 {
+			service = shapes(dels)
+		} else {
+			bound = shapes(dels)
+		}
+	}
+	return service, bound
+}
+
+func TestWriteLocking(t *testing.T) {
+	t.Run("leaves each key the grants of what it keeps, and withdraws what it held", func(t *testing.T) {
+		w := setup(t)
+		w.swarf.holding.Store(true)
+		before := append(w.held(t, w.serviceKey), w.held(t, w.principalKey)...)
+		full, _ := w.wantGrants(t, tenantstore.Active)
+
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+
+		require.Equal(t, tenantstore.WriteLocked, w.status(t))
+		service, bound := w.wantGrants(t, tenantstore.WriteLocked)
+		require.NotEmpty(t, service)
+		require.Less(t, len(service), len(full), "the service key may upload, and its narrowed grants are fewer")
+		require.Equal(t, service, shapes(w.held(t, w.serviceKey)))
+		require.Equal(t, bound, shapes(w.held(t, w.principalKey)))
+		require.ElementsMatch(t, links(before), w.owedLinks(t), "every grant the keys held is owed a revocation")
+		require.Equal(t, links([]ucan.Delegation{w.root}), links(w.held(t, w.tenant.DID())))
+		require.Empty(t, w.swarf.Revoked())
+
+		w.swarf.holding.Store(false)
+		w.awaitPublished(t)
+		require.ElementsMatch(t, links(before), w.swarf.Revoked())
 	})
 
-	t.Run("the status the tenant has already succeeds and writes nothing", func(t *testing.T) {
+	t.Run("returning to active issues the full grants afresh", func(t *testing.T) {
 		w := setup(t)
-		before, err := w.tenants.Get(t.Context(), w.tenant.DID())
-		require.NoError(t, err)
-		service := links(w.held(t, w.serviceKey))
+		service, bound := w.wantGrants(t, tenantstore.Active)
+		original := append(w.held(t, w.serviceKey), w.held(t, w.principalKey)...)
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+		narrowed := append(w.held(t, w.serviceKey), w.held(t, w.principalKey)...)
 
 		require.NoError(t, w.setStatus(t, tenantstore.Active))
 
-		after, err := w.tenants.Get(t.Context(), w.tenant.DID())
+		require.Equal(t, service, shapes(w.held(t, w.serviceKey)))
+		require.Equal(t, bound, shapes(w.held(t, w.principalKey)))
+		w.awaitPublished(t)
+		for _, d := range append(original, narrowed...) {
+			require.Contains(t, w.swarf.Revoked(), d.Link())
+		}
+		for _, d := range append(w.held(t, w.serviceKey), w.held(t, w.principalKey)...) {
+			require.NotContains(t, w.swarf.Revoked(), d.Link(), "a revoked grant is not issued again")
+		}
+	})
+
+	t.Run("from disabled issues the narrowed grants", func(t *testing.T) {
+		w := setup(t)
+		require.NoError(t, w.setStatus(t, tenantstore.Disabled))
+		w.awaitPublished(t)
+
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+
+		service, bound := w.wantGrants(t, tenantstore.WriteLocked)
+		require.Equal(t, service, shapes(w.held(t, w.serviceKey)))
+		require.Equal(t, bound, shapes(w.held(t, w.principalKey)))
+		for _, d := range append(w.held(t, w.serviceKey), w.held(t, w.principalKey)...) {
+			require.NotContains(t, w.swarf.Revoked(), d.Link())
+		}
+	})
+
+	t.Run("a key created for a write-locked tenant holds the narrowed grants until the tenant is active", func(t *testing.T) {
+		w := setup(t)
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+		key := w.serviceKeyInput(t, "ci", []did.DID{w.bucket}, "s3:GetObject", "s3:PutObject", "s3:PutObjectTagging")
+		require.NoError(t, w.run(t, createSpec(t, key)))
+
+		rec, err := w.accessKeys.Get(t.Context(), key.ID)
 		require.NoError(t, err)
-		require.Equal(t, before, after)
-		require.ElementsMatch(t, service, links(w.held(t, w.serviceKey)))
+		require.Equal(t, key.Permissions, rec.Permissions, "the key keeps the permissions it was created with")
+		reads, err := grant.Issue(w.tenant, key.ID, []did.DID{w.bucket}, []string{"s3:GetObject"}, nil)
+		require.NoError(t, err)
+		require.Equal(t, shapes(reads), shapes(w.held(t, key.ID)))
+
+		require.NoError(t, w.setStatus(t, tenantstore.Active))
+		all, err := grant.Issue(w.tenant, key.ID, []did.DID{w.bucket}, key.Permissions, nil)
+		require.NoError(t, err)
+		require.Equal(t, shapes(all), shapes(w.held(t, key.ID)))
+	})
+
+	t.Run("a policy written for a write-locked tenant gives the narrowed grants until the tenant is active", func(t *testing.T) {
+		w := setup(t)
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+		spec, err := tenantqueue.PutPolicySpec(w.tenant.DID(), w.bucket, bucketName,
+			policyOf("s3:GetObject", "s3:PutObject", "s3:DeleteObject"), tenantqueue.PolicyCondition{})
+		require.NoError(t, err)
+		require.NoError(t, w.run(t, spec))
+
+		kept, err := grant.Issue(w.tenant, w.principalKey, []did.DID{w.bucket}, []string{"s3:GetObject", "s3:DeleteObject"}, nil)
+		require.NoError(t, err)
+		require.Equal(t, shapes(kept), shapes(w.held(t, w.principalKey)))
+
+		require.NoError(t, w.setStatus(t, tenantstore.Active))
+		all, err := grant.Issue(w.tenant, w.principalKey, []did.DID{w.bucket}, []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject"}, nil)
+		require.NoError(t, err)
+		require.Greater(t, len(all), len(kept))
+		require.Equal(t, shapes(all), shapes(w.held(t, w.principalKey)))
+	})
+
+	t.Run("withdraws a grant stored between the handler's reads and its commit", func(t *testing.T) {
+		w := setup(t)
+		var late ucan.Delegation
+		w.hooks.beforeWrites = func() { late = w.stray(t, w.serviceKey) }
+
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+
+		require.NotNil(t, late, "the hook ran")
+		service, _ := w.wantGrants(t, tenantstore.WriteLocked)
+		require.Equal(t, service, shapes(w.held(t, w.serviceKey)))
+		w.awaitPublished(t)
+		require.Contains(t, w.swarf.Revoked(), late.Link())
+	})
+
+	t.Run("a key deleted between the handler's reads and its commit is issued nothing", func(t *testing.T) {
+		w := setup(t)
+		// The policy lets the principal delete too, so the grants a
+		// write-lock would issue its key differ from the ones it holds.
+		w.putPolicy(t, "s3:GetObject", "s3:DeleteObject")
+		held := links(w.held(t, w.principalKey))
+		service, bound := w.wantGrants(t, tenantstore.WriteLocked)
+		require.Greater(t, len(bound), len(held))
+		w.hooks.beforeWrites = func() {
+			require.NoError(t, w.accessKeys.Delete(t.Context(), w.principalKey))
+		}
+
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+
+		// What the key held is its deleter's to revoke. The row is deleted
+		// here without that, so it is still there, and nothing joined it.
+		require.ElementsMatch(t, held, links(w.held(t, w.principalKey)))
+		require.Equal(t, service, shapes(w.held(t, w.serviceKey)))
+	})
+}
+
+func TestStatusAlone(t *testing.T) {
+	t.Run("the status the tenant has already succeeds and writes nothing", func(t *testing.T) {
+		for _, status := range []tenantstore.Status{tenantstore.Active, tenantstore.WriteLocked} {
+			w := setup(t)
+			require.NoError(t, w.setStatus(t, status))
+			w.awaitPublished(t)
+			before, err := w.tenants.Get(t.Context(), w.tenant.DID())
+			require.NoError(t, err)
+			service := links(w.held(t, w.serviceKey))
+			revoked := w.swarf.Revoked()
+
+			require.NoError(t, w.setStatus(t, status))
+
+			after, err := w.tenants.Get(t.Context(), w.tenant.DID())
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			require.ElementsMatch(t, service, links(w.held(t, w.serviceKey)))
+			require.Empty(t, w.owedLinks(t))
+			require.Equal(t, revoked, w.swarf.Revoked())
+		}
 	})
 
 	t.Run("an unknown tenant fails", func(t *testing.T) {
