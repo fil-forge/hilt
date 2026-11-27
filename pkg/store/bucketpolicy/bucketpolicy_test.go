@@ -21,6 +21,8 @@ import (
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -197,11 +199,16 @@ func TestPolicyStore(t *testing.T) {
 		require.Equal(t, want, get(t, bucket).Policy)
 	})
 
-	t.Run("a write affects no row for a bucket that is gone or another tenant's", func(t *testing.T) {
+	t.Run("a write for a bucket that is gone breaks the foreign key", func(t *testing.T) {
 		tenantID, bucket := setup(t)
-		other := f.tenant(t)
-		require.False(t, put(t, other, bucket, doc(allow(everyone, "s3:GetObject"))))
-		require.False(t, put(t, tenantID, testutil.RandomDID(t), first))
+		require.True(t, put(t, tenantID, bucket, first))
+		require.NoError(t, bucketpostgres.New(f.pool).Delete(ctx, bucket))
+
+		st, _ := s.PutStatements(tenantID, bucket, second)
+		_, err := f.pool.Exec(ctx, st.SQL, st.Args...)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr)
+		require.Equal(t, pgerrcode.ForeignKeyViolation, pgErr.Code)
 		require.Nil(t, get(t, bucket), "nothing was written")
 	})
 

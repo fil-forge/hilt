@@ -275,11 +275,11 @@ type policyChange struct {
 //     the grants doc gives its principal there. Its delegations over other
 //     buckets are left alone. A change that alters no principal's actions
 //     withdraws and issues nothing.
-//   - Write the document, or remove the policy, with its index rows. Either
-//     is conditional, on the bucket still being the tenant's or on the
-//     policy still being there, so a bucket that tenant deletion took
-//     meanwhile runs the task again, which then finds the bucket or its
-//     policy gone.
+//   - Write the document, or remove the policy, with its index rows. A
+//     bucket that tenant deletion took meanwhile fails the commit: the write
+//     breaks the policy's foreign key to the bucket, and the removal is
+//     conditional on the policy still being there. The task runs again and
+//     then finds the bucket or its policy gone.
 //
 // The grants issued are those the tenant's status keeps
 // ([grant.LimitToTenantStatus]): a write-locked tenant's keys are stored the
@@ -318,7 +318,7 @@ func (q *Queue) policyWrites(ctx context.Context, tenantID, bucket did.DID, old 
 	}
 	if doc != nil {
 		put, index := q.policies.PutStatements(tenantID, bucket, *doc)
-		change.writes = append(change.writes, write{Statement: put, conditional: true})
+		change.writes = append(change.writes, write{Statement: put})
 		for _, st := range index {
 			change.writes = append(change.writes, write{Statement: st})
 		}
