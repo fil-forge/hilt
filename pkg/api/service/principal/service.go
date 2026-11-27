@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
@@ -136,6 +137,11 @@ func (s *Service) Get(ctx context.Context, externalID, principalID string) (prin
 	return s.principal(ctx, tenantID, principalID)
 }
 
+// DeleteTimeout is the longest a principal removal waits for its turn on the
+// tenant's queue. A removal that has not started by then is abandoned with
+// nothing written, and the caller repeats the call.
+const DeleteTimeout = 30 * time.Second
+
 // Delete removes the principal, its keys, and its place in every bucket
 // policy naming it. The change is a queue-tenant.remove-principal task
 // ([tenantqueue]), which Delete waits for: in one commit the principal leaves
@@ -151,16 +157,24 @@ func (s *Service) Get(ctx context.Context, externalID, principalID string) (prin
 // removed from the vault, best effort. It is idempotent: a principal that is
 // already gone is a no-op.
 //
-// If ctx ends first the task stays queued and a worker finishes it; the
-// keys' vault entries are then left behind, unreachable without their
-// records. A task still waiting for its turn at ctx's deadline is abandoned
-// with nothing written and reported as [ErrConcurrentChange].
+// The task and the vault cleanup run on a context detached from the request,
+// so a client disconnect cannot leave the keys deleted with their secrets
+// behind. A removal still waiting for its turn after [DeleteTimeout], or at
+// ctx's deadline if that is sooner, is abandoned with nothing written and
+// reported as [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, principalID string) error {
 	tenantID, err := s.tenant(ctx, externalID)
 	if err != nil {
 		return err
 	}
-	res, err := s.runner.Run(ctx, tenantqueue.RemovePrincipalSpec(tenantID, principalID))
+	spec := tenantqueue.RemovePrincipalSpec(tenantID, principalID)
+	expires := time.Now().Add(DeleteTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+		expires = deadline
+	}
+	spec.Expires = &expires
+	ctx = context.WithoutCancel(ctx)
+	res, err := s.runner.Run(ctx, spec)
 	if err != nil {
 		if errors.Is(err, taskrunner.ErrExpired) {
 			return ErrConcurrentChange

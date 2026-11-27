@@ -569,6 +569,80 @@ func TestCreate(t *testing.T) {
 	})
 }
 
+func TestDeleteWaitIsBounded(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("a deletion still waiting at the caller's deadline is abandoned with nothing written", func(t *testing.T) {
+		// A creation holds the tenant's queue: its task blocks where it reads
+		// the tenant.
+		b := newBackend(t)
+		entered, release := make(chan struct{}), make(chan struct{})
+		var hold bool
+		b.wrapQueue = func(deps *tenantqueue.Deps) {
+			deps.Tenants = &blockingTenants{Store: deps.Tenants, entered: entered, release: release, skip: &hold}
+		}
+		d := setupWith(t, b)
+		hold = true
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "kept", []string{"s3:GetObject"}, nil, nil, nil)
+		hold = false
+		require.NoError(t, err)
+
+		first := make(chan error, 1)
+		go func() {
+			_, _, err := d.svc.Create(ctx, "tenant-1", "first", []string{"s3:GetObject"}, nil, nil, nil)
+			first <- err
+		}()
+		select {
+		case <-entered:
+		case err := <-first:
+			t.Fatalf("the creation returned before its task ran: %v", err)
+		case <-time.After(testutil.WaitTimeout):
+			t.Fatal("the creation's task did not start")
+		}
+
+		short, cancel := context.WithTimeout(ctx, testutil.MinBlock)
+		defer cancel()
+		err = d.svc.Delete(short, "tenant-1", strings.TrimPrefix(rec.ID.String(), did.KeyPrefix))
+		require.ErrorIs(t, err, accesskeysvc.ErrConcurrentChange)
+
+		close(release)
+		require.NoError(t, <-first)
+		_, err = d.accessKeys.Get(ctx, rec.ID)
+		require.NoError(t, err, "the abandoned deletion wrote nothing")
+		require.Contains(t, d.secrets.remaining(t), vault.AccessKeyPath(d.tenantID, rec.ID))
+	})
+
+	t.Run("a caller that goes away during a deletion still leaves no secret behind", func(t *testing.T) {
+		b := newBackend(t)
+		gone, cancel := context.WithCancel(ctx)
+		defer cancel()
+		b.wrapQueue = func(deps *tenantqueue.Deps) {
+			deps.AccessKeys = &cancellingKeys{Store: deps.AccessKeys, cancel: cancel}
+		}
+		d := setupWith(t, b)
+		rec, _, err := d.svc.Create(ctx, "tenant-1", "k1", []string{"s3:GetObject"}, nil, nil, nil)
+		require.NoError(t, err)
+
+		require.NoError(t, d.svc.Delete(gone, "tenant-1", strings.TrimPrefix(rec.ID.String(), did.KeyPrefix)))
+		require.Error(t, gone.Err(), "the caller's context ended during the call")
+		_, err = d.accessKeys.Get(ctx, rec.ID)
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		require.Empty(t, d.secrets.remaining(t))
+	})
+}
+
+// cancellingKeys calls cancel on every Get, standing in for a caller that
+// goes away while a task reads the key.
+type cancellingKeys struct {
+	accesskeystore.Store
+	cancel context.CancelFunc
+}
+
+func (s *cancellingKeys) Get(ctx context.Context, id did.DID) (accesskeystore.Record, error) {
+	s.cancel()
+	return s.Store.Get(ctx, id)
+}
+
 // blockingTenants blocks the first Get until release is closed, having
 // closed entered.
 type blockingTenants struct {
@@ -576,9 +650,14 @@ type blockingTenants struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+	// skip, when set and true, lets a Get through without blocking.
+	skip *bool
 }
 
 func (s *blockingTenants) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
+	if s.skip != nil && *s.skip {
+		return s.Store.Get(ctx, id)
+	}
 	s.once.Do(func() {
 		close(s.entered)
 		<-s.release
