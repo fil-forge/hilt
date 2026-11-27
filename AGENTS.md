@@ -152,9 +152,8 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   permissions to the gateway goes through it. See the package doc.
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage,revocation}` —
   each an interface with its `postgres` implementation.
-- `pkg/store/pglock` — the Postgres locking and transaction helpers the
-  stores share: bounded lock waits, the mapping to
-  `store.ErrLockTimeout`, the transaction a ctx carries (`WithTx`, `Begin`
+- `pkg/store/pglock` — the Postgres transaction helpers the stores share:
+  the transaction a ctx carries (`WithTx`, `Begin`
   for a write, `Reader` for a read) and the read-only, repeatable-read
   snapshot a reader runs its reads in (`ReadSnapshot`, `Snapshots`).
 - `pkg/tasks` — the durable task queues, run on libforge's `taskrunner`
@@ -228,8 +227,6 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   or policies; every write of them is a task on the tenant's subject. A ctx
   can carry a transaction (`pglock.WithTx`), and a store call that opens its
   own through `pglock.Begin`, or reads through `pglock.Reader`, joins it.
-  Every lock wait is bounded by `store.LockTimeout` and a statement that gives
-  up returns `store.ErrLockTimeout`, which the caller retries.
 - **Reading one state**: a reader whose answer rests on several records reads
   them in one read-only, repeatable-read snapshot (`pglock.ReadSnapshot`),
   so a task committing between two of its reads is seen by neither. Store

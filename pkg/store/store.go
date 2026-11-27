@@ -66,8 +66,6 @@ type Statement struct {
 	Args []any
 }
 
-// LockTimeout bounds how long a locking statement in a Postgres store waits
-// for a conflicting lock before giving up with [ErrLockTimeout], so a wait
-// on a task's commit never pins its pool connection; the caller retries.
-// Authorization waits for a tenant's pending changes for as long.
+// LockTimeout bounds how long authorization waits for a tenant's pending
+// changes before answering that the service is temporarily unavailable.
 const LockTimeout = 10 * time.Second

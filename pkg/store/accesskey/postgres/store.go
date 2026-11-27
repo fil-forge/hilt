@@ -32,25 +32,13 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 const selectColumns = `SELECT id, tenant_id, name, buckets, permissions, principal_id, expires_at, created_at FROM access_key`
 
-// Add runs the insert [Store.AddStatement] builds, in a short transaction
-// whose lock waits are bounded at [store.LockTimeout]. A longer wait returns
-// [store.ErrLockTimeout] and nothing is written.
-func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
+// Add runs the insert [Store.AddStatement] builds.
+func (s *Store) Add(ctx context.Context, in accesskey.Input) error {
 	st, err := s.AddStatement(in)
 	if err != nil {
 		return err
 	}
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, st.SQL, st.Args...); err != nil {
+	if _, err = s.pool.Exec(ctx, st.SQL, st.Args...); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			switch pgErr.Code {
@@ -67,9 +55,6 @@ func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 			}
 		}
 		return fmt.Errorf("adding access key: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
