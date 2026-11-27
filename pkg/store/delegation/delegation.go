@@ -12,7 +12,8 @@ import (
 
 type Store interface {
 	// ListByAudience retrieves a paginated list of delegation records for a given
-	// audience.
+	// audience, leaving out those that have expired, which stay stored until
+	// [Store.DeleteExpired] removes them.
 	ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error)
 	// ProofChain recursively builds a proof chain of delegations from the given
 	// audience to the given subject for the specified command. It returns the list

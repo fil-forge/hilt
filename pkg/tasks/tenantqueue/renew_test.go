@@ -7,6 +7,7 @@ import (
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/grant"
+	"github.com/fil-forge/hilt/pkg/s3perm"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
@@ -42,7 +43,7 @@ func (w *world) renewDue(t *testing.T) (queued int, deleted int64) {
 // bucket.
 func (w *world) chain(t *testing.T) []ucan.Delegation {
 	t.Helper()
-	read := w.held(t, w.serviceKey)[0].Command()
+	read := s3perm.CommandsFor("s3:GetObject")[0]
 	proofs, _, err := w.delegations.ProofChain(t.Context(), w.serviceKey, read, w.bucket)
 	require.NoError(t, err)
 	return proofs

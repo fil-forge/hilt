@@ -274,8 +274,8 @@ func (s *Store) ListByAudience(ctx context.Context, audience did.DID, opts ...st
 	return s.listBy(ctx, byAudience, audience.String(), opts)
 }
 
-// listBy returns a page of delegations whose column equals value, ordered by id so
-// the keyset cursor is stable.
+// listBy returns a page of the unexpired delegations whose column equals
+// value, ordered by id so the keyset cursor is stable.
 func (s *Store) listBy(ctx context.Context, column listColumn, value string, opts []store.PaginationOption) (store.Page[ucan.Delegation], error) {
 	cfg := store.PaginationConfig{}
 	for _, opt := range opts {
@@ -291,6 +291,7 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 		SELECT id, data
 		FROM delegation
 		WHERE ` + string(column) + ` = $1
+		  AND (expires_at IS NULL OR expires_at > now())
 	`
 	if cfg.Cursor != nil {
 		args = append(args, *cfg.Cursor)

@@ -567,6 +567,18 @@ func expiring(t *testing.T, issuer ucan.Issuer, audience, subject did.DID, cmd u
 	return dlg
 }
 
+func TestListByAudienceLeavesOutExpired(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+	f := setupKeys(t)
+	bucket := testutil.RandomDID(t)
+	expired := expiring(t, f.tenant, f.keys[0], bucket, read, -time.Hour)
+	live := expiring(t, f.tenant, f.keys[0], bucket, read, time.Hour)
+	forever := expiring(t, f.tenant, f.keys[0], did.Undef, read, 0)
+	require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{expired, live, forever}))
+
+	require.ElementsMatch(t, linkStrings([]ucan.Delegation{live, forever}), f.held(t, f.keys[0]))
+}
+
 func TestProofChainExpiry(t *testing.T) {
 	read := command.MustParse("/content/retrieve")
 	f := setupKeys(t)
