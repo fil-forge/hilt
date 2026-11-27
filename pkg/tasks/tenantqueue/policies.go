@@ -242,10 +242,11 @@ func (q *Queue) currentPolicy(ctx context.Context, tenantID, bucket did.DID) (*b
 //     are stored only for the keys that still exist
 //     (delegation.Store.PutForKeysStatement), so a key a principal removal
 //     deletes is left with none.
-//   - The document is written only if the policy is still the one read and
-//     the bucket still the tenant's (bucketpolicy.Store.PutStatements,
-//     DeleteStatements), so a removal that rewrote the policy, or a deletion
-//     that took the bucket, is not written over.
+//   - The document is written only if the policy is still the one read
+//     (bucketpolicy.Store.PutStatements, DeleteStatements), so a removal
+//     that rewrote the policy is not written over. A deletion that took the
+//     bucket fails the commit through the policy's foreign key to the
+//     bucket, or by leaving no row to replace or remove.
 func (q *Queue) changePolicy(ctx context.Context, ex *taskrunner.Exec, tenantID, bucket did.DID, old *bucketpolicystore.Record, doc *s3bkt.PolicyDocument, principals []string) (int, error) {
 	var oldDoc *s3bkt.PolicyDocument
 	if old != nil {
