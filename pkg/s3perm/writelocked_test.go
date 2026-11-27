@@ -25,13 +25,14 @@ var (
 		"s3:GetBucketLocation", "s3:GetBucketAcl", "s3:GetBucketCORS", "s3:GetBucketTagging",
 		"s3:GetBucketVersioning", "s3:GetBucketObjectLockConfiguration",
 		"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:AbortMultipartUpload",
+		"s3:BypassGovernanceRetention",
 	}
 	writeLockedLost = []string{
 		"s3:PutObject", "s3:CreateBucket",
 		"s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutEncryptionConfiguration",
 		"s3:PutBucketCORS", "s3:PutBucketTagging", "s3:PutBucketVersioning",
 		"s3:PutBucketObjectLockConfiguration",
-		"s3:PutObjectRetention", "s3:PutObjectLegalHold", "s3:BypassGovernanceRetention",
+		"s3:PutObjectRetention", "s3:PutObjectLegalHold",
 		"s3:PutObjectTagging", "s3:DeleteObjectTagging",
 	}
 )

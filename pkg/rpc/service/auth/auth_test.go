@@ -1018,6 +1018,7 @@ func TestAuthorize(t *testing.T) {
 		"s3:ListAllMyBuckets", "s3:ListBucketMultipartUploads", "s3:ListMultipartUploadParts",
 		"s3:GetBucketPolicy", "s3:GetBucketVersioning",
 		"s3:DeleteObject", "s3:DeleteObjectVersion", "s3:DeleteBucket", "s3:AbortMultipartUpload",
+		"s3:BypassGovernanceRetention",
 	}
 	plain := func(method, path string) func(*testing.T) s3.Request {
 		return func(t *testing.T) s3.Request {
@@ -1079,7 +1080,7 @@ func TestAuthorize(t *testing.T) {
 		{"PutObjectLegalHold", plain("PUT", "/bucket/object-key?legal-hold"), auth.OpPutObjectLegalHold, false},
 		{"PutObjectTagging", plain("PUT", "/bucket/object-key?tagging"), auth.OpPutObjectTagging, false},
 		{"DeleteObjectTagging", plain("DELETE", "/bucket/object-key?tagging"), auth.OpDeleteObjectTagging, false},
-		{"DeleteObject bypassing governance retention", withHeader("DELETE", "/bucket/object-key?versionId=v1", "x-amz-bypass-governance-retention", "true"), auth.OpDeleteObjectVersion, false},
+		{"DeleteObject bypassing governance retention", withHeader("DELETE", "/bucket/object-key?versionId=v1", "x-amz-bypass-governance-retention", "true"), auth.OpDeleteObjectVersion, true},
 	}
 
 	t.Run("a write-locked tenant keeps its reads, listings and deletions and is refused the rest", func(t *testing.T) {

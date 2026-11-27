@@ -7,14 +7,17 @@ package s3perm
 //
 // Kept are the reads and listings, of objects and of bucket configuration,
 // and the deletions that release storage: an object, a named version, a
-// bucket, and the parts of a multipart upload that is stopped.
+// bucket, and the parts of a multipart upload that is stopped. Bypassing
+// governance retention is kept too, since it is only ever asked for to delete
+// a version under governance retention, and a key needs the permission for
+// it whatever the tenant's status.
 //
 // Not kept are the uploads (s3:PutObject, which also covers CopyObject and
 // initiating, uploading to and completing a multipart upload), bucket
 // creation, and every change to configuration or to what protects an object,
 // whichever HTTP method carries it: bucket policy, encryption, CORS, tags,
-// versioning and Object Lock configuration, an object's retention, legal
-// hold and tags, and bypassing governance retention.
+// versioning and Object Lock configuration, and an object's retention, legal
+// hold and tags.
 //
 // Every permission in permissionCommands has an entry, which
 // TestWriteLockedRuleCoversEveryPermission pins, so a new permission is
@@ -43,10 +46,11 @@ var writeLockedKeeps = map[string]bool{
 	"s3:GetBucketVersioning":              true,
 	"s3:GetBucketObjectLockConfiguration": true,
 
-	"s3:DeleteObject":         true,
-	"s3:DeleteObjectVersion":  true,
-	"s3:DeleteBucket":         true,
-	"s3:AbortMultipartUpload": true,
+	"s3:BypassGovernanceRetention": true,
+	"s3:DeleteObject":              true,
+	"s3:DeleteObjectVersion":       true,
+	"s3:DeleteBucket":              true,
+	"s3:AbortMultipartUpload":      true,
 
 	"s3:PutObject":    false,
 	"s3:CreateBucket": false,
@@ -59,11 +63,10 @@ var writeLockedKeeps = map[string]bool{
 	"s3:PutBucketVersioning":              false,
 	"s3:PutBucketObjectLockConfiguration": false,
 
-	"s3:PutObjectRetention":        false,
-	"s3:PutObjectLegalHold":        false,
-	"s3:BypassGovernanceRetention": false,
-	"s3:PutObjectTagging":          false,
-	"s3:DeleteObjectTagging":       false,
+	"s3:PutObjectRetention":  false,
+	"s3:PutObjectLegalHold":  false,
+	"s3:PutObjectTagging":    false,
+	"s3:DeleteObjectTagging": false,
 }
 
 // KeptWhenWriteLocked reports whether a write-locked tenant keeps the S3
