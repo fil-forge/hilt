@@ -330,9 +330,10 @@ func TestDisabling(t *testing.T) {
 		w.awaitPublished(t)
 		revoked := w.swarf.Revoked()
 		pending := func() []taskrunner.TaskID {
-			ids, err := w.runner.PendingOn(t.Context(), tasks.QueueRevocation, w.tenant.DID().String())
+			subject := w.tenant.DID().String()
+			ids, err := w.runner.Pending(t.Context(), tasks.QueueRevocation, []string{subject})
 			require.NoError(t, err)
-			return ids
+			return ids[subject]
 		}
 		require.Eventually(t, func() bool { return len(pending()) == 0 }, htestutil.WaitTimeout, 10*time.Millisecond)
 
@@ -542,7 +543,7 @@ func TestStatusAlone(t *testing.T) {
 			require.ElementsMatch(t, bound, links(w.held(t, w.principalKey)))
 		}
 		require.Empty(t, w.owedLinks(t))
-		pending, err := w.runner.PendingOn(t.Context(), tasks.QueueRevocation, w.tenant.DID().String())
+		pending, err := w.runner.Pending(t.Context(), tasks.QueueRevocation, []string{w.tenant.DID().String()})
 		require.NoError(t, err)
 		require.Empty(t, pending)
 		require.Zero(t, w.swarf.Calls())

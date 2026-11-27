@@ -95,9 +95,10 @@ type Authorizer struct {
 // hold a request back while a change to its tenant's authority is queued or
 // running. [*taskrunner.Runner] satisfies it.
 type TenantChanges interface {
-	// PendingOn returns the subject's unfinished tasks on the queue, running
-	// or waiting, oldest first.
-	PendingOn(ctx context.Context, queueName, subject string) ([]taskrunner.TaskID, error)
+	// Pending returns the unfinished tasks on the queue for each of subjects
+	// that has any, running or waiting, oldest first. With no action named it
+	// returns tasks of every action.
+	Pending(ctx context.Context, queueName string, subjects []string, opts ...taskrunner.PendingOption) (map[string][]taskrunner.TaskID, error)
 	// WaitAll waits until every one of the tasks has finished, however it
 	// ended. Its error is the wait's own: ctx ended, or a read failed.
 	WaitAll(ctx context.Context, queueName string, ids ...taskrunner.TaskID) (map[taskrunner.TaskID]taskrunner.Completion, error)
@@ -357,7 +358,9 @@ func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, te
 	if a.changes == nil {
 		return false, nil
 	}
-	pending, err := a.changes.PendingOn(ctx, tasks.QueueTenant, tenantID.String())
+	subject := tenantID.String()
+	byTenant, err := a.changes.Pending(ctx, tasks.QueueTenant, []string{subject})
+	pending := byTenant[subject]
 	if err != nil {
 		log.Error("looking up the tenant's pending changes", zap.Error(err))
 		return false, fmt.Errorf("looking up the tenant's pending changes: %w", err)
