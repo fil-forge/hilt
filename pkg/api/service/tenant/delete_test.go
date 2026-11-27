@@ -518,9 +518,10 @@ func TestDelete(t *testing.T) {
 			created <- err
 		}()
 		require.Eventually(t, func() bool {
-			pending, err := env.runner.PendingOn(ctx, tasks.QueueTenant, env.tenantID.String())
+			subject := env.tenantID.String()
+			pending, err := env.runner.Pending(ctx, tasks.QueueTenant, []string{subject})
 			require.NoError(t, err)
-			return len(pending) == 3
+			return len(pending[subject]) == 3
 		}, testutil.WaitTimeout, 10*time.Millisecond, "the reactivation and the key creation queue behind the deletion")
 		select {
 		case err := <-reactivated:
