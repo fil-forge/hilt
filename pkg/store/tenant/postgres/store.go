@@ -116,11 +116,11 @@ func (s *Store) SetStatusStatement(id did.DID, from, to tenant.Status) (store.St
 	}, nil
 }
 
-func (s *Store) Delete(ctx context.Context, id did.DID) error {
-	if _, err := s.pool.Exec(ctx, `DELETE FROM tenant WHERE id = $1`, id.String()); err != nil {
-		return fmt.Errorf("deleting tenant: %w", err)
+func (s *Store) DeleteStatement(id did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM tenant WHERE id = $1`,
+		Args: []any{id.String()},
 	}
-	return nil
 }
 
 func scanRecord(row pgx.Row) (tenant.Record, error) {

@@ -178,6 +178,13 @@ func (s *Store) DeleteStatement(tenant, id did.DID) store.Statement {
 	}
 }
 
+func (s *Store) DeleteByTenantStatement(tenant did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM bucket WHERE tenant_id = $1`,
+		Args: []any{tenant.String()},
+	}
+}
+
 func (s *Store) Owner(ctx context.Context, id did.DID) (bucket.Owner, error) {
 	var (
 		tenantStr, providerStr string

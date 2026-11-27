@@ -113,7 +113,7 @@ var (
 	// ErrTemporarilyUnavailable is returned when the state a request is
 	// authorized on was still being changed when the wait for it ran out: a
 	// change to the tenant's authority was still queued or running on the
-	// task runner after [store.LockTimeout]. Nothing about the request was
+	// task runner after [PendingChangeWait]. Nothing about the request was
 	// decided; a retry is answered from whichever state the change leaves.
 	// A bucket deletion also returns it when other changes to the tenant held
 	// it from its turn until the caller's deadline.

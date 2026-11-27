@@ -1,82 +1,17 @@
-// Package pglock holds the Postgres locking and transaction helpers the stores
-// share: the bounded wait every locking statement takes, the mapping of the
-// server's lock_not_available back to [store.ErrLockTimeout], the transaction
-// a write's callback joins, and the read-only snapshot a reader's calls join
-// ([ReadSnapshot]).
+// Package pglock holds the Postgres transaction helpers the stores share: the
+// transaction a store call joins, and the read-only snapshot a reader's calls
+// join ([ReadSnapshot]).
 package pglock
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// timeoutSetting is [store.LockTimeout] as Postgres spells it: a unitless
-// lock_timeout is milliseconds.
-var timeoutSetting = strconv.FormatInt(store.LockTimeout.Milliseconds(), 10)
-
-// SetTimeout bounds every lock tx goes on to take at [store.LockTimeout].
-// set_config with is_local is SET LOCAL, which SET itself cannot express with
-// a bound parameter. The setting lasts until the outermost transaction ends,
-// or until a savepoint tx rolls back.
-func SetTimeout(ctx context.Context, tx pgx.Tx) error {
-	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, timeoutSetting); err != nil {
-		return fmt.Errorf("setting lock timeout: %w", err)
-	}
-	return nil
-}
-
-// MapError returns [store.ErrLockTimeout] for the error Postgres raises when a
-// statement gives up waiting for a lock, and for a deadlock it broke by
-// aborting this transaction (Postgres reports one within its
-// deadlock_timeout, before lock_timeout), and err unchanged otherwise. Either
-// way nothing was committed and the caller retries.
-func MapError(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case pgerrcode.LockNotAvailable:
-			return fmt.Errorf("waited %s for a lock another write holds: %w", store.LockTimeout, store.ErrLockTimeout)
-		case pgerrcode.DeadlockDetected:
-			return fmt.Errorf("deadlocked with another write and was aborted: %w", store.ErrLockTimeout)
-		}
-	}
-	return err
-}
-
-// AdvisoryAll takes the exclusive transaction-scoped advisory lock identified
-// by (namespace, hashtext(key)) of each key inside tx, in a single statement.
-// Postgres identifies an advisory lock by its key pair and nothing else, so
-// each caller passes its own namespace to keep its locks apart from every
-// other advisory lock taken on the same database. The locks are released when
-// tx commits or rolls back. Callers pass
-// their keys sorted, so that two writers locking overlapping sets queue for
-// the shared keys in the same sequence. The statement orders the rows by
-// their position in the array, and Postgres's planner evaluates a volatile
-// target-list function such as the lock after that sort, but SQL does not
-// promise that order. If two writers did lock out of order and deadlock,
-// Postgres aborts one of them, which [MapError] reports as
-// [store.ErrLockTimeout] for the caller to retry.
-func AdvisoryAll(ctx context.Context, tx pgx.Tx, namespace int32, keys []string) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	if _, err := tx.Exec(ctx, `
-		SELECT pg_advisory_xact_lock($1, hashtext(k.name))
-		FROM unnest($2::text[]) WITH ORDINALITY AS k(name, ord)
-		ORDER BY k.ord
-	`, namespace, keys); err != nil {
-		return fmt.Errorf("taking advisory locks: %w", err)
-	}
-	return nil
-}
 
 // Found maps a single-row read's result: no row is [store.ErrRecordNotFound],
 // any other error is wrapped as "getting <recordType>", and a found row is returned
@@ -94,8 +29,8 @@ func Found[T any](v T, err error, recordType string) (T, error) {
 
 type txKey struct{}
 
-// WithTx returns ctx carrying tx for the callback a write runs inside its
-// transaction. A store call handed this ctx that opens its transaction with
+// WithTx returns ctx carrying tx, for store calls to run inside a
+// transaction the caller owns. A store call handed this ctx that opens its transaction with
 // [Begin] joins tx instead, so what it writes commits with the enclosing write
 // or not at all.
 func WithTx(ctx context.Context, tx pgx.Tx) context.Context {

@@ -133,14 +133,18 @@ func (s *Store) Archive(ctx context.Context, tenant did.DID, version int) error 
 }
 
 func (s *Store) Delete(ctx context.Context, tenant did.DID) error {
-	_, err := s.pool.Exec(ctx, `
-		DELETE FROM wrap_key
-		WHERE tenant_id = $1
-	`, tenant.String())
-	if err != nil {
+	st := s.DeleteStatement(tenant)
+	if _, err := s.pool.Exec(ctx, st.SQL, st.Args...); err != nil {
 		return fmt.Errorf("deleting wrap keys: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) DeleteStatement(tenant did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM wrap_key WHERE tenant_id = $1`,
+		Args: []any{tenant.String()},
+	}
 }
 
 func scanRecord(row pgx.Row) (wrapkey.Record, error) {

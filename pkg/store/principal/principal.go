@@ -49,9 +49,8 @@ type Store interface {
 	// so that Add can revive it. It affects nothing when the principal is
 	// missing or already removed.
 	TombstoneStatement(tenant did.DID, externalID string) store.Statement
-	// DeleteByTenant deletes the rows of every principal of the tenant,
-	// tombstones included. It is idempotent. Its wait for a row another
-	// transaction holds is bounded at [store.LockTimeout] and returns
-	// [store.ErrLockTimeout] when it runs out.
-	DeleteByTenant(ctx context.Context, tenant did.DID) error
+	// DeleteByTenantStatement returns the write that deletes the rows of
+	// every principal of the tenant, tombstones included, for tenant
+	// deletion to run in its commit once the tenant's access keys are gone.
+	DeleteByTenantStatement(tenant did.DID) store.Statement
 }

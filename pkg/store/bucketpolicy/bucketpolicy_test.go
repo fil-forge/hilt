@@ -21,8 +21,6 @@ import (
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
-	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -74,20 +72,15 @@ func doc(statements ...s3bkt.Statement) s3bkt.PolicyDocument {
 func ptr(s string) *string { return &s }
 
 // commit runs first and then rest in one transaction, as a task's commit
-// does, and reports whether first affected a row; when it affected none,
-// nothing is committed, as a failed WriteConditional fails the commit.
+// does, and reports whether they all ran; when one fails, nothing is
+// committed, as a failed statement fails a task's commit.
 func commit(t *testing.T, pool *pgxpool.Pool, first store.Statement, rest ...store.Statement) bool {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := pool.Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) // no-op once committed
-	tag, err := tx.Exec(ctx, first.SQL, first.Args...)
-	require.NoError(t, err)
-	if tag.RowsAffected() == 0 {
-		return false
-	}
-	for _, st := range rest {
+	for _, st := range append([]store.Statement{first}, rest...) {
 		if _, err := tx.Exec(ctx, st.SQL, st.Args...); err != nil {
 			t.Logf("statement failed: %v", err)
 			return false
@@ -199,16 +192,11 @@ func TestPolicyStore(t *testing.T) {
 		require.Equal(t, want, get(t, bucket).Policy)
 	})
 
-	t.Run("a write for a bucket that is gone breaks the foreign key", func(t *testing.T) {
+	t.Run("a write fails for a bucket that is gone or another tenant's", func(t *testing.T) {
 		tenantID, bucket := setup(t)
-		require.True(t, put(t, tenantID, bucket, first))
-		require.NoError(t, bucketpostgres.New(f.pool).Delete(ctx, bucket))
-
-		st, _ := s.PutStatements(tenantID, bucket, second)
-		_, err := f.pool.Exec(ctx, st.SQL, st.Args...)
-		var pgErr *pgconn.PgError
-		require.ErrorAs(t, err, &pgErr)
-		require.Equal(t, pgerrcode.ForeignKeyViolation, pgErr.Code)
+		other := f.tenant(t)
+		require.False(t, put(t, other, bucket, doc(allow(everyone, "s3:GetObject"))))
+		require.False(t, put(t, tenantID, testutil.RandomDID(t), first))
 		require.Nil(t, get(t, bucket), "nothing was written")
 	})
 
@@ -240,7 +228,8 @@ func TestPolicyStore(t *testing.T) {
 		require.NotNil(t, get(t, kept))
 		require.Equal(t, []did.DID{kept}, listed(t, tenantID, "alice"))
 
-		require.False(t, remove(t, bucket), "a removal affects no row when there is no policy")
+		require.True(t, remove(t, bucket), "a removal when there is no policy changes nothing")
+		require.NotNil(t, get(t, kept))
 	})
 
 	t.Run("deleting the bucket cascades to the policy and its index rows", func(t *testing.T) {

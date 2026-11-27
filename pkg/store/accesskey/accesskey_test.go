@@ -321,16 +321,21 @@ func TestAccessKeyStore(t *testing.T) {
 		require.Empty(t, got)
 	})
 
-	t.Run("Delete removes the row and is idempotent", func(t *testing.T) {
-		id := testutil.RandomDID(t)
-		tenantID := testutil.RandomDID(t)
+	t.Run("DeleteByTenantStatement removes every key of the tenant and no other", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
+		s, seed := accesskeypostgres.New(pool), newSeeder(pool)
+		id, other := testutil.RandomDID(t), testutil.RandomDID(t)
+		tenantID, otherTenant := testutil.RandomDID(t), testutil.RandomDID(t)
 		seed.tenant(t, tenantID)
+		seed.tenant(t, otherTenant)
 		require.NoError(t, s.Add(t.Context(), service(t, id, tenantID, "del", nil, "s3:GetObject")))
+		require.NoError(t, s.Add(t.Context(), service(t, other, otherTenant, "kept", nil, "s3:GetObject")))
 
-		require.NoError(t, s.Delete(t.Context(), id))
+		require.Equal(t, []int64{1}, htestutil.Exec(t, pool, s.DeleteByTenantStatement(tenantID)))
 		_, err := s.Get(t.Context(), id)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
-		require.NoError(t, s.Delete(t.Context(), id), "deleting an absent row is a no-op")
+		_, err = s.Get(t.Context(), other)
+		require.NoError(t, err)
 	})
 }
 

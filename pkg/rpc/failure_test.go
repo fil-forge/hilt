@@ -11,7 +11,6 @@ import (
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
-	"github.com/fil-forge/hilt/pkg/store"
 	ucanerrors "github.com/fil-forge/ucantone/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -186,7 +185,7 @@ func TestAuthFailure(t *testing.T) {
 		f := &recordingFailer{}
 		// As Authorize returns it: the named sentinel first, with the wait
 		// after it, so the receipt carries the retryable name.
-		err := fmt.Errorf("%w: waited %s for a change to the tenant", auth.ErrTemporarilyUnavailable, store.LockTimeout)
+		err := fmt.Errorf("%w: waited %s for a change to the tenant", auth.ErrTemporarilyUnavailable, auth.PendingChangeWait)
 		require.NoError(t, authFailure(f, err))
 		require.True(t, f.called)
 		requireName(t, f.got, auth.TemporarilyUnavailableErrorName)

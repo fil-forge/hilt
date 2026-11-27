@@ -39,10 +39,15 @@
 // Every change that records revocations queues queue-revocation.publish for
 // the tenant, which publishes them after the commit.
 //
+// queue-tenant.delete-tenant deletes a disabled tenant: it publishes the
+// revocations the tenant owes and those of every grant its keys hold,
+// deactivates the tenant's DID, removes its keys from the vault, and in one
+// commit deletes every row Hilt holds for it (tenants.go). A task queued
+// for the tenant behind it finds the tenant, or what it names, gone.
+//
 // Every change to what a tenant's keys may do is a task here, so none runs
 // between a handler's reads and its commit, and a handler decides from what
-// it read. Tenant deletion is the one writer of the same rows outside the
-// queue, and it runs only on a disabled tenant.
+// it read.
 package tenantqueue
 
 import (
@@ -59,6 +64,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
@@ -69,7 +75,8 @@ import (
 )
 
 // ErrTenantNotFound is the outcome of a queue-tenant.set-status or
-// queue-tenant.create-key task whose subject tenant does not exist.
+// queue-tenant.create-key task, or of a policy change that issues grants,
+// whose subject tenant does not exist, as after its deletion.
 var ErrTenantNotFound = errors.New("tenant not found")
 
 // Deps is what the queue's handlers need.
@@ -87,8 +94,19 @@ type Deps struct {
 	Policies bucketpolicy.Store
 	// Delegations builds the writes that withdraw and store the keys' grants.
 	Delegations delegation.Store
-	// Secrets holds the tenants' signing keys.
+	// WrapKeys holds the tenants' wrap key records, which tenant deletion
+	// removes with their vault entries.
+	WrapKeys wrapkey.Store
+	// Secrets holds the tenants' signing keys, and the vault entries tenant
+	// deletion removes.
 	Secrets vault.Vault
+	// Directory is the did:plc directory tenant deletion deactivates the
+	// tenant's DID in. Nil fails every tenant deletion.
+	Directory Directory
+	// Publisher is the revocation service tenant deletion publishes the
+	// revocations of the tenant's keys' grants to. Nil fails every tenant
+	// deletion.
+	Publisher grant.RevocationPublisher
 	// Logger is optional; defaults to zap.NewNop().
 	Logger *zap.Logger
 }
@@ -101,7 +119,10 @@ type Queue struct {
 	buckets     bucket.Store
 	policies    bucketpolicy.Store
 	delegations delegation.Store
+	wrapKeys    wrapkey.Store
 	secrets     vault.Vault
+	directory   Directory
+	publisher   grant.RevocationPublisher
 	logger      *zap.Logger
 }
 
@@ -114,7 +135,10 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		buckets:     d.Buckets,
 		policies:    d.Policies,
 		delegations: d.Delegations,
+		wrapKeys:    d.WrapKeys,
 		secrets:     d.Secrets,
+		directory:   d.Directory,
+		publisher:   d.Publisher,
 		logger:      d.Logger,
 	}
 	if q.logger == nil {
@@ -130,6 +154,7 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		tasks.ActionDeletePolicy:    q.runDeletePolicy,
 		tasks.ActionRemovePrincipal: q.runRemovePrincipal,
 		tasks.ActionDeleteBucket:    q.runDeleteBucket,
+		tasks.ActionDeleteTenant:    q.runDeleteTenant,
 	} {
 		if err := r.Handle(tasks.QueueTenant, action, h); err != nil {
 			return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, action, err)
@@ -202,7 +227,7 @@ func (q *Queue) runSetStatus(ctx context.Context, ex *taskrunner.Exec, t taskrun
 		return nil, err
 	}
 	if len(fresh) > 0 {
-		st, err := q.delegations.PutForKeysStatement(fresh)
+		st, err := q.delegations.PutStatement(fresh)
 		if err != nil {
 			return nil, fmt.Errorf("building the write of the keys' grants: %w", err)
 		}

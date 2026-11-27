@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"time"
 )
 
 // Page is a generic type representing a paginated response from the store.
@@ -65,14 +64,3 @@ type Statement struct {
 	// Args are the statement's bound parameters, in order.
 	Args []any
 }
-
-// LockTimeout bounds how long a locking statement in a Postgres store waits
-// for a conflicting lock before giving up with [ErrLockTimeout].
-//
-// A delegation-store Replace holds its audiences' locks across a
-// caller-supplied callback that publishes to the revocation service, so a
-// write that waits on them waits on a network call Postgres knows nothing
-// of, and an unbounded wait would pin its pool connection. The bound turns
-// that into an error the caller can retry. Authorization waits for a
-// tenant's pending changes for as long.
-const LockTimeout = 10 * time.Second

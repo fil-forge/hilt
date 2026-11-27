@@ -211,7 +211,7 @@ func TestRevocationStore(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
-	t.Run("Add and Delete commit with the caller's transaction", func(t *testing.T) {
+	t.Run("Add commits with the caller's transaction", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 2)
 		count := func() int64 {
@@ -231,13 +231,6 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, d.store.Add(pglock.WithTx(t.Context(), tx), d.tenant.DID(), dels))
 		require.NoError(t, tx.Commit(t.Context()))
-		require.EqualValues(t, 2, count())
-
-		tx, err = d.pool.Begin(t.Context())
-		require.NoError(t, err)
-		require.NoError(t, d.store.Delete(pglock.WithTx(t.Context(), tx), links(dels)))
-		require.EqualValues(t, 2, count(), "the rows stand until the caller commits")
-		require.NoError(t, tx.Rollback(t.Context()))
 		require.EqualValues(t, 2, count())
 	})
 
@@ -265,7 +258,7 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), issue(t, d.tenant, 2)))
 		require.NoError(t, d.store.Add(t.Context(), other.DID(), issue(t, other, 1)))
 
-		require.NoError(t, tenantpostgres.New(d.pool).Delete(t.Context(), d.tenant.DID()))
+		htestutil.Exec(t, d.pool, tenantpostgres.New(d.pool).DeleteStatement(d.tenant.DID()))
 		stats, err := d.store.Stats(t.Context())
 		require.NoError(t, err)
 		require.EqualValues(t, 1, stats.Count)

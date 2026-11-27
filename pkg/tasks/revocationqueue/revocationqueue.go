@@ -6,8 +6,9 @@
 // tenant ([PublishSpec]) in the same commit. The task publishes everything
 // the tenant owes, a batch of [BatchSize] at a time, deleting each batch's
 // rows once the revocation service has taken it, so an attempt that fails
-// part way keeps what it published. [Drain] is that work, which tenant
-// deletion runs itself before the tenant's DID is deactivated.
+// part way keeps what it published ([Drain]). Tenant deletion runs the same
+// task as a sync child of its own, before it deactivates the tenant's DID,
+// and holds the tenant's subject here until it commits.
 //
 // Publishing is retried for as long as it fails, so an outage of the
 // revocation service delays revocations and loses none. A revocation carries

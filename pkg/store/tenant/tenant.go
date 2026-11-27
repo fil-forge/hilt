@@ -62,7 +62,10 @@ type Store interface {
 	// or the tenant is gone, which a task makes a condition of its commit. It
 	// returns [store.ErrInvalidArgument] if either status is not valid.
 	SetStatusStatement(id did.DID, from, to Status) (store.Statement, error)
-	// Delete removes the tenant record for a given ID. It is idempotent:
-	// deleting an absent record returns nil.
-	Delete(ctx context.Context, id did.DID) error
+	// DeleteStatement returns the write that removes the tenant record, for
+	// tenant deletion to run in its commit once the rows that reference the
+	// tenant without a cascade (buckets, access keys, principals) are gone.
+	// The tenant's revocations owed, usage counts and deleted-bucket owners
+	// go with it by cascade. It removes nothing when the tenant is gone.
+	DeleteStatement(id did.DID) store.Statement
 }

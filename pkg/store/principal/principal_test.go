@@ -173,7 +173,7 @@ func TestPrincipalStore(t *testing.T) {
 		require.Zero(t, tombstone(t, pool, s, tenantID, "missing"))
 	})
 
-	t.Run("DeleteByTenant removes every principal of the tenant and is idempotent", func(t *testing.T) {
+	t.Run("DeleteByTenantStatement removes every principal of the tenant and no other", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		other := testutil.RandomDID(t)
 		seed(t, tenantID)
@@ -182,14 +182,14 @@ func TestPrincipalStore(t *testing.T) {
 		require.NoError(t, s.Add(t.Context(), tenantID, "b"))
 		require.NoError(t, s.Add(t.Context(), other, "a"))
 
-		require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
+		require.Zero(t, tombstone(t, pool, s, tenantID, "missing"))
+		require.EqualValues(t, 1, tombstone(t, pool, s, tenantID, "b"))
+		require.Equal(t, []int64{2}, htestutil.Exec(t, pool, s.DeleteByTenantStatement(tenantID)), "the tombstoned row goes too")
 		recs, err := s.ListByTenant(t.Context(), tenantID)
 		require.NoError(t, err)
 		require.Empty(t, recs)
 		recs, err = s.ListByTenant(t.Context(), other)
 		require.NoError(t, err)
 		require.Len(t, recs, 1)
-
-		require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
 	})
 }

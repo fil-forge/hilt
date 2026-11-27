@@ -33,8 +33,8 @@ func (p *deadlinePublisher) PublishBatch(ctx context.Context, revoker ucan.Issue
 	return p.FakeSwarf.PublishBatch(ctx, revoker, revoked)
 }
 
-// PublishRevocations bounds its own publish, so a caller that holds a
-// delegation lock with no deadline of its own still releases it at BatchTimeout.
+// PublishRevocations bounds its own publish, so a caller with no deadline of
+// its own still gives up at BatchTimeout.
 func TestPublishRevocationsUnderBatchTimeout(t *testing.T) {
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)

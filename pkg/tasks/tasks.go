@@ -56,6 +56,11 @@ const ActionRemovePrincipal = "remove-principal"
 // policy, withdrawing the grants over it.
 const ActionDeleteBucket = "delete-bucket"
 
+// ActionDeleteTenant is queue-tenant.delete-tenant: delete the subject
+// tenant, which must be disabled, after publishing the revocations it owes
+// and those of its keys' grants and deactivating its DID.
+const ActionDeleteTenant = "delete-tenant"
+
 // ActionPublish is queue-revocation.publish: publish every revocation the
 // subject tenant owes.
 const ActionPublish = "publish"

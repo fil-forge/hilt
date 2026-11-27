@@ -232,7 +232,7 @@ func (q *Queue) createKey(ctx context.Context, ex *taskrunner.Exec, t taskrunner
 		return err
 	}
 	if len(dels) > 0 {
-		put, err := q.delegations.PutForKeysStatement(dels)
+		put, err := q.delegations.PutStatement(dels)
 		if err != nil {
 			return fmt.Errorf("building the write of the key's grants: %w", err)
 		}

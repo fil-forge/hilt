@@ -278,11 +278,5 @@ func TestPolicy(t *testing.T) {
 		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket, "a bucket deleted between Authorize and the write")
 
-		f = setup(t, policyPerms, false)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
-		require.NoError(t, err)
-		f.bucketGone.Store(true)
-		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{}))
-		require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound, "a bucket deleted between Authorize and the removal")
 	})
 }

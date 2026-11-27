@@ -42,7 +42,7 @@ func makeStore(t *testing.T) fixture {
 			return id
 		},
 		dropTenant: func(t *testing.T, id did.DID) {
-			require.NoError(t, tenants.Delete(t.Context(), id))
+			testutil.Exec(t, pool, tenants.DeleteStatement(id))
 		},
 	}
 }

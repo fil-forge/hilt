@@ -2,7 +2,6 @@ package delegation
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
@@ -11,9 +10,6 @@ import (
 )
 
 type Store interface {
-	// DeleteByAudience removes all delegation records for a given audience,
-	// under that audience's lock.
-	DeleteByAudience(ctx context.Context, audience did.DID) error
 	// ListByAudience retrieves a paginated list of delegation records for a given
 	// audience.
 	ListByAudience(ctx context.Context, audience did.DID, opts ...store.PaginationOption) (store.Page[ucan.Delegation], error)
@@ -25,25 +21,14 @@ type Store interface {
 	// of the next Delegation. It returns [store.ErrInvalidArgument] for an undef
 	// subject.
 	ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error)
-	// PutBatch stores a batch of delegation records. It takes the lock of
-	// every audience the batch touches, so it does not interleave with a
-	// Replace of any of them. It returns [store.ErrInvalidArgument] if the
-	// batch contains a nil delegation.
+	// PutBatch stores a batch of delegation records in one transaction,
+	// leaving one already stored alone. It returns [store.ErrInvalidArgument]
+	// if the batch contains a nil delegation.
 	PutBatch(ctx context.Context, delegation []ucan.Delegation) error
-	// Replace atomically swaps the delegations of every listed audience in one
-	// transaction: it locks the audiences, hands next the current set of each,
-	// deletes them, stores what next returns, and commits. An audience missing
-	// from next's result, or mapped to nil, is left with none; an error from
-	// next rolls everything back and is returned. An audience holding nothing
-	// is handed a nil set, so Replace also stores a first delegation. next runs
-	// while the audiences are locked and must not call back into the store. It
-	// returns [store.ErrInvalidArgument] if next returns a nil delegation or
-	// one whose audience is not the audience it is filed under; entries for
-	// audiences not listed are ignored. On Postgres next's
-	// ctx carries the transaction, so a store that opens with pglock.Begin
-	// writes inside it. The lock wait is bounded at [store.LockTimeout] and
-	// returns [store.ErrLockTimeout] when it runs out.
-	Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error
+	// ListKeyGrants returns every delegation the tenant issued to one of its
+	// access keys, for tenant deletion to revoke before the tenant's DID is
+	// deactivated.
+	ListKeyGrants(ctx context.Context, tenant did.DID) ([]ucan.Delegation, error)
 	// WithdrawKeyGrantsStatement returns the write that takes every
 	// delegation the tenant issued to one of its access keys out of the store
 	// and records each as a revocation the tenant owes, for a task that
@@ -71,30 +56,15 @@ type Store interface {
 	// the tenant among them, are deleted and not revoked. Powerline
 	// delegations, which carry no subject, are left alone.
 	WithdrawSubjectStatements(tenant, subject did.DID) []store.Statement
-	// PutForKeysStatement returns the write that stores the delegations whose
-	// audience is an access key when the statement runs, for a task that
-	// issues grants in its own commit. A task that creates the key in the
-	// same commit runs it after the key's write. The filter is there for
-	// tenant deletion, which deletes the tenant's keys outside the tenant's
-	// task queue: a grant issued for a key it has deleted is not stored,
-	// where it would outlive the key with nothing to delete it. It returns
-	// [store.ErrInvalidArgument] if the batch contains a nil delegation.
-	PutForKeysStatement(delegations []ucan.Delegation) (store.Statement, error)
-}
-
-// CheckReplacement refuses a replacement that holds a nil delegation or one
-// filed under an audience other than its own, which would be written under an
-// audience the call did not lock. The store calls it after next returns.
-func CheckReplacement(audiences []did.DID, replacement map[did.DID][]ucan.Delegation) error {
-	for _, aud := range audiences {
-		for _, d := range replacement[aud] {
-			if d == nil {
-				return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
-			}
-			if d.Audience() != aud {
-				return fmt.Errorf("delegation %s is for %s, filed under %s: %w", d.Link(), d.Audience(), aud, store.ErrInvalidArgument)
-			}
-		}
-	}
-	return nil
+	// PutStatement returns the write that stores the delegations, leaving
+	// one already stored alone, for a task that issues grants in its own
+	// commit. It returns [store.ErrInvalidArgument] if the batch contains a
+	// nil delegation.
+	PutStatement(delegations []ucan.Delegation) (store.Statement, error)
+	// DeleteTenantStatement returns the write that removes every delegation
+	// of the tenant, for tenant deletion to run in its commit before the
+	// rows of the tenant's keys and buckets go: those the tenant issued or
+	// was issued, those its access keys hold, and those over its buckets. It
+	// records no revocation.
+	DeleteTenantStatement(tenant did.DID) store.Statement
 }
