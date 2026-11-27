@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -90,13 +91,20 @@ func TestAuthorizeRequest(t *testing.T) {
 		bucketName = "mybucket"
 		srcName    = "srcbucket"
 	)
-	srcID := testutil.RandomDID(t)
+	srcSigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	srcID := srcSigner.KeyDID()
 
 	// The access key signs the request; its private key lives in the vault so the
 	// handler can issue delegations as the access key.
 	akSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	akDID := akSigner.KeyDID()
+	// roots holds each bucket's root delegation, as bucket creation stores
+	// it, by bucket.
+	roots := map[did.DID]ucan.Delegation{}
+	// issueGrants is grant.Issue, which the grant helper below shadows.
+	issueGrants := grant.Issue
 
 	// providerID serves the signing region and both buckets, so it is the only
 	// legitimate invocation issuer. bucketID/tenantID are opaque DIDs — the handler no longer reads any
@@ -147,10 +155,13 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, bucketName))
 		require.NoError(t, buckets.Add(ctx, srcID, tenantID, providerID, srcName))
-		// The bucket's root delegation, as bucket creation stores it.
-		root, err := delegation.Delegate(multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
-		require.NoError(t, err)
-		require.NoError(t, dels.PutBatch(ctx, []ucan.Delegation{root}))
+		// Each bucket's root delegation, as bucket creation stores it.
+		for id, signer := range map[did.DID]ed25519.Signer{bucketID: bucketSigner, srcID: srcSigner} {
+			root, err := delegation.Delegate(multikey.NewIssuer(id, signer), tenantID, id, command.Top(), delegation.WithNoExpiration())
+			require.NoError(t, err)
+			require.NoError(t, dels.PutBatch(ctx, []ucan.Delegation{root}))
+			roots[id] = root
+		}
 
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets,
 			auth.WithSnapshots(pglock.NewSnapshots(pool)))
@@ -295,6 +306,47 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.Equal(t, 1, srcRetrieve)
 	})
 
+	// keyGrants stores the grants the tenant issues the key for perms over
+	// the buckets, as key creation does, and returns them.
+	keyGrants := func(t *testing.T, az *auth.Authorizer, perms []string, buckets ...did.DID) []ucan.Delegation {
+		t.Helper()
+		grants, err := issueGrants(multikey.NewIssuer(tenantID, tenantSigner), akDID, buckets, perms, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, grants)
+		require.NoError(t, storeFor[az].PutBatch(ctx, grants))
+		return grants
+	}
+
+	// The reply carries the grants the decision rests on, so the gateway can
+	// tell an out-of-date reply by its revoked grants.
+	t.Run("the reply carries the key's grants over the bucket, with their chains from its root", func(t *testing.T) {
+		perms := []string{"s3:GetObject"}
+		az, _ := setup(t, perms, false, akSigner)
+		grants := keyGrants(t, az, perms, bucketID)
+		elsewhere := keyGrants(t, az, perms, srcID)
+
+		ok, blocks, err := call(t, az, providerID, signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour))
+		require.NoError(t, err)
+
+		root := roots[bucketID]
+		require.Subset(t, cids(blocks), append(cids(grants), root.Link()))
+		require.NotContains(t, cids(blocks), elsewhere[0].Link(), "a grant over another bucket stays out")
+		for _, g := range grants {
+			require.Equal(t, []cid.Cid{root.Link(), g.Link()}, ok.Delegations.Entries[g.Link()])
+		}
+		require.Len(t, cids(blocks), len(slices.Compact(slices.Sorted(slices.Values(cidStrings(blocks))))), "each delegation once")
+	})
+
+	t.Run("a copy from another bucket also carries the key's grants over the source", func(t *testing.T) {
+		perms := []string{"s3:GetObject", "s3:PutObject"}
+		az, _ := setup(t, perms, false, akSigner)
+		grants := keyGrants(t, az, perms, bucketID, srcID)
+
+		_, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, srcName, region))
+		require.NoError(t, err)
+		require.Subset(t, cids(blocks), append(cids(grants), roots[bucketID].Link(), roots[srcID].Link()))
+	})
+
 	t.Run("a copy within one bucket delegates nothing extra", func(t *testing.T) {
 		az, _ := setup(t, []string{"s3:GetObject", "s3:PutObject"}, false, akSigner)
 		ok, blocks, err := call(t, az, providerID, signedCopyArgs(t, akSigner, bucketName, bucketName, region))
@@ -313,16 +365,25 @@ func TestAuthorizeRequest(t *testing.T) {
 
 		require.Equal(t, []string{"s3:GetObject", "s3:ListBucket"}, ok.Permissions.Entries[akDID])
 
-		// The key re-delegates to the gateway as a service key does; its stored
-		// grants over the bucket, which /s3/bucket/info chains through, are what
-		// the policy's actions map to.
-		require.Len(t, blocks, 1)
-		reDel := blocks[0]
-		require.Equal(t, akDID, reDel.Issuer())
+		// The key re-delegates to the gateway as a service key does. Its stored
+		// grants over the bucket, which the reply carries with the bucket's
+		// root, are what the policy's actions map to.
+		keySigned := issuedBy(blocks, akDID)
+		require.Len(t, keySigned, 1)
+		reDel := keySigned[0]
 		require.Equal(t, providerID, reDel.Audience())
 		require.Equal(t, bucketID, reDel.Subject())
 		require.Equal(t, content.Retrieve.Command.String(), reDel.Command().String())
-		require.Equal(t, map[cid.Cid][]cid.Cid{reDel.Link(): {reDel.Link()}}, ok.Delegations.Entries)
+		require.Equal(t, []cid.Cid{reDel.Link()}, ok.Delegations.Entries[reDel.Link()])
+
+		held := issuedBy(blocks, tenantID)
+		require.NotEmpty(t, held)
+		for _, g := range held {
+			require.Equal(t, akDID, g.Audience())
+			require.Equal(t, []cid.Cid{roots[bucketID].Link(), g.Link()}, ok.Delegations.Entries[g.Link()])
+		}
+		require.Contains(t, cids(blocks), roots[bucketID].Link())
+		require.Len(t, blocks, 1+len(held)+1, "the re-delegation, the key's grants and the root")
 	})
 
 	t.Run("a service key signs its own delegations", func(t *testing.T) {
@@ -444,6 +505,15 @@ func TestAuthorizeRequest(t *testing.T) {
 }
 
 // issuedBy returns the delegations among ds that issuer issued.
+// cidStrings returns the delegations' CIDs as strings.
+func cidStrings(ds []ucan.Delegation) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.Link().String()
+	}
+	return out
+}
+
 func issuedBy(ds []ucan.Delegation, issuer did.DID) []ucan.Delegation {
 	var out []ucan.Delegation
 	for _, d := range ds {

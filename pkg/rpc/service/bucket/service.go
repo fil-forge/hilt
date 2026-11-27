@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strconv"
 	"time"
 
@@ -563,39 +562,9 @@ func (s *Service) info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 		permissions = eff
 	}
 
-	// Build the proof chains from the bucket to the access key: for each grant to
-	// the access key that reaches this bucket (scoped to it or powerline), resolve
-	// its chain up to the bucket→tenant root.
-	stored, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
-		var o []store.PaginationOption
-		if opts.Cursor != nil {
-			o = append(o, store.WithCursor(*opts.Cursor))
-		}
-		return s.delegations.ListByAudience(ctx, args.AccessKey, o...)
-	})
+	proofSet, blocks, err := delegationstore.GrantChains(ctx, s.delegations, args.AccessKey, b.ID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing delegations: %w", err)
-	}
-	stored = slices.DeleteFunc(stored, func(d ucan.Delegation) bool { return d.Subject().Defined() && d.Subject() != b.ID })
-
-	proofSet := map[cid.Cid][]cid.Cid{}
-	var blocks []ucan.Delegation
-	seen := map[string]bool{}
-	for _, d := range stored {
-		proofs, links, err := s.delegations.ProofChain(ctx, args.AccessKey, d.Command(), b.ID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("building proof chain for %s: %w", d.Command(), err)
-		}
-		if len(proofs) == 0 {
-			continue
-		}
-		proofSet[d.Link()] = links
-		for _, p := range proofs {
-			if k := p.Link().String(); !seen[k] {
-				seen[k] = true
-				blocks = append(blocks, p)
-			}
-		}
+		return nil, nil, err
 	}
 
 	permissions, err = s.permissionsUnderStatus(ctx, b.Tenant, permissions)

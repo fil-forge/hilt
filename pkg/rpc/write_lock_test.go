@@ -634,36 +634,52 @@ func TestAuthorizeAcrossAWriteLock(t *testing.T) {
 		require.NoError(t, err, "the next request reads the new status")
 	})
 
-	t.Run("read as write-locked, then disabled: what the key delegates has no chain", func(t *testing.T) {
+	// grantsIn returns the delegations in the reply the tenant issued to the
+	// key: its grants, which the reply carries for the gateway to check.
+	grantsIn := func(env *lockEnv, issued []ucan.Delegation, key ed25519.Signer) []cid.Cid {
+		var out []cid.Cid
+		for _, d := range issuedBy(issued, env.tenant) {
+			if d.Audience() == key.KeyDID() {
+				out = append(out, d.Link())
+			}
+		}
+		return out
+	}
+
+	// The reply is the state before the change, whole: the permissions of
+	// the status read and the grants the key held then. The change revokes
+	// those grants, so the gateway does not keep the reply.
+	t.Run("read as write-locked, then disabled: the reply carries grants the change revokes", func(t *testing.T) {
 		env := setupLock(t)
+		env.swarf.holding.Store(true)
 		env.setStatus(t, tenant.WriteLocked)
+		before := cids(env.held(t, env.service))
 		env.authTenants.then = func() { env.setStatus(t, tenant.Disabled) }
 
 		ok, issued, err := env.authorize(t, env.service, "GET", object)
 
 		require.NoError(t, err)
 		require.Equal(t, []string{"s3:GetObject"}, ok.Permissions.Entries[env.service.KeyDID()])
-		require.Empty(t, env.held(t, env.service))
-		for _, d := range issuedBy(issued, env.service.KeyDID()) {
-			chain, _, err := env.delegations.ProofChain(t.Context(), env.service.KeyDID(), d.Command(), env.bucket)
-			require.NoError(t, err)
-			require.Empty(t, chain)
-		}
+		require.Empty(t, env.held(t, env.service), "the change committed before the answer")
+		grants := grantsIn(env, issued, env.service)
+		require.ElementsMatch(t, before, grants, "the reply carries the grants the key held when its status was read")
+		require.Subset(t, env.owedLinks(t), grants, "and every one of them is owed a revocation")
 	})
 
-	// The order of the reads does not narrow this one: the request is
-	// answered as the active tenant's it was when its status was read, with
-	// the full permission set, although the key's stored grants are the
-	// narrowed ones by the time the answer leaves.
-	t.Run("read as active, then write-locked: answered as active", func(t *testing.T) {
+	t.Run("read as active, then write-locked: the reply carries grants the change revokes", func(t *testing.T) {
 		env := setupLock(t)
+		env.swarf.holding.Store(true)
+		before := cids(env.held(t, env.service))
 		env.authTenants.then = func() { env.setStatus(t, tenant.WriteLocked) }
 
-		ok, _, err := env.authorize(t, env.service, "PUT", object)
+		ok, issued, err := env.authorize(t, env.service, "PUT", object)
 
 		require.NoError(t, err)
 		require.Equal(t, []string{"s3:GetObject", "s3:PutObject"}, ok.Permissions.Entries[env.service.KeyDID()])
 		require.Equal(t, lockedCommands, env.commands(t, env.service, env.bucket), "the change committed before the answer")
+		grants := grantsIn(env, issued, env.service)
+		require.ElementsMatch(t, before, grants, "the reply carries the grants the key held when its status was read")
+		require.Subset(t, env.owedLinks(t), grants, "and every one of them is owed a revocation")
 
 		_, _, err = env.authorize(t, env.service, "PUT", object)
 		require.ErrorIs(t, err, auth.ErrTenantWriteLocked, "the next request reads the new status")
