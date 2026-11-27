@@ -17,7 +17,8 @@ package s3perm
 // creation, and every change to configuration or to what protects an object,
 // whichever HTTP method carries it: bucket policy, encryption, CORS, tags,
 // versioning and Object Lock configuration, and an object's retention, legal
-// hold and tags.
+// hold and tags. That includes releasing a legal hold, which has no bypass,
+// so a version under legal hold stays until the tenant is active again.
 //
 // Every permission in permissionCommands has an entry, which
 // TestWriteLockedRuleCoversEveryPermission pins, so a new permission is
