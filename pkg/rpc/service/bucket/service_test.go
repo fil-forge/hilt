@@ -1023,7 +1023,8 @@ func infoAcrossAPolicyWrite(t *testing.T, straddle func(s delegationstore.Store,
 	}
 	// The key and the policy are made through the services, so the key
 	// holds the grants of the policy.
-	runner := htestutil.StartServiceTasks(t, pool, secrets, &htestutil.FakeSwarf{})
+	swarf := &htestutil.FakeSwarf{}
+	runner := htestutil.StartServiceTasks(t, pool, secrets, swarf)
 	policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, runner)
 	require.NoError(t, principals.Add(ctx, tenantID, "user-1"))
 	_, _, err = policyWrites.Write(ctx, tenantID, bucketID, bucketName, statement("s3:GetObject", "s3:ListBucket"))
@@ -1060,11 +1061,12 @@ func infoAcrossAPolicyWrite(t *testing.T, straddle func(s delegationstore.Store,
 	}
 	require.ElementsMatch(t, held, answered, "the grants before the write")
 
-	// Those grants are the ones the write withdrew: every one is owed, so
-	// the gateway is told to drop an answer that names them.
+	// Those grants are the ones the write withdrew: every one is owed or,
+	// once the revocation queue has run, published, so the gateway is told
+	// to drop an answer that names them.
 	dels, _, err := owed.Oldest(ctx, tenantID, revocation.Cursor{}, 100)
 	require.NoError(t, err)
-	var withdrawn []cid.Cid
+	withdrawn := swarf.Revoked()
 	for _, d := range dels {
 		withdrawn = append(withdrawn, d.Link())
 	}
