@@ -218,16 +218,17 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   `store.WithShareLock()` (`SELECT … FOR SHARE`). Every lock wait is bounded by
   `store.LockTimeout` and a statement that gives up returns
   `store.ErrLockTimeout`, which the caller retries.
-- **Tasks**: a handler reads through its stores and writes only through
+- **Tasks**: a handler reads through its stores and writes through
   `ex.Write`, with a `store.Statement` the store builds, so the write commits
   with the task; it never reads a row its own task wrote. A task's arguments
   and result are stored in Postgres, so no secret goes into either. Write an
   action with its queue (`queue-revocation.publish`). The runner refuses a
   task that queues its own action, so a task does all of its work itself:
   the one publish task a change queues (`revocationqueue.PublishSpec`)
-  publishes everything the tenant owes, reading each batch after the last
-  row of the one before, because its own deletes are not visible until it
-  commits. Principal removal and bucket and tenant deletion
+  publishes everything the tenant owes. It is the one handler that writes
+  outside its commit, and deliberately: it deletes each batch of owed rows
+  as soon as the revocation service has taken it, so a failure part way
+  keeps what was published, and a rerun publishes the rest. Principal removal and bucket and tenant deletion
   still write keys, grants and policies under locks, outside the queue. A
   task that withdraws grants therefore chooses the rows in the statements its
   commit runs (`delegation.Store.WithdrawKeyGrantsStatements`,
