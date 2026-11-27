@@ -227,16 +227,17 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   reads go through `pglock.Reader`, which joins the transaction ctx carries.
   Authorization and `/s3/bucket/info` read this way
   (`auth.Authorizer.ReadSnapshot`).
-- **Tasks**: a handler reads through its stores and writes only through
+- **Tasks**: a handler reads through its stores and writes through
   `ex.Write`, with a `store.Statement` the store builds, so the write commits
   with the task; it never reads a row its own task wrote. A task's arguments
   and result are stored in Postgres, so no secret goes into either. Write an
   action with its queue (`queue-revocation.publish`). The runner refuses a
   task that queues its own action, so a task does all of its work itself:
   the one publish task a change queues (`revocationqueue.PublishSpec`)
-  publishes everything the tenant owes, reading each batch after the last
-  row of the one before, because its own deletes are not visible until it
-  commits. Every change to a tenant's keys, principals, buckets, grants
+  publishes everything the tenant owes. It is the one handler that writes
+  outside its commit, and deliberately: it deletes each batch of owed rows
+  as soon as the revocation service has taken it, so a failure part way
+  keeps what was published, and a rerun publishes the rest. Every change to a tenant's keys, principals, buckets, grants
   and policies is a task on the tenant's subject, so nothing commits between
   a handler's reads and its commit but tenant deletion, which runs only on a
   disabled tenant; a handler decides from what it read. The writes that
