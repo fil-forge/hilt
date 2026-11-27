@@ -323,7 +323,7 @@ func TestDeleteKey(t *testing.T) {
 		kept := w.held(t, w.principalKey)
 
 		require.NoError(t, w.run(t, tenantqueue.DeleteKeySpec(w.tenant.DID(), w.serviceKey)))
-		pending, err := w.runner.PendingOn(t.Context(), tasks.QueueRevocation, w.tenant.DID().String())
+		pending, err := w.runner.Pending(t.Context(), tasks.QueueRevocation, []string{w.tenant.DID().String()})
 		require.NoError(t, err)
 		require.Empty(t, pending, "a deletion that finds no key queues nothing")
 		require.Empty(t, w.owedLinks(t))

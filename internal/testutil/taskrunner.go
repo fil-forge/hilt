@@ -106,9 +106,9 @@ func AwaitPublished(t *testing.T, r *taskrunner.Runner, tenant did.DID) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), WaitTimeout)
 	defer cancel()
-	pending, err := r.PendingOn(ctx, tasks.QueueRevocation, tenant.String())
+	pending, err := r.Pending(ctx, tasks.QueueRevocation, []string{tenant.String()})
 	require.NoError(t, err)
-	_, err = r.WaitAll(ctx, tasks.QueueRevocation, pending...)
+	_, err = r.WaitAll(ctx, tasks.QueueRevocation, pending[tenant.String()]...)
 	require.NoError(t, err, "the tenant's revocations were not published")
 }
 
