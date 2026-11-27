@@ -525,6 +525,28 @@ func TestDelete(t *testing.T) {
 // succeed one after the other, whichever goes first, and leave no policy
 // naming the removed principal and every other key the grants of the
 // policies as they end.
+// A caller that goes away while its removal runs: the removal still finishes,
+// and its keys' secrets still leave the vault.
+func TestDeleteAfterTheCallerGoesAway(t *testing.T) {
+	ctx := t.Context()
+	h := &hook{}
+	d := setup(t, h)
+	d.principal(t, "user-1")
+	d.writePolicy(t, allow(s3bkt.Only("user-1"), "s3:GetObject"))
+	key := d.addKey(t, "user-1", "laptop")
+
+	gone, cancel := context.WithCancel(ctx)
+	defer cancel()
+	h.set(cancel)
+	require.NoError(t, d.svc.Delete(gone, "tenant-1", "user-1"))
+	require.Error(t, gone.Err(), "the caller's context ended during the call")
+
+	_, err := d.accessKeys.Get(ctx, key)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, key))
+	require.ErrorIs(t, err, vault.ErrNotFound, "the key's secret left the vault")
+}
+
 func TestDeleteAndPolicyWriteTogether(t *testing.T) {
 	ctx := t.Context()
 	statements := func(name string) []s3bkt.Statement {

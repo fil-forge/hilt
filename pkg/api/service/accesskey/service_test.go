@@ -638,9 +638,9 @@ type cancellingKeys struct {
 	cancel context.CancelFunc
 }
 
-func (s *cancellingKeys) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
+func (s *cancellingKeys) Get(ctx context.Context, id did.DID) (accesskeystore.Record, error) {
 	s.cancel()
-	return s.Store.Get(ctx, id, opts...)
+	return s.Store.Get(ctx, id)
 }
 
 // blockingTenants blocks the first Get until release is closed, having
