@@ -77,8 +77,6 @@ type commitHook struct {
 	mu sync.Mutex
 	// next runs on the handler's next pass, and then no more.
 	next func()
-	// passes counts the passes of policy handlers since the last arm.
-	passes int
 }
 
 // arm makes fn run on the next pass of a policy handler, once it has read
@@ -86,25 +84,17 @@ type commitHook struct {
 func (h *commitHook) arm(fn func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.next, h.passes = fn, 0
+	h.next = fn
 }
 
 func (h *commitHook) run() {
 	h.mu.Lock()
 	fn := h.next
 	h.next = nil
-	h.passes++
 	h.mu.Unlock()
 	if fn != nil {
 		fn()
 	}
-}
-
-// ran is the number of passes policy handlers have made since the last arm.
-func (h *commitHook) ran() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.passes
 }
 
 type deps struct {
