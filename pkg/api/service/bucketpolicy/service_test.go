@@ -329,7 +329,7 @@ func commandsFor(actions ...string) []string {
 // owedLinks returns the CIDs of the revocations the tenant owes, sorted.
 func (d deps) owedLinks(t *testing.T) []string {
 	t.Helper()
-	dels, _, err := d.owed.Oldest(t.Context(), d.tenantID, revocation.Cursor{}, 10_000)
+	dels, err := d.owed.Oldest(t.Context(), d.tenantID, 10_000)
 	require.NoError(t, err)
 	return links(dels)
 }
