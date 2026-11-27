@@ -31,7 +31,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -388,7 +387,7 @@ func (d deleteDeps) held(t *testing.T) []string {
 // owedLinks returns the CIDs of the revocations the tenant owes.
 func (d deleteDeps) owedLinks(t *testing.T) []cid.Cid {
 	t.Helper()
-	dels, _, err := d.owed.Oldest(t.Context(), d.tenantID, revocation.Cursor{}, 10_000)
+	dels, err := d.owed.Oldest(t.Context(), d.tenantID, 10_000)
 	require.NoError(t, err)
 	out := make([]cid.Cid, len(dels))
 	for i, dlg := range dels {
@@ -1064,7 +1063,7 @@ func infoAcrossAPolicyWrite(t *testing.T, straddle func(s delegationstore.Store,
 	// Those grants are the ones the write withdrew: every one is owed or,
 	// once the revocation queue has run, published, so the gateway is told
 	// to drop an answer that names them.
-	dels, _, err := owed.Oldest(ctx, tenantID, revocation.Cursor{}, 100)
+	dels, err := owed.Oldest(ctx, tenantID, 100)
 	require.NoError(t, err)
 	withdrawn := swarf.Revoked()
 	for _, d := range dels {

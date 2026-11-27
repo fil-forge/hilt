@@ -21,7 +21,6 @@ import (
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -311,7 +310,7 @@ func TestDeletePrincipalHandler(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, get.Code)
 		_, err = deps.accessKeys.Get(ctx, keyID)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
-		owed, _, err := deps.owed.Oldest(ctx, deps.tenantID, revocation.Cursor{}, 10)
+		owed, err := deps.owed.Oldest(ctx, deps.tenantID, 10)
 		require.NoError(t, err)
 		require.Len(t, owed, 1)
 		require.Equal(t, held.Results[0].Link(), owed[0].Link())
