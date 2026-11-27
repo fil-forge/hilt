@@ -14,7 +14,6 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/ipfs/go-cid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -83,17 +82,21 @@ func (s *Store) Oldest(ctx context.Context, tenant did.DID, limit int) ([]ucan.D
 	if err != nil {
 		return nil, fmt.Errorf("reading revocations owed: %w", err)
 	}
-	datas, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
-	if err != nil {
-		return nil, fmt.Errorf("reading revocations owed: %w", err)
-	}
-	out := make([]ucan.Delegation, 0, len(datas))
-	for _, data := range datas {
+	defer rows.Close()
+	var out []ucan.Delegation
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("reading revocations owed: %w", err)
+		}
 		d, err := delegation.Decode(data)
 		if err != nil {
 			return nil, fmt.Errorf("decoding a delegation owed a revocation: %w", err)
 		}
 		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading revocations owed: %w", err)
 	}
 	return out, nil
 }
@@ -102,13 +105,14 @@ func (s *Store) Delete(ctx context.Context, ids []cid.Cid) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := s.exec(ctx, s.DeleteStatement(ids)); err != nil {
+	if err := s.exec(ctx, deleteStatement(ids)); err != nil {
 		return fmt.Errorf("deleting %d revocations owed: %w", len(ids), err)
 	}
 	return nil
 }
 
-func (s *Store) DeleteStatement(ids []cid.Cid) store.Statement {
+// deleteStatement is the write Delete makes.
+func deleteStatement(ids []cid.Cid) store.Statement {
 	strs := make([]string, len(ids))
 	for i, id := range ids {
 		strs[i] = id.String()

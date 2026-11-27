@@ -37,15 +37,13 @@ type Store interface {
 	// refuses.
 	AddStatement(tenant did.DID, delegations []ucan.Delegation) (store.Statement, error)
 	// Oldest returns up to limit of the delegations the tenant owes
-	// revocations for, the longest recorded first.
+	// revocations for, the longest recorded first, ordered by recording time
+	// and then CID.
 	Oldest(ctx context.Context, tenant did.DID, limit int) ([]ucan.Delegation, error)
 	// Delete removes the revocations owed for the delegations with the given
 	// CIDs. A CID with no row is ignored. When ctx carries a transaction
 	// (pglock.WithTx) the removal commits with it.
 	Delete(ctx context.Context, ids []cid.Cid) error
-	// DeleteStatement returns the write [Store.Delete] makes, for a task that
-	// removes the rows in its own commit.
-	DeleteStatement(ids []cid.Cid) store.Statement
 	// Stats returns the number of revocations owed across every tenant and
 	// the age of the oldest.
 	Stats(ctx context.Context) (Stats, error)

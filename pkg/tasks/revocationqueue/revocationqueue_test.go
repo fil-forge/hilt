@@ -31,16 +31,18 @@ import (
 )
 
 // flakySwarf is a revocation service that fails every publish while failing
-// is set, and counts the publishes it was asked for either way.
+// is set, or one publish by number, and counts the publishes it was asked for either way.
 type flakySwarf struct {
 	htestutil.FakeSwarf
 	failing  atomic.Bool
 	attempts atomic.Int64
+	// failOn fails the publish with this number, counting from 1, once.
+	failOn atomic.Int64
 }
 
 func (f *flakySwarf) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
-	f.attempts.Add(1)
-	if f.failing.Load() {
+	n := f.attempts.Add(1)
+	if f.failing.Load() || f.failOn.CompareAndSwap(n, 0) {
 		return errors.New("revocation service unavailable")
 	}
 	return f.FakeSwarf.PublishBatch(ctx, revoker, revoked)
@@ -109,13 +111,13 @@ func links(dels []ucan.Delegation) []cid.Cid {
 }
 
 // owe records the delegations as revocations the tenant owes and queues the
-// tasks that publish them, as a change to the tenant does.
+// task that publishes them, as a change to the tenant does.
 func (d deps) owe(t *testing.T, dels []ucan.Delegation) []taskrunner.TaskID {
 	t.Helper()
 	require.NoError(t, d.owed.Add(t.Context(), d.tenant.DID(), dels))
-	ids, err := d.runner.SubmitAll(t.Context(), revocationqueue.PublishSpecs(d.tenant.DID(), len(dels)))
+	id, err := d.runner.Submit(t.Context(), revocationqueue.PublishSpec(d.tenant.DID()))
 	require.NoError(t, err)
-	return ids
+	return []taskrunner.TaskID{id}
 }
 
 // finish waits for the tasks and returns how each ended.
@@ -135,23 +137,11 @@ func (d deps) count(t *testing.T) int64 {
 	return stats.Count
 }
 
-func TestPublishSpecs(t *testing.T) {
+func TestPublishSpec(t *testing.T) {
 	tenant := testutil.RandomDID(t)
-	for owed, want := range map[int]int{
-		-1:                               0,
-		0:                                0,
-		1:                                1,
-		revocationqueue.BatchSize:        1,
-		revocationqueue.BatchSize + 1:    2,
-		3 * revocationqueue.BatchSize:    3,
-		3*revocationqueue.BatchSize + 17: 4,
-	} {
-		specs := revocationqueue.PublishSpecs(tenant, owed)
-		require.Len(t, specs, want, "%d owed", owed)
-		for _, s := range specs {
-			require.Equal(t, taskrunner.Spec{Queue: "queue-revocation", Subject: tenant.String(), Action: "publish"}, s)
-		}
-	}
+	require.Equal(t,
+		taskrunner.Spec{Queue: "queue-revocation", Subject: tenant.String(), Action: "publish"},
+		revocationqueue.PublishSpec(tenant))
 }
 
 func TestPublish(t *testing.T) {
@@ -173,11 +163,11 @@ func TestPublish(t *testing.T) {
 		require.Zero(t, d.count(t))
 	})
 
-	t.Run("drains more than one batch, one task each", func(t *testing.T) {
+	t.Run("one task drains more than one batch", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 2*revocationqueue.BatchSize+1, nil)
 		ids := d.owe(t, dels)
-		require.Len(t, ids, 3)
+		require.Len(t, ids, 1)
 
 		for _, c := range d.finish(t, ids) {
 			require.NoError(t, c.Err)
@@ -186,16 +176,37 @@ func TestPublish(t *testing.T) {
 		for _, b := range d.swarf.Batches() {
 			sizes = append(sizes, len(b))
 		}
+		// Each batch is read past the one before, whose rows are still there
+		// until the task commits, so none is published twice.
 		require.Equal(t, []int{revocationqueue.BatchSize, revocationqueue.BatchSize, 1}, sizes)
 		require.ElementsMatch(t, links(dels), d.swarf.Revoked(), "every delegation is revoked once")
 		require.Zero(t, d.count(t))
 	})
 
+	t.Run("a publish that fails part way keeps the batches it published, and the retry carries on", func(t *testing.T) {
+		d := setup(t)
+		dels := issue(t, d.tenant, 2*revocationqueue.BatchSize+1, nil)
+		// The third request fails once, after two batches were taken.
+		d.swarf.failOn.Store(3)
+		ids := d.owe(t, dels)
+
+		for _, c := range d.finish(t, ids) {
+			require.NoError(t, c.Err)
+		}
+		var sizes []int
+		for _, b := range d.swarf.Batches() {
+			sizes = append(sizes, len(b))
+		}
+		require.Equal(t, []int{revocationqueue.BatchSize, revocationqueue.BatchSize, 1}, sizes, "no batch is published twice")
+		require.ElementsMatch(t, links(dels), d.swarf.Revoked())
+		require.Zero(t, d.count(t))
+	})
+
 	t.Run("a task with nothing owed publishes nothing", func(t *testing.T) {
 		d := setup(t)
-		ids, err := d.runner.SubmitAll(t.Context(), revocationqueue.PublishSpecs(d.tenant.DID(), 1))
+		id, err := d.runner.Submit(t.Context(), revocationqueue.PublishSpec(d.tenant.DID()))
 		require.NoError(t, err)
-		for _, c := range d.finish(t, ids) {
+		for _, c := range d.finish(t, []taskrunner.TaskID{id}) {
 			require.NoError(t, c.Err)
 		}
 		require.Zero(t, d.swarf.attempts.Load())

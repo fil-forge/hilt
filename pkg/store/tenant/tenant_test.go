@@ -100,6 +100,35 @@ func TestTenantStore(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
+	t.Run("SetStatusStatement moves the tenant only from the status named", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
+		s := tenantpostgres.New(pool)
+		id := testutil.RandomDID(t)
+		require.NoError(t, s.Add(t.Context(), id, "ext-statement", tenant.Active))
+		exec := func(from, to tenant.Status) int64 {
+			st, err := s.SetStatusStatement(id, from, to)
+			require.NoError(t, err)
+			tag, err := pool.Exec(t.Context(), st.SQL, st.Args...)
+			require.NoError(t, err)
+			return tag.RowsAffected()
+		}
+
+		require.EqualValues(t, 1, exec(tenant.Active, tenant.Disabled))
+		rec, err := s.Get(t.Context(), id)
+		require.NoError(t, err)
+		require.Equal(t, tenant.Disabled, rec.Status)
+
+		require.Zero(t, exec(tenant.Active, tenant.WriteLocked), "the tenant is no longer active")
+		rec, err = s.Get(t.Context(), id)
+		require.NoError(t, err)
+		require.Equal(t, tenant.Disabled, rec.Status)
+
+		_, err = s.SetStatusStatement(id, tenant.Active, tenant.Status("paused"))
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+		_, err = s.SetStatusStatement(id, tenant.Status(""), tenant.Active)
+		require.ErrorIs(t, err, store.ErrInvalidArgument)
+	})
+
 	t.Run("Delete removes a tenant and is idempotent", func(t *testing.T) {
 		id := testutil.RandomDID(t)
 		require.NoError(t, s.Add(t.Context(), id, "ext-del", tenant.Active))

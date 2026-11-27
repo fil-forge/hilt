@@ -23,8 +23,13 @@ const (
 	QueueRevocation = "queue-revocation"
 )
 
-// ActionPublish is queue-revocation.publish: publish one batch of the
-// subject tenant's revocations owed.
+// ActionSetStatus is queue-tenant.set-status: move the subject tenant to the
+// status in the task's arguments, withdrawing or issuing its keys' grants as
+// the change requires.
+const ActionSetStatus = "set-status"
+
+// ActionPublish is queue-revocation.publish: publish every revocation the
+// subject tenant owes.
 const ActionPublish = "publish"
 
 // Queues lists the queues in order, with the number of async tasks of each

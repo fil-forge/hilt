@@ -2,16 +2,17 @@
 // revocations a tenant owes, on the subject of the tenant's DID.
 //
 // A change to a tenant's authority records the delegations it withdraws as
-// revocations owed and queues queue-revocation.publish tasks for them, one
-// for each batch of [BatchSize] it recorded ([PublishSpecs]). A task
-// publishes the tenant's oldest batch and deletes its rows in the task's
-// commit. The runner refuses a task that queues its own action, so a task
-// never queues the next one: the tenant's rows are all published once the
-// tasks queued for them have run.
+// revocations owed and queues one queue-revocation.publish task for the
+// tenant ([PublishSpec]) in the same commit. The task publishes everything
+// the tenant owes, a batch of [BatchSize] at a time, deleting each batch's
+// rows once the revocation service has taken it, so an attempt that fails
+// part way keeps what it published. [Drain] is that work, which tenant
+// deletion runs itself before the tenant's DID is deactivated.
 //
 // Publishing is retried for as long as it fails, so an outage of the
 // revocation service delays revocations and loses none. A revocation carries
-// no nonce, so one published again after a crash is recorded once.
+// no nonce, so one published again by a retry or after a crash is recorded
+// once.
 package revocationqueue
 
 import (
@@ -33,14 +34,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// BatchSize is the most revocations one queue-revocation.publish task
-// publishes, in one request to the revocation service.
+// BatchSize is the most revocations published in one request to the
+// revocation service.
 const BatchSize = 200
 
 // publishRetry retries a failed publish without limit: after 1s, doubling to
 // a minute. The tasks behind one waiting to retry run during its backoff,
-// which costs nothing: each takes the tenant's oldest batch, whichever task
-// recorded it.
+// which costs nothing: each publishes whatever the tenant owes when it runs,
+// whichever change recorded it.
 var publishRetry = taskrunner.RetryPolicy{
 	First:      time.Second,
 	Max:        time.Minute,
@@ -89,36 +90,108 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 	return q, nil
 }
 
-// PublishSpecs returns the queue-revocation.publish tasks that publish owed
-// revocations of the tenant: one task for each batch of [BatchSize], none
-// when owed is not positive. The caller submits them in the commit that
-// records the revocations, so the tasks exist exactly when the rows do. The
-// tasks carry no arguments: each reads what the tenant owes when it runs.
-func PublishSpecs(tenant did.DID, owed int) []taskrunner.Spec {
-	if owed <= 0 {
-		return nil
+// ErrSigningKeyMissing is returned by [Drain] when the tenant owes a
+// revocation and its signing key is not in the vault, so nothing can sign it.
+var ErrSigningKeyMissing = errors.New("the tenant's signing key is not in the vault")
+
+// PublishSpec returns the queue-revocation.publish task that publishes every
+// revocation the tenant owes. The caller submits it in the commit that
+// records revocations, so the task exists exactly when the rows do. It
+// carries no arguments: it reads what the tenant owes when it runs.
+func PublishSpec(tenant did.DID) taskrunner.Spec {
+	return taskrunner.Spec{
+		Queue:   tasks.QueueRevocation,
+		Subject: tenant.String(),
+		Action:  tasks.ActionPublish,
 	}
-	specs := make([]taskrunner.Spec, (owed+BatchSize-1)/BatchSize)
-	for i := range specs {
-		specs[i] = taskrunner.Spec{
-			Queue:   tasks.QueueRevocation,
-			Subject: tenant.String(),
-			Action:  tasks.ActionPublish,
-		}
-	}
-	return specs
 }
 
-// runPublish is queue-revocation.publish. It publishes the revocations of the
-// subject tenant's oldest [BatchSize] delegations owed one, signed by the
-// tenant, and deletes their rows in the task's commit. A delegation that has
+// Drained counts what one [Drain] went through.
+type Drained struct {
+	// Published is the number of revocations the revocation service took.
+	Published int
+	// Expired is the number of delegations that had expired and needed no
+	// revocation.
+	Expired int
+}
+
+// Drain publishes every revocation the tenant owes, signed by the tenant, a
+// batch of [BatchSize] at a time, oldest first. Each batch's rows are deleted
+// as soon as the revocation service has taken it, so the next batch is read
+// from what is left and an attempt that fails part way keeps the batches it
+// published. Deleting a row the revocation service has taken is right
+// whatever happens after: the revocation is out. A delegation that has
 // expired needs no revocation and its row is deleted with the rest.
 //
-// A publish that fails is retried under the action's retry policy, and
-// leaves the rows in place. The task fails for good when the tenant's
-// signing key is not in the vault: nothing else can sign its revocations, so
-// the rows stay and the copies of the delegations the gateway has cached run
-// out on their own.
+// It stops at the first failure. It returns [ErrSigningKeyMissing] when a
+// live delegation is owed and the tenant's key is not in the vault; the key
+// is read only then, so a tenant whose key is gone still sheds the rows of
+// delegations that have expired.
+func Drain(
+	ctx context.Context,
+	log *zap.Logger,
+	owed revocation.Store,
+	secrets vault.Vault,
+	publisher grant.RevocationPublisher,
+	tenant did.DID,
+) (Drained, error) {
+	var (
+		done   Drained
+		issuer ucan.Issuer
+	)
+	for {
+		batch, err := owed.Oldest(ctx, tenant, BatchSize)
+		if err != nil {
+			return done, err
+		}
+		if len(batch) == 0 {
+			return done, nil
+		}
+		ids := make([]cid.Cid, len(batch))
+		live := make([]ucan.Delegation, 0, len(batch))
+		now := ucan.UnixTimestamp(time.Now().Unix())
+		for i, d := range batch {
+			ids[i] = d.Link()
+			if validator.ValidateNotExpired(d, now) == nil {
+				live = append(live, d)
+			}
+		}
+		if len(live) > 0 {
+			if issuer == nil {
+				issuer, err = vault.TenantIssuer(ctx, secrets, tenant)
+				if errors.Is(err, vault.ErrNotFound) {
+					return done, fmt.Errorf("%w: %w", ErrSigningKeyMissing, err)
+				}
+				if err != nil {
+					return done, err
+				}
+			}
+			if err := grant.PublishRevocations(ctx, log, publisher, issuer, live); err != nil {
+				return done, err
+			}
+		}
+		if err := owed.Delete(ctx, ids); err != nil {
+			return done, err
+		}
+		done.Published += len(live)
+		done.Expired += len(batch) - len(live)
+		if len(batch) < BatchSize {
+			return done, nil
+		}
+	}
+}
+
+// runPublish is queue-revocation.publish. It publishes every revocation the
+// subject tenant owes ([Drain]). It records no write of its own: each batch's
+// rows are deleted as it is published.
+//
+// A publish that fails is retried under the action's retry policy, and the
+// retry carries on from the rows still owed. A batch published again because
+// its rows were not deleted before a failure is recorded once by the
+// revocation service. The task fails for
+// good when the tenant's signing key is not in the vault: nothing else can
+// sign its revocations, so the rows stay and the copies of the delegations
+// the gateway has cached run out on their own.
 func (q *Queue) runPublish(ctx context.Context, ex *taskrunner.Exec, t taskrunner.Task) ([]byte, error) {
 	tenant, err := did.Parse(t.Subject)
 	if err != nil {
@@ -126,45 +199,18 @@ func (q *Queue) runPublish(ctx context.Context, ex *taskrunner.Exec, t taskrunne
 	}
 	log := q.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("task", t.ID))
 
-	owed, err := q.owed.Oldest(ctx, tenant, BatchSize)
+	done, err := Drain(ctx, log, q.owed, q.secrets, q.publisher, tenant)
+	if errors.Is(err, ErrSigningKeyMissing) {
+		log.Error("revocations cannot be signed: the tenant's signing key is not in the vault")
+		return nil, taskrunner.Permanent(err)
+	}
 	if err != nil {
+		log.Warn("publishing revocations failed; the task retries", zap.Int("published", done.Published), zap.Int("attempt", t.Attempt), zap.Error(err))
 		return nil, err
 	}
-	if len(owed) == 0 {
-		return nil, nil
+	if done.Published+done.Expired > 0 {
+		log.Info("published the revocations owed", zap.Int("published", done.Published), zap.Int("expired", done.Expired))
 	}
-	ids := make([]cid.Cid, len(owed))
-	live := make([]ucan.Delegation, 0, len(owed))
-	now := ucan.UnixTimestamp(time.Now().Unix())
-	for i, d := range owed {
-		ids[i] = d.Link()
-		if validator.ValidateNotExpired(d, now) == nil {
-			live = append(live, d)
-		}
-	}
-
-	// The key is read only when something is left to sign, so a tenant whose
-	// key is gone still sheds the rows of delegations that have expired.
-	if len(live) > 0 {
-		issuer, err := vault.TenantIssuer(ctx, q.secrets, tenant)
-		if errors.Is(err, vault.ErrNotFound) {
-			log.Error("revocations cannot be signed: the tenant's signing key is not in the vault", zap.Int("revocations", len(live)))
-			return nil, taskrunner.Permanent(fmt.Errorf("the tenant's signing key is not in the vault: %w", err))
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := grant.PublishRevocations(ctx, log, q.publisher, issuer, live); err != nil {
-			log.Warn("publishing revocations failed; the task retries", zap.Int("revocations", len(live)), zap.Int("attempt", t.Attempt), zap.Error(err))
-			return nil, err
-		}
-	}
-
-	st := q.owed.DeleteStatement(ids)
-	if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-		return nil, err
-	}
-	log.Info("published a batch of revocations owed", zap.Int("published", len(live)), zap.Int("expired", len(owed)-len(live)))
 	return nil, nil
 }
 

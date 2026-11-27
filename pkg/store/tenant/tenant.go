@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
 
@@ -67,6 +68,12 @@ type Store interface {
 	// [store.ErrInvalidArgument] if the status is not valid, and
 	// [store.ErrRecordNotFound] if no record exists for the specified ID.
 	SetStatus(ctx context.Context, id did.DID, status Status) error
+	// SetStatusStatement returns the write that moves the tenant from one
+	// status to another, for a task that changes the status in its own
+	// commit. It affects no row when the tenant's status is no longer from,
+	// or the tenant is gone, which a task makes a condition of its commit. It
+	// returns [store.ErrInvalidArgument] if either status is not valid.
+	SetStatusStatement(id did.DID, from, to Status) (store.Statement, error)
 	// Delete removes the tenant record for a given ID. It is idempotent:
 	// deleting an absent record returns nil.
 	Delete(ctx context.Context, id did.DID) error

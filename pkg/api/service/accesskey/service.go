@@ -16,7 +16,6 @@ import (
 	"time"
 
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -258,9 +257,11 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	// policy created meanwhile has no row to wait on, and the tenant lock the
 	// principal's add took is what keeps the key behind it. A write that
 	// starts after the key row exists rotates the key like any other.
-	var dels []ucan.Delegation
+	// [grant.ForKey] decides the set, as it does when a tenant leaving the
+	// disabled status has its keys' grants issued again.
+	var policies []bucketpolicystore.Record
 	if principalID != nil {
-		policies, err := s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID, store.WithShareLock())
+		policies, err = s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID, store.WithShareLock())
 		if err != nil {
 			rollback()
 			if errors.Is(err, store.ErrLockTimeout) {
@@ -268,24 +269,17 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 			}
 			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
 		}
-		for _, p := range policies {
-			eff := bucketpolicy.Effective(&p.Policy, *principalID)
-			if len(eff) == 0 {
-				continue
-			}
-			granted, err := grant.Issue(issuer, accessKeyID, []did.DID{p.Bucket}, eff, expiresAt)
-			if err != nil {
-				rollback()
-				return accesskeystore.Record{}, "", fmt.Errorf("issuing delegation: %w", err)
-			}
-			dels = append(dels, granted...)
-		}
-	} else {
-		dels, err = grant.Issue(issuer, accessKeyID, bucketIDs, permissions, expiresAt)
-		if err != nil {
-			rollback()
-			return accesskeystore.Record{}, "", fmt.Errorf("issuing delegation: %w", err)
-		}
+	}
+	dels, err := grant.ForKey(issuer, accesskeystore.Record{
+		ID:          in.ID,
+		Buckets:     in.Buckets,
+		Permissions: in.Permissions,
+		Principal:   in.Principal,
+		ExpiresAt:   in.ExpiresAt,
+	}, policies)
+	if err != nil {
+		rollback()
+		return accesskeystore.Record{}, "", fmt.Errorf("issuing delegation: %w", err)
 	}
 	if len(dels) > 0 {
 		// Store the delegations under the access key's delegation lock rather

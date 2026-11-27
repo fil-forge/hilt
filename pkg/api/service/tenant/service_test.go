@@ -25,9 +25,11 @@ import (
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	wrapkeyspostgres "github.com/fil-forge/hilt/pkg/store/wrapkey/postgres"
+	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	customercmds "github.com/fil-forge/libforge/commands/customer"
@@ -95,7 +97,7 @@ func provisionSetup(t *testing.T, plcStatus int) provisionEnv {
 	require.NoError(t, err)
 
 	svc := tenantsvc.New(zap.NewNop(), tenantpostgres.New(pool), bucketpostgres.New(pool),
-		accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeyspostgres.New(pool), plcClient, upload, &testutil.FakeSwarf{})
+		accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeyspostgres.New(pool), plcClient, upload, &testutil.FakeSwarf{}, revocationpostgres.New(pool), nil)
 	return provisionEnv{svc: svc, sprueFailed: sprueFailed}
 }
 
@@ -136,11 +138,15 @@ func TestProvision(t *testing.T) {
 	})
 }
 
-// simpleService builds a service over pool with the given tenant store and no PLC/upload
-// clients — enough for Get and SetStatus, which never touch them.
-func simpleService(pool *pgxpool.Pool, tenants tenant.Store) *tenantsvc.Service {
+// simpleService builds a service over pool with the given tenant store, a
+// running task runner and no PLC/upload clients — enough for Get and
+// SetStatus, which never touch them.
+func simpleService(t *testing.T, pool *pgxpool.Pool, tenants tenant.Store) *tenantsvc.Service {
+	t.Helper()
+	secrets, swarf := vaultmemory.New(), &testutil.FakeSwarf{}
 	return tenantsvc.New(zap.NewNop(), tenants, bucketpostgres.New(pool),
-		accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeyspostgres.New(pool), nil, nil, &testutil.FakeSwarf{})
+		accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), secrets, wrapkeyspostgres.New(pool), nil, nil, swarf,
+		revocationpostgres.New(pool), testutil.StartServiceTasks(t, pool, secrets, swarf))
 }
 
 func TestGetAndSetStatus(t *testing.T) {
@@ -150,7 +156,7 @@ func TestGetAndSetStatus(t *testing.T) {
 		pool := testutil.PostgresOrSkip(t)
 		tenants := tenantpostgres.New(pool)
 		require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", tenant.Active))
-		return simpleService(pool, tenants), tenants
+		return simpleService(t, pool, tenants), tenants
 	}
 
 	t.Run("get returns the tenant", func(t *testing.T) {
@@ -212,7 +218,14 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type deleteEnv struct {
-	svc        *tenantsvc.Service
+	svc  *tenantsvc.Service
+	pool *pgxpool.Pool
+	// keyID is the tenant's one access key.
+	keyID did.DID
+	// owed is the store of the revocations the tenant owes.
+	owed *revocationpostgres.Store
+	// issuer signs as the tenant.
+	issuer     ucan.Issuer
 	tenants    *tenantpostgres.Store
 	buckets    *bucketpostgres.Store
 	policies   *bucketpolicypostgres.Store
@@ -299,11 +312,32 @@ func deleteSetup(t *testing.T, status tenant.Status) deleteEnv {
 
 	swarf := &testutil.FakeSwarf{}
 	publisher := &deadlinePublisher{FakeSwarf: swarf}
+	owed := revocationpostgres.New(pool)
 	svc := tenantsvc.New(zap.NewNop(), tenants, buckets,
-		accessKeys, principals, policies, delegations, secrets, wrapkeyspostgres.New(pool), plcClient, nil, publisher)
-	return deleteEnv{svc: svc, tenants: tenants, buckets: buckets, policies: policies,
+		accessKeys, principals, policies, delegations, secrets, wrapkeyspostgres.New(pool), plcClient, nil, publisher, owed, nil)
+	return deleteEnv{svc: svc, pool: pool, keyID: keyID, owed: owed, issuer: multikey.NewIssuer(tenantID, signer), tenants: tenants, buckets: buckets, policies: policies,
 		principals: principals, swarf: swarf, publisher: publisher, bucketID: bucketID, tenantID: tenantID, grants: grants, directory: directory,
 		tombstone: tombstoneJSON.Bytes()}
+}
+
+// issueOwed records n delegations issued by the tenant as revocations it
+// owes, and returns their CIDs.
+func issueOwed(t *testing.T, env deleteEnv, n int) []cid.Cid {
+	t.Helper()
+	var dels []ucan.Delegation
+	for len(dels) < n {
+		issued, err := grant.Issue(env.issuer, testutil.RandomDID(t), []did.DID{testutil.RandomDID(t)}, []string{"s3:GetObject"}, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, issued)
+		dels = append(dels, issued...)
+	}
+	dels = dels[:n]
+	require.NoError(t, env.owed.Add(t.Context(), env.tenantID, dels))
+	out := make([]cid.Cid, n)
+	for i, d := range dels {
+		out[i] = d.Link()
+	}
+	return out
 }
 
 // deadlinePublisher records how long each publish had left on its deadline,
@@ -359,6 +393,61 @@ func TestDelete(t *testing.T) {
 		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)
 		require.Zero(t, env.directory.deactivations)
+	})
+
+	t.Run("publishes the revocations still owed before deactivating the DID", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		// More than one batch is owed, as after a disable the revocation
+		// service has not taken yet.
+		owed := issueOwed(t, env, revocationqueue.BatchSize+1)
+		var deactivatedAtPublish []int
+		env.swarf.OnPublish = func() { deactivatedAtPublish = append(deactivatedAtPublish, env.directory.deactivations) }
+
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+
+		batches := env.swarf.Batches()
+		require.Len(t, batches, 3, "two requests for what was owed, then one for the key's grants")
+		var published []cid.Cid
+		for _, b := range batches[:2] {
+			for _, r := range b {
+				require.Equal(t, env.tenantID, r.Revoker)
+				published = append(published, r.Revoked)
+			}
+		}
+		require.ElementsMatch(t, owed, published)
+		require.Equal(t, []int{0, 0, 0}, deactivatedAtPublish, "every publish came before the tombstone")
+		require.Equal(t, 1, env.directory.deactivations)
+		_, err := env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		stats, err := env.owed.Stats(ctx)
+		require.NoError(t, err)
+		require.Zero(t, stats.Count)
+	})
+
+	t.Run("a failed publish of the revocations owed leaves everything in place", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		owed := issueOwed(t, env, 3)
+		env.swarf.Err = errors.New("swarf unreachable")
+
+		err := env.svc.Delete(ctx, "tenant-1")
+		require.ErrorContains(t, err, "swarf unreachable")
+		require.ErrorContains(t, err, "revocations owed")
+
+		_, err = env.tenants.GetByExternalID(ctx, "tenant-1")
+		require.NoError(t, err)
+		require.Zero(t, env.directory.deactivations)
+		still, err := env.owed.Oldest(ctx, env.tenantID, 10)
+		require.NoError(t, err)
+		require.Len(t, still, len(owed), "the rows stay owed")
+		held, err := delegationpostgres.New(env.pool).ListByAudience(ctx, env.keyID)
+		require.NoError(t, err)
+		require.Len(t, held.Results, len(env.grants), "the key's grants were not touched")
+
+		// The retry publishes them and deletes the tenant.
+		env.swarf.Err = nil
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+		require.Subset(t, env.swarf.Revoked(), owed)
+		require.Equal(t, 1, env.directory.deactivations)
 	})
 
 	t.Run("an already deactivated DID publishes nothing and finishes the cascade", func(t *testing.T) {

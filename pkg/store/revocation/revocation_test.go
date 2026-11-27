@@ -163,6 +163,26 @@ func TestRevocationStore(t *testing.T) {
 		require.Empty(t, none)
 	})
 
+	t.Run("Oldest orders rows recorded together by CID", func(t *testing.T) {
+		d := setup(t)
+		// One Add stamps every row with the same time, so the CID orders them.
+		dels := issue(t, d.tenant, 7)
+		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), dels))
+
+		first, err := d.store.Oldest(t.Context(), d.tenant.DID(), 3)
+		require.NoError(t, err)
+		again, err := d.store.Oldest(t.Context(), d.tenant.DID(), 3)
+		require.NoError(t, err)
+		require.Equal(t, links(first), links(again), "the order is stable")
+
+		// Deleting what was read brings the next rows forward.
+		require.NoError(t, d.store.Delete(t.Context(), links(first)))
+		rest, err := d.store.Oldest(t.Context(), d.tenant.DID(), 100)
+		require.NoError(t, err)
+		require.Len(t, rest, 4)
+		require.ElementsMatch(t, links(dels), append(links(first), links(rest)...))
+	})
+
 	t.Run("Delete removes the named rows and ignores an unknown CID", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 3)
@@ -176,7 +196,7 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, d.store.Delete(t.Context(), nil))
 	})
 
-	t.Run("the statements make the writes Add and Delete make", func(t *testing.T) {
+	t.Run("the statement makes the write Add makes", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 2)
 		st, err := d.store.AddStatement(d.tenant.DID(), dels)
@@ -186,13 +206,6 @@ func TestRevocationStore(t *testing.T) {
 		got, err := d.store.Oldest(t.Context(), d.tenant.DID(), 10)
 		require.NoError(t, err)
 		require.ElementsMatch(t, links(dels), links(got))
-
-		st = d.store.DeleteStatement(links(dels))
-		_, err = d.pool.Exec(t.Context(), st.SQL, st.Args...)
-		require.NoError(t, err)
-		got, err = d.store.Oldest(t.Context(), d.tenant.DID(), 10)
-		require.NoError(t, err)
-		require.Empty(t, got)
 
 		_, err = d.store.AddStatement(d.tenant.DID(), issue(t, testutil.RandomIssuer(t), 1))
 		require.ErrorIs(t, err, store.ErrInvalidArgument)

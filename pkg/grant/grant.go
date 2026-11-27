@@ -5,13 +5,17 @@
 // derived from the permissions and buckets it was created with. A
 // principal-bound key holds, for each bucket its principal can reach, the set
 // derived from the principal's effective actions on that bucket, and a policy
-// change rewrites it (see Rotator).
+// change rewrites it (see Rotator). [ForKey] issues either kind's set, for a
+// key being created and for one whose grants are issued again.
 package grant
 
 import (
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/s3perm"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/delegation"
@@ -38,6 +42,32 @@ func Issue(issuer ucan.Issuer, key did.DID, subjects []did.DID, actions []string
 			}
 			dels = append(dels, d)
 		}
+	}
+	return dels, nil
+}
+
+// ForKey returns the issuer→key delegations the access key holds, issued
+// afresh by the tenant as issuer. A service key's come from its own
+// permissions and buckets, and policies is not read. A principal-bound key's
+// come from policies, the tenant's bucket policies that name its principal:
+// over each bucket, the delegations for the principal's effective actions
+// there, and none over a bucket whose policy leaves it no action. Only the
+// key's ID, Buckets, Permissions, Principal and ExpiresAt are read.
+func ForKey(issuer ucan.Issuer, key accesskeystore.Record, policies []bucketpolicystore.Record) ([]ucan.Delegation, error) {
+	if key.Principal == nil {
+		return Issue(issuer, key.ID, key.Buckets, key.Permissions, key.ExpiresAt)
+	}
+	var dels []ucan.Delegation
+	for _, p := range policies {
+		eff := bucketpolicy.Effective(&p.Policy, *key.Principal)
+		if len(eff) == 0 {
+			continue
+		}
+		granted, err := Issue(issuer, key.ID, []did.DID{p.Bucket}, eff, key.ExpiresAt)
+		if err != nil {
+			return nil, err
+		}
+		dels = append(dels, granted...)
 	}
 	return dels, nil
 }

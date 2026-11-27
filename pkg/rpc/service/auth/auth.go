@@ -163,6 +163,11 @@ func NewAuthorizer(
 // [store.LockTimeout], and answers from the state they leave. A wait that
 // runs out is [ErrTemporarilyUnavailable].
 //
+// A change submitted after that wait can still commit while Authorize is
+// reading. The tenant's status is therefore read first, before the policies
+// and before the stored grants a handler goes on to read: see the comment
+// at that read.
+//
 // Note that the caller must still check the operation matches the handler's
 // operation, since Authorize is operation-agnostic.
 func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request) (*AuthorizedRequest, error) {
@@ -223,6 +228,23 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, err
 	}
 
+	// The status is read before the policies below and before the key's
+	// stored grants, which a handler reads after Authorize returns, and that
+	// order is what makes the separate reads safe. A status change commits
+	// the status together with the grants it withdraws or issues, so one
+	// that commits between two of these reads can only make the later reads
+	// newer than the status read here. Either way the answer grants no more
+	// than the older status allows:
+	//
+	//   - Read as active, then disabled: the key's stored grants are gone by
+	//     the time they are read, so nothing the key delegates has a chain
+	//     to the bucket. The answer is the one a request that finished just
+	//     before the change would have had, without the key's grants.
+	//   - Read as disabled, then reactivated: the request is refused below,
+	//     whatever grants have been issued since.
+	//
+	// Keep the status read ahead of the others, and keep a status change's
+	// grant writes in the commit that writes the status.
 	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
 	if err != nil {
 		log.Error("looking up tenant", zap.Error(err))
