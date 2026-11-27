@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,23 +38,29 @@ import (
 
 // fakeChanges stands in for the task runner's view of queue-tenant.
 type fakeChanges struct {
-	// pending is what PendingOn returns.
+	// pending is what Pending returns for the subject asked about.
 	pending []taskrunner.TaskID
 	// wait is what WaitAll does, given the ctx it was called with.
 	wait func(ctx context.Context) error
 
 	mu sync.Mutex
-	// asked is the queue and subject of each PendingOn call.
+	// asked is the queue and subject of each Pending call.
 	asked [][2]string
 	// waited is the task IDs of each WaitAll call.
 	waited [][]taskrunner.TaskID
 }
 
-func (f *fakeChanges) PendingOn(_ context.Context, queueName, subject string) ([]taskrunner.TaskID, error) {
+func (f *fakeChanges) Pending(_ context.Context, queueName string, subjects []string, opts ...taskrunner.PendingOption) (map[string][]taskrunner.TaskID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.asked = append(f.asked, [2]string{queueName, subject})
-	return f.pending, nil
+	if len(subjects) != 1 || len(opts) != 0 {
+		return nil, fmt.Errorf("asked for %d subjects with %d options, want one subject and every action", len(subjects), len(opts))
+	}
+	f.asked = append(f.asked, [2]string{queueName, subjects[0]})
+	if len(f.pending) == 0 {
+		return map[string][]taskrunner.TaskID{}, nil
+	}
+	return map[string][]taskrunner.TaskID{subjects[0]: f.pending}, nil
 }
 
 func (f *fakeChanges) WaitAll(ctx context.Context, queueName string, ids ...taskrunner.TaskID) (map[taskrunner.TaskID]taskrunner.Completion, error) {
