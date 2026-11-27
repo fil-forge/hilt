@@ -43,6 +43,20 @@ import (
 // nothing written, and the caller repeats the call.
 const CreateTimeout = 30 * time.Second
 
+// DeleteTimeout is the longest a key deletion waits for its turn on the
+// tenant's queue, with the same outcome as [CreateTimeout].
+const DeleteTimeout = 30 * time.Second
+
+// expiresBy returns when a task waiting at most limit for its turn expires:
+// limit from now, or ctx's deadline if that is sooner.
+func expiresBy(ctx context.Context, limit time.Duration) *time.Time {
+	expires := time.Now().Add(limit)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+		expires = deadline
+	}
+	return &expires
+}
+
 // Service implements S3 access-key operations shared by the REST handlers.
 type Service struct {
 	logger     *zap.Logger
@@ -209,11 +223,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	if err != nil {
 		return accesskeystore.Record{}, "", fmt.Errorf("building the access key's task: %w", err)
 	}
-	expires := time.Now().Add(CreateTimeout)
-	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
-		expires = deadline
-	}
-	spec.Expires = &expires
+	spec.Expires = expiresBy(ctx, CreateTimeout)
 
 	vaultPath := vault.AccessKeyPath(tenantRec.ID, accessKeyID)
 	if err := s.secrets.Write(ctx, vaultPath, signer.Bytes()); err != nil {
@@ -256,13 +266,17 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 // toMicros returns t to the microsecond, the precision a key's row keeps.
 func toMicros(t time.Time) time.Time { return time.UnixMicro(t.UnixMicro()) }
 
-// outcomeUnknown reports whether a key creation that returned err may still
-// create the key. It cannot when the task itself failed, which its handler
-// marks as final, when it expired before it ran, and when the runner refused
-// it for not running. Any other error is the runner's own, from which the
-// task may be left queued until it expires.
+// outcomeUnknown reports whether a task that returned err may still take
+// effect. It cannot when the task itself failed: its handler marks every
+// failure as final, and the runner reports one it read back from the task's
+// row, after another instance ran it, as a [taskrunner.HandlerError]. Nor can
+// it when the task expired before it ran, or the runner refused it for not
+// running. Any other error is the runner's own, from which the task may be
+// left queued until it expires.
 func outcomeUnknown(err error) bool {
-	return !taskrunner.IsPermanent(err) && !errors.Is(err, taskrunner.ErrExpired) && !errors.Is(err, taskrunner.ErrNotStarted)
+	var failed *taskrunner.HandlerError
+	return !taskrunner.IsPermanent(err) && !errors.As(err, &failed) &&
+		!errors.Is(err, taskrunner.ErrExpired) && !errors.Is(err, taskrunner.ErrNotStarted)
 }
 
 // createError maps the outcome of a failed queue-tenant.create-key task to
@@ -366,10 +380,11 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 // returns before the gateway has been told to drop what it cached for the
 // key, and succeeds while the revocation service is down.
 //
-// If ctx ends first the task stays queued and a worker finishes it; the
-// key's vault entry is then left behind, unreachable without the record. A
-// task still waiting for its turn at ctx's deadline is abandoned with
-// nothing written and reported as [ErrConcurrentChange].
+// The task and the vault cleanup run on a context detached from the request,
+// so a client disconnect cannot leave the key deleted with its secret behind.
+// A deletion still waiting for its turn after [DeleteTimeout], or at ctx's
+// deadline if that is sooner, is abandoned with nothing written and reported
+// as [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -389,7 +404,10 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
-	if _, err := s.runner.Run(ctx, tenantqueue.DeleteKeySpec(tenantRec.ID, id)); err != nil {
+	spec := tenantqueue.DeleteKeySpec(tenantRec.ID, id)
+	spec.Expires = expiresBy(ctx, DeleteTimeout)
+	detached := context.WithoutCancel(ctx)
+	if _, err := s.runner.Run(detached, spec); err != nil {
 		if errors.Is(err, taskrunner.ErrExpired) {
 			return ErrConcurrentChange
 		}
@@ -397,7 +415,7 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 	}
 	// The row went first, so a key whose vault entry outlives it is unreachable
 	// rather than present but unusable.
-	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
+	if err := s.secrets.Delete(detached, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
 	s.logger.Info("deleted access key",
