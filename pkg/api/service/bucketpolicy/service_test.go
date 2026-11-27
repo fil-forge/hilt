@@ -1296,9 +1296,10 @@ func TestPolicyWriteDuringBucketDeletion(t *testing.T) {
 }
 
 // TestBucketDeletedBeforeCommit deletes a bucket after a policy task for it
-// has read the bucket and before the task commits. The task's write of the
-// document affects nothing for a bucket that is gone, so nothing is
-// committed, and the task runs again and finds the bucket missing.
+// has read the bucket and before the task commits. The commit fails, so
+// nothing is committed, and the task runs again and finds the bucket
+// missing: a create breaks the policy's foreign key to the bucket, and a
+// removal's conditional delete finds the policy gone with the bucket.
 func TestBucketDeletedBeforeCommit(t *testing.T) {
 	ctx := t.Context()
 	for name, removal := range map[string]bool{"a write": false, "a removal": true} {

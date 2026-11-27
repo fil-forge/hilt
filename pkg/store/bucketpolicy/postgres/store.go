@@ -332,11 +332,6 @@ func (s *Store) LockStatement(bucket did.DID) store.Statement {
 	}
 }
 
-// ownedBucket is the condition, on a statement whose first parameter is the
-// bucket and whose parameter numbered by its verb is the tenant, that the
-// bucket exists and is the tenant's.
-const ownedBucket = `EXISTS (SELECT 1 FROM bucket b WHERE b.id = $1 AND b.tenant_id = $%d)`
-
 // PutStatements inserts when the handler read no policy and updates the row
 // it read otherwise. An insert that meets a row, one committed since the
 // read or one another transaction commits while the insert waits for it,
@@ -348,18 +343,17 @@ func (s *Store) PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument, 
 		cas = store.Statement{
 			SQL: `
 				INSERT INTO bucket_policy (bucket_id, document, etag)
-				SELECT $1::text, $2::jsonb, $3::text
-				WHERE ` + fmt.Sprintf(ownedBucket, 4) + `
+				VALUES ($1, $2, $3)
 				ON CONFLICT (bucket_id) DO NOTHING`,
-			Args: []any{bucket.String(), canonical, etag, tenant.String()},
+			Args: []any{bucket.String(), canonical, etag},
 		}
 	} else {
 		cas = store.Statement{
 			SQL: `
 				UPDATE bucket_policy
 				SET document = $2, etag = $3, updated_at = NOW()
-				WHERE bucket_id = $1 AND etag = $5 AND ` + fmt.Sprintf(ownedBucket, 4),
-			Args: []any{bucket.String(), canonical, etag, tenant.String(), read.ETag},
+				WHERE bucket_id = $1 AND etag = $4`,
+			Args: []any{bucket.String(), canonical, etag, read.ETag},
 		}
 	}
 	index := []store.Statement{clearIndexStatement(bucket)}

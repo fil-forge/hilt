@@ -145,17 +145,17 @@ type Store interface {
 	// policy the task's handler read, nil when the bucket had none.
 	//
 	// cas writes the document on the condition that the stored policy is
-	// still read (the same ETag, or still none) and that the bucket is
-	// the tenant's. It affects no row otherwise, which fails the commit, so
-	// the task runs again and decides from the policy as it is then. index
-	// replaces the bucket's index rows. Callers run [bucketpolicy.Validate]
+	// still read (the same ETag, or still none). It affects no row
+	// otherwise, which fails the commit, so the task runs again and decides
+	// from the policy as it is then. index replaces the bucket's index rows. Callers run [bucketpolicy.Validate]
 	// first, as for [Store.Put].
 	//
 	// The condition on the ETag is there for principal removal, which
 	// rewrites the policies naming the principal it removes outside the
-	// tenant's task queue. The condition on the bucket refuses a bucket of
-	// another tenant, and a bucket deleted since the read, with no row
-	// affected rather than a foreign key's error.
+	// tenant's task queue. A bucket deleted since the read needs no
+	// condition: the policy's foreign key to the bucket fails a create, and
+	// the deletion removed the row a replace would update, so the commit
+	// fails either way and the task runs again and finds the bucket gone.
 	PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument, read *Record) (cas store.Statement, index []store.Statement)
 	// DeleteStatements returns the writes that remove the bucket's policy,
 	// for a task to run in its commit: cas with WriteConditional, then
