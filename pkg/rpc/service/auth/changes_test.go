@@ -10,7 +10,6 @@ import (
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
-	"github.com/fil-forge/hilt/pkg/store"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
@@ -201,8 +200,8 @@ func TestAuthorizeWaitsForTenantChanges(t *testing.T) {
 
 		_, err := az.Authorize(t.Context(), env.provider, env.request())
 		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
-		require.LessOrEqual(t, bound, store.LockTimeout)
-		require.Greater(t, bound, store.LockTimeout-time.Second)
+		require.LessOrEqual(t, bound, auth.PendingChangeWait)
+		require.Greater(t, bound, auth.PendingChangeWait-time.Second)
 	})
 
 	t.Run("a caller that gives up is not told to retry", func(t *testing.T) {

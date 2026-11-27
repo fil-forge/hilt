@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"time"
 )
 
 // Page is a generic type representing a paginated response from the store.
@@ -65,7 +64,3 @@ type Statement struct {
 	// Args are the statement's bound parameters, in order.
 	Args []any
 }
-
-// LockTimeout bounds how long authorization waits for a tenant's pending
-// changes before answering that the service is temporarily unavailable.
-const LockTimeout = 10 * time.Second

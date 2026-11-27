@@ -291,7 +291,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   it (`BucketRegionMismatchError` otherwise).
   Once the request is authenticated and before the tenant's status is read,
   `Authorize` asks the task runner for the tenant's unfinished tasks on
-  `queue-tenant` and waits for all of them, for up to `store.LockTimeout`,
+  `queue-tenant` and waits for all of them, for up to `auth.PendingChangeWait`,
   so no request is answered from a state a queued change is about to
   replace; a wait that runs out is `ErrTemporarilyUnavailable`. Every
   change to what a tenant's keys may do is queued there. The access key is

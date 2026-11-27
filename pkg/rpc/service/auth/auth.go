@@ -188,7 +188,7 @@ func NewAuthorizer(
 // A change to the tenant's authority that is queued or running on the task
 // runner holds the request back (see [WithTenantChanges]): once the request
 // is authenticated, Authorize waits for every unfinished task on
-// queue-tenant for the tenant, for up to [store.LockTimeout], and answers
+// queue-tenant for the tenant, for up to [PendingChangeWait], and answers
 // from the state they leave. A wait that runs out is
 // [ErrTemporarilyUnavailable]. The access key is read before the wait, since
 // it names the tenant and holds the secret the signature is checked with.
@@ -427,12 +427,17 @@ func (a *Authorizer) decide(ctx context.Context, log *zap.Logger, issuer did.DID
 	}, nil
 }
 
+// PendingChangeWait bounds how long authorization waits for a tenant's
+// pending changes before answering that the service is temporarily
+// unavailable.
+const PendingChangeWait = 10 * time.Second
+
 // awaitTenantChanges waits for the tenant's unfinished tasks on queue-tenant,
 // each a change to what the tenant's keys may do, so that what is read after
 // it is the state they leave. With none pending, the usual case, it costs one
 // indexed read. A task that failed
 // has finished and changed nothing, so how each ended is not read. The wait
-// is bounded by [store.LockTimeout], and one that runs out is
+// is bounded by [PendingChangeWait], and one that runs out is
 // [ErrTemporarilyUnavailable]: nothing about the request was decided, and
 // the caller retries.
 func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
@@ -449,12 +454,12 @@ func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, te
 	if len(pending) == 0 {
 		return nil
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, store.LockTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, PendingChangeWait)
 	defer cancel()
 	if _, err := a.changes.WaitAll(waitCtx, tasks.QueueTenant, pending...); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			log.Info("waited out a change to the tenant still pending", zap.Int("tasks", len(pending)))
-			return fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, store.LockTimeout)
+			return fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, PendingChangeWait)
 		}
 		log.Error("waiting for the tenant's pending changes", zap.Error(err))
 		return fmt.Errorf("waiting for the tenant's pending changes: %w", err)
