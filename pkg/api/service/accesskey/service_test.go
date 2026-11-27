@@ -275,7 +275,7 @@ func (d deps) held(t *testing.T, audience did.DID) []ucan.Delegation {
 // owedLinks returns the CIDs of the revocations the tenant owes.
 func (d deps) owedLinks(t *testing.T) []cid.Cid {
 	t.Helper()
-	dels, _, err := d.owed.Oldest(t.Context(), d.tenantID, revocation.Cursor{}, 10_000)
+	dels, err := d.owed.Oldest(t.Context(), d.tenantID, 10_000)
 	require.NoError(t, err)
 	return links(dels)
 }
