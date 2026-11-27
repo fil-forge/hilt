@@ -24,7 +24,6 @@ import (
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
@@ -430,7 +429,7 @@ func TestDelete(t *testing.T) {
 		_, err = env.tenants.GetByExternalID(ctx, "tenant-1")
 		require.NoError(t, err)
 		require.Zero(t, env.directory.deactivations)
-		still, _, err := env.owed.Oldest(ctx, env.tenantID, revocation.Cursor{}, 10)
+		still, err := env.owed.Oldest(ctx, env.tenantID, 10)
 		require.NoError(t, err)
 		require.Len(t, still, len(owed), "the rows stay owed")
 		held, err := delegationpostgres.New(env.pool).ListByAudience(ctx, env.keyID)

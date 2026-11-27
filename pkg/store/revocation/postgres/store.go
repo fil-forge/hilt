@@ -72,49 +72,47 @@ func (s *Store) AddStatement(tenant did.DID, delegations []ucan.Delegation) (sto
 	}, nil
 }
 
-func (s *Store) Oldest(ctx context.Context, tenant did.DID, after revocation.Cursor, limit int) ([]ucan.Delegation, revocation.Cursor, error) {
-	// The zero cursor's time is before every row's, so one query text serves
-	// the first page and the rest, on the (tenant_id, recorded_at, id) index.
+func (s *Store) Oldest(ctx context.Context, tenant did.DID, limit int) ([]ucan.Delegation, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, recorded_at, data FROM revocation_owed
-		WHERE tenant_id = $1 AND (recorded_at, id) > ($2, $3)
+		SELECT data FROM revocation_owed
+		WHERE tenant_id = $1
 		ORDER BY recorded_at, id
-		LIMIT $4
-	`, tenant.String(), after.RecordedAt, after.ID, limit)
+		LIMIT $2
+	`, tenant.String(), limit)
 	if err != nil {
-		return nil, after, fmt.Errorf("reading revocations owed: %w", err)
+		return nil, fmt.Errorf("reading revocations owed: %w", err)
 	}
 	defer rows.Close()
 	var out []ucan.Delegation
-	next := after
 	for rows.Next() {
 		var data []byte
-		if err := rows.Scan(&next.ID, &next.RecordedAt, &data); err != nil {
-			return nil, after, fmt.Errorf("reading revocations owed: %w", err)
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("reading revocations owed: %w", err)
 		}
 		d, err := delegation.Decode(data)
 		if err != nil {
-			return nil, after, fmt.Errorf("decoding a delegation owed a revocation: %w", err)
+			return nil, fmt.Errorf("decoding a delegation owed a revocation: %w", err)
 		}
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, after, fmt.Errorf("reading revocations owed: %w", err)
+		return nil, fmt.Errorf("reading revocations owed: %w", err)
 	}
-	return out, next, nil
+	return out, nil
 }
 
 func (s *Store) Delete(ctx context.Context, ids []cid.Cid) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := s.exec(ctx, s.DeleteStatement(ids)); err != nil {
+	if err := s.exec(ctx, deleteStatement(ids)); err != nil {
 		return fmt.Errorf("deleting %d revocations owed: %w", len(ids), err)
 	}
 	return nil
 }
 
-func (s *Store) DeleteStatement(ids []cid.Cid) store.Statement {
+// deleteStatement is the write Delete makes.
+func deleteStatement(ids []cid.Cid) store.Statement {
 	strs := make([]string, len(ids))
 	for i, id := range ids {
 		strs[i] = id.String()
