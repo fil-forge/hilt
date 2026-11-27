@@ -4,9 +4,10 @@
 // A change to a tenant's authority records the delegations it withdraws as
 // revocations owed and queues one queue-revocation.publish task for the
 // tenant ([PublishSpec]) in the same commit. The task publishes everything
-// the tenant owes, a batch of [BatchSize] at a time, and deletes the rows in
-// its commit. [Drain] is that work, which tenant deletion runs itself before
-// the tenant's DID is deactivated.
+// the tenant owes, a batch of [BatchSize] at a time, deleting each batch's
+// rows once the revocation service has taken it, so an attempt that fails
+// part way keeps what it published. [Drain] is that work, which tenant
+// deletion runs itself before the tenant's DID is deactivated.
 //
 // Publishing is retried for as long as it fails, so an outage of the
 // revocation service delays revocations and loses none. A revocation carries
@@ -115,18 +116,17 @@ type Drained struct {
 }
 
 // Drain publishes every revocation the tenant owes, signed by the tenant, a
-// batch of [BatchSize] at a time, oldest first. After each batch is published
-// it hands the batch's CIDs to remove, which deletes their rows or records
-// the delete for later. Each batch is read after the last row of the one
-// before, so the rows of a batch need not be gone before the next is read. A
-// delegation that has expired needs no revocation and is handed to remove
-// with the rest.
+// batch of [BatchSize] at a time, oldest first. Each batch's rows are deleted
+// as soon as the revocation service has taken it, so the next batch is read
+// from what is left and an attempt that fails part way keeps the batches it
+// published. Deleting a row the revocation service has taken is right
+// whatever happens after: the revocation is out. A delegation that has
+// expired needs no revocation and its row is deleted with the rest.
 //
-// It stops at the first failure, with the batches before it published and
-// handed to remove. It returns [ErrSigningKeyMissing] when a live delegation
-// is owed and the tenant's key is not in the vault; the key is read only
-// then, so a tenant whose key is gone still sheds the rows of delegations
-// that have expired.
+// It stops at the first failure. It returns [ErrSigningKeyMissing] when a
+// live delegation is owed and the tenant's key is not in the vault; the key
+// is read only then, so a tenant whose key is gone still sheds the rows of
+// delegations that have expired.
 func Drain(
 	ctx context.Context,
 	log *zap.Logger,
@@ -134,15 +134,13 @@ func Drain(
 	secrets vault.Vault,
 	publisher grant.RevocationPublisher,
 	tenant did.DID,
-	remove func(ctx context.Context, ids []cid.Cid) error,
 ) (Drained, error) {
 	var (
 		done   Drained
-		after  revocation.Cursor
 		issuer ucan.Issuer
 	)
 	for {
-		batch, next, err := owed.Oldest(ctx, tenant, after, BatchSize)
+		batch, err := owed.Oldest(ctx, tenant, BatchSize)
 		if err != nil {
 			return done, err
 		}
@@ -172,7 +170,7 @@ func Drain(
 				return done, err
 			}
 		}
-		if err := remove(ctx, ids); err != nil {
+		if err := owed.Delete(ctx, ids); err != nil {
 			return done, err
 		}
 		done.Published += len(live)
@@ -180,18 +178,17 @@ func Drain(
 		if len(batch) < BatchSize {
 			return done, nil
 		}
-		after = next
 	}
 }
 
 // runPublish is queue-revocation.publish. It publishes every revocation the
-// subject tenant owes ([Drain]) and deletes the rows in the task's commit.
-// The deletes are not visible until then, which is why the batches are read
-// by cursor.
+// subject tenant owes ([Drain]). It records no write of its own: each batch's
+// rows are deleted as it is published.
 //
-// A publish that fails is retried under the action's retry policy, and
-// leaves every row in place: the retry publishes from the start, and the
-// revocation service records a repeated revocation once. The task fails for
+// A publish that fails is retried under the action's retry policy, and the
+// retry carries on from the rows still owed. A batch published again because
+// its rows were not deleted before a failure is recorded once by the
+// revocation service. The task fails for
 // good when the tenant's signing key is not in the vault: nothing else can
 // sign its revocations, so the rows stay and the copies of the delegations
 // the gateway has cached run out on their own.
@@ -202,10 +199,7 @@ func (q *Queue) runPublish(ctx context.Context, ex *taskrunner.Exec, t taskrunne
 	}
 	log := q.logger.With(zap.Stringer("tenant", tenant), zap.Stringer("task", t.ID))
 
-	done, err := Drain(ctx, log, q.owed, q.secrets, q.publisher, tenant, func(ctx context.Context, ids []cid.Cid) error {
-		st := q.owed.DeleteStatement(ids)
-		return ex.Write(ctx, st.SQL, st.Args...)
-	})
+	done, err := Drain(ctx, log, q.owed, q.secrets, q.publisher, tenant)
 	if errors.Is(err, ErrSigningKeyMissing) {
 		log.Error("revocations cannot be signed: the tenant's signing key is not in the vault")
 		return nil, taskrunner.Permanent(err)

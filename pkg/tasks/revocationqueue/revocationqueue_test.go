@@ -102,19 +102,6 @@ func issue(t *testing.T, tenant ucan.Issuer, n int, expiresAt *time.Time) []ucan
 	return out[:n]
 }
 
-// dedupe returns ids without its repeats.
-func dedupe(ids []cid.Cid) []cid.Cid {
-	seen := map[cid.Cid]bool{}
-	var out []cid.Cid
-	for _, id := range ids {
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
 func links(dels []ucan.Delegation) []cid.Cid {
 	out := make([]cid.Cid, len(dels))
 	for i, d := range dels {
@@ -196,11 +183,11 @@ func TestPublish(t *testing.T) {
 		require.Zero(t, d.count(t))
 	})
 
-	t.Run("a publish that fails part way keeps every row, and the retry starts again", func(t *testing.T) {
+	t.Run("a publish that fails part way keeps the batches it published, and the retry carries on", func(t *testing.T) {
 		d := setup(t)
-		dels := issue(t, d.tenant, revocationqueue.BatchSize+1, nil)
-		// The second request fails once, after the first batch was taken.
-		d.swarf.failOn.Store(2)
+		dels := issue(t, d.tenant, 2*revocationqueue.BatchSize+1, nil)
+		// The third request fails once, after two batches were taken.
+		d.swarf.failOn.Store(3)
 		ids := d.owe(t, dels)
 
 		for _, c := range d.finish(t, ids) {
@@ -210,8 +197,8 @@ func TestPublish(t *testing.T) {
 		for _, b := range d.swarf.Batches() {
 			sizes = append(sizes, len(b))
 		}
-		require.Equal(t, []int{revocationqueue.BatchSize, revocationqueue.BatchSize, 1}, sizes, "the first batch is published again")
-		require.ElementsMatch(t, links(dels), dedupe(d.swarf.Revoked()))
+		require.Equal(t, []int{revocationqueue.BatchSize, revocationqueue.BatchSize, 1}, sizes, "no batch is published twice")
+		require.ElementsMatch(t, links(dels), d.swarf.Revoked())
 		require.Zero(t, d.count(t))
 	})
 

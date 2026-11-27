@@ -24,15 +24,6 @@ type Stats struct {
 	OldestAge time.Duration
 }
 
-// Cursor is a place in a tenant's revocations owed, in the order
-// [Store.Oldest] returns them. The zero Cursor is before the first.
-type Cursor struct {
-	// RecordedAt is when the row at the cursor was recorded.
-	RecordedAt time.Time
-	// ID is the CID string of the delegation at the cursor.
-	ID string
-}
-
 type Store interface {
 	// Add records the delegations as revocations the tenant owes, together or
 	// not at all. One already recorded is left as it is, so a repeat changes
@@ -46,19 +37,13 @@ type Store interface {
 	// refuses.
 	AddStatement(tenant did.DID, delegations []ucan.Delegation) (store.Statement, error)
 	// Oldest returns up to limit of the delegations the tenant owes
-	// revocations for that come after the cursor, the longest recorded first,
-	// and the cursor of the last one returned (after itself when none is).
-	// The order is by recording time and then CID, so a reader that passes
-	// each call's cursor to the next sees every row once, whether or not the
-	// rows it has read are deleted meanwhile.
-	Oldest(ctx context.Context, tenant did.DID, after Cursor, limit int) ([]ucan.Delegation, Cursor, error)
+	// revocations for, the longest recorded first, ordered by recording time
+	// and then CID.
+	Oldest(ctx context.Context, tenant did.DID, limit int) ([]ucan.Delegation, error)
 	// Delete removes the revocations owed for the delegations with the given
 	// CIDs. A CID with no row is ignored. When ctx carries a transaction
 	// (pglock.WithTx) the removal commits with it.
 	Delete(ctx context.Context, ids []cid.Cid) error
-	// DeleteStatement returns the write [Store.Delete] makes, for a task that
-	// removes the rows in its own commit.
-	DeleteStatement(ids []cid.Cid) store.Statement
 	// Stats returns the number of revocations owed across every tenant and
 	// the age of the oldest.
 	Stats(ctx context.Context) (Stats, error)
