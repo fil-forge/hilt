@@ -7,8 +7,7 @@
 // derived from the principal's effective actions on that bucket, and a policy
 // change rewrites it, in the task that writes the policy
 // (pkg/tasks/tenantqueue). [ForKey] issues either kind's set, for a key being
-// created and for one whose grants are issued again. Rotator revokes what a
-// removed principal's keys hold.
+// created and for one whose grants are issued again.
 //
 // The set is narrower while the key's tenant is not active: every issue
 // reduces the key's actions to what the tenant's status keeps

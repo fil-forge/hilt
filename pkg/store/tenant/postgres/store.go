@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgerrcode"
@@ -51,7 +52,7 @@ func (s *Store) Add(ctx context.Context, id did.DID, externalID string, status t
 }
 
 func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.Reader(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, external_id, status, created_at, updated_at
 		FROM tenant
 		WHERE id = $1
@@ -67,7 +68,7 @@ func (s *Store) Get(ctx context.Context, id did.DID) (tenant.Record, error) {
 }
 
 func (s *Store) GetByExternalID(ctx context.Context, externalID string) (tenant.Record, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := pglock.Reader(ctx, s.pool).QueryRow(ctx, `
 		SELECT id, external_id, status, created_at, updated_at
 		FROM tenant
 		WHERE external_id = $1

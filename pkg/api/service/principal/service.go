@@ -4,12 +4,9 @@
 // appears in no UCAN; each key bound to it holds the delegations the policies
 // grant the principal.
 //
-// Removal is the one operation that spans three tables. It first strips the
-// principal from every policy naming it, then takes the principal store's row
-// lock: the callback checks that no policy names the principal again, revokes
-// the delegations of the principal's keys and deletes the keys, and only then
-// does the store mark the row removed and commit. A failure part way leaves the
-// principal with narrower access and a retryable delete.
+// Removal changes what the tenant's keys may do, so it runs as a task on the
+// tenant's queue ([tenantqueue]), behind any other change to the tenant, and
+// the service waits for it.
 //
 // Known errors are in errors.go so handlers can map them to HTTP responses;
 // unexpected failures are returned wrapped for the handler to log.
@@ -20,21 +17,18 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
-	"github.com/fil-forge/hilt/pkg/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
-	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
-	"github.com/fil-forge/ucantone/ucan"
 	"go.uber.org/zap"
 )
 
@@ -46,39 +40,29 @@ const (
 
 // Service implements the principal operations shared by the REST handlers.
 type Service struct {
-	logger      *zap.Logger
-	tenants     tenantstore.Store
-	principals  principalstore.Store
-	policies    bucketpolicystore.Store
-	accessKeys  accesskeystore.Store
-	delegations delegationstore.Store
-	secrets     vault.Vault
-	revocations grant.RevocationPublisher
-	grants      *grant.Rotator
+	logger     *zap.Logger
+	tenants    tenantstore.Store
+	principals principalstore.Store
+	secrets    vault.Vault
+	runner     *taskrunner.Runner
 }
 
-// New constructs the principal service.
+// New constructs the principal service. runner runs the removals, and must
+// have queue-tenant's handlers registered ([tenantqueue.New]) and be started
+// before Delete is called.
 func New(
 	logger *zap.Logger,
 	tenants tenantstore.Store,
 	principals principalstore.Store,
-	policies bucketpolicystore.Store,
-	accessKeys accesskeystore.Store,
-	delegations delegationstore.Store,
 	secrets vault.Vault,
-	revocations grant.RevocationPublisher,
-	grants *grant.Rotator,
+	runner *taskrunner.Runner,
 ) *Service {
 	return &Service{
-		logger:      logger,
-		tenants:     tenants,
-		principals:  principals,
-		policies:    policies,
-		accessKeys:  accessKeys,
-		delegations: delegations,
-		secrets:     secrets,
-		revocations: revocations,
-		grants:      grants,
+		logger:     logger,
+		tenants:    tenants,
+		principals: principals,
+		secrets:    secrets,
+		runner:     runner,
 	}
 }
 
@@ -111,18 +95,14 @@ func (s *Service) Create(ctx context.Context, externalID, principalID string) (p
 	created := true
 	if err := s.principals.Add(ctx, tenantID, principalID); errors.Is(err, store.ErrRecordExists) {
 		created = false
-	} else if errors.Is(err, store.ErrLockTimeout) {
-		// A removal holding the row outlasted the lock timeout; nothing was
-		// recorded and the caller repeats the call.
-		return principalstore.Record{}, false, ErrConcurrentChange
 	} else if err != nil {
 		return principalstore.Record{}, false, fmt.Errorf("recording principal: %w", err)
 	}
 
 	rec, err := s.principals.Get(ctx, tenantID, principalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
-		// The read is unlocked, so a removal committing between the record
-		// and the read is what removed it; the caller repeats the call.
+		// A removal committing between the record and the read is what
+		// removed it; the caller repeats the call.
 		s.logger.Info("principal creation lost a race with a removal",
 			zap.Stringer("tenant", tenantID), zap.String("principal", principalID))
 		return principalstore.Record{}, false, ErrConcurrentChange
@@ -157,157 +137,62 @@ func (s *Service) Get(ctx context.Context, externalID, principalID string) (prin
 	return s.principal(ctx, tenantID, principalID)
 }
 
-// Delete removes the principal, its access to every bucket, and its keys, in
-// two steps. It first revokes the delegations of the principal's keys and
-// strips the principal from every policy naming it, without locking the
-// principal row: a policy write's commit holds its bucket's policy lock while
-// it share-locks the principals its document names, so a removal that held
-// the row while it waited for a bucket would wait on that commit as it
-// waited on the removal. The store then holds the row locked while
-// [Service.remove] finishes, so an authorize request for the principal waits
-// for the outcome. It is idempotent: a principal that is already gone is a
-// no-op.
+// DeleteTimeout is the longest a principal removal waits for its turn on the
+// tenant's queue. A removal that has not started by then is abandoned with
+// nothing written, and the caller repeats the call.
+const DeleteTimeout = 30 * time.Second
+
+// Delete removes the principal, its keys, and its place in every bucket
+// policy naming it. The change is a queue-tenant.remove-principal task
+// ([tenantqueue]), which Delete waits for: in one commit the principal leaves
+// every statement naming it, the other principals' grants over each
+// rewritten policy's bucket change as a policy write changes them, every
+// grant of the principal's keys leaves the delegation store and is recorded
+// as a revocation owed, the keys are deleted and the principal is
+// tombstoned. From that commit no request is authorized with the keys. The
+// revocations are published after it, by the task the commit queues, and
+// retried until the revocation service takes them, so Delete returns before
+// the gateway has been told to drop what it cached for the keys, and
+// succeeds while the revocation service is down. The keys' secrets are then
+// removed from the vault, best effort. It is idempotent: a principal that is
+// already gone is a no-op.
+//
+// The task and the vault cleanup run on a context detached from the request,
+// so a client disconnect cannot leave the keys deleted with their secrets
+// behind. A removal still waiting for its turn after [DeleteTimeout], or at
+// ctx's deadline if that is sooner, is abandoned with nothing written and
+// reported as [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, principalID string) error {
 	tenantID, err := s.tenant(ctx, externalID)
 	if err != nil {
 		return err
 	}
-	err = s.grants.Revoke(ctx, tenantID, principalID)
-	if err == nil {
-		err = s.stripFromPolicies(ctx, tenantID, principalID)
+	spec := tenantqueue.RemovePrincipalSpec(tenantID, principalID)
+	expires := time.Now().Add(DeleteTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+		expires = deadline
 	}
-	if err == nil {
-		err = s.principals.Tombstone(ctx, tenantID, principalID, func(ctx context.Context) error {
-			return s.remove(ctx, tenantID, principalID)
-		})
-	}
+	spec.Expires = &expires
+	ctx = context.WithoutCancel(ctx)
+	res, err := s.runner.Run(ctx, spec)
 	if err != nil {
-		// A lock the removal waited on, a policy edited between the listing
-		// and the rewrite, or a policy naming the principal again by the time
-		// its row is locked, means another writer got there first. Each step is
-		// idempotent, so the caller repeats the call. The removal's batch
-		// deadline ([grant.BatchTimeout]) is below the stores' lock timeout,
-		// so a wait that hits it surfaces as the context error rather than
-		// [store.ErrLockTimeout]; the caller's own deadline running out is
-		// not that case, so it is mapped only while the caller's context lives.
-		if store.Contended(ctx, err) || errors.Is(err, store.ErrPreconditionFailed) || errors.Is(err, errNamedAgain) {
-			s.logger.Info("principal removal lost a race with a concurrent write",
-				zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Error(err))
+		if errors.Is(err, taskrunner.ErrExpired) {
 			return ErrConcurrentChange
 		}
 		return fmt.Errorf("deleting principal %q: %w", principalID, err)
 	}
-	s.logger.Info("deleted principal", zap.Stringer("tenant", tenantID), zap.String("principal", principalID))
-	return nil
-}
-
-// errNamedAgain is a policy naming the principal once its row is locked: a
-// write named it after [Service.stripFromPolicies] ran.
-var errNamedAgain = errors.New("a policy names the principal again")
-
-// remove runs while the principal row is locked. A write naming the principal
-// now waits for the outcome, so it checks that no policy names the principal,
-// then revokes what the principal's keys hold and deletes their rows under the
-// keys' delegation locks, in one write. A key creation commits its key and
-// the key's grants together, after share-locking the principal's row: one
-// that commits first is listed and revoked here, and one that waits on the
-// row finds the principal removed and creates nothing. Nothing here waits on
-// a bucket. The revocations cover everything the
-// removal changes, so the policy and key writes it makes publish none of their
-// own. It runs under the principal row's lock, so the whole of it is bounded at
-// [grant.BatchTimeout], below the wait a share-locked reader gives the row.
-func (s *Service) remove(ctx context.Context, tenantID did.DID, principalID string) error {
-	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
-	defer cancel()
-	recs, err := s.policies.ListByPrincipal(ctx, tenantID, principalID)
+	keys, err := tenantqueue.DecodeRemovePrincipalResult(res)
 	if err != nil {
-		return fmt.Errorf("listing the principal's policies: %w", err)
-	}
-	for _, rec := range recs {
-		if _, named := bucketpolicy.RemovePrincipal(rec.Policy, principalID); named {
-			return fmt.Errorf("bucket %s: %w", rec.Bucket, errNamedAgain)
-		}
-	}
-	keys, err := s.accessKeys.ListByTenant(ctx, tenantID, accesskeystore.WithPrincipal(principalID))
-	if err != nil {
-		return fmt.Errorf("listing the principal's access keys: %w", err)
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
-	if err != nil {
-		return err
-	}
-	audiences := make([]did.DID, len(keys))
-	for i, key := range keys {
-		audiences[i] = key.ID
-	}
-	log := s.logger.With(zap.Stringer("tenant", tenantID), zap.String("principal", principalID))
-	err = s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-		var all []ucan.Delegation
-		for _, key := range keys {
-			all = append(all, current[key.ID]...)
-		}
-		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, all); err != nil {
-			return nil, err
-		}
-		for _, key := range keys {
-			if err := s.accessKeys.Delete(ctx, key.ID); err != nil {
-				return nil, fmt.Errorf("deleting access key %s: %w", key.ID, err)
-			}
-		}
-		return nil, nil
-	})
-	if err != nil {
-		return err
+		return fmt.Errorf("deleting principal %q: %w", principalID, err)
 	}
 	// The rows went first, so a key whose vault entry outlives it is
-	// unreachable rather than unusable-but-present.
+	// unreachable rather than present but unusable.
 	for _, key := range keys {
-		if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantID, key.ID)); err != nil {
-			s.logger.Warn("removing access key from vault",
-				zap.Stringer("access_key", key.ID),
-				zap.Error(err),
-			)
+		if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantID, key)); err != nil {
+			s.logger.Warn("removing access key from vault", zap.Stringer("access_key", key), zap.Error(err))
 		}
 	}
-	return nil
-}
-
-// stripFromPolicies removes the principal from every statement naming it,
-// deleting statements left with no principal and policies left with no
-// statement. Each write carries the ETag the listing read, so a policy edited
-// concurrently fails the removal rather than reverting it. Policies that
-// reach the principal only through the wildcard are left alone: the wildcard
-// names the tenant's principals, and this one is about to stop being one.
-func (s *Service) stripFromPolicies(ctx context.Context, tenantID did.DID, principalID string) error {
-	recs, err := s.policies.ListByPrincipal(ctx, tenantID, principalID)
-	if err != nil {
-		return fmt.Errorf("listing the principal's policies: %w", err)
-	}
-	for _, rec := range recs {
-		doc, changed := bucketpolicy.RemovePrincipal(rec.Policy, principalID)
-		if !changed {
-			continue
-		}
-		etag := rec.ETag
-		if len(doc.Statements) == 0 {
-			if err := s.policies.Delete(ctx, rec.Bucket, etag, nil); err != nil && !errors.Is(err, store.ErrRecordNotFound) {
-				return fmt.Errorf("deleting the policy of bucket %s: %w", rec.Bucket, err)
-			}
-			continue
-		}
-		if _, err := s.policies.Put(ctx, bucketpolicystore.Input{
-			Bucket:      rec.Bucket,
-			Tenant:      tenantID,
-			Policy:      doc,
-			IfMatch:     &etag,
-			Conditional: true,
-		}, nil); err != nil {
-			return fmt.Errorf("rewriting the policy of bucket %s: %w", rec.Bucket, err)
-		}
-	}
+	s.logger.Info("deleted principal", zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Int("access_keys", len(keys)))
 	return nil
 }
 

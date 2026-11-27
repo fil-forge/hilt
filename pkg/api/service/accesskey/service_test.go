@@ -20,8 +20,6 @@ import (
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/principal"
@@ -123,12 +121,16 @@ func (s disablingTenants) GetByExternalID(ctx context.Context, externalID string
 
 // removingPrincipals removes each principal right after the service looks it
 // up, so the task finds it gone.
-type removingPrincipals struct{ principal.Store }
+type removingPrincipals struct {
+	principal.Store
+	pool *pgxpool.Pool
+}
 
-func (s removingPrincipals) Get(ctx context.Context, tenantID did.DID, id string, opts ...store.ReadOption) (principal.Record, error) {
-	rec, err := s.Store.Get(ctx, tenantID, id, opts...)
+func (s removingPrincipals) Get(ctx context.Context, tenantID did.DID, id string) (principal.Record, error) {
+	rec, err := s.Store.Get(ctx, tenantID, id)
 	if err == nil {
-		err = s.Tombstone(ctx, tenantID, id, nil)
+		st := s.TombstoneStatement(tenantID, id)
+		_, err = s.pool.Exec(ctx, st.SQL, st.Args...)
 	}
 	return rec, err
 }
@@ -214,7 +216,7 @@ func setupWith(t *testing.T, b backend) deps {
 	ctx := t.Context()
 	pool := b.pool
 	tenants, accessKeys, principals := tenantpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool)
-	buckets, delegations, policies := bucketpostgres.New(pool), delegationpostgres.New(pool), bucketpolicypostgres.New(pool)
+	buckets, delegations := bucketpostgres.New(pool), delegationpostgres.New(pool)
 	secrets := &recordingVault{Vault: vaultmemory.New()}
 
 	signer, err := secp256k1.Generate()
@@ -234,10 +236,9 @@ func setupWith(t *testing.T, b backend) deps {
 	require.NoError(t, err)
 	require.NoError(t, delegations.PutBatch(ctx, []ucan.Delegation{root}))
 	// alice may read bucket-a; her keys hold the matching delegations.
-	_, err = policies.Put(ctx, bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: s3bkt.PolicyDocument{
+	testutil.PutPolicy(t, pool, tenantID, bucketID, s3bkt.PolicyDocument{
 		Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}},
-	}, Conditional: true}, nil)
-	require.NoError(t, err)
+	})
 
 	swarf := &heldSwarf{}
 	var wrap []func(*tenantqueue.Deps)
@@ -637,9 +638,9 @@ type cancellingKeys struct {
 	cancel context.CancelFunc
 }
 
-func (s *cancellingKeys) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (accesskeystore.Record, error) {
+func (s *cancellingKeys) Get(ctx context.Context, id did.DID) (accesskeystore.Record, error) {
 	s.cancel()
-	return s.Store.Get(ctx, id, opts...)
+	return s.Store.Get(ctx, id)
 }
 
 // blockingTenants blocks the first Get until release is closed, having
@@ -749,7 +750,7 @@ func TestCreatePrincipalBound(t *testing.T) {
 	t.Run("rejects a principal removed after the lookup", func(t *testing.T) {
 		// The service's own check passes, so the refusal is the task's.
 		b := newBackend(t)
-		b.principals = removingPrincipals{b.principals}
+		b.principals = removingPrincipals{Store: b.principals, pool: b.pool}
 		d := setupWith(t, b)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "laptop", nil, nil, new("alice"), nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)

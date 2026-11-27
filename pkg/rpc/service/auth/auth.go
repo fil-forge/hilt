@@ -93,6 +93,18 @@ type Authorizer struct {
 	// changes finds and waits for the queued changes to a tenant's authority.
 	// Nil skips the wait.
 	changes TenantChanges
+	// snapshots opens the read snapshot a decision is read in. Nil reads
+	// each record on its own.
+	snapshots Snapshots
+}
+
+// Snapshots is what [Authorizer.Authorize] needs to read everything it
+// decides from one state of the database. [*pglock.Snapshots] satisfies it.
+type Snapshots interface {
+	// Read runs fn with ctx carrying a read-only snapshot that every store
+	// read made with that ctx joins, so that a write committing while fn
+	// runs is seen by none of them.
+	Read(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 // TenantChanges is what [Authorizer.Authorize] needs of the task runner to
@@ -115,6 +127,12 @@ type Option func(*Authorizer)
 // unfinished tasks on queue-tenant before it reads the tenant's state.
 func WithTenantChanges(changes TenantChanges) Option {
 	return func(a *Authorizer) { a.changes = changes }
+}
+
+// WithSnapshots makes [Authorizer.Authorize] and [Authorizer.ReadSnapshot]
+// read in one snapshot of the database.
+func WithSnapshots(snapshots Snapshots) Option {
+	return func(a *Authorizer) { a.snapshots = snapshots }
 }
 
 // NewAuthorizer constructs the shared authorization service.
@@ -167,30 +185,22 @@ func NewAuthorizer(
 // returned are the credential's less those the tenant does not keep, so the
 // set a gateway caches lets it refuse the same requests itself.
 //
-// The key, the principal and the policy rows are read with a share lock, so
-// a request arriving while one of the writes that hold those rows locked is
-// committing waits for the outcome and is answered from the new state. Those
-// writes are the ones that run outside the tenant's task queue. A principal
-// removal holds its principal's row while it revokes and deletes the
-// principal's keys, whose rows it holds from their deletion on. A bucket
-// deletion holds the bucket's policy lock while it revokes the bucket's
-// grants and deletes the bucket.
-//
 // A change to the tenant's authority that is queued or running on the task
-// runner holds the request back too (see [WithTenantChanges]), a policy
-// write among them: once the
-// request is authenticated, and before the tenant's status is read, Authorize
-// waits for every unfinished task on queue-tenant for the tenant, for up to
-// [store.LockTimeout], and answers from the state they leave. The access key
-// is read before the wait, since it names the tenant, so a request that
-// waited reads it again and is refused when a change it waited for deleted
-// the key ([ErrUnknownAccessKey]). A wait that runs out is
-// [ErrTemporarilyUnavailable].
+// runner holds the request back (see [WithTenantChanges]): once the request
+// is authenticated, Authorize waits for every unfinished task on
+// queue-tenant for the tenant, for up to [store.LockTimeout], and answers
+// from the state they leave. A wait that runs out is
+// [ErrTemporarilyUnavailable]. The access key is read before the wait, since
+// it names the tenant and holds the secret the signature is checked with.
 //
-// A change submitted after that wait can still commit while Authorize is
-// reading. The tenant's status is therefore read first, before the policies
-// and before the stored grants a handler goes on to read: see the comment
-// at that read.
+// Everything the decision rests on is then read in one snapshot of the
+// database (see [WithSnapshots]): the access key again, so a key a change
+// deleted meanwhile is [ErrUnknownAccessKey], the tenant, the provider, the
+// buckets, the principal and the policies. A change submitted after the wait
+// can commit while Authorize reads, and is seen by none of those reads, so
+// the decision is the one the state before it gives, whole. The key's stored
+// grants, which a handler reads after Authorize returns, are read outside
+// the snapshot: see the comment at the status read.
 //
 // Note that the caller must still check the operation matches the handler's
 // operation: Authorize decides any operation, and a handler serves one.
@@ -213,7 +223,7 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrInvalidAccessKeyID
 	}
 
-	akRec, err := a.accessKeys.Get(ctx, accessKeyID, store.WithShareLock())
+	akRec, err := a.accessKeys.Get(ctx, accessKeyID)
 	if errors.Is(err, store.ErrRecordNotFound) {
 		log.Debug("rejecting unknown access key")
 		return nil, ErrUnknownAccessKey
@@ -248,34 +258,57 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrSignatureExpired
 	}
 
-	waited, err := a.awaitTenantChanges(ctx, log, akRec.Tenant)
+	if err := a.awaitTenantChanges(ctx, log, akRec.Tenant); err != nil {
+		return nil, err
+	}
+
+	var out *AuthorizedRequest
+	err = a.ReadSnapshot(ctx, func(ctx context.Context) error {
+		var err error
+		out, err = a.decide(ctx, log, issuer, req, sr, accessKeyID)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	if waited {
-		// The key was read before the wait, to learn which tenant to wait
-		// for, and a change the request waited for may have deleted it. The
-		// request is decided on the key as it is now.
-		akRec, err = a.accessKeys.Get(ctx, accessKeyID, store.WithShareLock())
-		if errors.Is(err, store.ErrRecordNotFound) {
-			log.Debug("rejecting an access key deleted while the request waited")
-			return nil, ErrUnknownAccessKey
-		} else if err != nil {
-			return nil, lookupError(log, "access key", err)
-		}
-		if akRec.ExpiresAt != nil && time.Now().After(*akRec.ExpiresAt) {
-			log.Debug("rejecting expired access key", zap.Timep("expires_at", akRec.ExpiresAt))
-			return nil, ErrAccessKeyExpired
-		}
+	return out, nil
+}
+
+// ReadSnapshot runs fn with ctx carrying one read snapshot of the database,
+// which every store read made with that ctx joins (see [WithSnapshots]).
+// Without snapshots it runs fn with ctx as it is.
+func (a *Authorizer) ReadSnapshot(ctx context.Context, fn func(ctx context.Context) error) error {
+	if a.snapshots == nil {
+		return fn(ctx)
+	}
+	return a.snapshots.Read(ctx, fn)
+}
+
+// decide is the part of [Authorizer.Authorize] that follows authentication
+// and the wait, reading through ctx, which carries the read snapshot.
+func (a *Authorizer) decide(ctx context.Context, log *zap.Logger, issuer did.DID, req s3.Request, sr *sigv4.SignedRequest, accessKeyID did.DID) (*AuthorizedRequest, error) {
+	// The key was read before the wait, to learn which tenant to wait for,
+	// and a change since may have deleted it. The request is decided on the
+	// key as the snapshot has it.
+	akRec, err := a.accessKeys.Get(ctx, accessKeyID)
+	if errors.Is(err, store.ErrRecordNotFound) {
+		log.Debug("rejecting an access key deleted before the decision")
+		return nil, ErrUnknownAccessKey
+	} else if err != nil {
+		return nil, lookupError(log, "access key", err)
+	}
+	if akRec.ExpiresAt != nil && time.Now().After(*akRec.ExpiresAt) {
+		log.Debug("rejecting expired access key", zap.Timep("expires_at", akRec.ExpiresAt))
+		return nil, ErrAccessKeyExpired
 	}
 
-	// The status is read before the policies below and before the key's
-	// stored grants, which a handler reads after Authorize returns, and that
-	// order is what makes the separate reads safe. A status change commits
-	// the status together with the grants it withdraws or issues, so one
-	// that commits between two of these reads can only make the later reads
-	// newer than the status read here. Either way the answer grants no more
-	// than the older status allows:
+	// The status, and everything else decide reads, is read in the snapshot,
+	// so a change that commits while decide runs leaves the decision as the
+	// state before it gives. The key's stored grants are read by the handler
+	// after Authorize returns, outside the snapshot, and so may be newer
+	// than the status. A status change commits the status together with the
+	// grants it withdraws or issues, so the grants can only be newer, and
+	// the answer grants no more than the older status allows:
 	//
 	//   - Read as active, then disabled: the key's stored grants are gone by
 	//     the time they are read, so nothing the key delegates has a chain
@@ -296,8 +329,8 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	//     ([s3perm.KeptWhenWriteLocked]): the gateway holds the full set
 	//     until it asks again.
 	//
-	// Keep the status read ahead of the others, and keep a status change's
-	// grant writes in the commit that writes the status.
+	// Keep the status read no later than the handler's grant reads, and keep
+	// a status change's grant writes in the commit that writes the status.
 	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
 	if err != nil {
 		log.Error("looking up tenant", zap.Error(err))
@@ -396,38 +429,37 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 
 // awaitTenantChanges waits for the tenant's unfinished tasks on queue-tenant,
 // each a change to what the tenant's keys may do, so that what is read after
-// it is the state they leave. It reports whether there was anything to wait
-// for, in which case what the caller read before it may have changed. With
-// none pending, the usual case, it costs one indexed read. A task that failed
+// it is the state they leave. With none pending, the usual case, it costs one
+// indexed read. A task that failed
 // has finished and changed nothing, so how each ended is not read. The wait
 // is bounded by [store.LockTimeout], and one that runs out is
 // [ErrTemporarilyUnavailable]: nothing about the request was decided, and
 // the caller retries.
-func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, tenantID did.DID) (bool, error) {
+func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
 	if a.changes == nil {
-		return false, nil
+		return nil
 	}
 	subject := tenantID.String()
 	byTenant, err := a.changes.Pending(ctx, tasks.QueueTenant, []string{subject})
 	pending := byTenant[subject]
 	if err != nil {
 		log.Error("looking up the tenant's pending changes", zap.Error(err))
-		return false, fmt.Errorf("looking up the tenant's pending changes: %w", err)
+		return fmt.Errorf("looking up the tenant's pending changes: %w", err)
 	}
 	if len(pending) == 0 {
-		return false, nil
+		return nil
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, store.LockTimeout)
 	defer cancel()
 	if _, err := a.changes.WaitAll(waitCtx, tasks.QueueTenant, pending...); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			log.Info("waited out a change to the tenant still pending", zap.Int("tasks", len(pending)))
-			return true, fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, store.LockTimeout)
+			return fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, store.LockTimeout)
 		}
 		log.Error("waiting for the tenant's pending changes", zap.Error(err))
-		return true, fmt.Errorf("waiting for the tenant's pending changes: %w", err)
+		return fmt.Errorf("waiting for the tenant's pending changes: %w", err)
 	}
-	return true, nil
+	return nil
 }
 
 // authorizeOperation decides what the credential may do: its own permission
@@ -483,13 +515,11 @@ func (a *Authorizer) authorizeOperation(
 	principalID := *akRec.Principal
 	log = log.With(zap.String("principal", principalID))
 
-	// The share lock makes the read wait on a removal of this principal that is
-	// committing, so the request is answered from the settled state.
-	if _, err := a.principals.Get(ctx, tenantRec.ID, principalID, store.WithShareLock()); err != nil {
+	if _, err := a.principals.Get(ctx, tenantRec.ID, principalID); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
-			// The key outlived its principal, which removal deletes it with. It
-			// is on its way out; report it as the unknown credential it is about
-			// to be.
+			// A principal's removal deletes its keys in the same commit, so a
+			// key that outlives its principal is not one any write leaves;
+			// report it as the unknown credential it should be.
 			log.Debug("rejecting access key whose principal is gone")
 			return nil, nil, nil, ErrUnknownAccessKey
 		}
@@ -546,7 +576,7 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, prov 
 	if err != nil {
 		return nil, nil, err
 	}
-	eff, _, err := a.effectiveActions(ctx, log, principalID, b.ID)
+	eff, err := a.effectiveActions(ctx, log, principalID, b.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -567,54 +597,38 @@ func (a *Authorizer) principalAccess(ctx context.Context, log *zap.Logger, prov 
 }
 
 // EffectiveActions computes the actions the tenant's principal holds on the
-// bucket, for a caller that has resolved both: the principal is read with a
-// share lock, so a request arriving while it is being removed waits for the
-// outcome, and a removed principal is [ErrUnknownAccessKey], the key bound to
-// it being on its way out; the policy is read the same way. A wait the store
-// gave up on is [ErrTemporarilyUnavailable]. An empty set is a bucket the
-// principal cannot reach.
-//
-// It also returns the ETag of the policy the actions came from, so a caller
-// that goes on to read something the same policy write touches can tell
-// whether the two came from one revision. A bucket with no policy reports "".
-func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, string, error) {
+// bucket, for a caller that has resolved both. A removed principal is
+// [ErrUnknownAccessKey], the key bound to it being one no write leaves. An
+// empty set is a bucket the principal cannot reach. A caller that reads
+// anything else to go with the answer reads it in the same snapshot
+// ([Authorizer.ReadSnapshot]).
+func (a *Authorizer) EffectiveActions(ctx context.Context, tenantID did.DID, principalID string, bucketID did.DID) ([]string, error) {
 	log := a.logger.With(zap.Stringer("tenant", tenantID), zap.String("principal", principalID), zap.Stringer("bucket", bucketID))
-	if _, err := a.principals.Get(ctx, tenantID, principalID, store.WithShareLock()); err != nil {
+	if _, err := a.principals.Get(ctx, tenantID, principalID); err != nil {
 		if errors.Is(err, store.ErrRecordNotFound) {
-			return nil, "", fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
+			return nil, fmt.Errorf("%w: its principal is gone", ErrUnknownAccessKey)
 		}
-		return nil, "", lookupError(log, "principal", err)
+		return nil, lookupError(log, "principal", err)
 	}
 	return a.effectiveActions(ctx, log, principalID, bucketID)
 }
 
 // effectiveActions computes the actions the principal holds on a bucket from
-// that bucket's policy, which is read with a share lock so a request arriving
-// while the bucket is being deleted, which holds the policy's lock while it
-// revokes the bucket's grants, waits for the outcome. Authorize waits for a
-// policy write on the tenant's queue before it gets here. A bucket with no
-// policy grants nothing, and reports no ETag.
-func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, string, error) {
+// that bucket's policy. A bucket with no policy grants nothing.
+func (a *Authorizer) effectiveActions(ctx context.Context, log *zap.Logger, principalID string, bucketID did.DID) ([]string, error) {
 	var doc *s3bkt.PolicyDocument
-	var etag string
-	rec, err := a.policies.Get(ctx, bucketID, store.WithShareLock())
+	rec, err := a.policies.Get(ctx, bucketID)
 	if err == nil {
-		doc, etag = &rec.Policy, rec.ETag
+		doc = &rec.Policy
 	} else if !errors.Is(err, store.ErrRecordNotFound) {
-		return nil, "", lookupError(log, "bucket policy", err)
+		return nil, lookupError(log, "bucket policy", err)
 	}
-	return bucketpolicy.Effective(doc, principalID), etag, nil
+	return bucketpolicy.Effective(doc, principalID), nil
 }
 
-// lookupError reports a failed share-locked read of the named record. A wait
-// the store gave up on, behind a write still committing, is
-// [ErrTemporarilyUnavailable], wrapping the store's timeout, and the caller
-// retries; anything else is an internal failure and is logged as such.
+// lookupError reports a failed read of the named record: an internal
+// failure, logged as such.
 func lookupError(log *zap.Logger, what string, err error) error {
-	if errors.Is(err, store.ErrLockTimeout) {
-		log.Info("share-locked read waited out a write in flight", zap.String("record", what), zap.Error(err))
-		return fmt.Errorf("%w: looking up %s: %w", ErrTemporarilyUnavailable, what, err)
-	}
 	log.Error("looking up "+what, zap.Error(err))
 	return fmt.Errorf("looking up %s: %w", what, err)
 }

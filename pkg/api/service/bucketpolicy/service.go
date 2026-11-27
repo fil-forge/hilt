@@ -99,12 +99,12 @@ func IfNoneMatch(v string) Condition { return Condition{Negate: true, Match: v} 
 
 // WriteOption configures a [Service.Write]. Without one the write is
 // unconditional, as a PutBucketPolicy without If-Match or If-None-Match is.
-type WriteOption func(*bucketpolicystore.Input) error
+type WriteOption func(*tenantqueue.PolicyCondition) error
 
 // WithCondition makes the write check c. A second condition on the same
 // write, or a negated one other than "*", is [ErrInvalidPrecondition].
 func WithCondition(c Condition) WriteOption {
-	return func(in *bucketpolicystore.Input) error {
+	return func(in *tenantqueue.PolicyCondition) error {
 		if in.Conditional {
 			return fmt.Errorf("a write takes one condition: %w", ErrInvalidPrecondition)
 		}
@@ -147,20 +147,13 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 	if err := bucketpolicy.Validate(doc, bucketName, func(p string) bool { return slices.Contains(tenantPrincipals, p) }); err != nil {
 		return "", false, err
 	}
-	in := bucketpolicystore.Input{
-		Bucket: bucketID,
-		Tenant: tenantID,
-		Policy: doc,
-	}
+	var cond tenantqueue.PolicyCondition
 	for _, opt := range opts {
-		if err := opt(&in); err != nil {
+		if err := opt(&cond); err != nil {
 			return "", false, err
 		}
 	}
-	spec, err := tenantqueue.PutPolicySpec(tenantID, bucketID, bucketName, doc, tenantqueue.PolicyCondition{
-		Conditional: in.Conditional,
-		IfMatch:     in.IfMatch,
-	})
+	spec, err := tenantqueue.PutPolicySpec(tenantID, bucketID, bucketName, doc, cond)
 	if err != nil {
 		return "", false, fmt.Errorf("building the task of the policy of bucket %q: %w", bucketName, err)
 	}

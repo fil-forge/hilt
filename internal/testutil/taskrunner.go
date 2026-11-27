@@ -19,6 +19,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
+	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -102,24 +103,52 @@ func AwaitPublished(t *testing.T, r *taskrunner.Runner, tenant did.DID) {
 }
 
 // BeforePolicyCommit returns a wrap for [StartServiceTasks] that calls before
-// on every pass of a queue-tenant.put-policy or queue-tenant.delete-policy
-// handler, once the handler has read everything it reads and before it
-// records its first write. What before does therefore lands between the
-// handler's reads and the task's commit.
+// on every pass of a queue-tenant handler that writes or removes a policy
+// (put-policy, delete-policy, and remove-principal for each policy it
+// rewrites), once the handler has read everything it reads for that policy
+// and before it records any write. What before does therefore lands between
+// the handler's reads and the task's commit.
 func BeforePolicyCommit(before func()) func(*tenantqueue.Deps) {
 	return func(deps *tenantqueue.Deps) {
 		deps.Policies = hookedPolicies{Store: deps.Policies, before: before}
 	}
 }
 
-// hookedPolicies runs before when a handler asks for the statement that
-// opens its commit, the first write a policy task records.
+// hookedPolicies runs before when a handler asks for the statements that
+// write or remove a policy, which it builds before recording any write.
 type hookedPolicies struct {
 	bucketpolicy.Store
 	before func()
 }
 
-func (h hookedPolicies) LockStatement(bucket did.DID) store.Statement {
+func (h hookedPolicies) PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument) (store.Statement, []store.Statement) {
 	h.before()
-	return h.Store.LockStatement(bucket)
+	return h.Store.PutStatements(tenant, bucket, doc)
+}
+
+func (h hookedPolicies) DeleteStatements(bucket did.DID) (store.Statement, store.Statement) {
+	h.before()
+	return h.Store.DeleteStatements(bucket)
+}
+
+// PutPolicy stores doc as the policy of the tenant's bucket, with the
+// statements a policy task's commit runs, and returns its ETag. It grants and
+// revokes nothing: it is for a test that seeds a policy beside grants it
+// stores itself.
+func PutPolicy(t *testing.T, pool *pgxpool.Pool, tenant, bucket did.DID, doc s3bkt.PolicyDocument) string {
+	t.Helper()
+	ctx := t.Context()
+	put, index := bucketpolicypostgres.New(pool).PutStatements(tenant, bucket, doc)
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, put.SQL, put.Args...)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected(), "the bucket is not the tenant's")
+	for _, st := range index {
+		_, err := tx.Exec(ctx, st.SQL, st.Args...)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit(ctx))
+	return s3bkt.ETag(doc)
 }

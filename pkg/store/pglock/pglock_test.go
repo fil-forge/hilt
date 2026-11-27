@@ -106,3 +106,49 @@ func TestAdvisoryAllHoldsEveryKey(t *testing.T) {
 	require.NoError(t, tx.Commit(ctx))
 	require.Equal(t, map[string]bool{"a": false, "b": false, "c": false}, heldAll())
 }
+
+// Every read made through a read snapshot's ctx sees the database as it was
+// at the snapshot's first read: a write committing between two of them is
+// seen by neither, and a read made outside the snapshot sees it.
+func TestReadSnapshot(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS pglock_snapshot_test (id TEXT PRIMARY KEY)`)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `INSERT INTO pglock_snapshot_test (id) VALUES ('before')`)
+	require.NoError(t, err)
+	count := func(ctx context.Context) int {
+		var n int
+		require.NoError(t, pglock.Reader(ctx, pool).QueryRow(ctx, `SELECT count(*) FROM pglock_snapshot_test`).Scan(&n))
+		return n
+	}
+
+	var first, second, outside int
+	require.NoError(t, pglock.NewSnapshots(pool).Read(ctx, func(ctx context.Context) error {
+		first = count(ctx)
+		_, err := pool.Exec(context.Background(), `INSERT INTO pglock_snapshot_test (id) VALUES ('during')`)
+		require.NoError(t, err)
+		second = count(ctx)
+		outside = count(context.Background())
+
+		// A snapshot opened inside one runs in it.
+		return pglock.ReadSnapshot(ctx, pool, func(ctx context.Context) error {
+			require.Equal(t, 1, count(ctx))
+			return nil
+		})
+	}))
+	require.Equal(t, 1, first)
+	require.Equal(t, 1, second, "a write committed after the first read is not seen")
+	require.Equal(t, 2, outside, "a read outside the snapshot sees it")
+	require.Equal(t, 2, count(ctx))
+
+	t.Run("refuses a write", func(t *testing.T) {
+		err := pglock.ReadSnapshot(ctx, pool, func(ctx context.Context) error {
+			tx, _ := pglock.TxFrom(ctx)
+			_, err := tx.Exec(ctx, `INSERT INTO pglock_snapshot_test (id) VALUES ('refused')`)
+			return err
+		})
+		require.Error(t, err)
+		require.Equal(t, 2, count(ctx))
+	})
+}

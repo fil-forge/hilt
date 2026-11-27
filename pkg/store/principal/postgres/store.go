@@ -4,9 +4,7 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
@@ -30,29 +28,16 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-// Add runs the upsert in a short transaction so its wait is bounded at
-// [store.LockTimeout]: the row lock it takes waits for an in-flight Tombstone
-// of the same principal, and a longer wait returns [store.ErrLockTimeout].
-func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err error) {
+func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) error {
 	if tenant == did.Undef {
 		return fmt.Errorf("principal tenant is required: %w", store.ErrInvalidArgument)
 	}
 	if externalID == "" {
 		return fmt.Errorf("principal external ID is required: %w", store.ErrInvalidArgument)
 	}
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
 	// The upsert revives a tombstone under the same id; it touches nothing when
 	// the row is live, and the zero row count reports the duplicate.
-	tag, err := tx.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO principal (tenant_id, external_id)
 		VALUES ($1, $2)
 		ON CONFLICT (tenant_id, external_id) DO UPDATE
@@ -65,42 +50,20 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err
 	if tag.RowsAffected() == 0 {
 		return store.ErrRecordExists
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
 	return nil
 }
 
-// Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
-// read waits on a Tombstone that holds the row FOR UPDATE. The share-locked read
-// runs in a short transaction of its own so its wait is bounded at
-// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
-func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string, opts ...store.ReadOption) (rec principal.Record, err error) {
-	defer func() { err = pglock.MapError(err) }()
-	const query = `
+func (s *Store) Get(ctx context.Context, tenant did.DID, externalID string) (principal.Record, error) {
+	rec, err := scanRecord(pglock.Reader(ctx, s.pool).QueryRow(ctx, `
 		SELECT tenant_id, external_id, created_at
 		FROM principal
 		WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
-	`
-	if !store.NewReadConfig(opts...).Share {
-		rec, err = scanRecord(s.pool.QueryRow(ctx, query, tenant.String(), externalID))
-		return pglock.Found(rec, err, "principal")
-	}
-
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return principal.Record{}, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the lock
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return principal.Record{}, err
-	}
-	rec, err = scanRecord(tx.QueryRow(ctx, query+` FOR SHARE`, tenant.String(), externalID))
+	`, tenant.String(), externalID))
 	return pglock.Found(rec, err, "principal")
 }
 
 func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.Record, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, `
 		SELECT tenant_id, external_id, created_at
 		FROM principal
 		WHERE tenant_id = $1 AND deleted_at IS NULL
@@ -126,7 +89,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID) ([]principal.R
 }
 
 func (s *Store) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, `
 		SELECT external_id
 		FROM principal
 		WHERE tenant_id = $1 AND deleted_at IS NULL
@@ -142,67 +105,20 @@ func (s *Store) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, 
 	return ids, nil
 }
 
-// Tombstone runs in one transaction: it locks the row FOR UPDATE, runs beforeCommit
-// while holding the lock, sets deleted_at and commits. A locked
-// read of the row (see [Store.Get]) waits for the commit or the rollback.
-//
-// The lock is held across beforeCommit, which checks that no policy names the
-// principal, revokes what its keys hold and deletes their rows. It receives
-// this transaction through [pglock.WithTx], so a store that opens with
-// [pglock.Begin] writes inside it and commits or rolls back with the removal;
-// the caller strips the principal from its policies before locking. A policy
-// write naming the principal meanwhile share-locks this row at its commit and
-// waits for the outcome, and the removal of another principal that rewrites a
-// policy naming this one key-share locks it; the wait here is bounded at
-// [store.LockTimeout].
-func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) (err error) {
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
+func (s *Store) TombstoneStatement(tenant did.DID, externalID string) store.Statement {
+	return store.Statement{
+		SQL: `
+			UPDATE principal
+			SET deleted_at = NOW()
+			WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL`,
+		Args: []any{tenant.String(), externalID},
 	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	var deleted bool
-	err = tx.QueryRow(ctx, `
-		SELECT deleted_at IS NOT NULL
-		FROM principal
-		WHERE tenant_id = $1 AND external_id = $2
-		FOR UPDATE
-	`, tenant.String(), externalID).Scan(&deleted)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && deleted) {
-		return nil // idempotent: nothing to publish and nothing to remove
-	}
-	if err != nil {
-		return fmt.Errorf("locking principal: %w", err)
-	}
-
-	if beforeCommit != nil {
-		if err := beforeCommit(pglock.WithTx(ctx, tx)); err != nil {
-			return fmt.Errorf("before tombstoning principal: %w", err)
-		}
-	}
-
-	if _, err := tx.Exec(ctx, `
-		UPDATE principal
-		SET deleted_at = NOW()
-		WHERE tenant_id = $1 AND external_id = $2
-	`, tenant.String(), externalID); err != nil {
-		return fmt.Errorf("tombstoning principal: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
 }
 
 // DeleteByTenant removes every principal of the tenant in a short transaction
-// so its wait is bounded at [store.LockTimeout]: a row held FOR UPDATE by a
-// removal in progress blocks the delete, and a longer wait returns
-// [store.ErrLockTimeout] with nothing written.
+// so its wait is bounded at [store.LockTimeout]: a row a task's commit holds
+// blocks the delete, and a longer wait returns [store.ErrLockTimeout] with
+// nothing written.
 func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) {
 	defer func() { err = pglock.MapError(err) }()
 	tx, err := pglock.Begin(ctx, s.pool)
@@ -221,27 +137,6 @@ func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) 
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
-}
-
-// RequireLiveStatement locks the live rows in external ID order and counts
-// them: a row a removal holds is waited for and, once the removal commits, is
-// no longer live and is not counted.
-func (s *Store) RequireLiveStatement(tenant did.DID, externalIDs ...string) store.Statement {
-	ids := slices.Clone(externalIDs)
-	slices.Sort(ids)
-	ids = slices.Compact(ids)
-	return store.Statement{
-		SQL: `
-			WITH live AS (
-				SELECT external_id
-				FROM principal
-				WHERE tenant_id = $1 AND external_id = ANY($2) AND deleted_at IS NULL
-				ORDER BY external_id ASC
-				FOR SHARE
-			)
-			SELECT 1 WHERE (SELECT count(*) FROM live) = $3 AND $3 > 0`,
-		Args: []any{tenant.String(), ids, len(ids)},
-	}
 }
 
 func scanRecord(row pgx.Row) (principal.Record, error) {

@@ -26,6 +26,7 @@ import (
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
@@ -212,9 +213,9 @@ func setupLock(t *testing.T) *lockEnv {
 	env.svc = tenantsvc.New(zap.NewNop(), tenants, buckets, accessKeys, principals, policies, env.delegations, env.secrets,
 		wrapkeypostgres.New(pool), nil, nil, env.swarf, env.owed, runner)
 	env.authorizer = auth.NewAuthorizer(zap.NewNop(), accessKeys, env.authTenants, providers, buckets, principals, policies, env.secrets,
-		auth.WithTenantChanges(runner))
+		auth.WithTenantChanges(runner), auth.WithSnapshots(pglock.NewSnapshots(pool)))
 	env.bucketSvc = bucketsvc.New(zap.NewNop(), env.authorizer, buckets, env.listed, accessKeys, tenants, policies, providers,
-		env.sprue, env.swarf, env.policies)
+		env.sprue, env.policies, runner)
 
 	env.writePolicy(t, "s3:GetObject", "s3:PutObject")
 	who := lockPrincipal
@@ -580,15 +581,32 @@ func TestBucketCommandsUnderATenantStatus(t *testing.T) {
 		require.Len(t, ok.Delegations.Entries, full)
 	})
 
-	// A write-lock that commits while a bucket command is between its reads
+	// A write-lock that commits while bucket info is between its reads
 	// never pairs the narrowed grants, which carry commands an upload uses
-	// too, with the permissions of an active tenant.
-	t.Run("bucket info that straddles a write-lock reports the kept permissions", func(t *testing.T) {
+	// too, with the permissions of an active tenant. Info reads in one
+	// snapshot, so it answers the active tenant it read, whole: the full
+	// permissions over the full grants, every one of which the write-lock
+	// withdrew and owes, so the gateway drops the answer once the revocations
+	// arrive.
+	t.Run("bucket info that straddles a write-lock answers the state before it", func(t *testing.T) {
 		env := setupLock(t)
+		env.swarf.holding.Store(true)
+		before := cids(env.held(t, env.admin))
 		env.listed.then = func() { env.setStatus(t, tenant.WriteLocked) }
 		ok, err := info(t, env, env.admin)
 		require.NoError(t, err)
-		require.Equal(t, kept, ok.Permissions.Entries[env.admin.KeyDID()])
+		require.Equal(t, adminPermissions, ok.Permissions.Entries[env.admin.KeyDID()])
+		var answered []cid.Cid
+		for link := range ok.Delegations.Entries {
+			answered = append(answered, link)
+		}
+		require.NotEmpty(t, answered)
+		require.Subset(t, before, answered, "the chains are of the grants before the write-lock")
+		require.Subset(t, env.owedLinks(t), answered, "and every one of them is owed")
+
+		ok, err = info(t, env, env.admin)
+		require.NoError(t, err)
+		require.Equal(t, kept, ok.Permissions.Entries[env.admin.KeyDID()], "the next call answers the write-lock")
 	})
 
 	t.Run("a bucket creation that straddles a write-lock reports the kept permissions", func(t *testing.T) {

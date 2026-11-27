@@ -7,7 +7,6 @@ import (
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	tenantsvc "github.com/fil-forge/hilt/pkg/api/service/tenant"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"go.uber.org/fx"
 )
 
@@ -19,7 +18,6 @@ var APIModule = fx.Module("api",
 		tenantsvc.New,
 		accesskeysvc.New,
 		metricssvc.New,
-		grant.NewRotator,
 		principalsvc.New,
 		bucketpolicysvc.New,
 		// Tenants

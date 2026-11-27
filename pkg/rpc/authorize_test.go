@@ -5,6 +5,7 @@ import (
 	"time"
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/grant"
@@ -15,10 +16,10 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	"github.com/fil-forge/hilt/pkg/store/pglock"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -119,7 +120,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	// Each opt adjusts the stored key before it is added.
 	// storeFor is the delegation store each setup built its authorizer over.
 	storeFor := map[*auth.Authorizer]delegationstore.Store{}
-	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *bucketpolicypostgres.Store) {
+	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *pgxpool.Pool) {
 		t.Helper()
 		pool := htestutil.PostgresOrSkip(t)
 		accessKeys, tenants, buckets := accesskeypostgres.New(pool), tenantpostgres.New(pool), bucketpostgres.New(pool)
@@ -151,26 +152,21 @@ func TestAuthorizeRequest(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, dels.PutBatch(ctx, []ucan.Delegation{root}))
 
-		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
+		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets,
+			auth.WithSnapshots(pglock.NewSnapshots(pool)))
 		storeFor[az] = dels
-		return az, policies
+		return az, pool
 	}
 
 	// grant stores a policy allowing "user-1" the given actions on the bucket.
-	grant := func(t *testing.T, policies *bucketpolicypostgres.Store, actions ...string) {
+	grant := func(t *testing.T, pool *pgxpool.Pool, actions ...string) {
 		t.Helper()
-		_, err := policies.Put(ctx, bucketpolicystore.Input{
-			Bucket: bucketID,
-			Tenant: tenantID,
-			Policy: s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
-				Effect:    s3bkt.Allow,
-				Principal: s3bkt.Only("user-1"),
-				Actions:   s3bkt.NewStringSet(actions...),
-				Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
-			}}},
-			Conditional: true,
-		}, nil)
-		require.NoError(t, err)
+		htestutil.PutPolicy(t, pool, tenantID, bucketID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{
+			Effect:    s3bkt.Allow,
+			Principal: s3bkt.Only("user-1"),
+			Actions:   s3bkt.NewStringSet(actions...),
+			Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos")),
+		}}})
 	}
 
 	call := func(t *testing.T, authorizer *auth.Authorizer, issuer did.DID, args *s3req.AuthorizeArguments) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
@@ -308,8 +304,8 @@ func TestAuthorizeRequest(t *testing.T) {
 	})
 
 	t.Run("a principal-bound key signs its own per-request delegations and gets its effective set", func(t *testing.T) {
-		az, policies := setup(t, nil, true, akSigner)
-		grant(t, policies, "s3:GetObject", "s3:ListBucket")
+		az, pool := setup(t, nil, true, akSigner)
+		grant(t, pool, "s3:GetObject", "s3:ListBucket")
 		args := signedGetArgs(t, akSigner, bucketName, region, time.Now(), time.Hour)
 
 		ok, blocks, err := call(t, az, providerID, args)

@@ -83,7 +83,7 @@ func TestPolicy(t *testing.T) {
 			}
 		}))
 		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, runner)
-		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, providers, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone}
+		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, providers, &fakeSprue{}, policyWrites, runner), policies, bucketID, bucketGone}
 	}
 
 	type reqOpts struct {

@@ -32,10 +32,8 @@ func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 const selectColumns = `SELECT id, tenant_id, name, buckets, permissions, principal_id, expires_at, created_at FROM access_key`
 
-// Add runs the insert [Store.AddStatement] builds. The principal foreign key
-// takes FOR KEY SHARE on the principal row, which a removal in progress holds
-// FOR UPDATE across its callback, so the insert runs in a short transaction
-// whose wait is bounded at [store.LockTimeout]. A longer wait returns
+// Add runs the insert [Store.AddStatement] builds, in a short transaction
+// whose lock waits are bounded at [store.LockTimeout]. A longer wait returns
 // [store.ErrLockTimeout] and nothing is written.
 func (s *Store) Add(ctx context.Context, in accesskey.Input) (err error) {
 	st, err := s.AddStatement(in)
@@ -127,27 +125,8 @@ func (s *Store) HasName(ctx context.Context, tenant did.DID, principal *string, 
 	return taken, nil
 }
 
-// Get reads the row, with FOR SHARE when [store.WithShareLock] is passed so the
-// read waits on a Delete that holds the row FOR UPDATE. The share-locked read
-// runs in a short transaction of its own so its wait is bounded at
-// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout].
-func (s *Store) Get(ctx context.Context, id did.DID, opts ...store.ReadOption) (rec accesskey.Record, err error) {
-	defer func() { err = pglock.MapError(err) }()
-	query := selectColumns + ` WHERE id = $1`
-	if !store.NewReadConfig(opts...).Share {
-		rec, err = scanRecord(s.pool.QueryRow(ctx, query, id.String()))
-		return pglock.Found(rec, err, "access key")
-	}
-
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return accesskey.Record{}, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // a read commits nothing; rolling back releases the lock
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return accesskey.Record{}, err
-	}
-	rec, err = scanRecord(tx.QueryRow(ctx, query+` FOR SHARE`, id.String()))
+func (s *Store) Get(ctx context.Context, id did.DID) (accesskey.Record, error) {
+	rec, err := scanRecord(pglock.Reader(ctx, s.pool).QueryRow(ctx, selectColumns+` WHERE id = $1`, id.String()))
 	return pglock.Found(rec, err, "access key")
 }
 
@@ -173,7 +152,7 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 	}
 	query += ` ORDER BY id ASC`
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing access keys by tenant: %w", err)
 	}

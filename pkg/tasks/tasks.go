@@ -46,6 +46,16 @@ const ActionPutPolicy = "put-policy"
 // grants it gave over the bucket.
 const ActionDeletePolicy = "delete-policy"
 
+// ActionRemovePrincipal is queue-tenant.remove-principal: remove the subject
+// tenant's principal named in the task's arguments, with its keys and its
+// place in the tenant's bucket policies, withdrawing the grants they held.
+const ActionRemovePrincipal = "remove-principal"
+
+// ActionDeleteBucket is queue-tenant.delete-bucket: delete the subject
+// tenant's bucket named in the task's arguments, once it is empty, with its
+// policy, withdrawing the grants over it.
+const ActionDeleteBucket = "delete-bucket"
+
 // ActionPublish is queue-revocation.publish: publish every revocation the
 // subject tenant owes.
 const ActionPublish = "publish"

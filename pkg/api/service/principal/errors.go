@@ -23,8 +23,10 @@ var (
 	// ErrInvalidPrincipalID is returned when the principalId is not one
 	// [ValidID] accepts.
 	ErrInvalidPrincipalID = errors.New(InvalidPrincipalIDErrorName, `principalId must be between 1 and 255 bytes of valid UTF-8 without NUL, "/", ";", ",", "?" or "%", and must not be ".", "..", or "*", which is reserved for the policy wildcard`)
-	// ErrConcurrentChange is returned when another write to the principal or to
-	// one of its bucket policies was in flight and this call gave up rather
-	// than wait on it. Nothing was changed and the call can be repeated.
+	// ErrConcurrentChange is returned when the principal was removed between
+	// its creation's write and its read, and when a removal was still
+	// waiting for its turn behind the tenant's other changes when the
+	// caller's deadline came. Nothing was changed and the call can be
+	// repeated.
 	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the principal is being changed concurrently, retry the request")
 )

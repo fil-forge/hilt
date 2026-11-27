@@ -27,16 +27,22 @@
 // revocations owed, and is stored the grants of the new document under the
 // tenant's status (policies.go).
 //
+// queue-tenant.remove-principal removes a principal: in one commit it strips
+// the principal from every policy naming it, changing the other principals'
+// grants over each bucket as a policy write does, withdraws every grant of
+// the principal's keys, deletes the keys and tombstones the principal
+// (principals.go). queue-tenant.delete-bucket deletes an empty bucket: in
+// one commit it withdraws every grant the tenant issued over the bucket and
+// deletes the bucket's delegations and the bucket, which takes its policy
+// (buckets.go).
+//
 // Every change that records revocations queues queue-revocation.publish for
 // the tenant, which publishes them after the commit.
 //
-// Principal removal and bucket and tenant deletion do not run here: they
-// write the same keys, grants and policies under row and advisory locks. A
-// task that stores grants therefore chooses the grants it withdraws in the
-// statements its commit runs, under the keys' delegation locks, and never
-// from what its handler read, and a task that issues grants or writes a
-// policy from what it read makes its commit conditional on that still
-// holding.
+// Every change to what a tenant's keys may do is a task here, so none runs
+// between a handler's reads and its commit, and a handler decides from what
+// it read. Tenant deletion is the one writer of the same rows outside the
+// queue, and it runs only on a disabled tenant.
 package tenantqueue
 
 import (
@@ -118,10 +124,12 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, tasks.ActionSetStatus, err)
 	}
 	for action, h := range map[string]taskrunner.Handler{
-		tasks.ActionCreateKey:    q.runCreateKey,
-		tasks.ActionDeleteKey:    q.runDeleteKey,
-		tasks.ActionPutPolicy:    q.runPutPolicy,
-		tasks.ActionDeletePolicy: q.runDeletePolicy,
+		tasks.ActionCreateKey:       q.runCreateKey,
+		tasks.ActionDeleteKey:       q.runDeleteKey,
+		tasks.ActionPutPolicy:       q.runPutPolicy,
+		tasks.ActionDeletePolicy:    q.runDeletePolicy,
+		tasks.ActionRemovePrincipal: q.runRemovePrincipal,
+		tasks.ActionDeleteBucket:    q.runDeleteBucket,
 	} {
 		if err := r.Handle(tasks.QueueTenant, action, h); err != nil {
 			return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, action, err)
@@ -189,10 +197,9 @@ func (q *Queue) runSetStatus(ctx context.Context, ex *taskrunner.Exec, t taskrun
 			return nil, err
 		}
 	}
-	for _, st := range q.delegations.WithdrawKeyGrantsStatements(tenantID) {
-		if err := ex.Write(ctx, st.SQL, st.Args...); err != nil {
-			return nil, err
-		}
+	withdraw := q.delegations.WithdrawKeyGrantsStatement(tenantID)
+	if err := ex.Write(ctx, withdraw.SQL, withdraw.Args...); err != nil {
+		return nil, err
 	}
 	if len(fresh) > 0 {
 		st, err := q.delegations.PutForKeysStatement(fresh)
