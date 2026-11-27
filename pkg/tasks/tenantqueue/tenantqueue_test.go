@@ -461,20 +461,6 @@ func TestReactivating(t *testing.T) {
 		require.Contains(t, w.swarf.Revoked(), late.Link())
 	})
 
-	t.Run("a key deleted between the handler's reads and its commit is issued nothing", func(t *testing.T) {
-		w := setup(t)
-		service := w.held(t, w.serviceKey)
-		require.NoError(t, w.setStatus(t, tenantstore.Disabled))
-		w.hooks.beforeWrites = func() {
-			require.NoError(t, w.accessKeys.Delete(t.Context(), w.principalKey))
-		}
-
-		require.NoError(t, w.setStatus(t, tenantstore.Active))
-
-		require.Empty(t, w.held(t, w.principalKey))
-		require.Equal(t, shapes(service), shapes(w.held(t, w.serviceKey)))
-	})
-
 	t.Run("fails and stays disabled when the tenant's signing key is gone", func(t *testing.T) {
 		w := setup(t)
 		require.NoError(t, w.setStatus(t, tenantstore.Disabled))
@@ -632,25 +618,6 @@ func TestWriteLocking(t *testing.T) {
 		require.Contains(t, w.swarf.Revoked(), late.Link())
 	})
 
-	t.Run("a key deleted between the handler's reads and its commit is issued nothing", func(t *testing.T) {
-		w := setup(t)
-		// The policy lets the principal delete too, so the grants a
-		// write-lock would issue its key differ from the ones it holds.
-		w.putPolicy(t, "s3:GetObject", "s3:DeleteObject")
-		held := links(w.held(t, w.principalKey))
-		service, bound := w.wantGrants(t, tenantstore.WriteLocked)
-		require.Greater(t, len(bound), len(held))
-		w.hooks.beforeWrites = func() {
-			require.NoError(t, w.accessKeys.Delete(t.Context(), w.principalKey))
-		}
-
-		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
-
-		// What the key held is its deleter's to revoke. The row is deleted
-		// here without that, so it is still there, and nothing joined it.
-		require.ElementsMatch(t, held, links(w.held(t, w.principalKey)))
-		require.Equal(t, service, shapes(w.held(t, w.serviceKey)))
-	})
 }
 
 func TestStatusAlone(t *testing.T) {

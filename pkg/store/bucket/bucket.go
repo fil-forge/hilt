@@ -130,10 +130,15 @@ type Store interface {
 	// deleting an absent record returns nil. The bucket's tenant and provider
 	// stay answerable through [Store.Owner].
 	Delete(ctx context.Context, id did.DID) error
-	// DeleteStatement returns the write [Store.Delete] makes, for a task that
-	// deletes the tenant's bucket in its own commit. It removes nothing when
-	// the tenant has no such bucket.
+	// DeleteStatement returns the write [Store.Delete] makes, narrowed to the
+	// tenant's bucket, for a task that deletes the bucket in its own commit.
+	// It removes nothing when the tenant has no such bucket.
 	DeleteStatement(tenant, id did.DID) store.Statement
+	// DeleteByTenantStatement returns the write that removes every bucket of
+	// the tenant, with their policies, for tenant deletion to run in its
+	// commit. It records no owner: the tenant's row goes in the same commit,
+	// and the owners recorded for it go with it.
+	DeleteByTenantStatement(tenant did.DID) store.Statement
 	// Owner returns the tenant and provider of a bucket by ID, whether the
 	// bucket exists or has been deleted. Usage a gateway reports late, for a
 	// bucket's last hours, is attributed and checked against it. It returns

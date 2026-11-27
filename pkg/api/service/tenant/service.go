@@ -10,19 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/fil-forge/hilt/pkg/client/upload"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
-	"github.com/fil-forge/hilt/pkg/store/accesskey"
-	"github.com/fil-forge/hilt/pkg/store/bucket"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/store/delegation"
-	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
-	"github.com/fil-forge/hilt/pkg/store/revocation"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
-	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/hilt/pkg/wrapkey"
@@ -30,7 +23,6 @@ import (
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
-	"github.com/fil-forge/ucantone/ucan"
 	"go.uber.org/zap"
 )
 
@@ -39,58 +31,43 @@ import (
 // replaced in place on rotation.
 const fragment = "hilt"
 
+// DeleteTimeout is the longest a tenant deletion waits for its turn on the
+// tenant's queue. A deletion that has not started by then is abandoned with
+// nothing done, and the caller repeats the call.
+const DeleteTimeout = 30 * time.Second
+
 // Service implements tenant-management operations shared by the REST handlers.
 type Service struct {
-	logger      *zap.Logger
-	tenants     tenantstore.Store
-	buckets     bucket.Store
-	accessKeys  accesskey.Store
-	principals  principalstore.Store
-	policies    bucketpolicystore.Store
-	delegations delegation.Store
-	secrets     vault.Vault
-	wrapKeys    wrapkeystore.Store
-	plcClient   *plc.DirectoryClient
-	upload      *upload.Client
-	revocations grant.RevocationPublisher
-	owed        revocation.Store
-	runner      *taskrunner.Runner
+	logger    *zap.Logger
+	tenants   tenantstore.Store
+	secrets   vault.Vault
+	wrapKeys  wrapkeystore.Store
+	plcClient *plc.DirectoryClient
+	upload    *upload.Client
+	runner    *taskrunner.Runner
 }
 
 // New constructs the tenant service. runner runs the tenant's status
-// changes, and must have queue-tenant.set-status registered
-// ([tenantqueue.New]) and be started before SetStatus is called.
+// changes and its deletion, and must have the handlers of queue-tenant
+// ([tenantqueue.New]) and queue-revocation registered and be started before
+// SetStatus or Delete is called.
 func New(
 	logger *zap.Logger,
 	tenants tenantstore.Store,
-	buckets bucket.Store,
-	accessKeys accesskey.Store,
-	principals principalstore.Store,
-	policies bucketpolicystore.Store,
-	delegations delegation.Store,
 	secrets vault.Vault,
 	wrapKeys wrapkeystore.Store,
 	plcClient *plc.DirectoryClient,
 	upload *upload.Client,
-	revocations grant.RevocationPublisher,
-	owed revocation.Store,
 	runner *taskrunner.Runner,
 ) *Service {
 	return &Service{
-		logger:      logger,
-		tenants:     tenants,
-		buckets:     buckets,
-		accessKeys:  accessKeys,
-		principals:  principals,
-		policies:    policies,
-		delegations: delegations,
-		secrets:     secrets,
-		plcClient:   plcClient,
-		wrapKeys:    wrapKeys,
-		upload:      upload,
-		revocations: revocations,
-		owed:        owed,
-		runner:      runner,
+		logger:    logger,
+		tenants:   tenants,
+		secrets:   secrets,
+		wrapKeys:  wrapKeys,
+		plcClient: plcClient,
+		upload:    upload,
+		runner:    runner,
 	}
 }
 
@@ -285,9 +262,28 @@ func (s *Service) SetStatus(ctx context.Context, externalID, status string) erro
 	return nil
 }
 
-// Delete permanently deletes a tenant (which must be disabled), cascading to its
-// buckets and their policies, access keys, principals, and delegations, and
-// deactivating its did:plc. It is idempotent: a missing tenant is a no-op.
+// Delete permanently deletes a tenant, which must be disabled, with its
+// buckets and their policies, access keys, principals, wrap keys and
+// delegations, and deactivates its did:plc. It is idempotent: a missing
+// tenant is a no-op.
+//
+// The deletion runs as a queue-tenant.delete-tenant task on the tenant
+// ([tenantqueue]), behind any other change to the tenant queued before it,
+// and Delete returns once it has committed or failed. Unless the tenant's
+// DID is already deactivated, the task publishes every revocation the
+// tenant owes and a revocation of every grant its keys hold, then
+// deactivates the DID, then removes the tenant's keys from the vault and
+// deletes its rows in one commit. The task runs on a context detached from
+// ctx, so a client that disconnects does not stop a deletion part way; it
+// finishes, and a repeated call finds nothing left. A deletion still
+// waiting for its turn after [DeleteTimeout], or at ctx's deadline, is
+// abandoned with nothing done. A deletion whose handler fails is not
+// retried: the caller repeats the call, and the repeat carries on from where
+// the failure left the tenant.
+//
+// A tenant that is not disabled when the task runs is refused with
+// [ErrTenantNotDisabled], and a failure to read or deactivate the DID is
+// [ErrDIDDeactivation].
 //
 // Out of scope: deprovisioning the tenant's spaces from the Forge upload service
 // (Sprue), for which there is no facility per the RFC.
@@ -300,177 +296,24 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 	}
 	log := s.logger.With(zap.String("external_id", rec.ExternalID), zap.Stringer("tenant", rec.ID))
 
-	if rec.Status != tenantstore.Disabled {
-		return ErrTenantNotDisabled
+	spec := tenantqueue.DeleteTenantSpec(rec.ID)
+	expires := time.Now().Add(DeleteTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+		expires = deadline
 	}
-
-	signingVaultKey := vault.TenantKeyPath(rec.ID)
-
-	keys, err := s.accessKeys.ListByTenant(ctx, rec.ID)
-	if err != nil {
-		return fmt.Errorf("listing access keys: %w", err)
-	}
-
-	// Publish the revocations the tenant still owes, then revoke and remove
-	// every delegation its keys hold, in one request and one
-	// delegation-store write, all before the did:plc goes: the tenant signs
-	// the revocations and Swarf verifies them against its DID, and the rows
-	// owed go with the tenant row. A warm key would otherwise keep serving
-	// from the gateway's cache until the next UTC midnight. A failed publish
-	// leaves everything in place for a retry. A DID an earlier attempt already deactivated skips both: that
-	// attempt published first, and Swarf could not verify a new publish against
-	// the tombstone anyway. A tenant tombstoned by a removal that predates the
-	// publish, and that then failed in its cascade, is the one case nothing
-	// here can revoke for: its keys' cached grants last until they expire.
-	last, err := s.plcClient.Last(ctx, rec.ID)
-	if _, deactivated := errors.AsType[*plc.DeactivatedDIDError](err); deactivated {
-		log.Info("tenant DID is already deactivated; skipping the revocation publish and the tombstone")
-	} else {
-		if err != nil {
-			log.Error("fetching the tenant DID's last operation", zap.Error(err))
+	spec.Expires = &expires
+	if _, err := s.runner.Run(context.WithoutCancel(ctx), spec); err != nil {
+		switch {
+		case errors.Is(err, tenantqueue.ErrTenantNotDisabled):
+			return ErrTenantNotDisabled
+		case errors.Is(err, tenantqueue.ErrDIDDeactivation):
+			log.Error("deactivating the tenant's DID", zap.Error(err))
 			return ErrDIDDeactivation
 		}
-		if err := s.publishOwed(ctx, log, rec.ID); err != nil {
-			return err
-		}
-		if err := s.revokeKeyDelegations(ctx, log, rec.ID, keys); err != nil {
-			return err
-		}
-		// Deactivate the did:plc next — it requires the (still-present) tenant
-		// key. Aborting here leaves all local state intact for a retry.
-		if err := deactivateTenantDID(ctx, s.plcClient, s.secrets, signingVaultKey, rec.ID, last); err != nil {
-			log.Error("deactivating tenant DID", zap.Error(err))
-			return ErrDIDDeactivation
-		}
-	}
-
-	// Cascade: access keys (records + any delegations left + vault keys).
-	for _, ak := range keys {
-		if err := s.delegations.DeleteByAudience(ctx, ak.ID); err != nil {
-			return fmt.Errorf("deleting access key delegations: %w", err)
-		}
-		if err := s.secrets.Delete(ctx, vault.AccessKeyPath(rec.ID, ak.ID)); err != nil {
-			log.Warn("removing access key from vault", zap.Error(err))
-		}
-		if err := s.accessKeys.Delete(ctx, ak.ID); err != nil {
-			return fmt.Errorf("deleting access key: %w", err)
-		}
-	}
-
-	// Cascade: principals. They reference the tenant row (FK RESTRICT), so they
-	// go before it. Their keys' delegations were revoked above.
-	if err := s.principals.DeleteByTenant(ctx, rec.ID); err != nil {
-		return fmt.Errorf("deleting principals: %w", err)
-	}
-
-	// Cascade: wrap keys (registry rows + their sealed private halves). Every
-	// version, active and archived, is destroyed — tenant deletion is the
-	// "true deletion" that ends the envelope-recovery path, so archive-don't-
-	// destroy (which governs rotation) does not apply.
-	wrapKeyRecs, err := s.wrapKeys.List(ctx, rec.ID)
-	if err != nil {
-		log.Error("listing wrap keys", zap.Error(err))
-		return fmt.Errorf("listing wrap keys: %w", err)
-	}
-	for _, wk := range wrapKeyRecs {
-		if err := s.secrets.Delete(ctx, wk.VaultKey); err != nil {
-			log.Warn("removing wrap key from vault", zap.Error(err))
-		}
-	}
-	if err := s.wrapKeys.Delete(ctx, rec.ID); err != nil {
-		log.Error("deleting wrap keys", zap.Error(err))
-		return fmt.Errorf("deleting wrap keys: %w", err)
-	}
-
-	// Cascade: buckets (records and, by cascade, their policies; bucket keys
-	// are discarded at creation).
-	bucketIDs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[did.DID], error) {
-		var listOpts []bucket.ListOption
-		if opts.Cursor != nil {
-			listOpts = append(listOpts, bucket.WithCursor(*opts.Cursor))
-		}
-		page, err := s.buckets.ListByTenant(ctx, rec.ID, listOpts...)
-		if err != nil {
-			return store.Page[did.DID]{}, err
-		}
-		ids := make([]did.DID, 0, len(page.Results))
-		for _, r := range page.Results {
-			ids = append(ids, r.ID)
-		}
-		return store.Page[did.DID]{Results: ids, Cursor: page.Cursor}, nil
-	})
-	if err != nil {
-		return fmt.Errorf("listing buckets: %w", err)
-	}
-	for _, id := range bucketIDs {
-		if err := s.buckets.Delete(ctx, id); err != nil {
-			return fmt.Errorf("deleting bucket: %w", err)
-		}
-	}
-
-	// Delegations addressed to the tenant (the bucket -> tenant grants).
-	if err := s.delegations.DeleteByAudience(ctx, rec.ID); err != nil {
-		return fmt.Errorf("deleting tenant delegations: %w", err)
-	}
-
-	if err := s.tenants.Delete(ctx, rec.ID); err != nil {
 		return fmt.Errorf("deleting tenant: %w", err)
-	}
-	// Best-effort removal of the tenant's key material.
-	if err := s.secrets.Delete(ctx, signingVaultKey); err != nil {
-		log.Warn("removing signing key from vault", zap.Error(err))
 	}
 	log.Info("deleted tenant")
 	return nil
-}
-
-// publishOwed publishes every revocation the tenant owes, as
-// queue-revocation.publish does, and deletes each batch's rows once the
-// revocation service has taken it. The queue is not used: the revocations
-// must be with the revocation service before the caller deactivates the
-// tenant's DID. A task of the queue publishing the same rows meanwhile
-// repeats revocations the service records once.
-func (s *Service) publishOwed(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
-	done, err := revocationqueue.Drain(ctx, log, s.owed, s.secrets, s.revocations, tenantID, s.owed.Delete)
-	if err != nil {
-		return fmt.Errorf("publishing the tenant's revocations owed: %w", err)
-	}
-	if done.Published+done.Expired > 0 {
-		log.Info("published the revocations owed before deleting the tenant", zap.Int("published", done.Published), zap.Int("expired", done.Expired))
-	}
-	return nil
-}
-
-// revokeKeyDelegations publishes, in one request signed by the tenant, a
-// revocation for every delegation the keys hold, and removes them in the same
-// delegation-store write, so a failed publish leaves every key's delegations
-// in place. Nothing is published when they hold none.
-func (s *Service) revokeKeyDelegations(ctx context.Context, log *zap.Logger, tenantID did.DID, keys []accesskey.Record) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	audiences := make([]did.DID, len(keys))
-	for i, ak := range keys {
-		audiences[i] = ak.ID
-	}
-	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantID)
-	if err != nil {
-		return err
-	}
-	// The publish runs while the keys' delegations are locked, so the whole
-	// write is bounded at the batch deadline.
-	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
-	defer cancel()
-	return s.delegations.Replace(ctx, audiences, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-		var all []ucan.Delegation
-		for _, held := range current {
-			all = append(all, held...)
-		}
-		if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, all); err != nil {
-			return nil, fmt.Errorf("revoking the tenant's key delegations: %w", err)
-		}
-		return nil, nil
-	})
 }
 
 // cleanupKey removes an orphaned tenant key after a provisioning failure. It runs
@@ -480,32 +323,6 @@ func (s *Service) cleanupKey(ctx context.Context, log *zap.Logger, vaultKey stri
 	if err := s.secrets.Delete(context.WithoutCancel(ctx), vaultKey); err != nil {
 		log.Error("cleaning up orphaned tenant key", zap.Error(err))
 	}
-}
-
-// deactivateTenantDID publishes a tombstone for the tenant's did:plc after its
-// last operation, signed with its rotation key from the vault.
-func deactivateTenantDID(ctx context.Context, plcClient *plc.DirectoryClient, secrets vault.Vault, vaultKey string, tenantID did.DID, last *plc.SignedOperation) error {
-	keyBytes, err := secrets.Read(ctx, vaultKey)
-	if err != nil {
-		return fmt.Errorf("reading tenant key: %w", err)
-	}
-	signer, err := secp256k1.Decode(keyBytes)
-	if err != nil {
-		return fmt.Errorf("decoding tenant key: %w", err)
-	}
-
-	tomb, err := plc.NewTombstoneFromPrevious(last)
-	if err != nil {
-		return fmt.Errorf("building tombstone: %w", err)
-	}
-	signed, err := plc.SignTombstone(signer, tomb)
-	if err != nil {
-		return fmt.Errorf("signing tombstone: %w", err)
-	}
-	if err := plcClient.Deactivate(ctx, tenantID, signed); err != nil {
-		return fmt.Errorf("publishing tombstone: %w", err)
-	}
-	return nil
 }
 
 // validStatus reports whether s is a recognized tenant status.

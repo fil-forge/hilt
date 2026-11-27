@@ -172,34 +172,17 @@ func (s *Store) ListByTenant(ctx context.Context, tenant did.DID, opts ...access
 	return recs, nil
 }
 
-// Delete removes the row in a short transaction so its wait on a row another
-// write holds is bounded at [store.LockTimeout]; a longer wait returns
-// [store.ErrLockTimeout] for the caller to retry rather than holding its pool
-// connection indefinitely.
-func (s *Store) Delete(ctx context.Context, id did.DID) (err error) {
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM access_key WHERE id = $1`, id.String()); err != nil {
-		return fmt.Errorf("deleting access key: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) DeleteStatement(tenant, id did.DID) store.Statement {
 	return store.Statement{
 		SQL:  `DELETE FROM access_key WHERE id = $1 AND tenant_id = $2`,
 		Args: []any{id.String(), tenant.String()},
+	}
+}
+
+func (s *Store) DeleteByTenantStatement(tenant did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM access_key WHERE tenant_id = $1`,
+		Args: []any{tenant.String()},
 	}
 }
 

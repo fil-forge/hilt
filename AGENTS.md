@@ -67,7 +67,8 @@ them. It exposes two APIs and talks to three external services:
   it takes off the affected principals' keys, a principal's removal the
   grants its keys held, and a bucket's deletion every grant the tenant issued
   over the bucket (`pkg/tasks/tenantqueue`). Tenant deletion publishes what
-  is still owed itself, before it deactivates the tenant's DID, which Swarf
+  is still owed inside its own task, with the revocations of the grants its
+  keys still hold, before it deactivates the tenant's DID, which Swarf
   verifies the revocations against.
 - **PLC** (the did:plc directory) — Hilt creates a tenant's did:plc there on
   provisioning and deactivates it on deletion (`pkg/fx/plc.go`).
@@ -152,7 +153,7 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - `pkg/store/{tenant,accesskey,bucket,delegation,provider,principal,bucketpolicy,usage,revocation}` —
   each an interface with its `postgres` implementation.
 - `pkg/store/pglock` — the Postgres locking and transaction helpers the
-  stores share: bounded lock waits, advisory locks, the mapping to
+  stores share: bounded lock waits, the mapping to
   `store.ErrLockTimeout`, the transaction a ctx carries (`WithTx`, `Begin`
   for a write, `Reader` for a read) and the read-only, repeatable-read
   snapshot a reader runs its reads in (`ReadSnapshot`, `Snapshots`).
@@ -186,6 +187,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   authorized: the handler asks Sprue whether the bucket is empty, and one
   commit moves every grant the tenant issued over the bucket into the
   revocations owed and deletes the bucket's delegations and the bucket.
+  `queue-tenant.delete-tenant` deletes a disabled tenant, submitted and
+  waited for by `tenant.Service.Delete` on a context detached from the
+  request (`pkg/tasks/tenantqueue/tenants.go`): unless the tenant's DID is
+  already deactivated, it publishes what the tenant owes by running
+  `queue-revocation.publish` as a sync child (which holds the tenant's
+  subject on that queue until the deletion commits), publishes the
+  revocations of the grants its keys still hold, and deactivates the DID;
+  it then removes the tenant's keys from the vault, and one commit deletes
+  every row Hilt holds for the tenant. A run after a failure that came after
+  the deactivation finds the DID deactivated and only deletes the rows.
   A task's arguments that carry more than one value,
   and a result that does, are a
   cbor-gen model under the queue's `datamodel` package (`go generate` in its
@@ -213,11 +224,9 @@ and `sprue` (the upload service; mirror its patterns where relevant).
 - **Stores**: an interface in `pkg/store/<entity>` with one implementation,
   `postgres`, exercised by the suite in `<entity>_test.go`. Add a method to the
   interface and the implementation and cover it in that suite.
-- **Locking and callbacks**: tenant deletion is the one write of a tenant's
-  keys, grants and policies that does not run as a task yet. It publishes its
-  keys' revocations inside a delegation-store `Replace`, whose callback
-  (`next`) runs while the keys' delegation locks are held; the callback's ctx
-  carries the transaction (`pglock.WithTx`), and a store call that opens its
+- **Locking**: no store takes a lock of its own for a tenant's keys, grants
+  or policies; every write of them is a task on the tenant's subject. A ctx
+  can carry a transaction (`pglock.WithTx`), and a store call that opens its
   own through `pglock.Begin`, or reads through `pglock.Reader`, joins it.
   Every lock wait is bounded by `store.LockTimeout` and a statement that gives
   up returns `store.ErrLockTimeout`, which the caller retries.
@@ -237,15 +246,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   publishes everything the tenant owes, reading each batch after the last
   row of the one before, because its own deletes are not visible until it
   commits. Every change to a tenant's keys, principals, buckets, grants
-  and policies is a task on the tenant's subject, so nothing commits between
-  a handler's reads and its commit but tenant deletion, which runs only on a
-  disabled tenant; a handler decides from what it read. The writes that
-  depend on a row tenant deletion may take are conditional
-  (`ex.WriteConditional`): a policy's write or removal affects no row for a
-  bucket that is gone, and grants are stored only for keys that still exist
-  (`PutForKeysStatement`). Tests build a runner on their test database with
+  and policies, the tenant's deletion included, is a task on the tenant's
+  subject, so nothing commits between a handler's reads and its commit, and
+  a handler decides from what it read. A task queued behind the tenant's
+  deletion finds the tenant gone: one that needs the tenant fails for good
+  (`tenantqueue.ErrTenantNotFound`, or the unknown bucket it names), and
+  one that removes something finds nothing to remove and succeeds. Tests
+  build a runner on their test database with
   `testutil.StartTaskRunner`, or `testutil.StartServiceTasks` for one with
-  the service's handlers registered.
+  the service's handlers registered (`testutil.WithDirectory` gives tenant
+  deletion its DID directory).
 - **RPC handlers** follow one shape: a `New<Cmd>Handler(logger, deps…) server.Route`
   constructor that returns the libforge bound command's `.Route(...)`, whose closure
   extracts `req.Invocation().Issuer()` / `req.Task().Arguments()` and delegates to an

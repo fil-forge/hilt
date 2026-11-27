@@ -20,12 +20,10 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/provider"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
-	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
@@ -231,7 +229,7 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, bucketpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), deps.secrets, deps.wrapKeys, plcClient, upload, &testutil.FakeSwarf{}, revocationpostgres.New(pool), nil)
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.secrets, deps.wrapKeys, plcClient, upload, nil)
 	route := api.NewProvisionTenantHandler(zap.NewNop(), svc)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
@@ -506,7 +504,7 @@ func TestGetTenantHandler(t *testing.T) {
 	ctx := t.Context()
 	tenants := tenantpostgres.New(pool)
 	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, bucketpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeypostgres.New(pool), nil, nil, &testutil.FakeSwarf{}, revocationpostgres.New(pool), nil)
+	svc := tenantsvc.New(zap.NewNop(), tenants, vaultmemory.New(), wrapkeypostgres.New(pool), nil, nil, nil)
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -538,7 +536,7 @@ func TestUpdateTenantStatusHandler(t *testing.T) {
 	secrets, swarf := vaultmemory.New(), &testutil.FakeSwarf{}
 	// The status change runs as a task, so the service gets a running runner.
 	runner := testutil.StartServiceTasks(t, pool, secrets, swarf)
-	svc := tenantsvc.New(zap.NewNop(), tenants, bucketpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), secrets, wrapkeypostgres.New(pool), nil, nil, swarf, revocationpostgres.New(pool), runner)
+	svc := tenantsvc.New(zap.NewNop(), tenants, secrets, wrapkeypostgres.New(pool), nil, nil, runner)
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), svc))
 
 	statusBody := func(s api.TenantStatus) []byte {
@@ -689,7 +687,8 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.buckets, deps.accessKeys, deps.principals, bucketpolicypostgres.New(pool), deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil, &testutil.FakeSwarf{}, revocationpostgres.New(pool), nil)
+	runner := testutil.StartServiceTasks(t, pool, deps.secrets, &testutil.FakeSwarf{}, testutil.WithDirectory(plcClient))
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.secrets, deps.wrapKeys, plcClient, nil, runner)
 	route := api.NewDeleteTenantHandler(zap.NewNop(), svc)
 	return serve(route), deps
 }

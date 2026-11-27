@@ -129,15 +129,19 @@ func TestTenantStore(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
-	t.Run("Delete removes a tenant and is idempotent", func(t *testing.T) {
-		id := testutil.RandomDID(t)
+	t.Run("DeleteStatement removes the tenant, and nothing once it is gone", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
+		s := tenantpostgres.New(pool)
+		id, kept := testutil.RandomDID(t), testutil.RandomDID(t)
 		require.NoError(t, s.Add(t.Context(), id, "ext-del", tenant.Active))
+		require.NoError(t, s.Add(t.Context(), kept, "ext-kept", tenant.Active))
 
-		require.NoError(t, s.Delete(t.Context(), id))
+		require.Equal(t, []int64{1}, htestutil.Exec(t, pool, s.DeleteStatement(id)))
 		_, err := s.Get(t.Context(), id)
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, err = s.Get(t.Context(), kept)
+		require.NoError(t, err)
 
-		// Deleting an absent record is a no-op.
-		require.NoError(t, s.Delete(t.Context(), id))
+		require.Equal(t, []int64{0}, htestutil.Exec(t, pool, s.DeleteStatement(id)))
 	})
 }

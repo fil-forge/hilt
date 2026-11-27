@@ -156,7 +156,12 @@ from the policies naming it, deletes its keys and queues the revocations of
 their grants. Deleting a bucket runs there too: once Sprue reports the bucket
 empty it deletes the bucket with its policy and queues the revocations of the
 grants over it. With Swarf unreachable these changes still succeed and the
-revocations are published once it returns. Each
+revocations are published once it returns. Deleting a disabled tenant runs
+there last of all, and is the one change that needs Swarf up: it publishes
+every revocation the tenant owes and those of its keys' grants, deactivates
+the tenant's did:plc, and then deletes everything Hilt holds for the tenant.
+The request waits for it; a client that disconnects does not stop it, and a
+repeated request after it finishes answers `204`. Each
 setting is the most queued tasks of that queue one instance runs at once. A
 tenant's tasks on a queue always run one at a time, so the count is the number
 of tenants worked on together. `0` runs none and leaves the queue to other

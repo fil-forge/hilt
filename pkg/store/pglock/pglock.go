@@ -1,7 +1,7 @@
 // Package pglock holds the Postgres locking and transaction helpers the stores
 // share: the bounded wait every locking statement takes, the mapping of the
 // server's lock_not_available back to [store.ErrLockTimeout], the transaction
-// a write's callback joins, and the read-only snapshot a reader's calls join
+// a store call joins, and the read-only snapshot a reader's calls join
 // ([ReadSnapshot]).
 package pglock
 
@@ -51,33 +51,6 @@ func MapError(err error) error {
 	return err
 }
 
-// AdvisoryAll takes the exclusive transaction-scoped advisory lock identified
-// by (namespace, hashtext(key)) of each key inside tx, in a single statement.
-// Postgres identifies an advisory lock by its key pair and nothing else, so
-// each caller passes its own namespace to keep its locks apart from every
-// other advisory lock taken on the same database. The locks are released when
-// tx commits or rolls back. Callers pass
-// their keys sorted, so that two writers locking overlapping sets queue for
-// the shared keys in the same sequence. The statement orders the rows by
-// their position in the array, and Postgres's planner evaluates a volatile
-// target-list function such as the lock after that sort, but SQL does not
-// promise that order. If two writers did lock out of order and deadlock,
-// Postgres aborts one of them, which [MapError] reports as
-// [store.ErrLockTimeout] for the caller to retry.
-func AdvisoryAll(ctx context.Context, tx pgx.Tx, namespace int32, keys []string) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	if _, err := tx.Exec(ctx, `
-		SELECT pg_advisory_xact_lock($1, hashtext(k.name))
-		FROM unnest($2::text[]) WITH ORDINALITY AS k(name, ord)
-		ORDER BY k.ord
-	`, namespace, keys); err != nil {
-		return fmt.Errorf("taking advisory locks: %w", err)
-	}
-	return nil
-}
-
 // Found maps a single-row read's result: no row is [store.ErrRecordNotFound],
 // any other error is wrapped as "getting <recordType>", and a found row is returned
 // as is.
@@ -94,8 +67,8 @@ func Found[T any](v T, err error, recordType string) (T, error) {
 
 type txKey struct{}
 
-// WithTx returns ctx carrying tx for the callback a write runs inside its
-// transaction. A store call handed this ctx that opens its transaction with
+// WithTx returns ctx carrying tx, for store calls to run inside a
+// transaction the caller owns. A store call handed this ctx that opens its transaction with
 // [Begin] joins tx instead, so what it writes commits with the enclosing write
 // or not at all.
 func WithTx(ctx context.Context, tx pgx.Tx) context.Context {

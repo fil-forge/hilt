@@ -95,7 +95,7 @@ func (q *Queue) runRemovePrincipal(ctx context.Context, ex *taskrunner.Exec, t t
 		return nil, fmt.Errorf("listing the principal's access keys: %w", err)
 	}
 
-	var writes []write
+	var writes []store.Statement
 	affected := len(keys) > 0
 	issued, rewritten := 0, 0
 	var others []string
@@ -129,11 +129,11 @@ func (q *Queue) runRemovePrincipal(ctx context.Context, ex *taskrunner.Exec, t t
 	for i, key := range keys {
 		result.Keys[i] = key.ID
 		writes = append(writes,
-			write{Statement: q.delegations.WithdrawGrantsOfKeyStatement(tenantID, key.ID)},
-			write{Statement: q.accessKeys.DeleteStatement(tenantID, key.ID)},
+			q.delegations.WithdrawGrantsOfKeyStatement(tenantID, key.ID),
+			q.accessKeys.DeleteStatement(tenantID, key.ID),
 		)
 	}
-	writes = append(writes, write{Statement: q.principals.TombstoneStatement(tenantID, principalID)})
+	writes = append(writes, q.principals.TombstoneStatement(tenantID, principalID))
 	if err := record(ctx, ex, writes); err != nil {
 		return nil, err
 	}

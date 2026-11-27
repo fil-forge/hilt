@@ -17,7 +17,7 @@ const (
 	// caller conditioned on.
 	PreconditionFailedErrorName = "PreconditionFailed"
 	// LockTimeoutErrorName is the name given to an error where a statement gave
-	// up waiting for a conflicting row or advisory lock.
+	// up waiting for a conflicting row lock.
 	LockTimeoutErrorName = "LockTimeout"
 )
 

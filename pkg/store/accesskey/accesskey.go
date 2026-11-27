@@ -169,13 +169,11 @@ type Store interface {
 	// keys of one principal or several (see [WithPrincipal], [WithPrincipals])
 	// or to given keys (see [WithIDs]).
 	ListByTenant(ctx context.Context, tenant did.DID, opts ...ListOption) ([]Record, error)
-	// Delete removes the access key record for a given ID. It is idempotent:
-	// deleting an absent record returns nil. On Postgres the wait for a row
-	// another write holds is bounded at [store.LockTimeout] and returns
-	// [store.ErrLockTimeout].
-	Delete(ctx context.Context, id did.DID) error
 	// DeleteStatement returns the write that removes the tenant's access key
 	// record with the ID, for a task that deletes the key in its own commit.
 	// It removes nothing when the tenant has no such key.
 	DeleteStatement(tenant, id did.DID) store.Statement
+	// DeleteByTenantStatement returns the write that removes every access
+	// key record of the tenant, for tenant deletion to run in its commit.
+	DeleteByTenantStatement(tenant did.DID) store.Statement
 }

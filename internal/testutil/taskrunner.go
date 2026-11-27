@@ -15,6 +15,7 @@ import (
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	wrapkeypostgres "github.com/fil-forge/hilt/pkg/store/wrapkey/postgres"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
@@ -56,12 +57,13 @@ func StartTaskRunner(t *testing.T, pool *pgxpool.Pool, register func(r *taskrunn
 // StartServiceTasks returns a running task runner over pool with the
 // service's own handlers registered: queue-tenant's, which change a tenant's
 // status, create and delete its access keys, write and remove its buckets'
-// policies and change the keys' grants, and
+// policies, change the keys' grants and delete the tenant, and
 // queue-revocation's, which publishes the revocations owed to publisher and
 // retries a failed publish within a test's patience. The handlers read the
-// tenants' signing keys from secrets. Each wrap may replace what
-// queue-tenant's handlers work through, for a test that acts at a point in a
-// handler's run.
+// tenants' signing keys from secrets, and tenant deletion publishes to
+// publisher too. Tenant deletion needs a DID directory, which a wrap sets
+// ([WithDirectory]). Each wrap may replace what queue-tenant's handlers work
+// through, for a test that acts at a point in a handler's run.
 func StartServiceTasks(t *testing.T, pool *pgxpool.Pool, secrets vault.Vault, publisher grant.RevocationPublisher, wrap ...func(*tenantqueue.Deps)) *taskrunner.Runner {
 	t.Helper()
 	return StartTaskRunner(t, pool, func(r *taskrunner.Runner) {
@@ -72,7 +74,9 @@ func StartServiceTasks(t *testing.T, pool *pgxpool.Pool, secrets vault.Vault, pu
 			Buckets:     bucketpostgres.New(pool),
 			Policies:    bucketpolicypostgres.New(pool),
 			Delegations: delegationpostgres.New(pool),
+			WrapKeys:    wrapkeypostgres.New(pool),
 			Secrets:     secrets,
+			Publisher:   publisher,
 		}
 		for _, w := range wrap {
 			w(&deps)
@@ -87,6 +91,12 @@ func StartServiceTasks(t *testing.T, pool *pgxpool.Pool, secrets vault.Vault, pu
 		})
 		require.NoError(t, err)
 	})
+}
+
+// WithDirectory returns a wrap for [StartServiceTasks] that gives tenant
+// deletion the DID directory it deactivates the tenant's DID in.
+func WithDirectory(directory tenantqueue.Directory) func(*tenantqueue.Deps) {
+	return func(deps *tenantqueue.Deps) { deps.Directory = directory }
 }
 
 // AwaitPublished waits for the tenant's queue-revocation tasks that are

@@ -211,8 +211,7 @@ func setupLock(t *testing.T) *lockEnv {
 	})
 	env.keys = accesskeysvc.New(zap.NewNop(), tenants, accessKeys, principals, buckets, env.secrets, runner)
 	env.policies = bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, runner)
-	env.svc = tenantsvc.New(zap.NewNop(), tenants, buckets, accessKeys, principals, policies, env.delegations, env.secrets,
-		wrapkeypostgres.New(pool), nil, nil, env.swarf, env.owed, runner)
+	env.svc = tenantsvc.New(zap.NewNop(), tenants, env.secrets, wrapkeypostgres.New(pool), nil, nil, runner)
 	env.authorizer = auth.NewAuthorizer(zap.NewNop(), accessKeys, env.authTenants, providers, buckets, principals, policies, env.secrets,
 		auth.WithTenantChanges(runner), auth.WithSnapshots(pglock.NewSnapshots(pool)))
 	env.bucketSvc = bucketsvc.New(zap.NewNop(), env.authorizer, buckets, env.listed, accessKeys, tenants, policies, providers,

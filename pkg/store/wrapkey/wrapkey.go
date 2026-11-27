@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
 
@@ -100,10 +101,14 @@ type Store interface {
 	// already archived, so an original archival timestamp is never re-stamped.
 	Archive(ctx context.Context, tenant did.DID, version int) error
 	// Delete removes every wrap-key record for a tenant (all versions,
-	// active and archived). It is used by tenant deletion — the "true deletion"
-	// that ends the envelope-recovery path — and is idempotent: a tenant with no
-	// records is a no-op.
+	// active and archived). Provisioning uses it to undo a record it wrote
+	// for a tenant it then failed to record. It is idempotent: a tenant with
+	// no records is a no-op.
 	Delete(ctx context.Context, tenant did.DID) error
+	// DeleteStatement returns the write [Store.Delete] makes, for tenant
+	// deletion to run in its commit: the "true deletion" that ends the
+	// envelope-recovery path.
+	DeleteStatement(tenant did.DID) store.Statement
 }
 
 // VaultKey returns the vault path under which a tenant wrap key's private half

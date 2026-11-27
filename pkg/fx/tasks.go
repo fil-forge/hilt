@@ -13,10 +13,12 @@ import (
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/revocation"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/store/wrapkey"
 	"github.com/fil-forge/hilt/pkg/tasks/revocationqueue"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/libforge/taskrunner"
+	"github.com/fil-forge/ucantone/did/plc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/fx"
@@ -57,7 +59,10 @@ func NewTenantQueue(
 	buckets bucket.Store,
 	policies bucketpolicy.Store,
 	delegations delegation.Store,
+	wrapKeys wrapkey.Store,
 	secrets vault.Vault,
+	directory *plc.DirectoryClient,
+	publisher grant.RevocationPublisher,
 	uploads tenantqueue.Uploads,
 	logger *zap.Logger,
 ) (*tenantqueue.Queue, error) {
@@ -68,7 +73,10 @@ func NewTenantQueue(
 		Buckets:     buckets,
 		Policies:    policies,
 		Delegations: delegations,
+		WrapKeys:    wrapKeys,
 		Secrets:     secrets,
+		Directory:   directory,
+		Publisher:   publisher,
 		Uploads:     uploads,
 		Logger:      logger.Named("tenant-changes"),
 	})

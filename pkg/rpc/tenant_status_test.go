@@ -206,8 +206,7 @@ func setupStatus(t *testing.T) *statusEnv {
 	env.key, err = ed25519.Decode(keyBytes)
 	require.NoError(t, err)
 
-	env.svc = tenantsvc.New(zap.NewNop(), tenants, buckets, accessKeys, principals, policies, delegations, secrets,
-		wrapkeypostgres.New(pool), nil, nil, swarf, owed, runner)
+	env.svc = tenantsvc.New(zap.NewNop(), tenants, secrets, wrapkeypostgres.New(pool), nil, nil, runner)
 	env.authorizer = auth.NewAuthorizer(zap.NewNop(), accessKeys, env.authTenants, providers, buckets, principals, policies, secrets,
 		auth.WithTenantChanges(runner), auth.WithSnapshots(pglock.NewSnapshots(pool)))
 	return env

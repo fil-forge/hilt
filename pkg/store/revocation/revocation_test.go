@@ -183,7 +183,7 @@ func TestRevocationStore(t *testing.T) {
 			// Deleting every other page shows the cursor does not depend on
 			// the rows before it still being there.
 			if page%2 == 0 {
-				require.NoError(t, d.store.Delete(t.Context(), links(got)))
+				htestutil.Exec(t, d.pool, d.store.DeleteStatement(links(got)))
 			}
 			after = next
 		}
@@ -191,20 +191,20 @@ func TestRevocationStore(t *testing.T) {
 		require.Len(t, seen, len(dels), "no row is read twice")
 	})
 
-	t.Run("Delete removes the named rows and ignores an unknown CID", func(t *testing.T) {
+	t.Run("DeleteStatement removes the named rows and ignores an unknown CID", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 3)
 		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), dels))
 
-		require.NoError(t, d.store.Delete(t.Context(), append(links(dels[:2]), testutil.RandomCID(t))))
+		htestutil.Exec(t, d.pool, d.store.DeleteStatement(append(links(dels[:2]), testutil.RandomCID(t))))
 		got, _, err := d.store.Oldest(t.Context(), d.tenant.DID(), revocation.Cursor{}, 10)
 		require.NoError(t, err)
 		require.Equal(t, links(dels[2:]), links(got))
 
-		require.NoError(t, d.store.Delete(t.Context(), nil))
+		htestutil.Exec(t, d.pool, d.store.DeleteStatement(nil))
 	})
 
-	t.Run("the statements make the writes Add and Delete make", func(t *testing.T) {
+	t.Run("AddStatement makes the write Add makes, and DeleteStatement removes it", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 2)
 		st, err := d.store.AddStatement(d.tenant.DID(), dels)
@@ -226,7 +226,7 @@ func TestRevocationStore(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
-	t.Run("Add and Delete commit with the caller's transaction", func(t *testing.T) {
+	t.Run("Add commits with the caller's transaction", func(t *testing.T) {
 		d := setup(t)
 		dels := issue(t, d.tenant, 2)
 		count := func() int64 {
@@ -246,13 +246,6 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, d.store.Add(pglock.WithTx(t.Context(), tx), d.tenant.DID(), dels))
 		require.NoError(t, tx.Commit(t.Context()))
-		require.EqualValues(t, 2, count())
-
-		tx, err = d.pool.Begin(t.Context())
-		require.NoError(t, err)
-		require.NoError(t, d.store.Delete(pglock.WithTx(t.Context(), tx), links(dels)))
-		require.EqualValues(t, 2, count(), "the rows stand until the caller commits")
-		require.NoError(t, tx.Rollback(t.Context()))
 		require.EqualValues(t, 2, count())
 	})
 
@@ -280,7 +273,7 @@ func TestRevocationStore(t *testing.T) {
 		require.NoError(t, d.store.Add(t.Context(), d.tenant.DID(), issue(t, d.tenant, 2)))
 		require.NoError(t, d.store.Add(t.Context(), other.DID(), issue(t, other, 1)))
 
-		require.NoError(t, tenantpostgres.New(d.pool).Delete(t.Context(), d.tenant.DID()))
+		htestutil.Exec(t, d.pool, tenantpostgres.New(d.pool).DeleteStatement(d.tenant.DID()))
 		stats, err := d.store.Stats(t.Context())
 		require.NoError(t, err)
 		require.EqualValues(t, 1, stats.Count)

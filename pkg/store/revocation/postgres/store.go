@@ -104,16 +104,6 @@ func (s *Store) Oldest(ctx context.Context, tenant did.DID, after revocation.Cur
 	return out, next, nil
 }
 
-func (s *Store) Delete(ctx context.Context, ids []cid.Cid) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	if err := s.exec(ctx, s.DeleteStatement(ids)); err != nil {
-		return fmt.Errorf("deleting %d revocations owed: %w", len(ids), err)
-	}
-	return nil
-}
-
 func (s *Store) DeleteStatement(ids []cid.Cid) store.Statement {
 	strs := make([]string, len(ids))
 	for i, id := range ids {

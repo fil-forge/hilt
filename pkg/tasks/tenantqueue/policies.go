@@ -228,24 +228,10 @@ func (q *Queue) changePolicy(ctx context.Context, ex *taskrunner.Exec, tenantID,
 	return change.issued, nil
 }
 
-// write is one statement a task records, with whether its commit depends on
-// it affecting a row.
-type write struct {
-	store.Statement
-	// conditional records the statement with WriteConditional.
-	conditional bool
-}
-
 // record records the writes in order.
-func record(ctx context.Context, ex *taskrunner.Exec, writes []write) error {
+func record(ctx context.Context, ex *taskrunner.Exec, writes []store.Statement) error {
 	for _, w := range writes {
-		var err error
-		if w.conditional {
-			err = ex.WriteConditional(ctx, w.SQL, w.Args...)
-		} else {
-			err = ex.Write(ctx, w.SQL, w.Args...)
-		}
-		if err != nil {
+		if err := ex.Write(ctx, w.SQL, w.Args...); err != nil {
 			return err
 		}
 	}
@@ -255,7 +241,7 @@ func record(ctx context.Context, ex *taskrunner.Exec, writes []write) error {
 // policyChange is the writes that replace one bucket's policy.
 type policyChange struct {
 	// writes are the statements to record, in order.
-	writes []write
+	writes []store.Statement
 	// issued is how many grants the writes store.
 	issued int
 	// affected is whether the change alters any principal's actions, and so
@@ -275,11 +261,7 @@ type policyChange struct {
 //     the grants doc gives its principal there. Its delegations over other
 //     buckets are left alone. A change that alters no principal's actions
 //     withdraws and issues nothing.
-//   - Write the document, or remove the policy, with its index rows. Either
-//     is conditional, on the bucket still being the tenant's or on the
-//     policy still being there, so a bucket that tenant deletion took
-//     meanwhile runs the task again, which then finds the bucket or its
-//     policy gone.
+//   - Write the document, or remove the policy, with its index rows.
 //
 // The grants issued are those the tenant's status keeps
 // ([grant.LimitToTenantStatus]): a write-locked tenant's keys are stored the
@@ -306,25 +288,23 @@ func (q *Queue) policyWrites(ctx context.Context, tenantID, bucket did.DID, old 
 		if err != nil {
 			return policyChange{}, err
 		}
-		change.writes = append(change.writes, write{Statement: q.delegations.WithdrawGrantsOverStatement(tenantID, bucket, affected)})
+		change.writes = append(change.writes, q.delegations.WithdrawGrantsOverStatement(tenantID, bucket, affected))
 		if len(fresh) > 0 {
-			put, err := q.delegations.PutForKeysStatement(fresh)
+			put, err := q.delegations.PutStatement(fresh)
 			if err != nil {
 				return policyChange{}, fmt.Errorf("building the write of the keys' grants: %w", err)
 			}
-			change.writes = append(change.writes, write{Statement: put})
+			change.writes = append(change.writes, put)
 			change.issued = len(fresh)
 		}
 	}
 	if doc != nil {
 		put, index := q.policies.PutStatements(tenantID, bucket, *doc)
-		change.writes = append(change.writes, write{Statement: put, conditional: true})
-		for _, st := range index {
-			change.writes = append(change.writes, write{Statement: st})
-		}
+		change.writes = append(change.writes, put)
+		change.writes = append(change.writes, index...)
 	} else {
 		del, index := q.policies.DeleteStatements(bucket)
-		change.writes = append(change.writes, write{Statement: del, conditional: true}, write{Statement: index})
+		change.writes = append(change.writes, del, index)
 	}
 	return change, nil
 }

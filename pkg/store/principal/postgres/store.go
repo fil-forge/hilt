@@ -115,28 +115,11 @@ func (s *Store) TombstoneStatement(tenant did.DID, externalID string) store.Stat
 	}
 }
 
-// DeleteByTenant removes every principal of the tenant in a short transaction
-// so its wait is bounded at [store.LockTimeout]: a row a task's commit holds
-// blocks the delete, and a longer wait returns [store.ErrLockTimeout] with
-// nothing written.
-func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) {
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
+func (s *Store) DeleteByTenantStatement(tenant did.DID) store.Statement {
+	return store.Statement{
+		SQL:  `DELETE FROM principal WHERE tenant_id = $1`,
+		Args: []any{tenant.String()},
 	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM principal WHERE tenant_id = $1`, tenant.String()); err != nil {
-		return fmt.Errorf("deleting principals by tenant: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
 }
 
 func scanRecord(row pgx.Row) (principal.Record, error) {

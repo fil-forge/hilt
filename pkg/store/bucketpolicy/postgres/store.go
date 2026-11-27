@@ -58,17 +58,15 @@ func (s *Store) ListByPrincipal(ctx context.Context, tenant did.DID, principal s
 	return collectRecords(rows)
 }
 
-// PutStatements upserts the document on the condition that the bucket exists
-// and is the tenant's.
+// PutStatements upserts the document.
 func (s *Store) PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument) (store.Statement, []store.Statement) {
 	put := store.Statement{
 		SQL: `
 			INSERT INTO bucket_policy (bucket_id, document, etag)
-			SELECT $1::text, $2::jsonb, $3::text
-			WHERE EXISTS (SELECT 1 FROM bucket b WHERE b.id = $1 AND b.tenant_id = $4)
+			VALUES ($1, $2, $3)
 			ON CONFLICT (bucket_id) DO UPDATE
 				SET document = EXCLUDED.document, etag = EXCLUDED.etag, updated_at = NOW()`,
-		Args: []any{bucket.String(), bucketpolicy.Canonical(doc), s3bkt.ETag(doc), tenant.String()},
+		Args: []any{bucket.String(), bucketpolicy.Canonical(doc), s3bkt.ETag(doc)},
 	}
 	index := []store.Statement{clearIndexStatement(bucket)}
 	if ids := indexed(doc); len(ids) > 0 {

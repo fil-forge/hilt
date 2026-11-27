@@ -47,21 +47,15 @@ type Store interface {
 	// from each listed policy itself, and only tombstones the row.
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string) ([]Record, error)
 	// PutStatements returns the writes that create or replace the policy of
-	// the tenant's bucket with doc, for a task to run in its commit: put with
-	// WriteConditional, then index, in order, with Write. Callers run
-	// [bucketpolicy.Validate] first; a principal doc names that the tenant
-	// does not have fails index when it runs.
-	//
-	// put affects no row when the bucket is missing or another tenant's,
-	// which fails the commit, so the task runs again and finds the bucket
-	// gone. index replaces the bucket's index rows.
+	// the tenant's bucket with doc, for a task to run in its commit: put,
+	// then index, in order. Callers check that the bucket is the tenant's
+	// and run [bucketpolicy.Validate] first; a bucket that is missing fails
+	// put when it runs, and a principal doc names that the tenant does not
+	// have fails index. index replaces the bucket's index rows.
 	PutStatements(tenant, bucket did.DID, doc s3bkt.PolicyDocument) (put store.Statement, index []store.Statement)
 	// DeleteStatements returns the writes that remove the bucket's policy,
-	// for a task to run in its commit: del with WriteConditional, then index
-	// with Write. del affects no row when the bucket has no policy, which
-	// fails the commit, so the task runs again and finds the policy gone, as
-	// it is when tenant deletion took the bucket meanwhile. index removes
-	// the bucket's index rows.
+	// for a task to run in its commit: del, then index. index removes the
+	// bucket's index rows.
 	DeleteStatements(bucket did.DID) (del, index store.Statement)
 }
 

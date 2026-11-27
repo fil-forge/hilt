@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/migrations"
+	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -189,6 +190,24 @@ func PostgresOrSkip(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	requireDockerOrSkip(t)
 	return CreatePostgres(t)
+}
+
+// Exec runs the statements on pool in one transaction, as a task's commit
+// runs its writes, and returns how many rows each affected.
+func Exec(t *testing.T, pool *pgxpool.Pool, sts ...store.Statement) []int64 {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx) // no-op once committed
+	affected := make([]int64, len(sts))
+	for i, st := range sts {
+		tag, err := tx.Exec(ctx, st.SQL, st.Args...)
+		require.NoError(t, err)
+		affected[i] = tag.RowsAffected()
+	}
+	require.NoError(t, tx.Commit(ctx))
+	return affected
 }
 
 var (

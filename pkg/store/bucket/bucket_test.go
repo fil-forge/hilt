@@ -42,7 +42,7 @@ func makeStore(t *testing.T) (bucket.Store, seedFunc, did.DID, seedProviderFunc,
 		require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 	}
 	drop := func(t *testing.T, tenantID did.DID) {
-		require.NoError(t, tenants.Delete(t.Context(), tenantID))
+		testutil.Exec(t, pool, tenants.DeleteStatement(tenantID))
 	}
 	return bucketpostgres.New(pool), seed, providerID, seedProvider, drop
 }
@@ -373,4 +373,25 @@ func TestBucketStore(t *testing.T) {
 		_, err := s.Owner(t.Context(), testutil.RandomDID(t))
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
+}
+
+func TestDeleteByTenantStatement(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
+	ctx := t.Context()
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "region-1", nil))
+	tenants, s := tenantpostgres.New(pool), bucketpostgres.New(pool)
+	tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
+	require.NoError(t, tenants.Add(ctx, tenantID, "ext-1", tenant.Active))
+	require.NoError(t, tenants.Add(ctx, other, "ext-2", tenant.Active))
+	require.NoError(t, s.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "gone-1"))
+	require.NoError(t, s.Add(ctx, testutil.RandomDID(t), tenantID, providerID, "gone-2"))
+	require.NoError(t, s.Add(ctx, testutil.RandomDID(t), other, providerID, "kept"))
+
+	require.Equal(t, []int64{2}, testutil.Exec(t, pool, s.DeleteByTenantStatement(tenantID)))
+	page, err := s.ListByTenant(ctx, tenantID)
+	require.NoError(t, err)
+	require.Empty(t, page.Results)
+	_, err = s.GetByName(ctx, "kept")
+	require.NoError(t, err)
 }

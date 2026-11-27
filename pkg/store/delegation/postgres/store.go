@@ -1,10 +1,8 @@
 // Package postgres provides a PostgreSQL-backed implementation of
 // delegation.Store. Encoded delegation payloads are stored directly in the
-// delegation table's data column. Every write that mutates an audience's set
-// outside a task (PutBatch, Replace, DeleteByAudience) runs in a transaction
-// holding that audience's advisory lock, so those writes of one audience
-// serialize. The statements a task writes through take no lock: the tasks
-// that change a tenant's grants run one at a time on the tenant's queue.
+// delegation table's data column. The statements a task writes through take
+// no lock: the tasks that change a tenant's grants run one at a time on the
+// tenant's queue.
 package postgres
 
 import (
@@ -40,51 +38,21 @@ func New(pool *pgxpool.Pool) *Store {
 // Initialize is a no-op. Schema is managed by the shared goose migrations.
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
-// PutBatch stores the batch in one transaction holding the advisory lock of
-// every audience it touches, so a concurrent Replace of any of them sees the
-// whole batch or none of it.
-func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) (err error) {
+// PutBatch stores the batch in one statement.
+func (s *Store) PutBatch(ctx context.Context, delegations []ucan.Delegation) error {
 	// Validate the whole batch before storing anything.
 	if slices.Contains(delegations, nil) {
 		return fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
 	}
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	audiences := make([]string, 0, len(delegations))
-	for _, d := range delegations {
-		audiences = append(audiences, d.Audience().String())
-	}
-	if err := lockAudiences(ctx, tx, audiences...); err != nil {
-		return err
-	}
-
-	if err := insert(ctx, tx, delegations); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
-}
-
-// insert stores the delegations inside tx in one statement, leaving an
-// already-stored one alone.
-func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
-	if len(dels) == 0 {
+	if len(delegations) == 0 {
 		return nil
 	}
-	st, err := insertStatement(dels, "")
+	st, err := insertStatement(delegations)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, st.SQL, st.Args...); err != nil {
-		return fmt.Errorf("storing %d delegations: %w", len(dels), err)
+	if _, err := s.pool.Exec(ctx, st.SQL, st.Args...); err != nil {
+		return fmt.Errorf("storing %d delegations: %w", len(delegations), err)
 	}
 	return nil
 }
@@ -92,9 +60,8 @@ func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
 // insertStatement builds the insert of the delegations, leaving an
 // already-stored one alone. Each column travels as one array parameter, so
 // the statement's size and its round trip stay the same however many
-// delegations a key or a policy change carries. where, when not empty, is a
-// condition on the row to insert, named d.
-func insertStatement(dels []ucan.Delegation, where string) (store.Statement, error) {
+// delegations a key or a policy change carries.
+func insertStatement(dels []ucan.Delegation) (store.Statement, error) {
 	var (
 		ids        = make([]string, len(dels))
 		issuers    = make([]string, len(dels))
@@ -119,24 +86,61 @@ func insertStatement(dels []ucan.Delegation, where string) (store.Statement, err
 			expiresAts[i] = &t
 		}
 	}
-	if where != "" {
-		where = " WHERE " + where
-	}
 	return store.Statement{
 		SQL: `
 		INSERT INTO delegation (id, issuer, audience, subject, command, data, expires_at)
 		SELECT d.* FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bytea[], $7::timestamptz[])
-			AS d(id, issuer, audience, subject, command, data, expires_at)` + where + `
+			AS d(id, issuer, audience, subject, command, data, expires_at)
 		ON CONFLICT (id) DO NOTHING`,
 		Args: []any{ids, issuers, audiences, subjects, commands, datas, expiresAts},
 	}, nil
 }
 
-func (s *Store) PutForKeysStatement(delegations []ucan.Delegation) (store.Statement, error) {
+func (s *Store) PutStatement(delegations []ucan.Delegation) (store.Statement, error) {
 	if slices.Contains(delegations, nil) {
 		return store.Statement{}, fmt.Errorf("delegations must not be nil: %w", store.ErrInvalidArgument)
 	}
-	return insertStatement(delegations, `EXISTS (SELECT 1 FROM access_key k WHERE k.id = d.audience)`)
+	return insertStatement(delegations)
+}
+
+func (s *Store) ListKeyGrants(ctx context.Context, tenant did.DID) ([]ucan.Delegation, error) {
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, `
+		SELECT d.id, d.data FROM delegation d
+		JOIN access_key k ON k.id = d.audience
+		WHERE k.tenant_id = $1 AND d.issuer = $1
+		ORDER BY d.id ASC`, tenant.String())
+	if err != nil {
+		return nil, fmt.Errorf("listing the grants of the tenant's access keys: %w", err)
+	}
+	defer rows.Close()
+	var out []ucan.Delegation
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			return nil, fmt.Errorf("scanning delegation: %w", err)
+		}
+		dlg, err := delegation.Decode(data)
+		if err != nil {
+			return nil, fmt.Errorf("decoding delegation %s: %w", id, err)
+		}
+		out = append(out, dlg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating delegations: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteTenantStatement(tenant did.DID) store.Statement {
+	return store.Statement{
+		SQL: `
+		DELETE FROM delegation d
+		WHERE d.issuer = $1 OR d.audience = $1
+		   OR d.audience IN (SELECT k.id FROM access_key k WHERE k.tenant_id = $1)
+		   OR d.subject IN (SELECT b.id FROM bucket b WHERE b.tenant_id = $1)`,
+		Args: []any{tenant.String()},
+	}
 }
 
 // withdrawSQL moves the rows of delegation d the condition the caller
@@ -189,106 +193,6 @@ func (s *Store) WithdrawSubjectStatements(tenant, subject did.DID) []store.State
 			Args: []any{subject.String()},
 		},
 	}
-}
-
-// lockNamespace is the first key of the advisory lock every audience-mutating
-// write takes per audience. Postgres identifies an advisory lock by its key
-// pair and nothing else, so the fixed first key keeps this store's locks apart
-// from any other advisory lock taken on the same database; the second key is
-// hashtext(audience DID).
-const lockNamespace int32 = 0x44454c47 // "DELG"
-
-// lockAudiences bounds tx's lock waits at [store.LockTimeout] and takes the
-// exclusive advisory lock of each distinct audience, in sorted order. The
-// order is what keeps two transactions locking overlapping audiences from
-// deadlocking: they queue for the shared audiences in the same sequence. All
-// of them are taken in one statement, so a write over many keys waits on
-// one round trip. The locks are released when tx commits or rolls back.
-func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	slices.Sort(audiences)
-	if err := pglock.AdvisoryAll(ctx, tx, lockNamespace, slices.Compact(audiences)); err != nil {
-		return fmt.Errorf("locking delegation audiences: %w", err)
-	}
-	return nil
-}
-
-// Replace runs in one transaction that takes the audiences' advisory locks
-// (released when the transaction ends), reads the current sets, calls next,
-// deletes the sets and inserts next's result. Another write of any of the
-// audiences waits on the lock until the first commits or rolls back, so it
-// sees the settled state; the holder runs next while it holds the locks, so
-// the wait is bounded at [store.LockTimeout] and a longer one returns
-// [store.ErrLockTimeout].
-func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) (err error) {
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	strs := make([]string, len(audiences))
-	for i, aud := range audiences {
-		strs[i] = aud.String()
-	}
-	if err := lockAudiences(ctx, tx, strs...); err != nil {
-		return err
-	}
-
-	current := make(map[did.DID][]ucan.Delegation, len(audiences))
-	rows, err := tx.Query(ctx, `SELECT id, data FROM delegation WHERE audience = ANY($1) ORDER BY id ASC`, strs)
-	if err != nil {
-		return fmt.Errorf("querying delegations by audience: %w", err)
-	}
-	for rows.Next() {
-		var id string
-		var data []byte
-		if err := rows.Scan(&id, &data); err != nil {
-			rows.Close()
-			return fmt.Errorf("scanning delegation: %w", err)
-		}
-		dlg, err := delegation.Decode(data)
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("decoding delegation %s: %w", id, err)
-		}
-		current[dlg.Audience()] = append(current[dlg.Audience()], dlg)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterating delegations: %w", err)
-	}
-
-	replacement, err := next(pglock.WithTx(ctx, tx), current)
-	if err != nil {
-		return err
-	}
-	if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE audience = ANY($1)`, strs); err != nil {
-		return fmt.Errorf("deleting delegations by audience: %w", err)
-	}
-	var fresh []ucan.Delegation
-	seen := make(map[did.DID]bool, len(audiences))
-	for _, aud := range audiences {
-		if !seen[aud] {
-			seen[aud] = true
-			fresh = append(fresh, replacement[aud]...)
-		}
-	}
-	if err := insert(ctx, tx, fresh); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
 }
 
 // listColumn is a delegation column a list query may filter on. The named type
@@ -364,30 +268,6 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 		results = append(results, dlg)
 	}
 	return store.Page[ucan.Delegation]{Cursor: cursor, Results: results}, nil
-}
-
-// DeleteByAudience removes the audience's delegations in one transaction
-// holding its advisory lock, so a concurrent Replace of the audience does not
-// reinsert what this call deleted.
-func (s *Store) DeleteByAudience(ctx context.Context, audience did.DID) (err error) {
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := lockAudiences(ctx, tx, audience.String()); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE audience = $1`, audience.String()); err != nil {
-		return fmt.Errorf("deleting delegations by audience: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
 }
 
 // ProofChain builds the proof chain from aud toward sub for cmd in a single

@@ -5,23 +5,16 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/validator"
 	"go.uber.org/zap"
 )
 
-// BatchTimeout caps every publish [PublishRevocations] makes. Tenant deletion
-// publishes inside a delegation-store Replace, which holds the keys'
-// delegation locks, and a write that waits on those locks gives up after
-// [store.LockTimeout]; the publish gives up first, so a stalled revocation
-// service fails the deletion rather than the writes behind it. An earlier
-// caller deadline still wins.
+// BatchTimeout caps every publish [PublishRevocations] makes. Every publish
+// runs inside a task that holds its tenant's subject on a queue, so a stalled
+// revocation service fails the task at the bound rather than holding up the
+// tenant's tasks behind it. An earlier caller deadline still wins.
 const BatchTimeout = 8 * time.Second
-
-// The batch bound must stay below the lock wait; a negative difference fails
-// to compile.
-const _ = uint(store.LockTimeout - BatchTimeout)
 
 // RevocationPublisher is the subset of the revocation service (Swarf) Hilt
 // needs. It is satisfied by [*swarfclient.Client]; the interface lets the logic

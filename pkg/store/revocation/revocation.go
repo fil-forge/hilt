@@ -52,12 +52,9 @@ type Store interface {
 	// each call's cursor to the next sees every row once, whether or not the
 	// rows it has read are deleted meanwhile.
 	Oldest(ctx context.Context, tenant did.DID, after Cursor, limit int) ([]ucan.Delegation, Cursor, error)
-	// Delete removes the revocations owed for the delegations with the given
-	// CIDs. A CID with no row is ignored. When ctx carries a transaction
-	// (pglock.WithTx) the removal commits with it.
-	Delete(ctx context.Context, ids []cid.Cid) error
-	// DeleteStatement returns the write [Store.Delete] makes, for a task that
-	// removes the rows in its own commit.
+	// DeleteStatement returns the write that removes the revocations owed
+	// for the delegations with the given CIDs, for a task that removes the
+	// rows in its own commit. A CID with no row is ignored.
 	DeleteStatement(ids []cid.Cid) store.Statement
 	// Stats returns the number of revocations owed across every tenant and
 	// the age of the oldest.
