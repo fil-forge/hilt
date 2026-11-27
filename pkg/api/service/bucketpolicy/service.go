@@ -3,12 +3,11 @@
 // principal reads computed from it, the policies naming a principal and its
 // effective actions per bucket.
 //
-// Every write rewrites the delegations over the bucket of every key of each
-// principal whose effective set the write changes, inside the store
-// transaction that commits the document, while the affected principal rows
-// are locked, and under one deadline for the whole batch. The store commits
-// only when the rotation succeeded, so a principal never keeps access the
-// gateway has not been told to re-read.
+// A write or a removal is a task on the tenant's queue ([tenantqueue]), which
+// the service submits and waits for. In one commit the task writes the
+// document and gives every key of each principal whose effective set the
+// change alters the grants it now holds over the bucket; the grants it takes
+// away are recorded as revocations owed and published after the commit.
 //
 // Known errors are in errors.go so handlers can map them to HTTP responses;
 // unexpected failures are returned wrapped for the handler to log.
@@ -24,12 +23,13 @@ import (
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"go.uber.org/zap"
 )
@@ -56,17 +56,19 @@ type Service struct {
 	buckets    bucketstore.Store
 	principals principalstore.Store
 	policies   bucketpolicystore.Store
-	grants     *grant.Rotator
+	runner     *taskrunner.Runner
 }
 
-// New constructs the policy service.
+// New constructs the policy service. runner runs the policy writes and
+// removals, and must have queue-tenant's handlers registered
+// ([tenantqueue.New]) and be started before Write or Remove is called.
 func New(
 	logger *zap.Logger,
 	tenants tenantstore.Store,
 	buckets bucketstore.Store,
 	principals principalstore.Store,
 	policies bucketpolicystore.Store,
-	grants *grant.Rotator,
+	runner *taskrunner.Runner,
 ) *Service {
 	return &Service{
 		logger:     logger,
@@ -74,7 +76,7 @@ func New(
 		buckets:    buckets,
 		principals: principals,
 		policies:   policies,
-		grants:     grants,
+		runner:     runner,
 	}
 }
 
@@ -118,14 +120,25 @@ func WithCondition(c Condition) WriteOption {
 }
 
 // Write creates or replaces the bucket's policy, for a caller that has
-// resolved the tenant and the bucket. It validates doc against the bucket
-// (every resource must name bucketName) and the tenant's principals, and
-// checks the condition [WithCondition] sets. bucketName also
-// names the bucket in errors. It returns the new ETag and whether the bucket
-// had no policy before.
+// resolved the tenant and the bucket. The document must be valid for the
+// bucket (every resource must name bucketName) and name only principals the
+// tenant has, and the condition [WithCondition] sets must hold. bucketName
+// also names the bucket in errors. It returns the new ETag and whether the
+// bucket had no policy before.
 //
-// The delegations of the principals the change affects are rotated inside the
-// store's transaction, so a publish failure leaves the old document in place.
+// The write is a queue-tenant.put-policy task ([tenantqueue]), which Write
+// waits for, behind any other change to the tenant queued before it. The
+// task is what decides: the validation made here before it only spares the
+// work of a request that cannot succeed. From the task's commit every
+// affected key holds the grants of the new document over the bucket. The
+// grants it lost are revoked after the commit, by the task the commit
+// queues, and retried until the revocation service takes them, so Write
+// returns before the gateway has been told to drop what it cached, and
+// succeeds while the revocation service is down.
+//
+// If ctx ends first the task stays queued and a worker finishes it. A task
+// still waiting for its turn at ctx's deadline is abandoned with nothing
+// written and reported as [ErrConcurrentChange].
 func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketName string, doc s3bkt.PolicyDocument, opts ...WriteOption) (string, bool, error) {
 	tenantPrincipals, err := s.principals.ListIDsByTenant(ctx, tenantID)
 	if err != nil {
@@ -144,61 +157,45 @@ func (s *Service) Write(ctx context.Context, tenantID, bucketID did.DID, bucketN
 			return "", false, err
 		}
 	}
-	var created bool
-	etag, err := s.policies.Put(ctx, in, func(ctx context.Context, old *bucketpolicystore.Record) error {
-		created = old == nil
-		var oldDoc *s3bkt.PolicyDocument
-		if old != nil {
-			oldDoc = &old.Policy
-		}
-		// Re-list under the bucket lock: a principal created since the list above
-		// is one the wildcard now reaches, so its keys are rotated here. One
-		// created after this list commits after the write does, since the add
-		// waits on the tenant lock the write holds, and its keys are created
-		// from the committed policy.
-		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
-		if err != nil {
-			return err
-		}
-		// A principal removed since the validation above must not be named in
-		// the committed document.
-		named, _ := bucketpolicy.Named(doc)
-		for _, p := range named {
-			if !slices.Contains(principals, p) {
-				return fmt.Errorf("principal %q was removed: %w", p, store.ErrInvalidArgument)
-			}
-		}
-		return s.rotate(ctx, tenantID, bucketID, oldDoc, &doc, principals)
+	spec, err := tenantqueue.PutPolicySpec(tenantID, bucketID, bucketName, doc, tenantqueue.PolicyCondition{
+		Conditional: in.Conditional,
+		IfMatch:     in.IfMatch,
 	})
 	if err != nil {
-		return "", false, s.writeError(ctx, bucketName, err)
+		return "", false, fmt.Errorf("building the task of the policy of bucket %q: %w", bucketName, err)
+	}
+	res, err := s.runner.Run(ctx, spec)
+	if err != nil {
+		return "", false, s.taskError(bucketName, err)
+	}
+	etag, created, err := tenantqueue.DecodePutPolicyResult(res)
+	if err != nil {
+		return "", false, fmt.Errorf("writing the policy of bucket %q: %w", bucketName, err)
 	}
 	return etag, created, nil
 }
 
 // Remove removes the bucket's policy, for a caller that has resolved the
 // tenant and the bucket. A non-nil ifMatch must equal the current ETag; nil
-// removes whatever is stored (a DeleteBucketPolicy without If-Match). Every principal
-// the policy reached loses its access, so each one's keys lose their
-// delegations over the bucket inside the store's transaction. bucketName names
-// the bucket in errors and logs.
+// removes whatever is stored (a DeleteBucketPolicy without If-Match). Every
+// principal the policy reached loses its access, so each one's keys lose
+// their grants over the bucket. bucketName names the bucket in errors and
+// logs.
+//
+// The removal is a queue-tenant.delete-policy task, which Remove waits for
+// as [Service.Write] waits for its own. A bucket the tenant no longer has
+// (deleted since the lookup) has no policy to remove, and is reported as
+// [ErrPolicyNotFound].
 func (s *Service) Remove(ctx context.Context, tenantID, bucketID did.DID, bucketName string, ifMatch *string) error {
-	var tag string
-	if ifMatch != nil {
-		tag = *ifMatch
+	spec, err := tenantqueue.DeletePolicySpec(tenantID, bucketID, bucketName, ifMatch)
+	if err != nil {
+		return fmt.Errorf("building the task removing the policy of bucket %q: %w", bucketName, err)
 	}
-	err := s.policies.Delete(ctx, bucketID, tag, func(ctx context.Context, old bucketpolicystore.Record) error {
-		// Re-list under the bucket lock, as Write does.
-		principals, err := s.principals.ListIDsByTenant(ctx, tenantID)
-		if err != nil {
-			return err
+	if _, err := s.runner.Run(ctx, spec); err != nil {
+		if errors.Is(err, tenantqueue.ErrUnknownBucket) {
+			return ErrPolicyNotFound
 		}
-		return s.rotate(ctx, tenantID, bucketID, &old.Policy, nil, principals)
-	})
-	if errors.Is(err, store.ErrRecordNotFound) {
-		return ErrPolicyNotFound
-	} else if err != nil {
-		return s.writeError(ctx, bucketName, err)
+		return s.taskError(bucketName, err)
 	}
 	s.logger.Info("deleted bucket policy", zap.Stringer("tenant", tenantID), zap.String("bucket", bucketName))
 	return nil
@@ -263,54 +260,33 @@ func (s *Service) principalPolicies(ctx context.Context, externalID, principalID
 	return tenantID, recs, nil
 }
 
-// rotate rewrites the delegations over the bucket of every key of each
-// principal whose effective actions the change from oldDoc to newDoc alters,
-// holding those principals' rows so a key created for one of them meanwhile
-// is either included or created from the committed policy. It runs inside the
-// store's write transaction while the bucket is locked, so the whole of it is
-// bounded at [grant.BatchTimeout] (see there). Any failure, the deadline
-// included, fails the write and rolls it back.
-func (s *Service) rotate(ctx context.Context, tenantID, bucketID did.DID, oldDoc, newDoc *s3bkt.PolicyDocument, principals []string) error {
-	affected := bucketpolicy.Changed(oldDoc, newDoc, principals)
-	if len(affected) == 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, grant.BatchTimeout)
-	defer cancel()
-	return s.principals.WithLock(ctx, tenantID, affected, func(ctx context.Context) error {
-		actions := make(map[string][]string, len(affected))
-		for _, p := range affected {
-			actions[p] = bucketpolicy.Effective(newDoc, p)
-		}
-		if err := s.grants.Rotate(ctx, tenantID, bucketID, actions); err != nil {
-			return fmt.Errorf("rotating the delegations of the affected principals: %w", err)
-		}
-		return nil
-	})
-}
-
-// writeError maps the store's compare-and-set and locking failures to the
-// service's own; anything else is wrapped for the handler to log. The batch
-// deadline of the rotation is a locking failure too: it fires before the lock
-// timeout it runs under, and the write is retried the same way; the caller's
-// own deadline running out is not, so the context error counts only while the
-// caller's ctx lives. A bucket the store no longer has (deleted since the
-// lookup) is a missing bucket. A document the store refuses for naming a
-// principal the tenant no longer has (removed between the validation and the
-// write) is an invalid policy. A failed precondition is logged with the
-// store's error, which names the stored ETag and the one sent, since the
-// mapped error the caller sees carries neither.
-func (s *Service) writeError(ctx context.Context, bucketName string, err error) error {
+// taskError maps the outcome of a failed policy task to the service's known
+// errors; anything else is wrapped for the handler to log. A bucket the
+// tenant no longer has (deleted since the lookup) is a missing bucket. A
+// document the task refuses, one naming a principal removed since the
+// validation included, is returned as the task reported it, an error
+// wrapping [s3bkt.ErrInvalidPolicy]. A failed precondition is logged with the
+// task's error, which names the stored ETag and the one sent, since the
+// mapped error the caller sees carries neither. A task that expired waited
+// behind the tenant's other changes for as long as its caller allowed.
+func (s *Service) taskError(bucketName string, err error) error {
 	switch {
 	case errors.Is(err, store.ErrPreconditionFailed):
 		s.logger.Warn("bucket policy precondition failed", zap.String("bucket", bucketName), zap.Error(err))
 		return ErrPreconditionFailed
-	case store.Contended(ctx, err):
-		return ErrConcurrentChange
-	case errors.Is(err, store.ErrRecordNotFound):
+	case errors.Is(err, tenantqueue.ErrPolicyNotFound):
+		return ErrPolicyNotFound
+	case errors.Is(err, tenantqueue.ErrUnknownBucket):
 		return ErrBucketNotFound
-	case errors.Is(err, store.ErrInvalidArgument):
-		return fmt.Errorf("%w: a principal the policy names no longer exists", s3bkt.ErrInvalidPolicy)
+	case errors.Is(err, s3bkt.ErrInvalidPolicy):
+		// The task marked the error final; the caller gets the error it
+		// marked.
+		if inner := errors.Unwrap(err); inner != nil && taskrunner.IsPermanent(err) {
+			return inner
+		}
+		return err
+	case errors.Is(err, taskrunner.ErrExpired):
+		return ErrConcurrentChange
 	}
 	return fmt.Errorf("writing the policy of bucket %q: %w", bucketName, err)
 }

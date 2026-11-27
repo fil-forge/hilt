@@ -20,15 +20,23 @@
 // the tenant issued to it leave the delegation store and are recorded as
 // revocations owed, in the commit that deletes its row (keys.go).
 //
+// queue-tenant.put-policy writes a bucket's policy and
+// queue-tenant.delete-policy removes one. In the commit that writes the
+// document, every access key of each principal whose effective actions on
+// the bucket change has its grants over the bucket withdrawn, recorded as
+// revocations owed, and is stored the grants of the new document
+// (policies.go).
+//
 // Every change that records revocations queues queue-revocation.publish for
 // the tenant, which publishes them after the commit.
 //
-// Policy writes, principal removal and bucket and tenant deletion do not run
-// here: they write the same keys and grants under row and advisory locks. A
-// task therefore chooses the grants it withdraws in the statements its
-// commit runs, under the keys' delegation locks, and never from what its
-// handler read, and a task that issues grants from what it read makes its
-// commit conditional on that still holding.
+// Principal removal and bucket and tenant deletion do not run here: they
+// write the same keys, grants and policies under row and advisory locks. A
+// task that stores grants therefore chooses the grants it withdraws in the
+// statements its commit runs, under the keys' delegation locks, and never
+// from what its handler read, and a task that issues grants or writes a
+// policy from what it read makes its commit conditional on that still
+// holding.
 package tenantqueue
 
 import (
@@ -110,8 +118,10 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, tasks.ActionSetStatus, err)
 	}
 	for action, h := range map[string]taskrunner.Handler{
-		tasks.ActionCreateKey: q.runCreateKey,
-		tasks.ActionDeleteKey: q.runDeleteKey,
+		tasks.ActionCreateKey:    q.runCreateKey,
+		tasks.ActionDeleteKey:    q.runDeleteKey,
+		tasks.ActionPutPolicy:    q.runPutPolicy,
+		tasks.ActionDeletePolicy: q.runDeletePolicy,
 	} {
 		if err := r.Handle(tasks.QueueTenant, action, h); err != nil {
 			return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, action, err)
@@ -139,9 +149,9 @@ func SetStatusSpec(tenantID did.DID, status tenant.Status) taskrunner.Spec {
 // Everything it writes commits together. A change into or out of disabled
 // first withdraws every delegation the tenant issued to its keys, recording
 // each as a revocation owed, and queues their publishing. A change out of
-// disabled then stores fresh grants for every key: one created or rewritten
-// while the tenant was disabled may hold some, and withdrawing first leaves
-// each key with exactly one set. The status is written last, on the
+// disabled then stores fresh grants for every key; withdrawing first leaves
+// each key with exactly one set, whatever it held. The status is written
+// last, on the
 // condition that it is still the one read here; when it is not, the commit
 // fails and the task runs again from what is there then.
 //

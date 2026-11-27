@@ -26,8 +26,8 @@ import (
 // operation's permission reaches it, a principal-bound key never does. A PUT's
 // body must hash to the request's signed payload hash, so nothing on the path
 // can replace the document, and is validated and stored as the policy service
-// stores a policy, rotating the affected principals' keys. If-Match and
-// If-None-Match, when present, must be signed headers.
+// stores a policy, rewriting the grants of the affected principals' keys.
+// If-Match and If-None-Match, when present, must be signed headers.
 func (s *Service) Policy(ctx context.Context, issuer did.DID, args *s3bkt.PolicyArguments) (*s3bkt.PolicyOK, error) {
 	authz, err := s.authorizer.Authorize(ctx, issuer, args.Request)
 	if err != nil {

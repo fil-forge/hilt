@@ -1099,50 +1099,45 @@ func TestTenantIssuer(t *testing.T) {
 	})
 }
 
-// TestEffectiveActionsDuringPolicyWrite runs the principal-bound read path
-// against Postgres while a policy write is in flight. The write holds the
-// policy row and then locks the principal, as its delegation rotation does;
-// the read takes the principal and then the policy. Each read runs in its own
-// short transaction, so the read waits for the write and neither waits on the
-// other.
-func TestEffectiveActionsDuringPolicyWrite(t *testing.T) {
+// TestEffectiveActionsDuringBucketDeletion runs the principal-bound read
+// path against Postgres while the bucket is being deleted. The deletion
+// holds the bucket's policy lock while it revokes the bucket's grants; the
+// read takes the principal and then the policy, each in its own short
+// transaction, so it waits for the deletion and is answered from what it
+// leaves.
+func TestEffectiveActionsDuringBucketDeletion(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	principals := principalpostgres.New(pool)
 	policies := bucketpolicypostgres.New(pool)
+	buckets := bucketpostgres.New(pool)
 	az := auth.NewAuthorizer(zap.NewNop(), nil, nil, nil, nil, principals, policies, nil)
 
 	tenantID, providerID, bucketID := testutil.RandomDID(t), testutil.RandomDID(t), testutil.RandomDID(t)
 	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), providerID, tenantID.String(), nil))
 	require.NoError(t, tenantpostgres.New(pool).Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
-	require.NoError(t, bucketpostgres.New(pool).Add(t.Context(), bucketID, tenantID, providerID, "effective-actions"))
+	require.NoError(t, buckets.Add(t.Context(), bucketID, tenantID, providerID, "effective-actions"))
 	require.NoError(t, principals.Add(t.Context(), tenantID, "alice"))
-	statement := func(actions ...string) s3bkt.PolicyDocument {
-		return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
-	}
-	etag, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject"), Conditional: true}, nil)
+	document := s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{{Effect: s3bkt.Allow, Principal: s3bkt.Only("alice"), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}}}
+	_, err := policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucketID, Tenant: tenantID, Policy: document, Conditional: true}, nil)
 	require.NoError(t, err)
 
 	var actions []string
 	var readETag string
-	written, read := htestutil.RequireWaitsForWriter(t,
+	deleted, read := htestutil.RequireWaitsForWriter(t,
 		func(entered chan<- struct{}, release <-chan struct{}) error {
-			_, err := policies.Put(context.Background(), bucketpolicystore.Input{
-				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:GetObject", "s3:PutObject"), IfMatch: &etag,
-				Conditional: true,
-			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
+			return policies.DeleteByBucket(context.Background(), bucketID, func(ctx context.Context) error {
 				close(entered)
 				<-release
-				return principals.WithLock(ctx, tenantID, []string{"alice"}, func(context.Context) error { return nil })
+				return buckets.Delete(ctx, bucketID)
 			})
-			return err
 		},
 		func() error {
 			var err error
 			actions, readETag, err = az.EffectiveActions(context.Background(), tenantID, "alice", bucketID)
 			return err
 		})
-	require.NoError(t, written)
+	require.NoError(t, deleted)
 	require.NoError(t, read)
-	require.ElementsMatch(t, []string{"s3:GetObject", "s3:PutObject"}, actions, "the read is answered from the committed write")
-	require.Equal(t, s3bkt.ETag(statement("s3:GetObject", "s3:PutObject")), readETag)
+	require.Empty(t, actions, "the read is answered from what the deletion left")
+	require.Empty(t, readETag)
 }

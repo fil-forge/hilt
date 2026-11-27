@@ -905,7 +905,7 @@ func TestInfo(t *testing.T) {
 
 		// The write narrows the policy to s3:ListBucket after Info has read the
 		// effective actions. Both actions map to /content/retrieve, so the
-		// rotation reissues a chain that still serves GetObject; pairing it with
+		// write reissues a chain that still serves GetObject; pairing it with
 		// the old action set would report a permission the policy just removed.
 		straddle.write = func() {
 			rec, err := policies.Get(ctx, bucketID)
@@ -937,7 +937,7 @@ func TestInfo(t *testing.T) {
 		})
 		grantPolicy(t, policies, "s3:GetObject", "s3:ListBucket")
 
-		// The write narrows the policy and rotates the key's grants after Info
+		// The write narrows the policy and rewrites the key's grants after Info
 		// has listed them. ProofChain reads by command and subject, so it would
 		// return the new chain under the old grant's CID, paired with the old
 		// action set.
@@ -966,7 +966,7 @@ func TestInfo(t *testing.T) {
 
 		ok, _, err := svc.Info(ctx, providerID, &s3bkt.InfoArguments{Name: bucketName, AccessKey: akDID})
 		if err == nil {
-			t.Fatalf("Info answered %v over the rotated grants", ok.Permissions.Entries[akDID])
+			t.Fatalf("Info answered %v over the rewritten grants", ok.Permissions.Entries[akDID])
 		}
 		require.ErrorIs(t, err, auth.ErrTemporarilyUnavailable)
 	})
@@ -1031,11 +1031,12 @@ func TestInfo(t *testing.T) {
 }
 
 // TestInfoDuringPolicyWrite runs a principal-bound Info against Postgres while
-// a policy write is in flight. The write starts after Info has read the
-// effective actions, commits the narrowed grants from its callback as the
-// rotation does, and parks before the policy row is written. Info lists the
-// new grants, so it must wait for the write to settle before it rereads the
-// policy rather than pair them with the old actions.
+// a write holds the bucket's policy lock, as a policy task's commit does. The
+// write starts after Info has read the effective actions, replaces the key's
+// grants with the narrowed ones in the transaction that holds the lock, and
+// parks before the policy row is written. Info must wait for the write to
+// settle before it rereads the policy, and then refuse rather than pair what
+// it read of the grants with the old actions.
 func TestInfoDuringPolicyWrite(t *testing.T) {
 	infoDuringPolicyWrite(t, func(s delegationstore.Store, write func()) delegationstore.Store {
 		return &writeOnFirstList{Store: s, write: write}
@@ -1044,8 +1045,8 @@ func TestInfoDuringPolicyWrite(t *testing.T) {
 
 // TestInfoDuringPolicyWriteBeforeProofChains is TestInfoDuringPolicyWrite with
 // the write starting after Info has listed the grants, before it builds their
-// proof chains. ProofChain reads the new chain, so Info must still wait for the
-// write before it rereads the policy.
+// proof chains. Info must still wait for the write before it rereads the
+// policy.
 func TestInfoDuringPolicyWriteBeforeProofChains(t *testing.T) {
 	infoDuringPolicyWrite(t, func(s delegationstore.Store, write func()) delegationstore.Store {
 		return &writeOnFirstProofChain{Store: s, write: write}
@@ -1104,8 +1105,8 @@ func infoDuringPolicyWrite(t *testing.T, straddle func(s delegationstore.Store, 
 				Bucket: bucketID, Tenant: tenantID, Policy: statement("s3:ListBucket"), IfMatch: &etag,
 				Conditional: true,
 			}, func(ctx context.Context, _ *bucketpolicystore.Record) error {
-				// The rotation commits the new grants in its own transaction
-				// before the policy row is written.
+				// The write replaces the grants in the transaction that goes
+				// on to write the policy row.
 				narrowed, err := grant.Issue(tenantIssuer, akDID, []did.DID{bucketID}, []string{"s3:ListBucket"}, nil)
 				if err != nil {
 					return err

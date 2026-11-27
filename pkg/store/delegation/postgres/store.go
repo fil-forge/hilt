@@ -1,13 +1,15 @@
 // Package postgres provides a PostgreSQL-backed implementation of
 // delegation.Store. Encoded delegation payloads are stored directly in the
 // delegation table's data column. Every write that mutates an audience's set
-// (PutBatch, Replace, ReplaceOver, DeleteByAudience) runs in a transaction holding that
+// (PutBatch, Replace, DeleteByAudience) runs in a transaction holding that
 // audience's advisory lock, so the writes of one audience serialize. The
-// statements a task runs in its own commit keep to the same rule: those of
-// WithdrawKeyGrantsStatements open with the locks of every key of the tenant
-// and those of WithdrawGrantsOfKeyStatements with the one key's, and
-// PutForKeysStatement follows the former in the same transaction or stores
-// the grants of a key its own transaction creates.
+// statements with which a task stores grants in its own commit keep to the
+// same rule: those of WithdrawKeyGrantsStatements open with the locks of
+// every key of the tenant and those of WithdrawGrantsOverStatements with the
+// locks of the named principals' keys, and PutForKeysStatement follows one
+// of them in the same transaction or stores the grants of a key its own
+// transaction creates. WithdrawGrantsOfKeyStatement only removes, and takes
+// no lock.
 package postgres
 
 import (
@@ -95,7 +97,7 @@ func insert(ctx context.Context, tx pgx.Tx, dels []ucan.Delegation) error {
 // insertStatement builds the insert of the delegations, leaving an
 // already-stored one alone. Each column travels as one array parameter, so
 // the statement's size and its round trip stay the same however many
-// delegations a key or a rotation carries. where, when not empty, is a
+// delegations a key or a policy change carries. where, when not empty, is a
 // condition on the row to insert, named d.
 func insertStatement(dels []ucan.Delegation, where string) (store.Statement, error) {
 	var (
@@ -174,27 +176,49 @@ func (s *Store) WithdrawKeyGrantsStatements(tenant did.DID) []store.Statement {
 	}
 }
 
-// WithdrawGrantsOfKeyStatements takes the lock [lockAudiences] takes for the
-// key. The key's row is not read: the lock is the audience's, whether or not
-// the key still exists.
-func (s *Store) WithdrawGrantsOfKeyStatements(tenant, key did.DID) []store.Statement {
+// WithdrawGrantsOverStatements locks the keys in the order
+// [Store.WithdrawKeyGrantsStatements] does.
+func (s *Store) WithdrawGrantsOverStatements(tenant, subject did.DID, principals []string) []store.Statement {
 	return []store.Statement{
 		{
-			SQL:  `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
-			Args: []any{lockNamespace, key.String()},
+			SQL: `
+				SELECT pg_advisory_xact_lock($1, hashtext(k.id))
+				FROM access_key k
+				WHERE k.tenant_id = $2 AND k.principal_id = ANY($3)
+				ORDER BY k.id COLLATE "C"`,
+			Args: []any{lockNamespace, tenant.String(), principals},
 		},
 		{
 			SQL: `
 				WITH withdrawn AS (
 					DELETE FROM delegation d
-					WHERE d.audience = $2 AND d.issuer = $1
+					USING access_key k
+					WHERE k.tenant_id = $1 AND k.principal_id = ANY($3)
+					  AND d.audience = k.id AND d.subject = $2 AND d.issuer = $1
 					RETURNING d.id, d.data
 				)
 				INSERT INTO revocation_owed (id, tenant_id, data)
 				SELECT w.id, $1, w.data FROM withdrawn w
 				ON CONFLICT (id) DO NOTHING`,
-			Args: []any{tenant.String(), key.String()},
+			Args: []any{tenant.String(), subject.String(), principals},
 		},
+	}
+}
+
+// WithdrawGrantsOfKeyStatement does not read the key's row: the delegations
+// are the audience's, whether or not the key still exists.
+func (s *Store) WithdrawGrantsOfKeyStatement(tenant, key did.DID) store.Statement {
+	return store.Statement{
+		SQL: `
+			WITH withdrawn AS (
+				DELETE FROM delegation d
+				WHERE d.audience = $2 AND d.issuer = $1
+				RETURNING d.id, d.data
+			)
+			INSERT INTO revocation_owed (id, tenant_id, data)
+			SELECT w.id, $1, w.data FROM withdrawn w
+			ON CONFLICT (id) DO NOTHING`,
+		Args: []any{tenant.String(), key.String()},
 	}
 }
 
@@ -209,7 +233,7 @@ const lockNamespace int32 = 0x44454c47 // "DELG"
 // exclusive advisory lock of each distinct audience, in sorted order. The
 // order is what keeps two transactions locking overlapping audiences from
 // deadlocking: they queue for the shared audiences in the same sequence. All
-// of them are taken in one statement, so a rotation over many keys waits on
+// of them are taken in one statement, so a write over many keys waits on
 // one round trip. The locks are released when tx commits or rolls back.
 func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
@@ -229,22 +253,7 @@ func lockAudiences(ctx context.Context, tx pgx.Tx, audiences ...string) error {
 // sees the settled state; the holder runs next while it holds the locks, so
 // the wait is bounded at [store.LockTimeout] and a longer one returns
 // [store.ErrLockTimeout].
-func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	return s.replace(ctx, audiences, nil, next)
-}
-
-// ReplaceOver is Replace with the read and the delete narrowed to the rows
-// over subject, which the (audience, subject, command) index serves.
-func (s *Store) ReplaceOver(ctx context.Context, audiences []did.DID, subject did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
-	if !subject.Defined() {
-		return fmt.Errorf("cannot replace powerline delegations: %w", store.ErrInvalidArgument)
-	}
-	return s.replace(ctx, audiences, &subject, next)
-}
-
-// replace swaps the audiences' delegations, those over subject alone when it
-// is non-nil.
-func (s *Store) replace(ctx context.Context, audiences []did.DID, subject *did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) (err error) {
+func (s *Store) Replace(ctx context.Context, audiences []did.DID, next func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) (err error) {
 	defer func() { err = pglock.MapError(err) }()
 	tx, err := pglock.Begin(ctx, s.pool)
 	if err != nil {
@@ -260,15 +269,8 @@ func (s *Store) replace(ctx context.Context, audiences []did.DID, subject *did.D
 		return err
 	}
 
-	// Two query texts rather than one with an optional subject, so each is
-	// planned for the index it can use.
-	scope, args := `audience = ANY($1)`, []any{strs}
-	if subject != nil {
-		scope, args = scope+` AND subject = $2`, append(args, subject.String())
-	}
-
 	current := make(map[did.DID][]ucan.Delegation, len(audiences))
-	rows, err := tx.Query(ctx, `SELECT id, data FROM delegation WHERE `+scope+` ORDER BY id ASC`, args...)
+	rows, err := tx.Query(ctx, `SELECT id, data FROM delegation WHERE audience = ANY($1) ORDER BY id ASC`, strs)
 	if err != nil {
 		return fmt.Errorf("querying delegations by audience: %w", err)
 	}
@@ -295,16 +297,11 @@ func (s *Store) replace(ctx context.Context, audiences []did.DID, subject *did.D
 	if err != nil {
 		return err
 	}
-	if subject != nil {
-		err = dlgstore.CheckReplacementOver(audiences, *subject, replacement)
-	} else {
-		err = dlgstore.CheckReplacement(audiences, replacement)
-	}
-	if err != nil {
+	if err := dlgstore.CheckReplacement(audiences, replacement); err != nil {
 		return err
 	}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE `+scope, args...); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM delegation WHERE audience = ANY($1)`, strs); err != nil {
 		return fmt.Errorf("deleting delegations by audience: %w", err)
 	}
 	var fresh []ucan.Delegation

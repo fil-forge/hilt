@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
+	"github.com/fil-forge/hilt/pkg/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -24,9 +26,9 @@ import (
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
-	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	revocationpostgres "github.com/fil-forge/hilt/pkg/store/revocation/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
@@ -45,104 +47,71 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// blockingSwarf never answers a publish: it blocks until the context is done
-// and reports why, standing in for a revocation service that hangs.
-type blockingSwarf struct{}
-
-func (blockingSwarf) PublishBatch(ctx context.Context, _ ucan.Issuer, _ []ucan.Delegation) error {
-	<-ctx.Done()
-	return ctx.Err()
+// heldSwarf is a revocation service that refuses every publish while holding
+// is set, so a test can look at the revocations owed before they are
+// published, and can stand in for a service that is down.
+type heldSwarf struct {
+	testutil.FakeSwarf
+	holding atomic.Bool
 }
 
-// rejectingPolicies fails every Put with err, standing in for the store
-// refusing the document.
-type rejectingPolicies struct {
-	bucketpolicystore.Store
-	err error
-}
-
-func (r *rejectingPolicies) Put(context.Context, bucketpolicystore.Input, func(context.Context, *bucketpolicystore.Record) error) (string, error) {
-	return "", r.err
-}
-
-// parkedPolicies holds Put until resume is closed, closing reached when it
-// gets there. It parks before the wrapped store takes its lock, so the write
-// has validated its document and holds nothing.
-type parkedPolicies struct {
-	bucketpolicystore.Store
-	reached chan struct{}
-	resume  chan struct{}
-}
-
-func (p *parkedPolicies) Put(ctx context.Context, in bucketpolicystore.Input, fn func(context.Context, *bucketpolicystore.Record) error) (string, error) {
-	close(p.reached)
-	<-p.resume
-	return p.Store.Put(ctx, in, fn)
-}
-
-// growingPrincipals records a new principal for the tenant right after the
-// first ListIDsByTenant answers, so the list a write takes before the bucket lock
-// and the one its store callback takes differ: it stands in for a principal
-// created in that gap. added, when set, runs once the principal exists.
-type growingPrincipals struct {
-	principalstore.Store
-	late   string
-	added  func()
-	listed bool
-}
-
-func (g *growingPrincipals) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
-	ids, err := g.Store.ListIDsByTenant(ctx, tenant)
-	if err != nil || g.listed {
-		return ids, err
+func (h *heldSwarf) PublishBatch(ctx context.Context, revoker ucan.Issuer, revoked []ucan.Delegation) error {
+	if h.holding.Load() {
+		return errors.New("revocation service unavailable")
 	}
-	g.listed = true
-	if err := g.Store.Add(ctx, tenant, g.late); err != nil {
-		return nil, err
-	}
-	if g.added != nil {
-		g.added()
-	}
-	return ids, nil
+	return h.FakeSwarf.PublishBatch(ctx, revoker, revoked)
 }
 
-// gatedPrincipals holds the nth ListIDsByTenant until resume is closed, closing
-// reached when it gets there; with after set it holds once that call has
-// returned. A policy write makes that call from inside the policy store's
-// write, so the gate parks the write holding one store and about to read the
-// other, or having read it.
-type gatedPrincipals struct {
-	principalstore.Store
-	mu      sync.Mutex
-	calls   int
-	nth     int
-	after   bool
-	reached chan struct{}
-	resume  chan struct{}
+// park closes entered and waits for release. It gives up when the test ends,
+// so a test that fails while a writer is parked leaves nothing blocked.
+func park(t *testing.T, entered chan<- struct{}, release <-chan struct{}) {
+	close(entered)
+	select {
+	case <-release:
+	case <-t.Context().Done():
+	}
 }
 
-func (g *gatedPrincipals) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, error) {
-	g.mu.Lock()
-	hold := false
-	g.calls++
-	if g.calls == g.nth {
-		hold = true
+// commitHook lets a test act between a policy task's reads and its commit
+// (see [testutil.BeforePolicyCommit]).
+type commitHook struct {
+	mu sync.Mutex
+	// next runs on the handler's next pass, and then no more.
+	next func()
+	// passes counts the passes of policy handlers since the last arm.
+	passes int
+}
+
+// arm makes fn run on the next pass of a policy handler, once it has read
+// everything it reads and before it records a write.
+func (h *commitHook) arm(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.next, h.passes = fn, 0
+}
+
+func (h *commitHook) run() {
+	h.mu.Lock()
+	fn := h.next
+	h.next = nil
+	h.passes++
+	h.mu.Unlock()
+	if fn != nil {
+		fn()
 	}
-	g.mu.Unlock()
-	if hold && !g.after {
-		close(g.reached)
-		<-g.resume
-	}
-	ids, err := g.Store.ListIDsByTenant(ctx, tenant)
-	if hold && g.after {
-		close(g.reached)
-		<-g.resume
-	}
-	return ids, err
+}
+
+// ran is the number of passes policy handlers have made since the last arm.
+func (h *commitHook) ran() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.passes
 }
 
 type deps struct {
 	svc     *bucketpolicysvc.Service
+	runner  *taskrunner.Runner
+	hook    *commitHook
 	pool    *pgxpool.Pool
 	tenants *tenantpostgres.Store
 	// providerID is the provider the tenant's buckets are placed with.
@@ -152,23 +121,25 @@ type deps struct {
 	principals  *principalpostgres.Store
 	accessKeys  *accesskeypostgres.Store
 	delegations *delegationpostgres.Store
+	owed        *revocationpostgres.Store
 	secrets     *vaultmemory.Store
-	swarf       *testutil.FakeSwarf
+	swarf       *heldSwarf
 	tenantID    did.DID
 	tenant      ucan.Issuer
 	otherTenant did.DID
 	// photos is the tenant's bucket; archive is a bucket every key holds a
-	// delegation over, so a removal always has something to revoke.
+	// delegation over, so a write to photos has another bucket's grants to
+	// leave alone and a removal always has something to revoke.
 	photos, archive did.DID
 	// keys maps each principal-bound key to its principal.
 	keys map[did.DID]string
 }
 
 // setup wires the service over a fresh database with two tenants and one
-// bucket, "photos", owned by "tenant-1", whose key is in the vault so the grant
-// rotator can sign as it. wrapPrincipals, when given, wraps the principal
-// store the service is built over.
-func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principalstore.Store) deps {
+// bucket, "photos", owned by "tenant-1", whose key is in the vault so the
+// policy tasks can sign as it, and a running task runner with the service's
+// handlers. Each wrap replaces what queue-tenant's handlers work through.
+func setup(t *testing.T, wrap ...func(*tenantqueue.Deps)) deps {
 	t.Helper()
 	ctx := t.Context()
 	pool := testutil.PostgresOrSkip(t)
@@ -180,6 +151,7 @@ func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principals
 	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
 
 	d := deps{
+		hook:        &commitHook{},
 		pool:        pool,
 		tenants:     tenants,
 		providerID:  providerID,
@@ -188,8 +160,9 @@ func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principals
 		principals:  principalpostgres.New(pool),
 		accessKeys:  accesskeypostgres.New(pool),
 		delegations: delegationpostgres.New(pool),
+		owed:        revocationpostgres.New(pool),
 		secrets:     vaultmemory.New(),
-		swarf:       &testutil.FakeSwarf{},
+		swarf:       &heldSwarf{},
 		tenantID:    tenantID,
 		otherTenant: otherTenant,
 		photos:      testutil.RandomDID(t),
@@ -201,11 +174,8 @@ func setup(t *testing.T, wrapPrincipals ...func(principalstore.Store) principals
 	require.NoError(t, d.secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
 	d.tenant = multikey.NewIssuer(tenantID, signer)
 	require.NoError(t, d.buckets.Add(ctx, d.photos, tenantID, providerID, "photos"))
-	var principals principalstore.Store = d.principals
-	for _, wrap := range wrapPrincipals {
-		principals = wrap(principals)
-	}
-	d.svc = bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, principals, d.policies, d.rotator(d.swarf))
+	d.runner = testutil.StartServiceTasks(t, pool, d.secrets, d.swarf, append(wrap, testutil.BeforePolicyCommit(d.hook.run))...)
+	d.svc = bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, d.policies, d.runner)
 	return d
 }
 
@@ -223,26 +193,36 @@ func (h *hookedKeys) AddStatement(in accesskeystore.Input) (store.Statement, err
 	return h.Store.AddStatement(in)
 }
 
-// keyService returns the access-key service over d's database and the task
-// runner its creations and deletions run on. before, when not nil, runs once,
-// as hookedKeys runs it.
-func (d deps) keyService(t *testing.T, before func()) (*accesskeysvc.Service, *taskrunner.Runner) {
-	t.Helper()
-	runner := testutil.StartServiceTasks(t, d.pool, d.secrets, d.swarf, func(deps *tenantqueue.Deps) {
-		if before != nil {
-			deps.AccessKeys = &hookedKeys{Store: deps.AccessKeys, before: before}
+// keyService returns the access-key service over d's database and runner.
+func (d deps) keyService() *accesskeysvc.Service {
+	return accesskeysvc.New(zap.NewNop(), d.tenants, d.accessKeys, d.principals, d.buckets, d.secrets, d.runner)
+}
+
+// principalService returns the principal service over d's stores, which
+// removes a principal under locks, outside the task runner.
+func (d deps) principalService() *principalsvc.Service {
+	return principalsvc.New(zap.NewNop(), d.tenants, d.principals, d.policies, d.accessKeys, d.delegations, d.secrets, d.swarf,
+		grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf))
+}
+
+// deleteBucket deletes the bucket the way the bucket service does: under the
+// bucket's policy write lock it removes the delegations over the bucket and
+// the bucket's row, which takes the policy with it. during, when not nil,
+// runs once the lock is held.
+func (d deps) deleteBucket(ctx context.Context, bucket did.DID, during func()) error {
+	return d.policies.DeleteByBucket(ctx, bucket, func(ctx context.Context) error {
+		if during != nil {
+			during()
 		}
+		if err := d.delegations.DeleteBySubject(ctx, bucket); err != nil {
+			return err
+		}
+		return d.buckets.Delete(ctx, bucket)
 	})
-	return accesskeysvc.New(zap.NewNop(), d.tenants, d.accessKeys, d.principals, d.buckets, d.secrets, runner), runner
 }
 
-// rotator builds a grant rotator over the stores publishing to swarf.
-func (d deps) rotator(swarf grant.RevocationPublisher) *grant.Rotator {
-	return grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, swarf)
-}
-
-// principal records the principals, each with one key, so a rotation of the
-// principal is observable.
+// principal records the principals, each with one key, so a change to what
+// the principal may do is observable.
 func (d deps) principal(t *testing.T, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
@@ -269,6 +249,17 @@ func (d deps) key(t *testing.T, principal string) did.DID {
 	return id
 }
 
+// keysOf returns the keys bound to the principal.
+func (d deps) keysOf(principal string) []did.DID {
+	var out []did.DID
+	for key, p := range d.keys {
+		if p == principal {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
 // over returns the commands the key holds over the bucket, sorted.
 func (d deps) over(t *testing.T, key, bucket did.DID) []string {
 	t.Helper()
@@ -280,6 +271,19 @@ func (d deps) over(t *testing.T, key, bucket did.DID) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// heldOver returns the CIDs of the delegations the key holds over the
+// bucket, sorted.
+func (d deps) heldOver(t *testing.T, key, bucket did.DID) []string {
+	t.Helper()
+	var over []ucan.Delegation
+	for _, dlg := range d.held(t, key) {
+		if dlg.Subject() == bucket {
+			over = append(over, dlg)
+		}
+	}
+	return links(over)
 }
 
 // granted returns the principals whose keys hold something over photos, sorted.
@@ -295,7 +299,23 @@ func (d deps) granted(t *testing.T) []string {
 	return slices.Compact(out)
 }
 
-// commandsFor returns the Forge commands the actions map to, sorted.
+// requireGrants requires that every key of the principals holds exactly the
+// commands the actions map to over photos, and still holds what it held
+// over archive.
+func (d deps) requireGrants(t *testing.T, actions []string, principals ...string) {
+	t.Helper()
+	for _, p := range principals {
+		keys := d.keysOf(p)
+		require.NotEmpty(t, keys, p)
+		for _, key := range keys {
+			require.Equal(t, commandsFor(actions...), d.over(t, key, d.photos), "%s over photos", p)
+			require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.archive), "%s over another bucket", p)
+		}
+	}
+}
+
+// commandsFor returns the Forge commands the actions map to, sorted, and nil
+// for no actions.
 func commandsFor(actions ...string) []string {
 	var out []string
 	for _, c := range s3perm.CommandsFor(actions...) {
@@ -305,8 +325,33 @@ func commandsFor(actions ...string) []string {
 	return out
 }
 
-// rotated returns the principals whose keys' delegations were revoked, sorted.
-func (d deps) rotated() []string {
+// owedLinks returns the CIDs of the revocations the tenant owes, sorted.
+func (d deps) owedLinks(t *testing.T) []string {
+	t.Helper()
+	dels, err := d.owed.Oldest(t.Context(), d.tenantID, 10_000)
+	require.NoError(t, err)
+	return links(dels)
+}
+
+// published waits for the revocations the tenant owes to be published and
+// returns the CIDs of every delegation revoked so far, sorted.
+func (d deps) published(t *testing.T) []string {
+	t.Helper()
+	testutil.AwaitPublished(t, d.runner, d.tenantID)
+	require.Empty(t, d.owedLinks(t), "nothing is left owed")
+	var out []string
+	for _, c := range d.swarf.Revoked() {
+		out = append(out, c.String())
+	}
+	slices.Sort(out)
+	return out
+}
+
+// rotated waits for the tenant's revocations to be published and returns the
+// principals whose keys' delegations were revoked, sorted.
+func (d deps) rotated(t *testing.T) []string {
+	t.Helper()
+	d.published(t)
 	var out []string
 	for _, r := range d.swarf.Revocations() {
 		out = append(out, d.keys[r.Delegation.Audience()])
@@ -323,6 +368,17 @@ func (d deps) held(t *testing.T, key did.DID) []ucan.Delegation {
 	return page.Results
 }
 
+// policy returns the bucket's stored policy, nil when it has none.
+func (d deps) policy(t *testing.T, bucket did.DID) *bucketpolicystore.Record {
+	t.Helper()
+	rec, err := d.policies.Get(t.Context(), bucket)
+	if errors.Is(err, store.ErrRecordNotFound) {
+		return nil
+	}
+	require.NoError(t, err)
+	return &rec
+}
+
 var everyone = s3bkt.Everyone()
 
 func only(ids ...string) s3bkt.Principal { return s3bkt.Only(ids...) }
@@ -335,12 +391,22 @@ func deny(p s3bkt.Principal, actions ...string) s3bkt.Statement {
 	return s3bkt.Statement{Effect: s3bkt.Deny, Principal: p, Actions: s3bkt.NewStringSet(actions...), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))}
 }
 
+// on returns the statement with its resources naming the bucket.
+func on(bucket string, st s3bkt.Statement) s3bkt.Statement {
+	st.Resources = s3bkt.NewStringSet(s3bkt.BucketARN(bucket), s3bkt.ObjectsARN(bucket))
+	return st
+}
+
 func doc(statements ...s3bkt.Statement) s3bkt.PolicyDocument {
 	return s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: statements}
 }
 
 // createOnly is the condition of a first write: the bucket has no policy.
 var createOnly = bucketpolicysvc.WithCondition(bucketpolicysvc.IfNoneMatch("*"))
+
+func ifMatch(etag string) bucketpolicysvc.WriteOption {
+	return bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag))
+}
 
 func ptr(s string) *string { return &s }
 
@@ -422,9 +488,8 @@ func TestPutAndGet(t *testing.T) {
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
 
-		tenants := d.tenants
 		core, logs := observer.New(zapcore.WarnLevel)
-		svc := bucketpolicysvc.New(zap.New(core), tenants, d.buckets, d.principals, d.policies, d.rotator(d.swarf))
+		svc := bucketpolicysvc.New(zap.New(core), d.tenants, d.buckets, d.principals, d.policies, d.runner)
 
 		stale := `"any-stale-etag"`
 		_, _, err = svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(stale)))
@@ -488,572 +553,800 @@ func TestPutAndGet(t *testing.T) {
 	})
 }
 
-func TestRotations(t *testing.T) {
+func TestGrants(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("a create issues the granted principals' keys their delegations and publishes nothing", func(t *testing.T) {
+	t.Run("a first policy issues the granted principals' keys their grants and revokes nothing", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2", "user-3")
+		second := d.key(t, "user-1")
 
 		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
 			doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
-		require.Empty(t, d.swarf.Revocations(), "a first grant over the bucket revokes nothing")
-		require.Equal(t, []string{"user-1", "user-2"}, d.granted(t))
-
-		for key, principal := range d.keys {
-			if principal == "user-3" {
-				require.Empty(t, d.over(t, key, d.photos))
-				continue
-			}
-			require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.photos))
-			require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.archive), "other buckets are untouched")
-		}
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1", "user-2")
+		d.requireGrants(t, nil, "user-3")
+		require.Equal(t, commandsFor("s3:GetObject"), d.over(t, second, d.photos), "each key of a principal is granted")
+		require.Empty(t, d.published(t), "a first grant over the bucket revokes nothing")
 	})
 
-	t.Run("a principal with several keys has each rotated", func(t *testing.T) {
+	t.Run("a write that narrows leaves each key the new document's grants and revokes the old ones", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2")
-		second := d.key(t, "user-1")
-
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		d.key(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
+			doc(allow(only("user-1", "user-2"), "s3:GetObject", "s3:PutObject")), createOnly)
 		require.NoError(t, err)
-		require.Equal(t, commandsFor("s3:GetObject"), d.over(t, second, d.photos))
+		d.requireGrants(t, []string{"s3:GetObject", "s3:PutObject"}, "user-1", "user-2")
+		var old []string
+		for key := range d.keys {
+			old = append(old, d.heldOver(t, key, d.photos)...)
+		}
+		slices.Sort(old)
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
+		d.swarf.holding.Store(true)
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos",
+			doc(allow(only("user-1", "user-2"), "s3:GetObject")), ifMatch(etag))
 		require.NoError(t, err)
-		require.Len(t, d.swarf.Revocations(), 2, "one revocation per key over the bucket")
-		require.Equal(t, 1, d.swarf.Calls(), "every revocation of one write goes in one request")
-		require.Equal(t, []string{"user-1"}, d.rotated())
-		require.Equal(t, commandsFor("s3:PutObject"), d.over(t, second, d.photos))
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1", "user-2")
+		require.Equal(t, old, d.owedLinks(t), "what the keys held over the bucket is owed a revocation")
+		require.Empty(t, d.swarf.Revoked(), "and is published after the write")
+
+		d.swarf.holding.Store(false)
+		require.Equal(t, old, d.published(t))
+		for _, r := range d.swarf.Revocations() {
+			require.Equal(t, d.tenantID, r.Revoker)
+		}
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1", "user-2")
 	})
 
-	t.Run("a replace rotates only the principals whose actions changed", func(t *testing.T) {
+	t.Run("a write that removes a principal's access leaves its keys nothing over the bucket", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1", "user-2")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
+			doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+		var old []string
+		for _, key := range d.keysOf("user-2") {
+			old = append(old, d.heldOver(t, key, d.photos)...)
+		}
+
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos",
+			doc(allow(only("user-1"), "s3:GetObject")), ifMatch(etag))
+		require.NoError(t, err)
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+		d.requireGrants(t, nil, "user-2")
+		require.Equal(t, old, d.published(t), "only the principal that lost its access is revoked")
+	})
+
+	t.Run("a replace changes only the principals whose actions changed", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2", "user-3")
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
 			doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
-		d.swarf.Reset()
+		kept := d.heldOver(t, d.keysOf("user-1")[0], d.photos)
 
 		// user-1 keeps GetObject, user-2 gains PutObject, user-3 gains nothing.
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(
 			allow(only("user-1"), "s3:GetObject"),
 			allow(only("user-2"), "s3:GetObject", "s3:PutObject"),
-		), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
+		), ifMatch(etag))
 		require.NoError(t, err)
-		require.Equal(t, []string{"user-2"}, d.rotated())
-		for key, principal := range d.keys {
-			switch principal {
-			case "user-1":
-				require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.photos))
-			case "user-2":
-				require.Equal(t, commandsFor("s3:GetObject", "s3:PutObject"), d.over(t, key, d.photos))
-			default:
-				require.Empty(t, d.over(t, key, d.photos))
-			}
-		}
+		require.Equal(t, []string{"user-2"}, d.rotated(t))
+		require.Equal(t, kept, d.heldOver(t, d.keysOf("user-1")[0], d.photos), "an unaffected key keeps the delegations it held")
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+		d.requireGrants(t, []string{"s3:GetObject", "s3:PutObject"}, "user-2")
+		d.requireGrants(t, nil, "user-3")
 	})
 
-	t.Run("the wildcard fans out to every principal of the tenant", func(t *testing.T) {
+	t.Run("the wildcard reaches every key of the tenant", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2", "user-3")
+		d.key(t, "user-2")
 
-		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(everyone, "s3:ListBucket")), createOnly)
-		require.NoError(t, err)
-		require.Equal(t, []string{"user-1", "user-2", "user-3"}, d.granted(t))
-	})
-
-	t.Run("the wildcard reaches a principal created while the write was under way", func(t *testing.T) {
-		// "user-2" appears after the pre-lock list and before the write commits.
-		// Its first authorize waits on the bucket lock this write holds, so the
-		// rotation from inside the lock still reaches it in time.
-		// user-2's key is created with the principal, for the rotation to find.
-		var d deps
-		d = setup(t, func(s principalstore.Store) principalstore.Store {
-			return &growingPrincipals{Store: s, late: "user-2", added: func() { d.key(t, "user-2") }}
-		})
-		d.principal(t, "user-1")
-
-		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(everyone, "s3:ListBucket")), createOnly)
-		require.NoError(t, err)
-		require.Equal(t, []string{"user-1", "user-2"}, d.granted(t))
-	})
-
-	t.Run("a Deny narrowing the wildcard rotates only the denied principal", func(t *testing.T) {
-		d := setup(t)
-		d.principal(t, "user-1", "user-2", "user-3")
 		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
 			doc(allow(everyone, "s3:ListBucket")), createOnly)
 		require.NoError(t, err)
-		d.swarf.Reset()
+		d.requireGrants(t, []string{"s3:ListBucket"}, "user-1", "user-2", "user-3")
 
 		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(
 			allow(everyone, "s3:ListBucket"),
 			deny(only("user-2"), "s3:ListBucket"),
-		), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
+		), ifMatch(etag))
 		require.NoError(t, err)
-		require.Equal(t, []string{"user-2"}, d.rotated())
+		require.Equal(t, []string{"user-2"}, d.rotated(t), "a Deny narrowing the wildcard changes only the denied principal")
 		require.Equal(t, []string{"user-1", "user-3"}, d.granted(t))
 	})
 
-	t.Run("a delete rotates every principal the policy reached", func(t *testing.T) {
+	t.Run("a write that changes no principal's actions revokes and issues nothing", func(t *testing.T) {
 		d := setup(t)
 		d.principal(t, "user-1", "user-2")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
-		require.NoError(t, err)
-		d.swarf.Reset()
-
-		require.NoError(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", &etag))
-		require.Equal(t, []string{"user-1", "user-2"}, d.rotated())
-		require.Equal(t, 1, d.swarf.Calls())
-		require.Empty(t, d.granted(t))
-
-		_, err = d.policies.Get(ctx, d.photos)
-		require.ErrorIs(t, err, store.ErrRecordNotFound)
-	})
-
-	t.Run("a delete with a stale ETag fails, publishes nothing and keeps the policy", func(t *testing.T) {
-		d := setup(t)
-		d.principal(t, "user-1")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
-		require.NoError(t, err)
-		d.swarf.Reset()
-
-		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", ptr(`"stale"`)), bucketpolicysvc.ErrPreconditionFailed)
-		require.Empty(t, d.rotated())
-
-		rec, err := d.policies.Get(ctx, d.photos)
-		require.NoError(t, err)
-		require.Equal(t, etag, rec.ETag)
-	})
-
-	t.Run("a publish failure leaves the old document and the delegations in place", func(t *testing.T) {
-		d := setup(t)
-		d.principal(t, "user-1", "user-2")
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		first := doc(allow(only("user-1", "user-2"), "s3:GetObject"))
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, createOnly)
 		require.NoError(t, err)
 		before := map[did.DID][]string{}
 		for key := range d.keys {
 			before[key] = links(d.held(t, key))
 		}
-		d.swarf.Err = errors.New("swarf unreachable")
 
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1", "user-2"), "s3:GetObject", "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
-		require.ErrorContains(t, err, "swarf unreachable")
-
-		rec, err := d.policies.Get(ctx, d.photos)
+		// The same document, and one that says the same in two statements.
+		same, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, ifMatch(etag))
 		require.NoError(t, err)
-		require.Equal(t, etag, rec.ETag, "the old document must survive")
-		require.Equal(t, doc(allow(only("user-1"), "s3:GetObject")), rec.Policy)
+		require.False(t, created)
+		require.Equal(t, etag, same)
+		split := doc(allow(only("user-1"), "s3:GetObject"), allow(only("user-2"), "s3:GetObject"))
+		next, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", split, ifMatch(etag))
+		require.NoError(t, err)
+		require.NotEqual(t, etag, next)
+		require.Equal(t, s3bkt.ETag(split), d.policy(t, d.photos).ETag)
+
 		for key, want := range before {
-			require.Equal(t, want, links(d.held(t, key)), "the delegations must survive")
+			require.Equal(t, want, links(d.held(t, key)), "every key keeps the delegations it held")
 		}
-
-		require.ErrorContains(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", &etag), "swarf unreachable")
-		_, err = d.policies.Get(ctx, d.photos)
-		require.NoError(t, err, "a failed delete must leave the policy")
+		require.Empty(t, d.owedLinks(t))
+		require.Empty(t, d.published(t))
+		require.Zero(t, d.swarf.Calls())
 	})
 
-	t.Run("a batch of publishes that never answer fails the write at the batch deadline", func(t *testing.T) {
+	t.Run("a removal leaves every principal the policy reached nothing over the bucket", func(t *testing.T) {
 		d := setup(t)
-		d.principal(t, "user-1", "user-2", "user-3")
-		old := doc(allow(only("user-1"), "s3:GetObject"))
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, createOnly)
+		d.principal(t, "user-1", "user-2")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos",
+			doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
 		require.NoError(t, err)
-
-		tenants := d.tenants
-		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, d.policies, d.rotator(blockingSwarf{}))
-
-		start := time.Now()
-		// user-1's actions change, so the write has revocations to publish.
-		_, _, err = svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
-		elapsed := time.Since(start)
-		// The batch deadline is reported as the retryable conflict the lock
-		// timeout it runs under would be.
-		require.ErrorIs(t, err, bucketpolicysvc.ErrConcurrentChange)
-		require.Less(t, elapsed, grant.BatchTimeout+2*time.Second,
-			"the write must give up at the batch deadline")
-		require.Less(t, elapsed, store.LockTimeout, "the write must release the bucket before a reader gives up")
-
-		rec, err := d.policies.Get(ctx, d.photos)
-		require.NoError(t, err)
-		require.Equal(t, old, rec.Policy, "the old document must survive")
-		require.Equal(t, etag, rec.ETag)
-	})
-
-	t.Run("a principal removed between validation and the write is an invalid policy", func(t *testing.T) {
-		d := setup(t)
-		d.principal(t, "user-1")
-		tenants := d.tenants
-		// The store's index foreign key refuses a document naming a principal
-		// that is gone; rejectingPolicies stands in for that refusal.
-		policies := &rejectingPolicies{Store: d.policies, err: store.ErrInvalidArgument}
-		svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
-
-		_, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
-		require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
-	})
-
-	t.Run("a replace whose publish fails writes nothing", func(t *testing.T) {
-		d := setup(t)
-		d.principal(t, "user-1")
-		old := doc(allow(only("user-1"), "s3:GetObject"))
-		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", old, createOnly)
-		require.NoError(t, err)
-		d.swarf.Err = errors.New("swarf unreachable")
-
-		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etag)))
-		require.ErrorContains(t, err, "swarf unreachable")
-
-		rec, err := d.policies.Get(ctx, d.photos)
-		require.NoError(t, err)
-		require.Equal(t, old, rec.Policy)
+		var old []string
 		for key := range d.keys {
-			require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.photos))
+			old = append(old, d.heldOver(t, key, d.photos)...)
 		}
+		slices.Sort(old)
+
+		require.NoError(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", &etag))
+		require.Nil(t, d.policy(t, d.photos))
+		d.requireGrants(t, nil, "user-1", "user-2")
+		require.Equal(t, old, d.published(t))
+		recs, err := d.policies.ListByPrincipal(ctx, d.tenantID, "user-1")
+		require.NoError(t, err)
+		require.Empty(t, recs, "the index rows went with the policy")
+	})
+
+	t.Run("a removal without a condition removes whatever is stored", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+
+		require.NoError(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", nil))
+		require.Nil(t, d.policy(t, d.photos))
+		d.requireGrants(t, nil, "user-1")
+	})
+
+	t.Run("a removal with a stale ETag fails, revokes nothing and keeps the policy", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+
+		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", ptr(`"stale"`)), bucketpolicysvc.ErrPreconditionFailed)
+		require.Equal(t, etag, d.policy(t, d.photos).ETag)
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+		require.Empty(t, d.published(t))
+	})
+
+	t.Run("a removal of a policy the bucket does not have is reported", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", nil), bucketpolicysvc.ErrPolicyNotFound)
+		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", ptr(`"any"`)), bucketpolicysvc.ErrPolicyNotFound)
+		require.Empty(t, d.published(t))
+	})
+
+	t.Run("a write succeeds while the revocation service is down, and its revocations are published once it is back", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+		old := d.heldOver(t, d.keysOf("user-1")[0], d.photos)
+
+		d.swarf.holding.Store(true)
+		next := doc(allow(only("user-1"), "s3:PutObject"))
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", next, ifMatch(etag))
+		require.NoError(t, err)
+		require.Equal(t, next, d.policy(t, d.photos).Policy)
+		d.requireGrants(t, []string{"s3:PutObject"}, "user-1")
+		require.Equal(t, old, d.owedLinks(t))
+
+		d.swarf.holding.Store(false)
+		require.Equal(t, old, d.published(t))
+	})
+
+	t.Run("a key that has expired is issued nothing", func(t *testing.T) {
+		d := setup(t)
+		require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
+		expired, user := time.Now().Add(-time.Hour), "user-1"
+		key := testutil.RandomDID(t)
+		require.NoError(t, d.accessKeys.Add(ctx, accesskeystore.Input{ID: key, Tenant: d.tenantID, Name: "old", Principal: &user, ExpiresAt: &expired}))
+
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		require.NoError(t, err)
+		require.Empty(t, d.held(t, key))
+	})
+
+	t.Run("a disabled tenant's keys are issued nothing, and hold the policy's grants once it is active again", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		_, err := d.runner.Run(ctx, tenantqueue.SetStatusSpec(d.tenantID, tenant.Disabled))
+		require.NoError(t, err)
+		key := d.keysOf("user-1")[0]
+		require.Empty(t, d.held(t, key), "disabling withdrew what the key held")
+
+		written := doc(allow(only("user-1"), "s3:GetObject"))
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", written, createOnly)
+		require.NoError(t, err)
+		require.Equal(t, written, d.policy(t, d.photos).Policy)
+		require.Empty(t, d.held(t, key))
+
+		_, err = d.runner.Run(ctx, tenantqueue.SetStatusSpec(d.tenantID, tenant.Active))
+		require.NoError(t, err)
+		require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.photos))
+	})
+
+	t.Run("fails when grants are to be issued and the tenant's signing key is not in the vault", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		require.NoError(t, d.secrets.Delete(ctx, vault.TenantKeyPath(d.tenantID)))
+
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+		require.ErrorIs(t, err, vault.ErrNotFound)
+		require.Nil(t, d.policy(t, d.photos))
 	})
 }
 
-// TestConcurrentPolicyWriteAndPrincipalRemoval runs a policy write against the
-// removal of a principal it names: the write holds the bucket while it reads
-// and locks the principals, and the removal rewrites that bucket's policy. The
-// removal strips its policies before it locks the principal, so neither waits
-// on what the other holds and both return: the write commits, and the removal
-// finishes or reports a conflict its caller repeats.
-func TestConcurrentPolicyWriteAndPrincipalRemoval(t *testing.T) {
-	reached, resume := make(chan struct{}), make(chan struct{})
-	d := setup(t, func(s principalstore.Store) principalstore.Store {
-		// The second list is the one the policy store's callback makes; the
-		// first runs before the write takes the bucket.
-		return &gatedPrincipals{Store: s, nth: 2, reached: reached, resume: resume}
-	})
-	d.principal(t, "user-1")
-
-	tenants := d.tenants
-	started := make(chan struct{})
-	// A principal removal revokes its keys' delegations first, so the first
-	// publish says the removal has started and is about to strip its policies.
-	d.swarf.OnPublish = sync.OnceFunc(func() { close(started) })
-	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
-		d.accessKeys, d.delegations, d.secrets, d.swarf, d.rotator(d.swarf))
-
-	put := make(chan error, 1)
-	go func() {
-		_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1"), "s3:GetObject")), createOnly)
-		put <- err
-	}()
-	<-reached // the write holds the policy store and is about to read the principals
-
-	del := make(chan error, 1)
-	go func() { del <- principals.Delete(context.Background(), "tenant-1", "user-1") }()
-	<-started // the removal has revoked and is about to read the policies
-
-	close(resume)
-
-	deadline := time.After(30 * time.Second)
-	conflicted := false
-	for range 2 {
-		select {
-		case err := <-put:
+// TestConditionAtCommit changes the bucket's policy between a policy task's
+// reads and its commit, as a principal removal's rewrite does. The task's
+// write of the document is conditional on the policy it read, so the task
+// runs again and decides the caller's condition from the policy as it is
+// then.
+func TestConditionAtCommit(t *testing.T) {
+	ctx := t.Context()
+	first, other, wanted := doc(allow(only("user-1"), "s3:GetObject")), doc(allow(only("user-1"), "s3:ListBucket")), doc(allow(only("user-1"), "s3:PutObject"))
+	// rewrite stores the document under the store's own locks, outside the
+	// task runner.
+	rewrite := func(t *testing.T, d deps, document s3bkt.PolicyDocument) func() {
+		return func() {
+			_, err := d.policies.Put(context.Background(), bucketpolicystore.Input{Bucket: d.photos, Tenant: d.tenantID, Policy: document}, nil)
 			require.NoError(t, err)
-		case err := <-del:
-			if err != nil {
-				require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
-				conflicted = true
-			}
-		case <-deadline:
-			t.Fatal("the policy write and the principal removal deadlocked")
 		}
 	}
-	if conflicted {
-		require.NoError(t, principals.Delete(t.Context(), "tenant-1", "user-1"), "a repeat finishes the removal")
-	}
 
-	// The removal ran last and took the policy with it: its only statement
-	// named the principal that is gone.
-	_, err := d.policies.Get(t.Context(), d.photos)
-	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	t.Run("If-Match fails when the policy was rewritten since the read", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, createOnly)
+		require.NoError(t, err)
+
+		d.hook.arm(rewrite(t, d, other))
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", wanted, ifMatch(etag))
+		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
+		require.Equal(t, other, d.policy(t, d.photos).Policy, "the rewrite is not written over")
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+		require.Empty(t, d.published(t), "nothing of the refused write was committed")
+	})
+
+	t.Run("If-None-Match fails when a policy was stored since the read", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+
+		d.hook.arm(rewrite(t, d, other))
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", wanted, createOnly)
+		require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
+		require.Equal(t, other, d.policy(t, d.photos).Policy)
+		d.requireGrants(t, nil, "user-1")
+	})
+
+	t.Run("a write without a condition runs again and replaces what is there then", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+
+		d.hook.arm(rewrite(t, d, other))
+		etag, created, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", wanted)
+		require.NoError(t, err)
+		require.False(t, created, "the bucket had a policy by the time the write committed")
+		require.Equal(t, s3bkt.ETag(wanted), etag)
+		require.Equal(t, 2, d.hook.ran(), "the task ran again")
+		require.Equal(t, wanted, d.policy(t, d.photos).Policy)
+		d.requireGrants(t, []string{"s3:PutObject"}, "user-1")
+	})
+
+	t.Run("a removal with If-Match fails when the policy was rewritten since the read", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, createOnly)
+		require.NoError(t, err)
+
+		d.hook.arm(rewrite(t, d, other))
+		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", &etag), bucketpolicysvc.ErrPreconditionFailed)
+		require.Equal(t, other, d.policy(t, d.photos).Policy)
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+	})
+
+	t.Run("a removal finds no policy when it was removed since the read", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, createOnly)
+		require.NoError(t, err)
+
+		d.hook.arm(func() { require.NoError(t, d.policies.Delete(context.Background(), d.photos, "", nil)) })
+		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, d.photos, "photos", nil), bucketpolicysvc.ErrPolicyNotFound)
+	})
 }
 
-// TestPolicyWriteAfterPrincipalRemoval removes a principal after a policy
-// write naming it has validated its document and before the write reaches the
-// store. The write must fail, so a principal revived under the same id starts
-// named in no statement.
-func TestPolicyWriteAfterPrincipalRemoval(t *testing.T) {
+// TestConcurrentWrites issues changes to one tenant at once. They are tasks
+// on the tenant, so each runs in its turn and none reports a conflict.
+func TestConcurrentWrites(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("two writes to one bucket both succeed, and the keys hold the grants of the one that ran last", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1", "user-2")
+		actions := [][]string{{"s3:GetObject"}, {"s3:PutObject", "s3:ListBucket"}}
+		errs := make(chan error, len(actions))
+		for _, a := range actions {
+			go func() {
+				_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1", "user-2"), a...)))
+				errs <- err
+			}()
+		}
+		for range actions {
+			require.NoError(t, <-errs)
+		}
+
+		stored := d.policy(t, d.photos)
+		last := actions[0]
+		if stored.ETag != s3bkt.ETag(doc(allow(only("user-1", "user-2"), last...))) {
+			last = actions[1]
+		}
+		require.Equal(t, doc(allow(only("user-1", "user-2"), last...)), stored.Policy)
+		d.requireGrants(t, last, "user-1", "user-2")
+		// The write that ran first issued grants the second took away.
+		require.NotEmpty(t, d.published(t))
+		d.requireGrants(t, last, "user-1", "user-2")
+	})
+
+	t.Run("the second of two writes to one bucket waits for the first", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		first, second := doc(allow(only("user-1"), "s3:GetObject")), doc(allow(only("user-1"), "s3:PutObject"))
+
+		var created bool
+		wrote, waited := testutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				d.hook.arm(func() { park(t, entered, release) })
+				_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", first, createOnly)
+				return err
+			},
+			func() (err error) {
+				_, created, err = d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", second)
+				return err
+			})
+		require.NoError(t, wrote)
+		require.NoError(t, waited)
+		require.False(t, created, "the second write replaced the first's policy")
+		require.Equal(t, second, d.policy(t, d.photos).Policy)
+		d.requireGrants(t, []string{"s3:PutObject"}, "user-1")
+	})
+
+	t.Run("writes to two buckets of one tenant both succeed", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		backups := testutil.RandomDID(t)
+		require.NoError(t, d.buckets.Add(ctx, backups, d.tenantID, d.providerID, "backups"))
+		key := d.keysOf("user-1")[0]
+
+		errs := make(chan error, 2)
+		go func() {
+			_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+			errs <- err
+		}()
+		go func() {
+			_, _, err := d.svc.Write(context.Background(), d.tenantID, backups, "backups", doc(on("backups", allow(only("user-1"), "s3:PutObject"))), createOnly)
+			errs <- err
+		}()
+		require.NoError(t, <-errs)
+		require.NoError(t, <-errs)
+
+		require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.photos))
+		require.Equal(t, commandsFor("s3:PutObject"), d.over(t, key, backups))
+		require.Equal(t, commandsFor("s3:GetObject"), d.over(t, key, d.archive))
+
+		// A second write to one bucket leaves the other bucket's grants alone.
+		kept := d.heldOver(t, key, backups)
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:ListBucket")))
+		require.NoError(t, err)
+		require.Equal(t, commandsFor("s3:ListBucket"), d.over(t, key, d.photos))
+		require.Equal(t, kept, d.heldOver(t, key, backups))
+	})
+
+	t.Run("a write still waiting for its turn at the caller's deadline writes nothing", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		first := doc(allow(only("user-1"), "s3:GetObject"))
+		entered, release := make(chan struct{}), make(chan struct{})
+		d.hook.arm(func() { park(t, entered, release) })
+		wrote := make(chan error, 1)
+		go func() {
+			_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", first, createOnly)
+			wrote <- err
+		}()
+		select {
+		case <-entered:
+		case err := <-wrote:
+			t.Fatalf("the first write returned before its task ran: %v", err)
+		case <-time.After(testutil.WaitTimeout):
+			t.Fatal("the first write's task did not start")
+		}
+
+		short, cancel := context.WithTimeout(ctx, testutil.MinBlock)
+		defer cancel()
+		_, _, err := d.svc.Write(short, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:PutObject")))
+		// The task expires at the caller's deadline, and the wait ends on
+		// whichever of the two it sees first.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			require.ErrorIs(t, err, bucketpolicysvc.ErrConcurrentChange)
+		}
+
+		close(release)
+		require.NoError(t, <-wrote)
+		// A third write runs after the abandoned one's turn has passed, and
+		// finds the first write's policy still there.
+		_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", first, ifMatch(s3bkt.ETag(first)))
+		require.NoError(t, err, "the abandoned write did not run later")
+		require.Equal(t, first, d.policy(t, d.photos).Policy)
+		d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+	})
+}
+
+// TestPolicyWriteAndKeyCreation issues a policy write and the creation of a
+// key for a principal the write affects together. Both are tasks on the
+// tenant, so one waits for the other, and either way the new key holds the
+// grants of the policy the write stored.
+func TestPolicyWriteAndKeyCreation(t *testing.T) {
+	ctx := t.Context()
+	before, after := doc(allow(only("user-1"), "s3:GetObject", "s3:PutObject")), doc(allow(only("user-1"), "s3:ListBucket"))
+
+	t.Run("issued at once", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", before, createOnly)
+		require.NoError(t, err)
+		keys := d.keyService()
+
+		wrote, made := make(chan error, 1), make(chan error, 1)
+		var created accesskeystore.Record
+		go func() {
+			_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", after)
+			wrote <- err
+		}()
+		go func() {
+			var err error
+			created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, new("user-1"), nil)
+			made <- err
+		}()
+		require.NoError(t, <-wrote)
+		require.NoError(t, <-made)
+		require.Equal(t, commandsFor("s3:ListBucket"), d.over(t, created.ID, d.photos))
+		d.requireGrants(t, []string{"s3:ListBucket"}, "user-1")
+	})
+
+	t.Run("the creation waits for a write that has read the principal's keys", func(t *testing.T) {
+		d := setup(t)
+		d.principal(t, "user-1")
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", before, createOnly)
+		require.NoError(t, err)
+		keys := d.keyService()
+
+		var created accesskeystore.Record
+		wrote, made := testutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				d.hook.arm(func() { park(t, entered, release) })
+				_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", after)
+				return err
+			},
+			func() (err error) {
+				created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, new("user-1"), nil)
+				return err
+			})
+		require.NoError(t, wrote)
+		require.NoError(t, made)
+		require.Equal(t, commandsFor("s3:ListBucket"), d.over(t, created.ID, d.photos), "the key is created from the policy the write stored")
+	})
+
+	t.Run("the write waits for a creation that has read the principal's policies", func(t *testing.T) {
+		entered, release := make(chan struct{}), make(chan struct{})
+		d := setup(t, func(deps *tenantqueue.Deps) {
+			deps.AccessKeys = &hookedKeys{Store: deps.AccessKeys, before: func() { park(t, entered, release) }}
+		})
+		d.principal(t, "user-1")
+		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", before, createOnly)
+		require.NoError(t, err)
+		keys := d.keyService()
+
+		var created accesskeystore.Record
+		made, wrote := testutil.RequireWaitsForWriter(t,
+			func(in chan<- struct{}, out <-chan struct{}) (err error) {
+				go func() { <-entered; close(in) }()
+				go func() { <-out; close(release) }()
+				created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, new("user-1"), nil)
+				return err
+			},
+			func() error {
+				_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", after)
+				return err
+			})
+		require.NoError(t, made)
+		require.NoError(t, wrote)
+		require.Equal(t, commandsFor("s3:ListBucket"), d.over(t, created.ID, d.photos), "the write rewrote the new key's grants")
+		d.requireGrants(t, []string{"s3:ListBucket"}, "user-1")
+	})
+}
+
+// TestPrincipalRemovalRewritesPolicyBeforeCommit removes a principal the
+// bucket's policy names after a policy task has read the policy and before
+// the task commits. The removal rewrites the policy without the principal,
+// so the task's write, which is conditional on the policy it read, affects
+// nothing: the task runs again, and the caller's If-Match no longer holds.
+func TestPrincipalRemovalRewritesPolicyBeforeCommit(t *testing.T) {
 	ctx := t.Context()
 	d := setup(t)
-	d.principal(t, "user-1")
-	tenants := d.tenants
-	policies := &parkedPolicies{Store: d.policies, reached: make(chan struct{}), resume: make(chan struct{})}
-	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, d.principals, policies, d.rotator(d.swarf))
-	principals := principalsvc.New(zap.NewNop(), tenants, d.principals, d.policies,
-		d.accessKeys, d.delegations, d.secrets, d.swarf, d.rotator(d.swarf))
+	d.principal(t, "user-1", "user-2")
+	etag, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
+	require.NoError(t, err)
 
-	put := make(chan error, 1)
-	go func() {
-		_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos",
-			doc(allow(only("user-1"), "s3:GetObject")), createOnly)
-		put <- err
-	}()
-	<-policies.reached
-	require.NoError(t, principals.Delete(ctx, "tenant-1", "user-1"))
-	close(policies.resume)
-	require.ErrorIs(t, <-put, s3bkt.ErrInvalidPolicy)
+	d.hook.arm(func() { require.NoError(t, d.principalService().Delete(context.Background(), "tenant-1", "user-2")) })
+	_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:PutObject")), ifMatch(etag))
+	require.ErrorIs(t, err, bucketpolicysvc.ErrPreconditionFailed)
+
+	require.Equal(t, doc(allow(only("user-1"), "s3:GetObject")), d.policy(t, d.photos).Policy, "the policy is the one the removal left")
+	d.requireGrants(t, []string{"s3:GetObject"}, "user-1")
+}
+
+// TestPrincipalRemovedBeforeCommit removes a principal after a policy task
+// naming it has validated its document and before the task commits. The
+// commit requires the principals the document names to be live, so the task
+// runs again and refuses the document: a principal revived under the same id
+// starts named in no statement.
+func TestPrincipalRemovedBeforeCommit(t *testing.T) {
+	ctx := t.Context()
+	d := setup(t)
+	d.principal(t, "user-1", "user-2")
+	principals := d.principalService()
+
+	d.hook.arm(func() { require.NoError(t, principals.Delete(context.Background(), "tenant-1", "user-1")) })
+	_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1", "user-2"), "s3:GetObject")), createOnly)
+	require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy)
+	require.Nil(t, d.policy(t, d.photos))
+	d.requireGrants(t, nil, "user-2")
 
 	_, created, err := principals.Create(ctx, "tenant-1", "user-1")
 	require.NoError(t, err)
 	require.True(t, created)
-	access, err := svc.Access(ctx, "tenant-1", "user-1")
+	access, err := d.svc.Access(ctx, "tenant-1", "user-1")
 	require.NoError(t, err)
 	require.Empty(t, access, "a revived principal is named in no statement")
 }
 
-// TestPrincipalAddedDuringPolicyWritePostgres adds a principal while a policy
-// write granting the wildcard is parked after its callback listed the
-// tenant's principals, so the write cannot rotate the new principal's keys.
-// The add waits for the write to commit, and the key created for the
-// principal afterwards reads the committed policy and holds its grants.
-func TestPrincipalAddedDuringPolicyWritePostgres(t *testing.T) {
+// TestPrincipalRemovedWhileGrantsIssued removes a principal the wildcard
+// reaches, with its keys, after a policy task has issued the keys' grants
+// and before the task commits. The commit stores grants only for the keys
+// that still exist, so none is left for a key the removal deleted.
+func TestPrincipalRemovedWhileGrantsIssued(t *testing.T) {
 	ctx := t.Context()
 	d := setup(t)
-	tenants, principals, policies := d.tenants, d.principals, d.policies
+	d.principal(t, "user-1", "user-2")
+	gone := d.keysOf("user-1")[0]
 
-	// The second list is the one the policy store's callback makes.
-	reached, resume := make(chan struct{}), make(chan struct{})
-	gated := &gatedPrincipals{Store: principals, nth: 2, after: true, reached: reached, resume: resume}
-	svc := bucketpolicysvc.New(zap.NewNop(), tenants, d.buckets, gated, policies, d.rotator(d.swarf))
-	keys, _ := d.keyService(t, nil)
+	d.hook.arm(func() { require.NoError(t, d.principalService().Delete(context.Background(), "tenant-1", "user-1")) })
+	_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:ListBucket")), createOnly)
+	require.NoError(t, err)
 
-	written, added := testutil.RequireWaitsForWriter(t,
+	_, err = d.accessKeys.Get(ctx, gone)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	require.Empty(t, d.held(t, gone), "no grant is stored for a key that was deleted")
+	d.requireGrants(t, []string{"s3:ListBucket"}, "user-2")
+}
+
+// TestPolicyWriteDuringPrincipalRemoval commits a policy task while the
+// removal of a principal the wildcard reaches is revoking the principal's
+// keys' grants, under the keys' delegation locks. The commit takes the same
+// locks before it touches the keys' grants, so it waits for the revocation.
+// The removal then finds what the commit stored, revokes it and deletes the
+// keys.
+func TestPolicyWriteDuringPrincipalRemoval(t *testing.T) {
+	ctx := t.Context()
+	d := setup(t)
+	d.principal(t, "user-1", "user-2")
+	gone := d.keysOf("user-1")[0]
+	held := links(d.held(t, gone))
+	principals := d.principalService()
+
+	removed, wrote := testutil.RequireWaitsForWriter(t,
 		func(entered chan<- struct{}, release <-chan struct{}) error {
-			go func() { <-reached; close(entered) }()
-			go func() { <-release; close(resume) }()
-			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:GetObject")), createOnly)
-			return err
+			// The removal's first publish is of what the keys hold, made
+			// while it holds their delegation locks.
+			d.swarf.OnPublish = sync.OnceFunc(func() { park(t, entered, release) })
+			return principals.Delete(context.Background(), "tenant-1", "user-1")
 		},
 		func() error {
-			return principals.Add(context.Background(), d.tenantID, "user-2")
+			_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(everyone, "s3:ListBucket")), createOnly)
+			return err
 		})
-	require.NoError(t, written)
-	require.NoError(t, added)
-
-	rec, _, err := keys.Create(ctx, "tenant-1", "key", nil, nil, new("user-2"), nil)
-	require.NoError(t, err)
-	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, rec.ID, d.photos), "the key is created from the committed policy")
-}
-
-// afterLock calls after once, when the first WithLock returns: under a policy
-// write that is after the rotation and before the document is written, with
-// the write's transaction still open.
-type afterLock struct {
-	principalstore.Store
-	after func()
-}
-
-func (a *afterLock) WithLock(ctx context.Context, tenant did.DID, ids []string, fn func(context.Context) error) error {
-	err := a.Store.WithLock(ctx, tenant, ids, fn)
-	if a.after != nil {
-		after := a.after
-		a.after = nil
-		after()
+	require.NoError(t, wrote)
+	if removed != nil {
+		require.ErrorIs(t, removed, principalsvc.ErrConcurrentChange)
+		require.NoError(t, principals.Delete(ctx, "tenant-1", "user-1"), "a repeat finishes the removal")
 	}
-	return err
+
+	_, err := d.accessKeys.Get(ctx, gone)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	require.Empty(t, d.held(t, gone))
+	d.requireGrants(t, []string{"s3:ListBucket"}, "user-2")
+	// Whatever was stored for the key has been revoked: what it held before,
+	// and the grants the write stored for it once the first revocation let
+	// the write's commit through.
+	var revoked, fresh []string
+	for _, r := range d.swarf.Revocations() {
+		if r.Delegation.Audience() != gone {
+			continue
+		}
+		revoked = append(revoked, r.Revoked.String())
+		if r.Delegation.Subject() == d.photos {
+			fresh = append(fresh, r.Delegation.Command().String())
+		}
+	}
+	require.Subset(t, revoked, held)
+	slices.Sort(fresh)
+	require.Equal(t, commandsFor("s3:ListBucket"), fresh, "the grants the write stored for the key were revoked with it")
 }
 
-// TestPolicyWriteCancelledAfterRotationPostgres cancels a policy write once
-// its rotation has run and its principal lock call has returned, before the
-// document is written. The rotation's delegation writes joined the policy
-// transaction, so the old policy stays with its own grants: a principal is
-// never left with the grants of a policy that was not stored.
-func TestPolicyWriteCancelledAfterRotationPostgres(t *testing.T) {
-	ctx := t.Context()
-	d := setup(t)
-	require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
-	key := testutil.RandomDID(t)
-	user := "user-1"
-	require.NoError(t, d.accessKeys.Add(ctx, accesskeystore.Input{ID: key, Tenant: d.tenantID, Name: "laptop", Principal: &user}))
-
-	rotator := grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf)
-	svc := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, d.principals, d.policies, rotator)
-	etagA, _, err := svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:ListBucket")), createOnly)
-	require.NoError(t, err)
-	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), d.over(t, key, d.photos))
-
-	writeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	principals := &afterLock{Store: d.principals, after: cancel}
-	cancelling := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, principals, d.policies, rotator)
-	_, _, err = cancelling.Write(writeCtx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:ListBucket")), bucketpolicysvc.WithCondition(bucketpolicysvc.IfMatch(etagA)))
-	require.ErrorIs(t, err, context.Canceled)
-	require.Nil(t, principals.after, "the rotation ran")
-
-	rec, err := d.policies.Get(ctx, d.photos)
-	require.NoError(t, err)
-	require.Equal(t, etagA, rec.ETag, "the document was not replaced")
-	require.Equal(t, commandsFor("s3:GetObject", "s3:ListBucket"), d.over(t, key, d.photos), "and the key keeps the stored policy's grants")
-}
-
-// TestKeyCreatedDuringPolicyWritePostgres creates a key for an existing
-// principal while a policy write that changes what the principal may do is
-// in flight, parked once its principal lock call has returned: it has listed
-// the principal's keys, without the new one, and has not committed. The write
-// holds the principal's row until it commits, so the creation's commit waits
-// for it, finds the policies changed, and the task runs again from the
-// committed policy. The key holds that policy's grants.
-func TestKeyCreatedDuringPolicyWritePostgres(t *testing.T) {
-	for name, tc := range map[string]struct {
-		// before is the bucket's policy when the creation starts, nil for
-		// none.
-		before []string
-		// after is the policy the write in flight stores.
-		after []string
-	}{
-		"the first policy naming the principal": {nil, []string{"s3:GetObject"}},
-		"a policy that takes an action away":    {[]string{"s3:GetObject", "s3:PutObject"}, []string{"s3:GetObject"}},
-	} {
-		t.Run(name, func(t *testing.T) {
+// TestPolicyWriteAndPrincipalRemovalAtOnce runs a policy write naming a
+// principal against the principal's removal, several times over. Neither
+// waits on what the other holds for longer than a lock wait, so both return:
+// the write stores its document or is refused it, and the removal finishes
+// or reports a conflict its caller repeats. Once the removal has finished no
+// policy names the principal and none of its keys or their grants is left.
+func TestPolicyWriteAndPrincipalRemovalAtOnce(t *testing.T) {
+	for i := range 4 {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			ctx := t.Context()
 			d := setup(t)
-			require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
-			// The principal holds a key already, so the write has a rotation to run.
-			user := "user-1"
-			require.NoError(t, d.accessKeys.Add(ctx, accesskeystore.Input{ID: testutil.RandomDID(t), Tenant: d.tenantID, Name: "phone", Principal: &user}))
-			var opts []bucketpolicysvc.WriteOption
-			if tc.before != nil {
-				_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), tc.before...)), createOnly)
+			d.principal(t, "user-1", "user-2")
+			gone := d.keysOf("user-1")[0]
+			principals := d.principalService()
+			if i%2 == 1 {
+				_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
 				require.NoError(t, err)
-			} else {
-				opts = append(opts, createOnly)
 			}
 
-			keys, _ := d.keyService(t, nil)
-			var created accesskeystore.Record
-			written, added := testutil.RequireWaitsForWriter(t,
-				func(entered chan<- struct{}, release <-chan struct{}) error {
-					principals := &afterLock{Store: d.principals, after: func() { close(entered); <-release }}
-					svc := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, principals, d.policies,
-						grant.NewRotator(zap.NewNop(), d.delegations, d.accessKeys, d.secrets, d.swarf))
-					_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), tc.after...)), opts...)
-					return err
-				},
-				func() error {
-					var err error
-					created, _, err = keys.Create(context.Background(), "tenant-1", "laptop", nil, nil, new("user-1"), nil)
-					return err
-				})
-			require.NoError(t, written)
-			require.NoError(t, added)
-			require.Equal(t, commandsFor(tc.after...), d.over(t, created.ID, d.photos), "the key is created from the committed policy")
+			put, del := make(chan error, 1), make(chan error, 1)
+			go func() {
+				_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1", "user-2"), "s3:GetObject", "s3:PutObject")))
+				put <- err
+			}()
+			go func() { del <- principals.Delete(context.Background(), "tenant-1", "user-1") }()
+
+			deadline := time.After(30 * time.Second)
+			conflicted := false
+			for range 2 {
+				select {
+				case err := <-put:
+					if err != nil {
+						require.ErrorIs(t, err, s3bkt.ErrInvalidPolicy, "the write is refused only for naming a principal that is gone")
+					}
+				case err := <-del:
+					if err != nil {
+						require.ErrorIs(t, err, principalsvc.ErrConcurrentChange)
+						conflicted = true
+					}
+				case <-deadline:
+					t.Fatal("the policy write and the principal removal did not both return")
+				}
+			}
+			if conflicted {
+				require.NoError(t, principals.Delete(ctx, "tenant-1", "user-1"), "a repeat finishes the removal")
+			}
+
+			_, err := d.principals.Get(ctx, d.tenantID, "user-1")
+			require.ErrorIs(t, err, store.ErrRecordNotFound)
+			if stored := d.policy(t, d.photos); stored != nil {
+				named, _ := bucketpolicy.Named(stored.Policy)
+				require.NotContains(t, named, "user-1", "no policy names the removed principal")
+			}
+			_, err = d.accessKeys.Get(ctx, gone)
+			require.ErrorIs(t, err, store.ErrRecordNotFound)
+			require.Empty(t, d.held(t, gone))
 		})
 	}
 }
 
-// TestKeyCreatedAcrossPolicyWritePostgres commits a policy write that takes
-// an action away from a principal after a key creation's task has read the
-// principal's policies and before the task commits. The write's rotation
-// lists the principal's keys before the new one exists, so nothing rewrites
-// the new key's grants: the creation's commit finds the policies changed,
-// and the task runs again and issues the grants of the policy as written.
-func TestKeyCreatedAcrossPolicyWritePostgres(t *testing.T) {
+// TestPolicyWriteDuringBucketDeletion commits a policy task for a bucket
+// while the bucket's deletion holds the bucket's policy write lock, as it
+// does while it revokes the bucket's grants. The commit opens by taking that
+// lock, so it waits for the deletion, finds the bucket gone and stores
+// nothing: the task runs again and reports the bucket missing.
+func TestPolicyWriteDuringBucketDeletion(t *testing.T) {
 	ctx := t.Context()
 	d := setup(t)
-	require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
-	_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:PutObject")), createOnly)
-	require.NoError(t, err)
-	require.NotEqual(t, commandsFor("s3:GetObject"), commandsFor("s3:GetObject", "s3:PutObject"), "the two policies grant different commands")
+	d.principal(t, "user-1")
 
-	var wrote bool
-	keys, _ := d.keyService(t, func() {
-		_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")))
-		require.NoError(t, err)
-		wrote = true
-	})
-	created, _, err := keys.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
-	require.NoError(t, err)
-	require.True(t, wrote, "the policy was written while the creation was in flight")
-	require.Equal(t, commandsFor("s3:GetObject"), d.over(t, created.ID, d.photos), "the key holds what the policy grants now, and no more")
-}
-
-// rotatingKeys parks the rotation it serves inside the keys' delegation
-// locks: the read of the keys that remain, which a rotation makes under
-// those locks before it stores their fresh grants, closes reached and waits
-// for resume once it has its answer.
-type rotatingKeys struct {
-	accesskeystore.Store
-	reached chan struct{}
-	resume  chan struct{}
-	once    sync.Once
-}
-
-func (r *rotatingKeys) ListByTenant(ctx context.Context, tenantID did.DID, opts ...accesskeystore.ListOption) ([]accesskeystore.Record, error) {
-	recs, err := r.Store.ListByTenant(ctx, tenantID, opts...)
-	if accesskeystore.NewListConfig(opts...).IDs != nil {
-		r.once.Do(func() {
-			close(r.reached)
-			<-r.resume
-		})
-	}
-	return recs, err
-}
-
-// TestKeyDeletedDuringRotationPostgres deletes a principal-bound key while a
-// policy write is rewriting its grants, parked under the key's delegation
-// lock: it has found the key still there and is about to store its fresh
-// grants. The deletion's commit waits for the lock, so the grants the write
-// stores are withdrawn with the rest and none outlives the key.
-func TestKeyDeletedDuringRotationPostgres(t *testing.T) {
-	ctx := t.Context()
-	d := setup(t)
-	require.NoError(t, d.principals.Add(ctx, d.tenantID, "user-1"))
-	_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
-	require.NoError(t, err)
-	keys, runner := d.keyService(t, nil)
-	created, _, err := keys.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
-	require.NoError(t, err)
-	original := d.held(t, created.ID)
-	require.NotEmpty(t, original)
-
-	written, deleted := testutil.RequireWaitsForWriter(t,
+	deleted, wrote := testutil.RequireWaitsForWriter(t,
 		func(entered chan<- struct{}, release <-chan struct{}) error {
-			rotating := &rotatingKeys{Store: d.accessKeys, reached: make(chan struct{}), resume: make(chan struct{})}
-			go func() { <-rotating.reached; close(entered) }()
-			go func() { <-release; close(rotating.resume) }()
-			svc := bucketpolicysvc.New(zap.NewNop(), d.tenants, d.buckets, d.principals, d.policies,
-				grant.NewRotator(zap.NewNop(), d.delegations, rotating, d.secrets, d.swarf))
-			_, _, err := svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject", "s3:PutObject")))
-			return err
+			return d.deleteBucket(context.Background(), d.photos, func() { park(t, entered, release) })
 		},
-		func() error { return keys.Delete(context.Background(), "tenant-1", created.ID.Identifier()) })
-	require.NoError(t, written)
+		func() error {
+			_, _, err := d.svc.Write(context.Background(), d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+			return err
+		})
 	require.NoError(t, deleted)
+	require.ErrorIs(t, wrote, bucketpolicysvc.ErrBucketNotFound)
 
-	_, err = d.accessKeys.Get(ctx, created.ID)
-	require.ErrorIs(t, err, store.ErrRecordNotFound)
-	require.Empty(t, d.held(t, created.ID), "no grant outlives the key")
-	// The write revoked the grants it replaced, and the deletion's publish
-	// revokes the ones the write stored.
-	testutil.AwaitPublished(t, runner, d.tenantID)
-	fresh := len(commandsFor("s3:GetObject", "s3:PutObject"))
-	require.Len(t, d.swarf.Revoked(), len(original)+fresh)
-	for _, r := range d.swarf.Revocations() {
-		require.Equal(t, created.ID, r.Delegation.Audience())
+	page, err := d.delegations.ListBySubject(ctx, d.photos)
+	require.NoError(t, err)
+	require.Empty(t, page.Results, "no grant over the bucket outlives it")
+	require.Nil(t, d.policy(t, d.photos))
+}
+
+// TestBucketDeletedBeforeCommit deletes a bucket after a policy task for it
+// has read the bucket and before the task commits. The commit fails, so
+// nothing is committed, and the task runs again and finds the bucket
+// missing: a create breaks the policy's foreign key to the bucket, and a
+// removal's conditional delete finds the policy gone with the bucket.
+func TestBucketDeletedBeforeCommit(t *testing.T) {
+	ctx := t.Context()
+	for name, removal := range map[string]bool{"a write": false, "a removal": true} {
+		t.Run(name, func(t *testing.T) {
+			d := setup(t)
+			d.principal(t, "user-1")
+			if removal {
+				_, _, err := d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+				require.NoError(t, err)
+			}
+
+			d.hook.arm(func() { require.NoError(t, d.deleteBucket(context.Background(), d.photos, nil)) })
+			var err error
+			if removal {
+				err = d.svc.Remove(ctx, d.tenantID, d.photos, "photos", nil)
+			} else {
+				_, _, err = d.svc.Write(ctx, d.tenantID, d.photos, "photos", doc(allow(only("user-1"), "s3:GetObject")), createOnly)
+			}
+			if removal {
+				require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound)
+			} else {
+				require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound)
+			}
+
+			page, err := d.delegations.ListBySubject(ctx, d.photos)
+			require.NoError(t, err)
+			require.Empty(t, page.Results, "no grant over the bucket outlives it")
+			require.Empty(t, d.owedLinks(t), "the task committed nothing")
+		})
 	}
 }
 
-// TestPolicyWriteToMissingBucketPostgres writes a policy for a bucket the
-// caller resolved but the store has no row for, standing in for a bucket
-// deleted between the lookup and the write. It is reported as a missing
-// bucket.
-func TestPolicyWriteToMissingBucketPostgres(t *testing.T) {
+// TestPolicyWriteToMissingBucket writes a policy for a bucket the caller
+// resolved but the tenant does not have, as for a bucket deleted between the
+// lookup and the write, and for another tenant's bucket. Each is reported as
+// a missing bucket to a write, and as a missing policy to a removal.
+func TestPolicyWriteToMissingBucket(t *testing.T) {
+	ctx := t.Context()
 	d := setup(t)
-	_, _, err := d.svc.Write(t.Context(), d.tenantID, testutil.RandomDID(t), "photos", doc(allow(everyone, "s3:ListBucket")), createOnly)
-	require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound)
+	theirs := testutil.RandomDID(t)
+	require.NoError(t, d.buckets.Add(ctx, theirs, d.otherTenant, d.providerID, "theirs"))
+	for name, bucket := range map[string]did.DID{"no such bucket": testutil.RandomDID(t), "another tenant's bucket": theirs} {
+		_, _, err := d.svc.Write(ctx, d.tenantID, bucket, "photos", doc(allow(everyone, "s3:ListBucket")), createOnly)
+		require.ErrorIs(t, err, bucketpolicysvc.ErrBucketNotFound, name)
+		require.ErrorIs(t, d.svc.Remove(ctx, d.tenantID, bucket, "photos", nil), bucketpolicysvc.ErrPolicyNotFound, name)
+		require.Nil(t, d.policy(t, bucket), name)
+	}
 }
 
 func TestPrincipalReads(t *testing.T) {

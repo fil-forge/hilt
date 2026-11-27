@@ -5,8 +5,10 @@
 // derived from the permissions and buckets it was created with. A
 // principal-bound key holds, for each bucket its principal can reach, the set
 // derived from the principal's effective actions on that bucket, and a policy
-// change rewrites it (see Rotator). [ForKey] issues either kind's set, for a
-// key being created and for one whose grants are issued again.
+// change rewrites it, in the task that writes the policy
+// (pkg/tasks/tenantqueue). [ForKey] issues either kind's set, for a key being
+// created and for one whose grants are issued again. Rotator revokes what a
+// removed principal's keys hold.
 package grant
 
 import (

@@ -3,6 +3,7 @@ package delegation_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	dlgstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
@@ -296,107 +298,7 @@ func TestDelegationStore(t *testing.T) {
 		require.Empty(t, page.Results, "nothing is written under an audience the call did not lock")
 	})
 
-	t.Run("ReplaceOver hands next only the delegations over the subject and keeps the rest", func(t *testing.T) {
-		issuer := testutil.RandomIssuer(t)
-		audience := testutil.RandomDID(t)
-		over, other := testutil.RandomDID(t), testutil.RandomDID(t)
-		cmd := command.MustParse("/test/run")
-		old := makeDelegation(t, issuer, audience, over, cmd)
-		kept := makeDelegation(t, issuer, audience, other, cmd)
-		require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old, kept}))
-		fresh := makeDelegation(t, issuer, audience, over, cmd)
-
-		var seen []ucan.Delegation
-		require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			seen = current[audience]
-			return map[did.DID][]ucan.Delegation{audience: {fresh}}, nil
-		}))
-
-		require.Len(t, seen, 1)
-		require.Equal(t, old.Link(), seen[0].Link())
-		page, err := s.ListByAudience(t.Context(), audience)
-		require.NoError(t, err)
-		require.ElementsMatch(t, []string{fresh.Link().String(), kept.Link().String()}, linkStrings(page.Results))
-	})
-
-	t.Run("ReplaceOver with next returning nil leaves the audience with nothing over the subject", func(t *testing.T) {
-		issuer := testutil.RandomIssuer(t)
-		audience := testutil.RandomDID(t)
-		over, other := testutil.RandomDID(t), testutil.RandomDID(t)
-		cmd := command.MustParse("/test/run")
-		kept := makeDelegation(t, issuer, audience, other, cmd)
-		require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{makeDelegation(t, issuer, audience, over, cmd), kept}))
-
-		require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			return nil, nil
-		}))
-
-		page, err := s.ListByAudience(t.Context(), audience)
-		require.NoError(t, err)
-		require.Equal(t, []string{kept.Link().String()}, linkStrings(page.Results))
-	})
-
-	t.Run("ReplaceOver rolls back when next errors", func(t *testing.T) {
-		issuer := testutil.RandomIssuer(t)
-		audience, over := testutil.RandomDID(t), testutil.RandomDID(t)
-		old := makeDelegation(t, issuer, audience, over, command.MustParse("/test/run"))
-		require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{old}))
-		boom := errors.New("publish failed")
-
-		err := s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			return nil, boom
-		})
-		require.ErrorIs(t, err, boom)
-
-		page, err := s.ListByAudience(t.Context(), audience)
-		require.NoError(t, err)
-		require.Equal(t, []string{old.Link().String()}, linkStrings(page.Results))
-	})
-
-	t.Run("ReplaceOver returns ErrInvalidArgument for a delegation over another subject", func(t *testing.T) {
-		issuer := testutil.RandomIssuer(t)
-		audience := testutil.RandomDID(t)
-		over, other := testutil.RandomDID(t), testutil.RandomDID(t)
-		stray := makeDelegation(t, issuer, audience, other, command.MustParse("/test/run"))
-
-		err := s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			return map[did.DID][]ucan.Delegation{audience: {stray}}, nil
-		})
-		require.ErrorIs(t, err, store.ErrInvalidArgument)
-
-		page, err := s.ListByAudience(t.Context(), audience)
-		require.NoError(t, err)
-		require.Empty(t, page.Results)
-	})
-
-	t.Run("ReplaceOver swaps several audiences in one call", func(t *testing.T) {
-		issuer := testutil.RandomIssuer(t)
-		a, b := testutil.RandomDID(t), testutil.RandomDID(t)
-		over, other := testutil.RandomDID(t), testutil.RandomDID(t)
-		cmd := command.MustParse("/test/run")
-		oldA := makeDelegation(t, issuer, a, over, cmd)
-		keptA := makeDelegation(t, issuer, a, other, cmd)
-		keptB := makeDelegation(t, issuer, b, other, cmd)
-		require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{oldA, keptA, keptB}))
-		freshA, freshB := makeDelegation(t, issuer, a, over, cmd), makeDelegation(t, issuer, b, over, cmd)
-
-		var seen map[did.DID][]ucan.Delegation
-		require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{a, b}, over, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			seen = current
-			return map[did.DID][]ucan.Delegation{a: {freshA}, b: {freshB}}, nil
-		}))
-
-		require.Equal(t, []string{oldA.Link().String()}, linkStrings(seen[a]))
-		require.Empty(t, seen[b], "b holds nothing over the subject")
-		pageA, err := s.ListByAudience(t.Context(), a)
-		require.NoError(t, err)
-		require.ElementsMatch(t, []string{freshA.Link().String(), keptA.Link().String()}, linkStrings(pageA.Results))
-		pageB, err := s.ListByAudience(t.Context(), b)
-		require.NoError(t, err)
-		require.ElementsMatch(t, []string{freshB.Link().String(), keptB.Link().String()}, linkStrings(pageB.Results))
-	})
-
-	t.Run("Replace and ReplaceOver hand next each audience once when it is listed twice", func(t *testing.T) {
+	t.Run("Replace hands next each audience once when it is listed twice", func(t *testing.T) {
 		issuer := testutil.RandomIssuer(t)
 		audience, over := testutil.RandomDID(t), testutil.RandomDID(t)
 		require.NoError(t, s.PutBatch(t.Context(), []ucan.Delegation{makeDelegation(t, issuer, audience, over, command.MustParse("/test/run"))}))
@@ -406,42 +308,6 @@ func TestDelegationStore(t *testing.T) {
 		}
 
 		require.NoError(t, s.Replace(t.Context(), []did.DID{audience, audience}, keep))
-		require.NoError(t, s.ReplaceOver(t.Context(), []did.DID{audience, audience}, over, keep))
-	})
-
-	t.Run("ReplaceOver waits for an in-flight Replace of the same audience", func(t *testing.T) {
-		issuer := testutil.RandomIssuer(t)
-		audience, over := testutil.RandomDID(t), testutil.RandomDID(t)
-		cmd := command.MustParse("/test/run")
-		fresh := makeDelegation(t, issuer, audience, over, cmd)
-
-		var seen []ucan.Delegation
-		writeErr, waitErr := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return replaceOne(t.Context(), s, audience, func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
-					close(entered)
-					<-release
-					return []ucan.Delegation{fresh}, nil
-				})
-			},
-			func() error {
-				return s.ReplaceOver(t.Context(), []did.DID{audience}, over, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-					seen = current[audience]
-					return current, nil
-				})
-			},
-		)
-		require.NoError(t, writeErr)
-		require.NoError(t, waitErr)
-		require.Equal(t, []string{fresh.Link().String()}, linkStrings(seen), "ReplaceOver sees the settled result of the Replace it waited on")
-	})
-
-	t.Run("ReplaceOver returns ErrInvalidArgument for undef subject", func(t *testing.T) {
-		err := s.ReplaceOver(t.Context(), []did.DID{testutil.RandomDID(t)}, did.Undef, func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			t.Fatal("next must not run")
-			return nil, nil
-		})
-		require.ErrorIs(t, err, store.ErrInvalidArgument)
 	})
 
 	t.Run("DeleteBySubject removes only that subject's delegations", func(t *testing.T) {
@@ -799,46 +665,75 @@ func TestWithdrawKeyGrantsStatements(t *testing.T) {
 	})
 }
 
-func TestWithdrawGrantsOfKeyStatements(t *testing.T) {
-	read := command.MustParse("/content/retrieve")
+func TestWithdrawGrantsOverStatements(t *testing.T) {
+	read, write := command.MustParse("/content/retrieve"), command.MustParse("/blob/add")
 
-	t.Run("moves what the tenant issued to the one key to the revocations owed, and nothing else", func(t *testing.T) {
-		f := setupKeys(t)
-		bucket := testutil.RandomIssuer(t)
-		grants := []ucan.Delegation{
-			makeDelegation(t, f.tenant, f.keys[0], bucket.DID(), read),
-			makeDelegation(t, f.tenant, f.keys[0], did.Undef, read),
+	// principalKeys adds the principals to the fixture's tenant, and one key
+	// bound to each, in order.
+	principalKeys := func(t *testing.T, f keyFixture, principals ...string) []did.DID {
+		t.Helper()
+		keys := make([]did.DID, len(principals))
+		for i, p := range principals {
+			require.NoError(t, principalpostgres.New(f.pool).Add(t.Context(), f.tenant.DID(), p))
+			keys[i] = testutil.RandomDID(t)
+			require.NoError(t, accesskeypostgres.New(f.pool).Add(t.Context(), accesskey.Input{ID: keys[i], Tenant: f.tenant.DID(), Name: "bound", Principal: &p}))
 		}
-		// Left alone: the tenant's other key's grant, the bucket's root to
-		// the tenant, and a delegation another party issued to the key.
-		sibling := makeDelegation(t, f.tenant, f.keys[1], bucket.DID(), read)
-		root := makeDelegation(t, bucket, f.tenant.DID(), bucket.DID(), command.Top())
-		foreign := makeDelegation(t, bucket, f.keys[0], bucket.DID(), read)
-		require.NoError(t, f.store.PutBatch(t.Context(), append(grants, sibling, root, foreign)))
+		return keys
+	}
 
-		f.run(t, f.store.WithdrawGrantsOfKeyStatements(f.tenant.DID(), f.keys[0])...)
+	t.Run("moves what the tenant issued over the subject to the principals' keys to the revocations owed, and nothing else", func(t *testing.T) {
+		f := setupKeys(t)
+		bound := principalKeys(t, f, "alice", "bob", "carol")
+		bucket, elsewhere := testutil.RandomIssuer(t), testutil.RandomDID(t)
+		grants := []ucan.Delegation{
+			makeDelegation(t, f.tenant, bound[0], bucket.DID(), read),
+			makeDelegation(t, f.tenant, bound[0], bucket.DID(), write),
+			makeDelegation(t, f.tenant, bound[1], bucket.DID(), read),
+		}
+		// Left alone: the keys' grants over another bucket, the grant over
+		// this one of a principal not named and of a service key, a
+		// delegation another party issued to one of the keys, and the
+		// bucket's root to the tenant.
+		others := []ucan.Delegation{
+			makeDelegation(t, f.tenant, bound[0], elsewhere, read),
+			makeDelegation(t, f.tenant, bound[1], elsewhere, read),
+			makeDelegation(t, f.tenant, bound[2], bucket.DID(), read),
+			makeDelegation(t, f.tenant, f.keys[0], bucket.DID(), read),
+			makeDelegation(t, bucket, bound[0], bucket.DID(), read),
+			makeDelegation(t, bucket, f.tenant.DID(), bucket.DID(), command.Top()),
+		}
+		require.NoError(t, f.store.PutBatch(t.Context(), append(slices.Clone(grants), others...)))
 
-		require.Equal(t, linkStrings([]ucan.Delegation{foreign}), f.held(t, f.keys[0]))
-		require.Equal(t, linkStrings([]ucan.Delegation{sibling}), f.held(t, f.keys[1]))
-		require.Equal(t, linkStrings([]ucan.Delegation{root}), f.held(t, f.tenant.DID()))
+		f.run(t, f.store.WithdrawGrantsOverStatements(f.tenant.DID(), bucket.DID(), []string{"alice", "bob"})...)
+
+		require.ElementsMatch(t, linkStrings([]ucan.Delegation{others[0], others[4]}), f.held(t, bound[0]))
+		require.Equal(t, linkStrings([]ucan.Delegation{others[1]}), f.held(t, bound[1]))
+		require.Equal(t, linkStrings([]ucan.Delegation{others[2]}), f.held(t, bound[2]))
+		require.Equal(t, linkStrings([]ucan.Delegation{others[3]}), f.held(t, f.keys[0]))
+		require.Equal(t, linkStrings([]ucan.Delegation{others[5]}), f.held(t, f.tenant.DID()))
 		owed := f.owed(t)
 		require.ElementsMatch(t, linkStrings(grants), owed[f.tenant.DID().String()])
 		require.Len(t, owed, 1, "only the tenant owes anything")
 
 		// A second run finds nothing left to move.
-		f.run(t, f.store.WithdrawGrantsOfKeyStatements(f.tenant.DID(), f.keys[0])...)
+		f.run(t, f.store.WithdrawGrantsOverStatements(f.tenant.DID(), bucket.DID(), []string{"alice", "bob"})...)
 		require.Equal(t, owed, f.owed(t))
 	})
 
-	t.Run("waits for a Replace of the key and withdraws what it stored", func(t *testing.T) {
+	t.Run("waits for a Replace of one of the keys and withdraws what it stored", func(t *testing.T) {
 		f := setupKeys(t)
-		late := makeDelegation(t, f.tenant, f.keys[1], testutil.RandomDID(t), read)
+		bound := principalKeys(t, f, "alice")
+		bucket := testutil.RandomDID(t)
+		late := makeDelegation(t, f.tenant, bound[0], bucket, read)
 
 		writeErr, withdrawErr := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return replaceOne(t.Context(), f.store, f.keys[1], func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+				return replaceOne(t.Context(), f.store, bound[0], func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
 					close(entered)
-					<-release
+					select {
+					case <-release:
+					case <-t.Context().Done():
+					}
 					return []ucan.Delegation{late}, nil
 				})
 			},
@@ -848,7 +743,7 @@ func TestWithdrawGrantsOfKeyStatements(t *testing.T) {
 					return err
 				}
 				defer tx.Rollback(context.Background()) // no-op once committed
-				for _, st := range f.store.WithdrawGrantsOfKeyStatements(f.tenant.DID(), f.keys[1]) {
+				for _, st := range f.store.WithdrawGrantsOverStatements(f.tenant.DID(), bucket, []string{"alice"}) {
 					if _, err := tx.Exec(t.Context(), st.SQL, st.Args...); err != nil {
 						return err
 					}
@@ -858,9 +753,38 @@ func TestWithdrawGrantsOfKeyStatements(t *testing.T) {
 		)
 		require.NoError(t, writeErr)
 		require.NoError(t, withdrawErr)
-		require.Empty(t, f.held(t, f.keys[1]))
+		require.Empty(t, f.held(t, bound[0]))
 		require.Equal(t, []string{late.Link().String()}, f.owed(t)[f.tenant.DID().String()])
 	})
+}
+
+func TestWithdrawGrantsOfKeyStatement(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+	f := setupKeys(t)
+	bucket := testutil.RandomIssuer(t)
+	grants := []ucan.Delegation{
+		makeDelegation(t, f.tenant, f.keys[0], bucket.DID(), read),
+		makeDelegation(t, f.tenant, f.keys[0], did.Undef, read),
+	}
+	// Left alone: the tenant's other key's grant, the bucket's root to the
+	// tenant, and a delegation another party issued to the key.
+	sibling := makeDelegation(t, f.tenant, f.keys[1], bucket.DID(), read)
+	root := makeDelegation(t, bucket, f.tenant.DID(), bucket.DID(), command.Top())
+	foreign := makeDelegation(t, bucket, f.keys[0], bucket.DID(), read)
+	require.NoError(t, f.store.PutBatch(t.Context(), append(grants, sibling, root, foreign)))
+
+	f.run(t, f.store.WithdrawGrantsOfKeyStatement(f.tenant.DID(), f.keys[0]))
+
+	require.Equal(t, linkStrings([]ucan.Delegation{foreign}), f.held(t, f.keys[0]))
+	require.Equal(t, linkStrings([]ucan.Delegation{sibling}), f.held(t, f.keys[1]))
+	require.Equal(t, linkStrings([]ucan.Delegation{root}), f.held(t, f.tenant.DID()))
+	owed := f.owed(t)
+	require.ElementsMatch(t, linkStrings(grants), owed[f.tenant.DID().String()])
+	require.Len(t, owed, 1, "only the tenant owes anything")
+
+	// A second run finds nothing left to move.
+	f.run(t, f.store.WithdrawGrantsOfKeyStatement(f.tenant.DID(), f.keys[0]))
+	require.Equal(t, owed, f.owed(t))
 }
 
 func TestPutForKeysStatement(t *testing.T) {

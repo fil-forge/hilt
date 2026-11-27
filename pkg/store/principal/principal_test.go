@@ -16,7 +16,6 @@ import (
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
-	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
@@ -260,100 +259,6 @@ func TestPrincipalStore(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound)
 	})
 
-	t.Run("WithLock runs the callback once and returns its error", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-		calls := 0
-		require.NoError(t, s.WithLock(t.Context(), tenantID, []string{"held", "absent"}, func(ctx context.Context) error {
-			calls++
-			return nil
-		}))
-		require.Equal(t, 1, calls)
-
-		boom := errors.New("boom")
-		err := s.WithLock(t.Context(), tenantID, []string{"held"}, func(ctx context.Context) error { return boom })
-		require.ErrorIs(t, err, boom)
-	})
-
-	t.Run("WithLock waits on a principal a removal holds", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-		deleted, locked := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() error {
-				return s.WithLock(context.Background(), tenantID, []string{"held"}, func(context.Context) error { return nil })
-			})
-		require.NoError(t, deleted)
-		require.NoError(t, locked, "the row is gone when Lock gets its turn, so it is skipped")
-	})
-
-	t.Run("WithLock does not wait on principals a removal does not hold", func(t *testing.T) {
-		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
-		seed(t, tenantID)
-		seed(t, other)
-		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-		require.NoError(t, s.Add(t.Context(), tenantID, "other"))
-		require.NoError(t, s.Add(t.Context(), other, "other"))
-
-		entered, release := make(chan struct{}), make(chan struct{})
-		removed := make(chan error, 1)
-		go func() {
-			removed <- s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
-				close(entered)
-				<-release
-				return nil
-			})
-		}()
-		select {
-		case <-entered:
-		case err := <-removed:
-			t.Fatalf("the removal returned before holding its row: %v", err)
-		case <-time.After(htestutil.WaitTimeout):
-			t.Fatal("the removal did not hold its row")
-		}
-		defer func() { close(release); require.NoError(t, <-removed) }()
-
-		// Another principal of the same tenant, another tenant's, and an
-		// id with no row: none is held by the removal, so none waits.
-		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-		defer cancel()
-		noop := func(context.Context) error { return nil }
-		require.NoError(t, s.WithLock(ctx, tenantID, []string{"other"}, noop))
-		require.NoError(t, s.WithLock(ctx, other, []string{"other"}, noop))
-		require.NoError(t, s.WithLock(ctx, tenantID, []string{"absent"}, noop))
-	})
-
-	t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-		locked, got := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.WithLock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() error {
-				_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
-				return err
-			})
-		require.NoError(t, locked)
-		require.NoError(t, got)
-	})
-
 	t.Run("DeleteByTenant removes every principal of the tenant and is idempotent", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		other := testutil.RandomDID(t)
@@ -463,33 +368,6 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 		require.NoError(t, deleted)
 		require.ErrorIs(t, got, store.ErrRecordNotFound)
 	})
-
-	t.Run("Add waits on the tenant lock a policy write holds shared", func(t *testing.T) {
-		tenantID := testutil.RandomDID(t)
-		seed(t, tenantID)
-
-		tx, err := pool.Begin(t.Context())
-		require.NoError(t, err)
-		defer tx.Rollback(t.Context())
-
-		released, added := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				if err := pglock.Advisory(t.Context(), tx, tenant.LockNamespace, tenantID.String(), true); err != nil {
-					return err
-				}
-				close(entered)
-				<-release
-				return tx.Rollback(t.Context())
-			},
-			func() error {
-				return s.Add(context.Background(), tenantID, "late")
-			})
-		require.NoError(t, released)
-		require.NoError(t, added)
-		rec, err := s.Get(t.Context(), tenantID, "late")
-		require.NoError(t, err)
-		require.Equal(t, "late", rec.ExternalID)
-	})
 }
 
 // TestPrincipalStorePostgresLockTimeout pins the bounded wait that keeps a
@@ -497,7 +375,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 // each other. Removal holds the principal row FOR UPDATE across a callback
 // that rewrites policies in transactions of its own, while a policy write
 // reaches back onto the same row through the bucket_policy_principal foreign
-// key; re-adding the principal, locking it for a policy write, and adding a
+// key; re-adding the principal and adding a
 // key bound to it (FOR KEY SHARE through the access_key foreign key) take the
 // row itself. Neither edge is visible to Postgres, so the wait is bounded and
 // one side is told to retry. Each case holds the row from a raw transaction.
@@ -555,15 +433,6 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 			},
 		},
 		{
-			name: "locking the principal for a policy write",
-			op: func(ctx context.Context, tenantID did.DID) error {
-				return principals.WithLock(ctx, tenantID, []string{"held"}, func(context.Context) error {
-					return errors.New("the callback must not run while the row is held")
-				})
-			},
-			unwritten: func(*testing.T, did.DID) {},
-		},
-		{
 			name: "adding a key bound to the principal",
 			op: func(ctx context.Context, tenantID did.DID) error {
 				principal := "held"
@@ -618,22 +487,22 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 	}
 }
 
-// TestRequireLiveStatement covers the statement a key creation's commit runs
-// conditionally: it affects a row only for a live principal, and it waits
-// for the writers that hold the principal's row.
+// TestRequireLiveStatement covers the statement a task's commit runs
+// conditionally: it affects a row only when every principal it names is
+// live, and it waits for a removal that holds one of their rows.
 func TestRequireLiveStatement(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	s := principalpostgres.New(pool)
 	seed := seeder(pool)
 	// affected runs the statement in a transaction of its own and returns
 	// the number of rows it affected.
-	affected := func(ctx context.Context, tenantID did.DID, id string) (int64, error) {
+	affected := func(ctx context.Context, tenantID did.DID, ids ...string) (int64, error) {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			return 0, err
 		}
 		defer tx.Rollback(context.Background())
-		st := s.RequireLiveStatement(tenantID, id)
+		st := s.RequireLiveStatement(tenantID, ids...)
 		tag, err := tx.Exec(ctx, st.SQL, st.Args...)
 		if err != nil {
 			return 0, err
@@ -641,18 +510,31 @@ func TestRequireLiveStatement(t *testing.T) {
 		return tag.RowsAffected(), tx.Commit(ctx)
 	}
 
-	t.Run("affects one row for a live principal and none for a missing or removed one", func(t *testing.T) {
+	t.Run("affects one row when every principal is live and none when one is missing or removed", func(t *testing.T) {
 		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
 		seed(t, tenantID)
 		seed(t, other)
 		require.NoError(t, s.Add(t.Context(), tenantID, "alice"))
+		require.NoError(t, s.Add(t.Context(), tenantID, "bob"))
 		require.NoError(t, s.Add(t.Context(), tenantID, "gone"))
 		require.NoError(t, s.Tombstone(t.Context(), tenantID, "gone", nil))
 
-		for id, want := range map[string]int64{"alice": 1, "gone": 0, "nobody": 0} {
-			n, err := affected(t.Context(), tenantID, id)
+		for _, tc := range []struct {
+			ids  []string
+			want int64
+		}{
+			{[]string{"alice"}, 1},
+			{[]string{"gone"}, 0},
+			{[]string{"nobody"}, 0},
+			{[]string{"alice", "bob"}, 1},
+			{[]string{"bob", "alice", "bob"}, 1},
+			{[]string{"alice", "gone"}, 0},
+			{[]string{"alice", "bob", "nobody"}, 0},
+			{nil, 0},
+		} {
+			n, err := affected(t.Context(), tenantID, tc.ids...)
 			require.NoError(t, err)
-			require.Equal(t, want, n, id)
+			require.Equal(t, tc.want, n, tc.ids)
 		}
 		n, err := affected(t.Context(), other, "alice")
 		require.NoError(t, err)
@@ -663,6 +545,7 @@ func TestRequireLiveStatement(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		require.NoError(t, s.Add(t.Context(), tenantID, "alice"))
+		require.NoError(t, s.Add(t.Context(), tenantID, "bob"))
 
 		var n int64
 		removed, checked := htestutil.RequireWaitsForWriter(t,
@@ -674,7 +557,7 @@ func TestRequireLiveStatement(t *testing.T) {
 				})
 			},
 			func() (err error) {
-				n, err = affected(context.Background(), tenantID, "alice")
+				n, err = affected(context.Background(), tenantID, "alice", "bob")
 				return err
 			})
 		require.NoError(t, removed)
@@ -682,34 +565,15 @@ func TestRequireLiveStatement(t *testing.T) {
 		require.Zero(t, n)
 	})
 
-	t.Run("waits for a writer holding the principal with WithLock, and holds it off in turn", func(t *testing.T) {
+	t.Run("holds off a removal until its transaction ends", func(t *testing.T) {
 		tenantID := testutil.RandomDID(t)
 		seed(t, tenantID)
 		require.NoError(t, s.Add(t.Context(), tenantID, "alice"))
 
-		var n int64
-		locked, checked := htestutil.RequireWaitsForWriter(t,
-			func(entered chan<- struct{}, release <-chan struct{}) error {
-				return s.WithLock(t.Context(), tenantID, []string{"alice"}, func(context.Context) error {
-					close(entered)
-					<-release
-					return nil
-				})
-			},
-			func() (err error) {
-				n, err = affected(context.Background(), tenantID, "alice")
-				return err
-			})
-		require.NoError(t, locked)
-		require.NoError(t, checked)
-		require.EqualValues(t, 1, n)
-
-		// The other way round: the statement's transaction holds the row, and
-		// WithLock waits for it to end.
 		tx, err := pool.Begin(t.Context())
 		require.NoError(t, err)
 		defer tx.Rollback(context.Background())
-		held, locked := htestutil.RequireWaitsForWriter(t,
+		held, removed := htestutil.RequireWaitsForWriter(t,
 			func(entered chan<- struct{}, release <-chan struct{}) error {
 				st := s.RequireLiveStatement(tenantID, "alice")
 				if _, err := tx.Exec(t.Context(), st.SQL, st.Args...); err != nil {
@@ -719,10 +583,8 @@ func TestRequireLiveStatement(t *testing.T) {
 				<-release
 				return tx.Commit(t.Context())
 			},
-			func() error {
-				return s.WithLock(context.Background(), tenantID, []string{"alice"}, func(context.Context) error { return nil })
-			})
+			func() error { return s.Tombstone(context.Background(), tenantID, "alice", nil) })
 		require.NoError(t, held)
-		require.NoError(t, locked)
+		require.NoError(t, removed)
 	})
 }

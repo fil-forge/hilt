@@ -6,12 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/principal"
-	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,12 +31,8 @@ func New(pool *pgxpool.Pool) *Store {
 func (s *Store) Initialize(ctx context.Context) error { return nil }
 
 // Add runs the upsert in a short transaction so its wait is bounded at
-// [store.LockTimeout]: the row lock it takes waits for an in-flight Delete of
-// the same principal, and a longer wait returns [store.ErrLockTimeout]. It
-// first takes the tenant's advisory lock exclusive ([tenantstore.LockNamespace]),
-// which a policy write holds shared for its transaction, so the new principal
-// is committed either before the write's callback lists the tenant's
-// principals or after the write itself; that wait is bounded the same way.
+// [store.LockTimeout]: the row lock it takes waits for an in-flight Tombstone
+// of the same principal, and a longer wait returns [store.ErrLockTimeout].
 func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err error) {
 	if tenant == did.Undef {
 		return fmt.Errorf("principal tenant is required: %w", store.ErrInvalidArgument)
@@ -52,9 +48,6 @@ func (s *Store) Add(ctx context.Context, tenant did.DID, externalID string) (err
 	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
 
 	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	if err := pglock.Advisory(ctx, tx, tenantstore.LockNamespace, tenant.String(), false); err != nil {
 		return err
 	}
 	// The upsert revives a tombstone under the same id; it touches nothing when
@@ -157,10 +150,11 @@ func (s *Store) ListIDsByTenant(ctx context.Context, tenant did.DID) ([]string, 
 // principal, revokes what its keys hold and deletes their rows. It receives
 // this transaction through [pglock.WithTx], so a store that opens with
 // [pglock.Begin] writes inside it and commits or rolls back with the removal;
-// the caller strips the principal from its policies before locking. A policy write naming the principal meanwhile key-share
-// locks this row and waits for the outcome, so the wait here and the wait
-// there are bounded at [store.LockTimeout] and one of the two callers is given
-// [store.ErrLockTimeout] to retry instead of both hanging.
+// the caller strips the principal from its policies before locking. A policy
+// write naming the principal meanwhile share-locks this row at its commit and
+// waits for the outcome, and the removal of another principal that rewrites a
+// policy naming this one key-share locks it; the wait here is bounded at
+// [store.LockTimeout].
 func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string, beforeCommit func(ctx context.Context) error) (err error) {
 	defer func() { err = pglock.MapError(err) }()
 	tx, err := pglock.Begin(ctx, s.pool)
@@ -205,47 +199,6 @@ func (s *Store) Tombstone(ctx context.Context, tenant did.DID, externalID string
 	return nil
 }
 
-// WithLock runs in one transaction: it locks the live rows FOR NO KEY UPDATE in
-// external ID order, runs fn while holding them and commits. Sorting keeps two
-// WithLock calls over overlapping principals from deadlocking; the wait for a row a
-// removal holds is bounded at [store.LockTimeout] and a longer one returns
-// [store.ErrLockTimeout]. The mode blocks a share-locked Get and a Tombstone, and
-// leaves alone the FOR KEY SHARE a policy write holds on the principals it
-// names, since fn may run inside that write. fn receives this transaction
-// through [pglock.WithTx], so a store that opens with [pglock.Begin] writes
-// inside it.
-func (s *Store) WithLock(ctx context.Context, tenant did.DID, externalIDs []string, fn func(ctx context.Context) error) (err error) {
-	if len(externalIDs) == 0 {
-		return fn(ctx)
-	}
-	defer func() { err = pglock.MapError(err) }()
-	tx, err := pglock.Begin(ctx, s.pool)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // no-op once committed; rolls back on any early return
-
-	if err := pglock.SetTimeout(ctx, tx); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `
-		SELECT 1
-		FROM principal
-		WHERE tenant_id = $1 AND external_id = ANY($2) AND deleted_at IS NULL
-		ORDER BY external_id ASC
-		FOR NO KEY UPDATE
-	`, tenant.String(), externalIDs); err != nil {
-		return fmt.Errorf("locking principals: %w", err)
-	}
-	if err := fn(pglock.WithTx(ctx, tx)); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
-}
-
 // DeleteByTenant removes every principal of the tenant in a short transaction
 // so its wait is bounded at [store.LockTimeout]: a row held FOR UPDATE by a
 // removal in progress blocks the delete, and a longer wait returns
@@ -270,14 +223,24 @@ func (s *Store) DeleteByTenant(ctx context.Context, tenant did.DID) (err error) 
 	return nil
 }
 
-func (s *Store) RequireLiveStatement(tenant did.DID, externalID string) store.Statement {
+// RequireLiveStatement locks the live rows in external ID order and counts
+// them: a row a removal holds is waited for and, once the removal commits, is
+// no longer live and is not counted.
+func (s *Store) RequireLiveStatement(tenant did.DID, externalIDs ...string) store.Statement {
+	ids := slices.Clone(externalIDs)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
 	return store.Statement{
 		SQL: `
-			SELECT 1
-			FROM principal
-			WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
-			FOR SHARE`,
-		Args: []any{tenant.String(), externalID},
+			WITH live AS (
+				SELECT external_id
+				FROM principal
+				WHERE tenant_id = $1 AND external_id = ANY($2) AND deleted_at IS NULL
+				ORDER BY external_id ASC
+				FOR SHARE
+			)
+			SELECT 1 WHERE (SELECT count(*) FROM live) = $3 AND $3 > 0`,
+		Args: []any{tenant.String(), ids, len(ids)},
 	}
 }
 

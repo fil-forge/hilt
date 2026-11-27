@@ -5,18 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
@@ -35,23 +34,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
-
-// deleteBeforePut deletes the bucket ahead of a policy write once gone is set,
-// as a bucket delete landing between Authorize and the write would.
-type deleteBeforePut struct {
-	bucketpolicystore.Store
-	gone *bool
-	del  func(ctx context.Context) error
-}
-
-func (s deleteBeforePut) Put(ctx context.Context, in bucketpolicystore.Input, fn func(ctx context.Context, old *bucketpolicystore.Record) error) (string, error) {
-	if *s.gone {
-		if err := s.del(ctx); err != nil {
-			return "", err
-		}
-	}
-	return s.Store.Put(ctx, in, fn)
-}
 
 // TestPolicy covers /s3/bucket/policy: the three S3 bucket policy operations,
 // reached with a service key holding the operation's permission, with the
@@ -72,7 +54,7 @@ func TestPolicy(t *testing.T) {
 		svc        *bucketsvc.Service
 		policies   *bucketpolicypostgres.Store
 		bucketID   did.DID
-		bucketGone *bool // deletes the bucket ahead of the next policy write, for a delete racing a write
+		bucketGone *atomic.Bool // deletes the bucket under the next policy write, between its task's reads and its commit
 	}
 	// setup seeds the tenant, the photos bucket, principal user-1 with one
 	// key, and akSigner as a service key holding perms (or bound to user-1).
@@ -81,7 +63,7 @@ func TestPolicy(t *testing.T) {
 		pool := htestutil.PostgresOrSkip(t)
 		accessKeys, tenants, buckets := accesskeypostgres.New(pool), tenantpostgres.New(pool), bucketpostgres.New(pool)
 		providers, secrets, delegations := providerpostgres.New(pool), vaultmemory.New(), delegationpostgres.New(pool)
-		bucketGone := new(bool)
+		bucketGone := new(atomic.Bool)
 		principals := principalpostgres.New(pool)
 		policies := bucketpolicypostgres.New(pool)
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
@@ -95,9 +77,12 @@ func TestPolicy(t *testing.T) {
 		require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), tenantSigner.Bytes()))
 		az := auth.NewAuthorizer(zap.NewNop(), accessKeys, tenants, providers, buckets, principals, policies, secrets)
 		swarf := &htestutil.FakeSwarf{}
-		grants := grant.NewRotator(zap.NewNop(), delegations, accessKeys, secrets, swarf)
-		racing := deleteBeforePut{Store: policies, gone: bucketGone, del: func(ctx context.Context) error { return buckets.Delete(ctx, bucketID) }}
-		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, racing, grants)
+		runner := htestutil.StartServiceTasks(t, pool, secrets, swarf, htestutil.BeforePolicyCommit(func() {
+			if bucketGone.Load() {
+				require.NoError(t, buckets.Delete(context.Background(), bucketID))
+			}
+		}))
+		policyWrites := bucketpolicysvc.New(zap.NewNop(), tenants, buckets, principals, policies, runner)
 		return fixture{bucketsvc.New(zap.NewNop(), az, buckets, delegations, accessKeys, tenants, policies, providers, &fakeSprue{}, swarf, policyWrites), policies, bucketID, bucketGone}
 	}
 
@@ -289,8 +274,15 @@ func TestPolicy(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnknownBucket)
 
 		f = setup(t, policyPerms, false)
-		*f.bucketGone = true
+		f.bucketGone.Store(true)
 		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
 		require.ErrorIs(t, err, bucketsvc.ErrUnknownBucket, "a bucket deleted between Authorize and the write")
+
+		f = setup(t, policyPerms, false)
+		_, err = f.svc.Policy(ctx, providerID, request(t, "PUT", reqOpts{body: encode(t, read)}))
+		require.NoError(t, err)
+		f.bucketGone.Store(true)
+		_, err = f.svc.Policy(ctx, providerID, request(t, "DELETE", reqOpts{}))
+		require.ErrorIs(t, err, bucketpolicysvc.ErrPolicyNotFound, "a bucket deleted between Authorize and the removal")
 	})
 }
