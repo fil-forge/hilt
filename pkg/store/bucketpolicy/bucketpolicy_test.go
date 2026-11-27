@@ -22,6 +22,8 @@ import (
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/libforge/testutil"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -1149,7 +1151,7 @@ func park(t *testing.T, entered chan<- struct{}, release <-chan struct{}) {
 
 // TestPutAndDeleteStatements covers the writes a policy task's commit runs:
 // they store or remove the document with its index rows only while the
-// policy is the one the task read and the bucket is the tenant's.
+// policy is the one the task read.
 func TestPutAndDeleteStatements(t *testing.T) {
 	s, f := makeStore(t)
 	ctx := t.Context()
@@ -1248,18 +1250,23 @@ func TestPutAndDeleteStatements(t *testing.T) {
 		require.Nil(t, get(t, bucket))
 	})
 
-	t.Run("a write affects no row for a bucket that is gone or another tenant's", func(t *testing.T) {
+	t.Run("a write for a bucket deleted since the read fails", func(t *testing.T) {
 		tenantID, bucket := setup(t)
-		other := f.tenant(t)
-		require.False(t, put(t, other, bucket, doc(allow(everyone, "s3:GetObject")), nil), "another tenant's bucket")
-		require.False(t, put(t, tenantID, testutil.RandomDID(t), first, nil), "no such bucket")
-
 		require.True(t, put(t, tenantID, bucket, first, nil))
 		read := get(t, bucket)
-		require.False(t, put(t, other, bucket, doc(allow(everyone, "s3:GetObject")), read), "another tenant's bucket, replacing")
 		require.NoError(t, bucketpostgres.New(f.pool).Delete(ctx, bucket))
-		require.False(t, put(t, tenantID, bucket, second, read), "deleted since the read")
-		require.False(t, put(t, tenantID, bucket, second, nil), "deleted, creating")
+
+		cas, _ := s.PutStatements(tenantID, bucket, second, read)
+		tag, err := f.pool.Exec(ctx, cas.SQL, cas.Args...)
+		require.NoError(t, err)
+		require.Zero(t, tag.RowsAffected(), "the replace finds no row")
+
+		cas, _ = s.PutStatements(tenantID, bucket, second, nil)
+		_, err = f.pool.Exec(ctx, cas.SQL, cas.Args...)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr)
+		require.Equal(t, pgerrcode.ForeignKeyViolation, pgErr.Code, "the create breaks the foreign key")
+		require.Nil(t, get(t, bucket))
 	})
 
 	t.Run("a create behind the lock waits for one in flight and then affects no row", func(t *testing.T) {
