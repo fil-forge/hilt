@@ -211,9 +211,9 @@ func TestPublish(t *testing.T) {
 		require.Eventually(t, func() bool { return d.swarf.attempts.Load() >= 3 }, htestutil.WaitTimeout, 10*time.Millisecond)
 		require.EqualValues(t, 2, d.count(t))
 		require.Empty(t, d.swarf.Revoked())
-		pending, err := d.runner.PendingOn(t.Context(), tasks.QueueRevocation, d.tenant.DID().String())
+		pending, err := d.runner.Pending(t.Context(), tasks.QueueRevocation, []string{d.tenant.DID().String()})
 		require.NoError(t, err)
-		require.Equal(t, ids, pending, "the task is still pending, not failed")
+		require.Equal(t, ids, pending[d.tenant.DID().String()], "the task is still pending, not failed")
 
 		d.swarf.failing.Store(false)
 		for _, c := range d.finish(t, ids) {
