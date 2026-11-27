@@ -79,4 +79,19 @@ type Store interface {
 	// of the tenant's principals, bounded at [store.LockTimeout], and returns
 	// [store.ErrLockTimeout] when the wait runs out.
 	DeleteByTenant(ctx context.Context, tenant did.DID) error
+	// RequireLiveStatement returns a statement for a task that creates a key
+	// for the principal to run in its commit with WriteConditional, ahead of
+	// the write of the key. It share-locks the principal's live row until
+	// the commit and affects no row when the principal is missing or removed,
+	// which fails the commit so the task runs again and refuses the key.
+	//
+	// The lock is there for the two writers that change a principal's keys
+	// outside the tenant's task queue. Principal removal holds the row while
+	// it deletes the principal's keys, so the statement waits for a removal
+	// in flight and then finds the row removed, and a removal that starts
+	// later lists the new key. A policy write holds the row from before it
+	// lists the principal's keys until it commits ([Store.WithLock]), so the
+	// statement waits for a write in flight to commit, and a write that
+	// starts later lists the new key and rewrites its grants.
+	RequireLiveStatement(tenant did.DID, externalID string) store.Statement
 }

@@ -28,6 +28,14 @@ const (
 // the change requires.
 const ActionSetStatus = "set-status"
 
+// ActionCreateKey is queue-tenant.create-key: create the access key in the
+// task's arguments for the subject tenant, with the grants it holds.
+const ActionCreateKey = "create-key"
+
+// ActionDeleteKey is queue-tenant.delete-key: delete the subject tenant's
+// access key named in the task's arguments, withdrawing the grants it holds.
+const ActionDeleteKey = "delete-key"
+
 // ActionPublish is queue-revocation.publish: publish every revocation the
 // subject tenant owes.
 const ActionPublish = "publish"

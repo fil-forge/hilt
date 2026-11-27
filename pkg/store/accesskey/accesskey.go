@@ -7,7 +7,6 @@ package accesskey
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -15,9 +14,6 @@ import (
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
 )
-
-// ErrTenantDisabled is returned by [Store.Add] when the tenant is disabled.
-var ErrTenantDisabled = errors.New("tenant is disabled")
 
 // Record is one stored access key.
 type Record struct {
@@ -62,6 +58,9 @@ type Input struct {
 	Principal *string
 	// ExpiresAt is when the access key expires. Nil means it never expires.
 	ExpiresAt *time.Time
+	// CreatedAt is the creation time to record. Zero records the time the row
+	// is written.
+	CreatedAt time.Time
 }
 
 // NewServiceKey builds the input of a service key, which carries its own
@@ -147,15 +146,22 @@ func NewListConfig(opts ...ListOption) ListConfig {
 // Store persists access key records.
 type Store interface {
 	// Add creates an access key record. It returns [store.ErrInvalidArgument] if
-	// the input fails [Input.Validate] or, on Postgres, the principal does not
-	// exist for the tenant. It returns [store.ErrRecordExists] if a record with
-	// the same ID already exists, if a service key of the tenant already holds
-	// the name, or if the principal already holds a key of the name. It
-	// returns [ErrTenantDisabled] if the tenant is disabled (or, where
-	// referential integrity is enforced, gone), checked atomically with the
-	// insert: a tenant deletion, which requires a disabled tenant, never misses
-	// a key added concurrently.
+	// the input fails [Input.Validate], the tenant does not exist, or the
+	// principal has no row for the tenant. It returns [store.ErrRecordExists]
+	// if a record with the same ID already exists, if a service key of the
+	// tenant already holds the name, or if the principal already holds a key
+	// of the name. It checks neither the tenant's status nor that the
+	// principal has not been removed: key creation checks both in its task.
 	Add(ctx context.Context, in Input) error
+	// AddStatement returns the write [Store.Add] makes, for a task that
+	// creates the key in its own commit. It returns the [Input.Validate]
+	// error for an inconsistent input. A name or ID already taken, or a
+	// tenant or principal with no row, fails the statement when it runs.
+	AddStatement(in Input) (store.Statement, error)
+	// HasName reports whether a key of the name exists where a new key's
+	// name must be unique: among the tenant's service keys when principal is
+	// nil, and among the principal's keys otherwise.
+	HasName(ctx context.Context, tenant did.DID, principal *string, name string) (bool, error)
 	// Get retrieves the record for a given ID. It returns
 	// [store.ErrRecordNotFound] if no record exists for the specified ID. With
 	// [store.WithShareLock] the read waits for a transaction holding the row to
@@ -171,4 +177,8 @@ type Store interface {
 	// another write holds is bounded at [store.LockTimeout] and returns
 	// [store.ErrLockTimeout].
 	Delete(ctx context.Context, id did.DID) error
+	// DeleteStatement returns the write that removes the tenant's access key
+	// record with the ID, for a task that deletes the key in its own commit.
+	// It removes nothing when the tenant has no such key.
+	DeleteStatement(tenant, id did.DID) store.Statement
 }

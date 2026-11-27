@@ -25,9 +25,9 @@ const (
 var (
 	// ErrTenantNotFound is returned when no tenant exists for the external id.
 	ErrTenantNotFound = errors.New(TenantNotFoundErrorName, "tenant not found")
-	// ErrTenantDisabled is returned when the tenant is disabled: a disabled
-	// tenant is one on its way to deletion, and a key created for it would
-	// escape the deletion's revocation of the tenant's keys.
+	// ErrTenantDisabled is returned when the tenant is disabled: nothing a
+	// disabled tenant's key holds can be used, and a disabled tenant is one
+	// on its way to deletion.
 	ErrTenantDisabled = errors.New(TenantDisabledErrorName, "tenant is disabled")
 	// ErrInvalidName is returned when the access key name is empty or too long.
 	ErrInvalidName = errors.New(InvalidNameErrorName, "name must be between 1 and 64 characters")
@@ -50,9 +50,8 @@ var (
 	// ErrUnknownPrincipal is returned when the principal to bind the key to is not
 	// a principal of the tenant.
 	ErrUnknownPrincipal = errors.New(UnknownPrincipalErrorName, "unknown principal")
-	// ErrConcurrentChange is returned when another write to the access key was
-	// in flight and this call gave up rather than wait on it, or when a policy
-	// write rotated a principal-bound key while it was being created. Nothing
+	// ErrConcurrentChange is returned when other changes to the tenant kept
+	// the creation or deletion waiting for its turn until it gave up. Nothing
 	// was changed and the call can be repeated.
 	ErrConcurrentChange = errors.New(ConcurrentChangeErrorName, "the access key is being changed concurrently, retry the request")
 )

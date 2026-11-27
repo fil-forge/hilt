@@ -1,10 +1,17 @@
 // Package accesskey provides the S3 access-key business logic for the REST API:
-// creation (key-pair generation and tenant→access-key delegation issuance),
-// listing, retrieval, and revocation. A key created with a principal is bound
-// to it: it holds no permissions or buckets of its own, and its delegations are
-// derived from the tenant's bucket policies for that principal. It returns the
-// known errors in errors.go so handlers can map them to HTTP responses;
-// unexpected failures are returned wrapped for the handler to log.
+// creation, listing, retrieval and deletion. A key created with a principal is
+// bound to it: it holds no permissions or buckets of its own, and its
+// delegations are derived from the tenant's bucket policies for that
+// principal.
+//
+// Creation and deletion change what the tenant's keys may do, so each runs as
+// a task on the tenant's queue ([tenantqueue]), behind any other change to
+// the tenant, and the service waits for it. The service keeps what a task
+// cannot hold: it generates the key pair, writes the secret to the vault and
+// hands the secret to the caller, and none of it enters the task.
+//
+// It returns the known errors in errors.go so handlers can map them to HTTP
+// responses; unexpected failures are returned wrapped for the handler to log.
 package accesskey
 
 import (
@@ -16,60 +23,71 @@ import (
 	"time"
 
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/bucket"
-	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/principal"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/multikey/ed25519"
-	"github.com/fil-forge/ucantone/ucan"
 	"github.com/multiformats/go-multibase"
 	"go.uber.org/zap"
 )
 
-const maxNameLength = 64
+// CreateTimeout is the longest a key creation waits for its turn on the
+// tenant's queue. A creation that has not started by then is abandoned with
+// nothing written, and the caller repeats the call.
+const CreateTimeout = 30 * time.Second
+
+// DeleteTimeout is the longest a key deletion waits for its turn on the
+// tenant's queue, with the same outcome as [CreateTimeout].
+const DeleteTimeout = 30 * time.Second
+
+// expiresBy returns when a task waiting at most limit for its turn expires:
+// limit from now, or ctx's deadline if that is sooner.
+func expiresBy(ctx context.Context, limit time.Duration) *time.Time {
+	expires := time.Now().Add(limit)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+		expires = deadline
+	}
+	return &expires
+}
 
 // Service implements S3 access-key operations shared by the REST handlers.
 type Service struct {
-	logger      *zap.Logger
-	tenants     tenant.Store
-	accessKeys  accesskeystore.Store
-	principals  principal.Store
-	buckets     bucket.Store
-	policies    bucketpolicystore.Store
-	delegations delegationstore.Store
-	secrets     vault.Vault
-	revocations grant.RevocationPublisher
+	logger     *zap.Logger
+	tenants    tenant.Store
+	accessKeys accesskeystore.Store
+	principals principal.Store
+	buckets    bucket.Store
+	secrets    vault.Vault
+	runner     *taskrunner.Runner
 }
 
-// New constructs the access-key service.
+// New constructs the access-key service. runner runs the key creations and
+// deletions, and must have queue-tenant's handlers registered
+// ([tenantqueue.New]) and be started before Create or Delete is called.
 func New(
 	logger *zap.Logger,
 	tenants tenant.Store,
 	accessKeys accesskeystore.Store,
 	principals principal.Store,
 	buckets bucket.Store,
-	policies bucketpolicystore.Store,
-	delegations delegationstore.Store,
 	secrets vault.Vault,
-	revocations grant.RevocationPublisher,
+	runner *taskrunner.Runner,
 ) *Service {
 	return &Service{
-		logger:      logger,
-		tenants:     tenants,
-		accessKeys:  accessKeys,
-		principals:  principals,
-		buckets:     buckets,
-		policies:    policies,
-		delegations: delegations,
-		secrets:     secrets,
-		revocations: revocations,
+		logger:     logger,
+		tenants:    tenants,
+		accessKeys: accessKeys,
+		principals: principals,
+		buckets:    buckets,
+		secrets:    secrets,
+		runner:     runner,
 	}
 }
 
@@ -82,8 +100,22 @@ func New(
 // within the principal.
 // It returns the stored record and the secret access key (the one time it is
 // exposed).
+//
+// The key's row and delegations are written by a queue-tenant.create-key
+// task, in one commit ([tenantqueue]), which Create waits for. The task is
+// what decides: it refuses a disabled tenant, a name already taken, an
+// unknown principal and an unknown bucket, and the checks made here before it
+// only spare the work of a request that cannot succeed. Create writes the
+// secret to the vault before it submits the task, since the task's arguments
+// are stored and must not hold it, and removes it again when the task fails.
+//
+// The task runs even if ctx ends while Create waits, so a caller that goes
+// away never leaves a key created without its secret or a secret without its
+// key. A creation still waiting for its turn after [CreateTimeout], or at
+// ctx's deadline when that is sooner, is abandoned with nothing written and
+// reported as [ErrConcurrentChange].
 func (s *Service) Create(ctx context.Context, externalID, name string, permissions, bucketNames []string, principalID *string, expiresAt *time.Time) (accesskeystore.Record, string, error) {
-	if name == "" || len(name) > maxNameLength {
+	if name == "" || len(name) > tenantqueue.MaxKeyNameLength {
 		return accesskeystore.Record{}, "", ErrInvalidName
 	}
 	if principalID != nil {
@@ -111,38 +143,18 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		return accesskeystore.Record{}, "", fmt.Errorf("looking up tenant: %w", err)
 	}
 	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID))
-	// A disabled tenant is on its way to deletion, which revokes every key it
-	// holds at that point; a key created after that snapshot would keep its
-	// authority. Refuse it, as the deletion itself refuses a tenant that is not
-	// disabled. This early check only spares the work below; the store's Add
-	// holds the authoritative one, atomic with the insert.
 	if tenantRec.Status == tenant.Disabled {
 		return accesskeystore.Record{}, "", ErrTenantDisabled
 	}
 
 	if principalID != nil {
-		// The share lock waits for an in-flight removal of the principal, or a
-		// policy write holding the principal's row while it rotates its keys.
-		// A principal added while a policy is being written is ordered by the
-		// tenant lock its add took: it is committed before the write rotates
-		// or after the write commits, so the policies read below are settled.
-		_, err := s.principals.Get(ctx, tenantRec.ID, *principalID, store.WithShareLock())
+		_, err := s.principals.Get(ctx, tenantRec.ID, *principalID)
 		if errors.Is(err, store.ErrRecordNotFound) {
 			return accesskeystore.Record{}, "", ErrUnknownPrincipal
-		} else if errors.Is(err, store.ErrLockTimeout) {
-			return accesskeystore.Record{}, "", ErrConcurrentChange
 		} else if err != nil {
 			return accesskeystore.Record{}, "", fmt.Errorf("looking up principal: %w", err)
 		}
 		log = log.With(zap.String("principal", *principalID))
-	}
-
-	// Load the tenant signer up front: it is required to issue the key's
-	// delegations and its absence is unrecoverable, so fail before creating any
-	// state.
-	issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantRec.ID)
-	if err != nil {
-		return accesskeystore.Record{}, "", err
 	}
 
 	// Resolve the named buckets to DIDs in a single tenant-scoped list query. The
@@ -150,6 +162,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	// doesn't exist) simply won't come back. An empty list means tenant-wide
 	// (powerline) access.
 	var bucketIDs []did.DID
+	bucketNameOf := map[did.DID]string{}
 	if len(bucketNames) > 0 {
 		bucketIDs = make([]did.DID, 0, len(bucketNames))
 		recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
@@ -165,6 +178,7 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 		byName := make(map[string]did.DID, len(recs))
 		for _, b := range recs {
 			byName[b.Name] = b.ID
+			bucketNameOf[b.ID] = b.Name
 		}
 		for _, n := range bucketNames {
 			id, ok := byName[n]
@@ -188,6 +202,13 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	}
 	log = log.With(zap.Stringer("access_key", accessKeyID))
 
+	// The times are the ones the key's row will hold, to the microsecond, so
+	// the record returned here is the one a later read returns.
+	createdAt := toMicros(time.Now())
+	if expiresAt != nil {
+		e := toMicros(*expiresAt)
+		expiresAt = &e
+	}
 	var in accesskeystore.Input
 	if principalID != nil {
 		in, err = accesskeystore.NewPrincipalKey(accessKeyID, tenantRec.ID, name, *principalID, expiresAt)
@@ -197,119 +218,99 @@ func (s *Service) Create(ctx context.Context, externalID, name string, permissio
 	if err != nil {
 		return accesskeystore.Record{}, "", fmt.Errorf("building access key record: %w", err)
 	}
+	in.CreatedAt = createdAt
+	spec, err := tenantqueue.CreateKeySpec(in)
+	if err != nil {
+		return accesskeystore.Record{}, "", fmt.Errorf("building the access key's task: %w", err)
+	}
+	spec.Expires = expiresBy(ctx, CreateTimeout)
 
 	vaultPath := vault.AccessKeyPath(tenantRec.ID, accessKeyID)
 	if err := s.secrets.Write(ctx, vaultPath, signer.Bytes()); err != nil {
 		return accesskeystore.Record{}, "", fmt.Errorf("storing access key: %w", err)
 	}
 
-	// Best-effort rollback of the (idempotent) state created below, so a partial
-	// failure leaves nothing behind and is retryable. Cleanup runs on a context
-	// detached from the request (values retained, cancellation/deadline dropped) so
-	// a client disconnect — which cancels ctx — cannot abort the rollback partway
-	// and leave orphaned state.
-	// The record goes before the delegations: a policy write rotating the
-	// principal's keys skips a key whose record is gone, so none stores grants
-	// for this key after its delegations are deleted.
-	rollback := func() {
-		cleanupCtx := context.WithoutCancel(ctx)
-		if err := s.accessKeys.Delete(cleanupCtx, accessKeyID); err != nil {
-			log.Warn("rollback: deleting access key", zap.Error(err))
+	// The task and the vault cleanup run on a context detached from the
+	// request (values retained, cancellation and deadline dropped), so a
+	// client disconnect, which cancels ctx, cannot return before the task has
+	// an outcome. The task's expiry bounds the wait instead.
+	detached := context.WithoutCancel(ctx)
+	if _, err := s.runner.Run(detached, spec); err != nil {
+		if outcomeUnknown(err) {
+			// The runner failed without reporting what became of the task,
+			// which may still run before it expires. The secret stays, so a
+			// key that does get created is usable and can be deleted.
+			log.Warn("access key creation ended without an outcome; its vault entry is kept", zap.Error(err))
+		} else if err := s.secrets.Delete(detached, vaultPath); err != nil {
+			log.Warn("removing the vault entry of an access key that was not created", zap.Error(err))
 		}
-		if err := s.delegations.DeleteByAudience(cleanupCtx, accessKeyID); err != nil {
-			log.Warn("rollback: deleting delegations", zap.Error(err))
-		}
-		if err := s.secrets.Delete(cleanupCtx, vaultPath); err != nil {
-			log.Warn("rollback: deleting access key from vault", zap.Error(err))
-		}
+		return accesskeystore.Record{}, "", createError(err, bucketNameOf)
 	}
 
-	if err := s.accessKeys.Add(ctx, in); err != nil {
-		rollback()
-		// Name uniqueness is enforced by the store: per tenant for a service key,
-		// per principal for a principal-bound key. A fresh random access-key DID
-		// colliding is not a realistic case.
-		if errors.Is(err, store.ErrRecordExists) {
-			return accesskeystore.Record{}, "", ErrNameConflict
-		}
-		if errors.Is(err, accesskeystore.ErrTenantDisabled) {
-			return accesskeystore.Record{}, "", ErrTenantDisabled
-		}
-		// The principal was looked up above, so a rejected reference means it was
-		// removed in between.
-		if principalID != nil && errors.Is(err, store.ErrInvalidArgument) {
-			return accesskeystore.Record{}, "", ErrUnknownPrincipal
-		}
-		// A removal or a policy write holding the principal row past the
-		// store's lock timeout leaves nothing written, and the call can be
-		// repeated.
-		if errors.Is(err, store.ErrLockTimeout) {
-			return accesskeystore.Record{}, "", ErrConcurrentChange
-		}
-		return accesskeystore.Record{}, "", fmt.Errorf("storing access key record: %w", err)
-	}
-
-	// Issue the tenant→access-key delegations: one per (command × subject),
-	// where subject is each bucket DID or a single powerline (undefined subject).
-	// A service key's come from its permissions and buckets. A principal-bound
-	// key's come from the bucket policies naming its principal, read under a
-	// share lock so that a write holding one of those rows commits first; a
-	// policy created meanwhile has no row to wait on, and the tenant lock the
-	// principal's add took is what keeps the key behind it. A write that
-	// starts after the key row exists rotates the key like any other.
-	// [grant.ForKey] decides the set, as it does when a tenant leaving the
-	// disabled status has its keys' grants issued again.
-	var policies []bucketpolicystore.Record
-	if principalID != nil {
-		policies, err = s.policies.ListByPrincipal(ctx, tenantRec.ID, *principalID, store.WithShareLock())
-		if err != nil {
-			rollback()
-			if errors.Is(err, store.ErrLockTimeout) {
-				return accesskeystore.Record{}, "", ErrConcurrentChange
-			}
-			return accesskeystore.Record{}, "", fmt.Errorf("listing the principal's policies: %w", err)
-		}
-	}
-	dels, err := grant.ForKey(issuer, accesskeystore.Record{
+	rec := accesskeystore.Record{
 		ID:          in.ID,
-		Buckets:     in.Buckets,
+		Tenant:      in.Tenant,
+		Name:        in.Name,
 		Permissions: in.Permissions,
 		Principal:   in.Principal,
+		CreatedAt:   createdAt,
 		ExpiresAt:   in.ExpiresAt,
-	}, policies)
-	if err != nil {
-		rollback()
-		return accesskeystore.Record{}, "", fmt.Errorf("issuing delegation: %w", err)
 	}
-	if len(dels) > 0 {
-		// Store the delegations under the access key's delegation lock rather
-		// than with PutBatch: a policy write rotating the principal's keys
-		// between the key record's commit and this write has already stored
-		// the key's delegations from the new policy, and the ones issued above
-		// may predate it. The access-key DID is freshly generated, so a key
-		// holding anything was rotated meanwhile, and the creation fails and
-		// rolls back rather than store stale grants beside it.
-		if err := s.delegations.Replace(ctx, []did.DID{accessKeyID}, func(_ context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-			if len(current[accessKeyID]) > 0 {
-				return nil, fmt.Errorf("access key already holds delegations: %w", ErrConcurrentChange)
-			}
-			return map[did.DID][]ucan.Delegation{accessKeyID: dels}, nil
-		}); err != nil {
-			rollback()
-			if errors.Is(err, store.ErrLockTimeout) || errors.Is(err, ErrConcurrentChange) {
-				return accesskeystore.Record{}, "", ErrConcurrentChange
-			}
-			return accesskeystore.Record{}, "", fmt.Errorf("storing delegations: %w", err)
-		}
-	}
-
-	rec, err := s.accessKeys.Get(ctx, accessKeyID)
-	if err != nil {
-		rollback()
-		return accesskeystore.Record{}, "", fmt.Errorf("loading created access key: %w", err)
+	if len(in.Buckets) > 0 {
+		rec.Buckets = in.Buckets
 	}
 	log.Info("created access key")
 	return rec, secretAccessKey, nil
+}
+
+// toMicros returns t to the microsecond, the precision a key's row keeps.
+func toMicros(t time.Time) time.Time { return time.UnixMicro(t.UnixMicro()) }
+
+// outcomeUnknown reports whether a task that returned err may still take
+// effect. It cannot when the task itself failed: its handler marks every
+// failure as final, and the runner reports one it read back from the task's
+// row, after another instance ran it, as a [taskrunner.HandlerError]. Nor can
+// it when the task expired before it ran, or the runner refused it for not
+// running. Any other error is the runner's own, from which the task may be
+// left queued until it expires.
+func outcomeUnknown(err error) bool {
+	var failed *taskrunner.HandlerError
+	return !taskrunner.IsPermanent(err) && !errors.As(err, &failed) &&
+		!errors.Is(err, taskrunner.ErrExpired) && !errors.Is(err, taskrunner.ErrNotStarted)
+}
+
+// createError maps the outcome of a failed queue-tenant.create-key task to
+// the service's known errors. bucketNameOf names the buckets the request
+// resolved, for a bucket deleted since.
+func createError(err error, bucketNameOf map[did.DID]string) error {
+	var unknownBucket *tenantqueue.UnknownBucketError
+	switch {
+	case errors.Is(err, tenantqueue.ErrTenantNotFound):
+		return ErrTenantNotFound
+	case errors.Is(err, tenantqueue.ErrTenantDisabled):
+		return ErrTenantDisabled
+	case errors.Is(err, tenantqueue.ErrKeyNameTaken):
+		return ErrNameConflict
+	case errors.Is(err, tenantqueue.ErrUnknownPrincipal):
+		return ErrUnknownPrincipal
+	case errors.As(err, &unknownBucket):
+		if name, ok := bucketNameOf[unknownBucket.Bucket]; ok {
+			return fmt.Errorf("%w: %s", ErrUnknownBucket, name)
+		}
+		return fmt.Errorf("%w: %s", ErrUnknownBucket, unknownBucket.Bucket)
+	case errors.Is(err, tenantqueue.ErrInvalidKeyName):
+		return ErrInvalidName
+	case errors.Is(err, tenantqueue.ErrNoPermissions):
+		return ErrNoPermissions
+	case errors.Is(err, tenantqueue.ErrInvalidPermission):
+		return ErrInvalidPermission
+	case errors.Is(err, tenantqueue.ErrPrincipalScoped):
+		return ErrPrincipalScoped
+	case errors.Is(err, taskrunner.ErrExpired):
+		// Other changes to the tenant held its queue for the whole wait.
+		return ErrConcurrentChange
+	}
+	return fmt.Errorf("creating access key: %w", err)
 }
 
 // List returns the tenant's access keys and a DID→name map for the buckets they
@@ -369,16 +370,21 @@ func (s *Service) Get(ctx context.Context, externalID, accessKeyID string) (acce
 	return rec, names, nil
 }
 
-// Delete removes an access key belonging to the tenant. Its delegations are
-// revoked first, in one request and under the key's delegation lock, so a
-// rotation of the same key in flight waits for the outcome: publishing before
-// anything is removed leaves the key intact when the revocation service fails,
-// so the call is cleanly retryable — otherwise the delegations would live on
-// with nothing for a verifier to check. The record goes under the same lock,
-// so a rotation that listed the key and is waiting on the lock finds it gone
-// rather than issuing it fresh delegations. Both kinds of key are deleted the
-// same way. A row another write holds past the store's lock timeout is
-// [ErrConcurrentChange].
+// Delete removes an access key belonging to the tenant, of either kind. The
+// change is a queue-tenant.delete-key task ([tenantqueue]), which Delete
+// waits for: in one commit the delegations the tenant issued to the key
+// leave the delegation store and are recorded as revocations owed, and the
+// key's record is deleted. From that commit no request is authorized with
+// the key. The revocations are published after it, by the task the commit
+// queues, and retried until the revocation service takes them, so Delete
+// returns before the gateway has been told to drop what it cached for the
+// key, and succeeds while the revocation service is down.
+//
+// The task and the vault cleanup run on a context detached from the request,
+// so a client disconnect cannot leave the key deleted with its secret behind.
+// A deletion still waiting for its turn after [DeleteTimeout], or at ctx's
+// deadline if that is sooner, is abandoned with nothing written and reported
+// as [ErrConcurrentChange].
 func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) error {
 	tenantRec, err := s.tenants.GetByExternalID(ctx, externalID)
 	if errors.Is(err, store.ErrRecordNotFound) {
@@ -398,40 +404,18 @@ func (s *Service) Delete(ctx context.Context, externalID, accessKeyID string) er
 		return fmt.Errorf("looking up access key: %w", err)
 	}
 
-	// The key's delegations are revoked and removed, and its record deleted,
-	// under the key's delegation lock and, on Postgres, in its transaction. A
-	// policy write rotating the key meanwhile serializes with it, and a failure
-	// after the row's delete leaves the record, its delegations and its secret
-	// in place for a retry. The tenant key is read only when there is
-	// something to revoke: a key holding no delegations is deleted without it.
-	log := s.logger.With(zap.Stringer("tenant", tenantRec.ID), zap.Stringer("access_key", id))
-	err = s.delegations.Replace(ctx, []did.DID{id}, func(ctx context.Context, current map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error) {
-		if len(current[id]) > 0 {
-			issuer, err := vault.TenantIssuer(ctx, s.secrets, tenantRec.ID)
-			if err != nil {
-				return nil, err
-			}
-			if err := grant.PublishRevocations(ctx, log, s.revocations, issuer, current[id]); err != nil {
-				return nil, err
-			}
+	spec := tenantqueue.DeleteKeySpec(tenantRec.ID, id)
+	spec.Expires = expiresBy(ctx, DeleteTimeout)
+	detached := context.WithoutCancel(ctx)
+	if _, err := s.runner.Run(detached, spec); err != nil {
+		if errors.Is(err, taskrunner.ErrExpired) {
+			return ErrConcurrentChange
 		}
-		// A lock the delete waited on means another writer holds the row;
-		// nothing is committed and the caller repeats the call.
-		if err := s.accessKeys.Delete(ctx, id); err != nil {
-			return nil, fmt.Errorf("deleting access key: %w", err)
-		}
-		return nil, nil
-	})
-	if errors.Is(err, store.ErrLockTimeout) {
-		log.Info("access key removal lost a race with a concurrent write", zap.Error(err))
-		return ErrConcurrentChange
-	}
-	if err != nil {
-		return fmt.Errorf("revoking access key: %w", err)
+		return fmt.Errorf("deleting access key: %w", err)
 	}
 	// The row went first, so a key whose vault entry outlives it is unreachable
 	// rather than present but unusable.
-	if err := s.secrets.Delete(ctx, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
+	if err := s.secrets.Delete(detached, vault.AccessKeyPath(tenantRec.ID, id)); err != nil {
 		s.logger.Warn("removing access key from vault", zap.Error(err))
 	}
 	s.logger.Info("deleted access key",

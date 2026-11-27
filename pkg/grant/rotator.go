@@ -25,8 +25,8 @@ import (
 // [store.LockTimeout]. Each call shortens its ctx to this deadline, below the
 // reader's bound (an earlier caller deadline still wins), so a large batch or
 // a stalled publish cannot lock the data path out. [PublishRevocations] applies
-// the same bound, so every publish made under a delegation lock, a key or
-// bucket deletion's and a tenant removal's included, has it.
+// the same bound, so every publish made under a delegation lock, a bucket
+// deletion's and a tenant removal's included, has it.
 const BatchTimeout = 8 * time.Second
 
 // The batch bound must stay below the reader's; a negative difference fails

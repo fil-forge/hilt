@@ -799,6 +799,70 @@ func TestWithdrawKeyGrantsStatements(t *testing.T) {
 	})
 }
 
+func TestWithdrawGrantsOfKeyStatements(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+
+	t.Run("moves what the tenant issued to the one key to the revocations owed, and nothing else", func(t *testing.T) {
+		f := setupKeys(t)
+		bucket := testutil.RandomIssuer(t)
+		grants := []ucan.Delegation{
+			makeDelegation(t, f.tenant, f.keys[0], bucket.DID(), read),
+			makeDelegation(t, f.tenant, f.keys[0], did.Undef, read),
+		}
+		// Left alone: the tenant's other key's grant, the bucket's root to
+		// the tenant, and a delegation another party issued to the key.
+		sibling := makeDelegation(t, f.tenant, f.keys[1], bucket.DID(), read)
+		root := makeDelegation(t, bucket, f.tenant.DID(), bucket.DID(), command.Top())
+		foreign := makeDelegation(t, bucket, f.keys[0], bucket.DID(), read)
+		require.NoError(t, f.store.PutBatch(t.Context(), append(grants, sibling, root, foreign)))
+
+		f.run(t, f.store.WithdrawGrantsOfKeyStatements(f.tenant.DID(), f.keys[0])...)
+
+		require.Equal(t, linkStrings([]ucan.Delegation{foreign}), f.held(t, f.keys[0]))
+		require.Equal(t, linkStrings([]ucan.Delegation{sibling}), f.held(t, f.keys[1]))
+		require.Equal(t, linkStrings([]ucan.Delegation{root}), f.held(t, f.tenant.DID()))
+		owed := f.owed(t)
+		require.ElementsMatch(t, linkStrings(grants), owed[f.tenant.DID().String()])
+		require.Len(t, owed, 1, "only the tenant owes anything")
+
+		// A second run finds nothing left to move.
+		f.run(t, f.store.WithdrawGrantsOfKeyStatements(f.tenant.DID(), f.keys[0])...)
+		require.Equal(t, owed, f.owed(t))
+	})
+
+	t.Run("waits for a Replace of the key and withdraws what it stored", func(t *testing.T) {
+		f := setupKeys(t)
+		late := makeDelegation(t, f.tenant, f.keys[1], testutil.RandomDID(t), read)
+
+		writeErr, withdrawErr := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return replaceOne(t.Context(), f.store, f.keys[1], func(context.Context, []ucan.Delegation) ([]ucan.Delegation, error) {
+					close(entered)
+					<-release
+					return []ucan.Delegation{late}, nil
+				})
+			},
+			func() error {
+				tx, err := f.pool.Begin(t.Context())
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback(context.Background()) // no-op once committed
+				for _, st := range f.store.WithdrawGrantsOfKeyStatements(f.tenant.DID(), f.keys[1]) {
+					if _, err := tx.Exec(t.Context(), st.SQL, st.Args...); err != nil {
+						return err
+					}
+				}
+				return tx.Commit(t.Context())
+			},
+		)
+		require.NoError(t, writeErr)
+		require.NoError(t, withdrawErr)
+		require.Empty(t, f.held(t, f.keys[1]))
+		require.Equal(t, []string{late.Link().String()}, f.owed(t)[f.tenant.DID().String()])
+	})
+}
+
 func TestPutForKeysStatement(t *testing.T) {
 	read := command.MustParse("/content/retrieve")
 	f := setupKeys(t)

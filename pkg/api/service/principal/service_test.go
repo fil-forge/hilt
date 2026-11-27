@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
+	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
@@ -35,6 +37,7 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/ipfs/go-cid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -544,41 +547,18 @@ func TestDeleteConcurrentChange(t *testing.T) {
 	})
 }
 
-// racingKeys runs race once, after the first Add commits, standing in for a
-// removal of the key's principal that starts as the key's creation goes on to
-// store its grants.
-type racingKeys struct {
+// hookedKeys runs before once, when the first key creation's task builds the
+// write of its key: the task has read everything it reads and has written
+// nothing.
+type hookedKeys struct {
 	accesskeystore.Store
-	race  func()
-	added did.DID
+	before func()
+	once   sync.Once
 }
 
-func (r *racingKeys) Add(ctx context.Context, in accesskeystore.Input) error {
-	err := r.Store.Add(ctx, in)
-	if err == nil && r.race != nil {
-		r.added = in.ID
-		race := r.race
-		r.race = nil
-		race()
-	}
-	return err
-}
-
-// removeBeforeAdd runs remove once, before the first Add, standing in for a
-// removal that lists the principal's keys after the creation's principal
-// lookup and before its key row is stored.
-type removeBeforeAdd struct {
-	accesskeystore.Store
-	remove func()
-}
-
-func (r *removeBeforeAdd) Add(ctx context.Context, in accesskeystore.Input) error {
-	if r.remove != nil {
-		remove := r.remove
-		r.remove = nil
-		remove()
-	}
-	return r.Store.Add(ctx, in)
+func (h *hookedKeys) AddStatement(in accesskeystore.Input) (store.Statement, error) {
+	h.once.Do(h.before)
+	return h.Store.AddStatement(in)
 }
 
 // pausingDelegations closes revoked once the first Replace made while armed
@@ -601,52 +581,81 @@ func (p *pausingDelegations) Replace(ctx context.Context, audiences []did.DID, n
 	return err
 }
 
+// keyService returns the access-key service over d's database, with the task
+// runner its creations and deletions run on. before runs once, as hookedKeys
+// runs it.
+func (d deps) keyService(t *testing.T, before func()) *accesskeysvc.Service {
+	t.Helper()
+	runner := testutil.StartServiceTasks(t, d.pool, d.secrets, d.swarf, func(deps *tenantqueue.Deps) {
+		if before != nil {
+			deps.AccessKeys = &hookedKeys{Store: deps.AccessKeys, before: before}
+		}
+	})
+	return accesskeysvc.New(zap.NewNop(), d.tenants, d.accessKeys, d.principals, bucketpostgres.New(d.pool), d.secrets, runner)
+}
+
+// parkedRemoval returns a principal service whose removal parks under the
+// principal's row lock, having deleted the principal's key rows and not yet
+// committed, and the delegation store that parks it.
+func (d deps) parkedRemoval() (*principalsvc.Service, *pausingDelegations) {
+	delegations := &pausingDelegations{Store: d.delegations, revoked: make(chan struct{}), released: make(chan struct{})}
+	principals := &renamingPrincipals{Store: d.principals, write: func() { delegations.armed = true }}
+	grants := grant.NewRotator(zap.NewNop(), delegations, d.accessKeys, d.secrets, d.swarf)
+	return principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, delegations, d.secrets, d.swarf, grants), delegations
+}
+
 func TestDeleteDuringKeyCreate(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("a key created as the principal is removed is left no delegations", func(t *testing.T) {
+	t.Run("a key whose creation commits as the principal is removed is refused", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
-		// The wildcard policy survives the removal, so the creation has grants
-		// to store.
+		// The wildcard policy survives the removal, so the policies the
+		// creation issued its grants from are unchanged, and the principal is
+		// all that changes under it.
 		d.putPolicy(t, d.tenantID, s3bkt.PolicyDocument{Version: s3bkt.Version2012, Statements: []s3bkt.Statement{
 			{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
+		// The principal has a key already, so the removal has key rows to
+		// delete under the principal's row lock.
+		d.addKey(t, d.tenantID, "user-1", "phone")
 
-		// The removal starts once the key row is committed. It revokes under the
-		// principal's row lock and parks there, the key rows not yet deleted, so
-		// the creation waits on that lock to store the key's grants and stores
-		// them only once the removal has committed.
-		delegations := &pausingDelegations{Store: d.delegations, revoked: make(chan struct{}), released: make(chan struct{})}
-		principals := &renamingPrincipals{Store: d.principals, write: func() { delegations.armed = true }}
-		grants := grant.NewRotator(zap.NewNop(), delegations, d.accessKeys, d.secrets, d.swarf)
-		removal := principalsvc.New(zap.NewNop(), d.tenants, principals, d.policies, d.accessKeys, delegations, d.secrets, d.swarf, grants)
+		// The removal starts once the creation's task has found the principal
+		// live. It parks under the principal's row lock, so the task's commit
+		// waits for it, and then finds the principal removed.
+		removal, delegations := d.parkedRemoval()
 		removed := make(chan error, 1)
-		keys := &racingKeys{Store: d.accessKeys, race: func() {
+		creator := d.keyService(t, func() {
 			go func() { removed <- removal.Delete(ctx, "tenant-1", "user-1") }()
 			<-delegations.revoked
 			time.AfterFunc(testutil.MinBlock, func() { close(delegations.released) })
-		}}
-		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketpostgres.New(d.pool), d.policies, delegations, d.secrets, d.swarf)
+		})
 
-		_, _, _ = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
+		start := time.Now()
+		_, _, err = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
+		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
+		require.GreaterOrEqual(t, time.Since(start), testutil.MinBlock, "the creation waited for the removal")
 		require.NoError(t, <-removed)
 
-		_, err = d.accessKeys.Get(ctx, keys.added)
-		require.ErrorIs(t, err, store.ErrRecordNotFound, "the key row is gone")
-		require.Empty(t, d.held(t, keys.added), "no delegation outlives the key")
+		recs, err := d.accessKeys.ListByTenant(ctx, d.tenantID)
+		require.NoError(t, err)
+		require.Empty(t, recs, "no key of the removed principal is left")
+		var stored int
+		require.NoError(t, d.pool.QueryRow(ctx, `SELECT count(*) FROM delegation`).Scan(&stored))
+		require.Zero(t, stored, "no delegation outlives the keys")
 	})
 
-	t.Run("a key stored after the removal listed the principal's keys is refused", func(t *testing.T) {
+	t.Run("a key whose principal is removed before its creation commits is refused", func(t *testing.T) {
 		d := setup(t)
 		_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
 		require.NoError(t, err)
 
-		keys := &removeBeforeAdd{Store: d.accessKeys, remove: func() {
+		// No policy names the principal, so nothing but the principal changes
+		// between the task's reads and its commit.
+		creator := d.keyService(t, func() {
 			require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
-		}}
-		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketpostgres.New(d.pool), d.policies, d.delegations, d.secrets, d.swarf)
+		})
 		_, _, err = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
 
@@ -657,6 +666,48 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, recs)
 	})
+}
+
+// A key deletion that runs beside a removal of the key's principal waits for
+// the removal, which deletes the key itself, and then finds nothing left to
+// do.
+func TestDeleteDuringKeyDelete(t *testing.T) {
+	ctx := t.Context()
+	d := setup(t)
+	_, _, err := d.svc.Create(ctx, "tenant-1", "user-1")
+	require.NoError(t, err)
+	key := d.addKey(t, d.tenantID, "user-1", "phone")
+	held := d.held(t, key)
+	require.NotEmpty(t, held)
+	keys := d.keyService(t, nil)
+
+	removal, delegations := d.parkedRemoval()
+	removed, deleted := testutil.RequireWaitsForWriter(t,
+		func(entered chan<- struct{}, release <-chan struct{}) error {
+			go func() {
+				<-delegations.revoked
+				close(entered)
+				<-release
+				close(delegations.released)
+			}()
+			return removal.Delete(ctx, "tenant-1", "user-1")
+		},
+		func() error { return keys.Delete(context.Background(), "tenant-1", key.Identifier()) })
+	require.NoError(t, removed)
+	require.NoError(t, deleted)
+
+	_, err = d.accessKeys.Get(ctx, key)
+	require.ErrorIs(t, err, store.ErrRecordNotFound)
+	require.Empty(t, d.held(t, key))
+	_, err = d.secrets.Read(ctx, vault.AccessKeyPath(d.tenantID, key))
+	require.ErrorIs(t, err, vault.ErrNotFound)
+	// The removal revoked what the key held, and the deletion found nothing
+	// more to revoke.
+	var want []cid.Cid
+	for _, dlg := range held {
+		want = append(want, dlg.Link())
+	}
+	require.ElementsMatch(t, want, d.swarf.Revoked())
 }
 
 // TestDeleteDuringPolicyWritePostgres removes a principal while a policy write

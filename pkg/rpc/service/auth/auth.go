@@ -160,8 +160,11 @@ func NewAuthorizer(
 // runner holds the request back too (see [WithTenantChanges]): once the
 // request is authenticated, and before the tenant's status is read, Authorize
 // waits for every unfinished task on queue-tenant for the tenant, for up to
-// [store.LockTimeout], and answers from the state they leave. A wait that
-// runs out is [ErrTemporarilyUnavailable].
+// [store.LockTimeout], and answers from the state they leave. The access key
+// is read before the wait, since it names the tenant, so a request that
+// waited reads it again and is refused when a change it waited for deleted
+// the key ([ErrUnknownAccessKey]). A wait that runs out is
+// [ErrTemporarilyUnavailable].
 //
 // A change submitted after that wait can still commit while Authorize is
 // reading. The tenant's status is therefore read first, before the policies
@@ -224,8 +227,25 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 		return nil, ErrSignatureExpired
 	}
 
-	if err := a.awaitTenantChanges(ctx, log, akRec.Tenant); err != nil {
+	waited, err := a.awaitTenantChanges(ctx, log, akRec.Tenant)
+	if err != nil {
 		return nil, err
+	}
+	if waited {
+		// The key was read before the wait, to learn which tenant to wait
+		// for, and a change the request waited for may have deleted it. The
+		// request is decided on the key as it is now.
+		akRec, err = a.accessKeys.Get(ctx, accessKeyID, store.WithShareLock())
+		if errors.Is(err, store.ErrRecordNotFound) {
+			log.Debug("rejecting an access key deleted while the request waited")
+			return nil, ErrUnknownAccessKey
+		} else if err != nil {
+			return nil, lookupError(log, "access key", err)
+		}
+		if akRec.ExpiresAt != nil && time.Now().After(*akRec.ExpiresAt) {
+			log.Debug("rejecting expired access key", zap.Timep("expires_at", akRec.ExpiresAt))
+			return nil, ErrAccessKeyExpired
+		}
 	}
 
 	// The status is read before the policies below and before the key's
@@ -327,36 +347,38 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 
 // awaitTenantChanges waits for the tenant's unfinished tasks on queue-tenant,
 // each a change to what the tenant's keys may do, so that what is read after
-// it is the state they leave. With none pending, the usual case, it costs one
-// indexed read. A task that failed has finished and changed nothing, so how
-// each ended is not read. The wait is bounded by [store.LockTimeout], and one
-// that runs out is [ErrTemporarilyUnavailable]: nothing about the request was
-// decided, and the caller retries.
-func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
+// it is the state they leave. It reports whether there was anything to wait
+// for, in which case what the caller read before it may have changed. With
+// none pending, the usual case, it costs one indexed read. A task that failed
+// has finished and changed nothing, so how each ended is not read. The wait
+// is bounded by [store.LockTimeout], and one that runs out is
+// [ErrTemporarilyUnavailable]: nothing about the request was decided, and
+// the caller retries.
+func (a *Authorizer) awaitTenantChanges(ctx context.Context, log *zap.Logger, tenantID did.DID) (bool, error) {
 	if a.changes == nil {
-		return nil
+		return false, nil
 	}
 	subject := tenantID.String()
 	byTenant, err := a.changes.Pending(ctx, tasks.QueueTenant, []string{subject})
 	pending := byTenant[subject]
 	if err != nil {
 		log.Error("looking up the tenant's pending changes", zap.Error(err))
-		return fmt.Errorf("looking up the tenant's pending changes: %w", err)
+		return false, fmt.Errorf("looking up the tenant's pending changes: %w", err)
 	}
 	if len(pending) == 0 {
-		return nil
+		return false, nil
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, store.LockTimeout)
 	defer cancel()
 	if _, err := a.changes.WaitAll(waitCtx, tasks.QueueTenant, pending...); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			log.Info("waited out a change to the tenant still pending", zap.Int("tasks", len(pending)))
-			return fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, store.LockTimeout)
+			return true, fmt.Errorf("%w: waited %s for a change to the tenant", ErrTemporarilyUnavailable, store.LockTimeout)
 		}
 		log.Error("waiting for the tenant's pending changes", zap.Error(err))
-		return fmt.Errorf("waiting for the tenant's pending changes: %w", err)
+		return true, fmt.Errorf("waiting for the tenant's pending changes: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // authorizeOperation decides what the credential may do: its own permission
