@@ -10,6 +10,16 @@ import (
 	"github.com/ipfs/go-cid"
 )
 
+// DueGrant is an access key whose grants over a subject are due for
+// renewal.
+type DueGrant struct {
+	// Key is the access key holding the grants.
+	Key did.DID
+	// Subject is the bucket the grants are over, or [did.Undef] for
+	// powerline grants.
+	Subject did.DID
+}
+
 type Store interface {
 	// ListByAudience retrieves a paginated list of delegation records for a given
 	// audience, leaving out those that have expired, which stay stored until
@@ -72,14 +82,14 @@ type Store interface {
 	// records no revocation.
 	DeleteTenantStatement(tenant did.DID) store.Statement
 	// TenantsWithGrantsDue returns the tenants that have an access key with a
-	// grant due for renewal: the newest delegation the tenant issued to the
-	// key for its subject and command expires before the given time. A
-	// delegation that expires with its key is never due, since the next one
-	// would expire with the key as well.
+	// grant due for renewal: the newest delegations the tenant issued to the
+	// key over a subject expire before the given time. A delegation that
+	// expires with its key is never due, since the next one would expire with
+	// the key as well.
 	TenantsWithGrantsDue(ctx context.Context, before time.Time) ([]did.DID, error)
-	// KeysWithGrantsDue returns the tenant's access keys that have a grant
-	// due for renewal, as [Store.TenantsWithGrantsDue] finds them.
-	KeysWithGrantsDue(ctx context.Context, tenant did.DID, before time.Time) ([]did.DID, error)
+	// GrantsDue returns, for the tenant, each access key and subject whose
+	// grants are due for renewal, as [Store.TenantsWithGrantsDue] finds them.
+	GrantsDue(ctx context.Context, tenant did.DID, before time.Time) ([]DueGrant, error)
 	// DeleteExpired removes the delegations that expired before the given
 	// time and returns how many it removed. An expired delegation is in no
 	// proof chain and needs no revocation. A grant that is due for renewal

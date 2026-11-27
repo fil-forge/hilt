@@ -198,8 +198,14 @@ func (s *Store) WithdrawSubjectStatements(tenant, subject did.DID) []store.State
 // dueGrant is the condition under which the delegation d, of the access key
 // k, is a grant due for renewal before $1: the tenant issued it, it expires
 // before $1 and ahead of its key, and the key holds no later delegation from
-// the tenant for the same subject and command. A grant expires on a whole
-// second, so a key's expiry is compared to the second.
+// the tenant over the same subject. A grant expires on a whole second, so a
+// key's expiry is compared to the second.
+//
+// The later delegation may be for any command. Every write issues a key all
+// its commands over a subject at once, so a key's grants over one subject
+// share an expiry, and one that a later issue left out is a command the key
+// no longer holds there, as after a change to the commands an S3 action maps
+// to. Matching on the command too would keep such a grant due for good.
 const dueGrant = `
 	d.issuer = k.tenant_id
 	AND d.expires_at < $1
@@ -207,43 +213,64 @@ const dueGrant = `
 	AND NOT EXISTS (
 		SELECT 1 FROM delegation n
 		WHERE n.audience = d.audience AND n.issuer = d.issuer
-		  AND n.subject IS NOT DISTINCT FROM d.subject AND n.command = d.command
+		  AND n.subject IS NOT DISTINCT FROM d.subject
 		  AND (n.expires_at IS NULL OR n.expires_at > d.expires_at)
 	)`
 
 func (s *Store) TenantsWithGrantsDue(ctx context.Context, before time.Time) ([]did.DID, error) {
-	return s.due(ctx, `
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, `
 		SELECT DISTINCT k.tenant_id
 		FROM delegation d JOIN access_key k ON k.id = d.audience
 		WHERE `+dueGrant+`
 		ORDER BY k.tenant_id`, before)
-}
-
-func (s *Store) KeysWithGrantsDue(ctx context.Context, tenant did.DID, before time.Time) ([]did.DID, error) {
-	return s.due(ctx, `
-		SELECT DISTINCT k.id
-		FROM delegation d JOIN access_key k ON k.id = d.audience
-		WHERE k.tenant_id = $2 AND `+dueGrant+`
-		ORDER BY k.id`, before, tenant.String())
-}
-
-// due runs a query that returns one column of DIDs.
-func (s *Store) due(ctx context.Context, query string, args ...any) ([]did.DID, error) {
-	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("querying the grants due for renewal: %w", err)
+		return nil, fmt.Errorf("querying the tenants with grants due: %w", err)
 	}
 	strs, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, fmt.Errorf("scanning the grants due for renewal: %w", err)
+		return nil, fmt.Errorf("scanning the tenants with grants due: %w", err)
 	}
 	ids := make([]did.DID, len(strs))
 	for i, str := range strs {
 		if ids[i], err = did.Parse(str); err != nil {
-			return nil, fmt.Errorf("parsing %q: %w", str, err)
+			return nil, fmt.Errorf("parsing tenant %q: %w", str, err)
 		}
 	}
 	return ids, nil
+}
+
+func (s *Store) GrantsDue(ctx context.Context, tenant did.DID, before time.Time) ([]dlgstore.DueGrant, error) {
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, `
+		SELECT DISTINCT k.id, d.subject
+		FROM delegation d JOIN access_key k ON k.id = d.audience
+		WHERE k.tenant_id = $2 AND `+dueGrant+`
+		ORDER BY k.id, d.subject`, before, tenant.String())
+	if err != nil {
+		return nil, fmt.Errorf("querying the grants due: %w", err)
+	}
+	defer rows.Close()
+	var out []dlgstore.DueGrant
+	for rows.Next() {
+		var key string
+		var subject *string
+		if err := rows.Scan(&key, &subject); err != nil {
+			return nil, fmt.Errorf("scanning a grant due: %w", err)
+		}
+		due := dlgstore.DueGrant{Subject: did.Undef}
+		if due.Key, err = did.Parse(key); err != nil {
+			return nil, fmt.Errorf("parsing key %q: %w", key, err)
+		}
+		if subject != nil {
+			if due.Subject, err = did.Parse(*subject); err != nil {
+				return nil, fmt.Errorf("parsing subject %q: %w", *subject, err)
+			}
+		}
+		out = append(out, due)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating the grants due: %w", err)
+	}
+	return out, nil
 }
 
 // DeleteExpired runs outside the tenants' task queues. The tasks either

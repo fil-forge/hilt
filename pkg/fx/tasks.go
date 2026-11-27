@@ -135,11 +135,20 @@ func RegisterGrantRenewal(
 	logger *zap.Logger,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	lc.Append(fx.StartStopHook(
 		func() {
-			go renewGrants(ctx, runner, tenants, logger.Named("grant-renewal"), tenantqueue.RenewalInterval)
+			go func() {
+				defer close(done)
+				renewGrants(ctx, runner, tenants, logger.Named("grant-renewal"), tenantqueue.RenewalInterval)
+			}()
 		},
-		cancel,
+		// The stop waits for the loop, so no pass is still running when the
+		// pool closes. Canceling ctx ends one in progress.
+		func() {
+			cancel()
+			<-done
+		},
 	))
 }
 

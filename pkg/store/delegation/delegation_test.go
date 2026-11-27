@@ -608,14 +608,14 @@ func TestProofChainExpiry(t *testing.T) {
 func TestGrantsDue(t *testing.T) {
 	read, write := command.MustParse("/content/retrieve"), command.MustParse("/blob/add")
 	day := 24 * time.Hour
-	due := func(t *testing.T, f keyFixture) ([]did.DID, []did.DID) {
+	due := func(t *testing.T, f keyFixture) ([]did.DID, []dlgstore.DueGrant) {
 		t.Helper()
 		before := time.Now().Add(3 * day)
 		tenants, err := f.store.TenantsWithGrantsDue(t.Context(), before)
 		require.NoError(t, err)
-		keys, err := f.store.KeysWithGrantsDue(t.Context(), f.tenant.DID(), before)
+		grants, err := f.store.GrantsDue(t.Context(), f.tenant.DID(), before)
 		require.NoError(t, err)
-		return tenants, keys
+		return tenants, grants
 	}
 
 	t.Run("a key whose newest grant expires before the time is due", func(t *testing.T) {
@@ -631,12 +631,27 @@ func TestGrantsDue(t *testing.T) {
 			expiring(t, f.other, f.keys[1], bucket, read, day),
 		}))
 
-		tenants, keys := due(t, f)
+		tenants, grants := due(t, f)
 		require.Equal(t, []did.DID{f.tenant.DID()}, tenants)
-		require.Equal(t, []did.DID{f.keys[0]}, keys)
+		require.Equal(t, []dlgstore.DueGrant{{Key: f.keys[0], Subject: bucket}}, grants)
 	})
 
-	t.Run("a grant with a later one for the same subject and command is not due", func(t *testing.T) {
+	t.Run("each subject of a key is due on its own", func(t *testing.T) {
+		f := setupKeys(t)
+		bucket, other := testutil.RandomDID(t), testutil.RandomDID(t)
+		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{
+			expiring(t, f.tenant, f.keys[0], bucket, read, day),
+			expiring(t, f.tenant, f.keys[0], did.Undef, read, day),
+			// A policy write reissued the grants over this bucket alone.
+			expiring(t, f.tenant, f.keys[0], other, read, day),
+			expiring(t, f.tenant, f.keys[0], other, read, 7*day),
+		}))
+
+		_, grants := due(t, f)
+		require.ElementsMatch(t, []dlgstore.DueGrant{{Key: f.keys[0], Subject: bucket}, {Key: f.keys[0], Subject: did.Undef}}, grants)
+	})
+
+	t.Run("a grant with a later one over the same subject is not due", func(t *testing.T) {
 		f := setupKeys(t)
 		bucket := testutil.RandomDID(t)
 		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{
@@ -646,17 +661,19 @@ func TestGrantsDue(t *testing.T) {
 			expiring(t, f.tenant, f.keys[0], did.Undef, read, 7*day),
 		}))
 
-		tenants, keys := due(t, f)
+		tenants, grants := due(t, f)
 		require.Empty(t, tenants)
-		require.Empty(t, keys)
+		require.Empty(t, grants)
 
-		// A later grant for another command leaves the first one due.
+		// A later grant for another command over the subject ends it too: the
+		// renewal no longer issues the command, as after a change to what an
+		// S3 action maps to, and the grant would otherwise stay due for good.
 		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{
 			expiring(t, f.tenant, f.keys[1], bucket, read, day),
 			expiring(t, f.tenant, f.keys[1], bucket, write, 7*day),
 		}))
-		_, keys = due(t, f)
-		require.Equal(t, []did.DID{f.keys[1]}, keys)
+		_, grants = due(t, f)
+		require.Empty(t, grants)
 	})
 
 	t.Run("a grant that expires with its key is not due", func(t *testing.T) {
@@ -670,14 +687,14 @@ func TestGrantsDue(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{capped}))
 
-		tenants, keys := due(t, f)
+		tenants, grants := due(t, f)
 		require.Empty(t, tenants)
-		require.Empty(t, keys)
+		require.Empty(t, grants)
 	})
 }
 
 func TestDeleteExpired(t *testing.T) {
-	read := command.MustParse("/content/retrieve")
+	read, write := command.MustParse("/content/retrieve"), command.MustParse("/blob/add")
 	day := 24 * time.Hour
 	f := setupKeys(t)
 	bucket := testutil.RandomIssuer(t)
@@ -695,6 +712,8 @@ func TestDeleteExpired(t *testing.T) {
 		withKey,
 		// A delegation to something that is not an access key.
 		expiring(t, f.tenant, testutil.RandomDID(t), bucket.DID(), read, -day),
+		// A command the key's renewed grants over the subject left out.
+		expiring(t, f.tenant, f.keys[0], bucket.DID(), write, -day),
 	}
 	kept := []ucan.Delegation{
 		expiring(t, f.tenant, f.keys[0], bucket.DID(), read, 7*day),
@@ -716,7 +735,7 @@ func TestDeleteExpired(t *testing.T) {
 	require.NoError(t, err)
 	require.ElementsMatch(t, linkStrings(kept), left)
 
-	keys, err := f.store.KeysWithGrantsDue(t.Context(), f.tenant.DID(), time.Now().Add(3*day))
+	grants, err := f.store.GrantsDue(t.Context(), f.tenant.DID(), time.Now().Add(3*day))
 	require.NoError(t, err)
-	require.Equal(t, []did.DID{f.keys[0]}, keys, "the expired grant kept is due")
+	require.Equal(t, []dlgstore.DueGrant{{Key: f.keys[0], Subject: did.Undef}}, grants, "the expired grant kept is due")
 }

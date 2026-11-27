@@ -8,11 +8,13 @@ import (
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/libforge/testutil"
+	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/stretchr/testify/require"
 )
@@ -185,6 +187,34 @@ func TestRenewingGrants(t *testing.T) {
 		require.Greater(t, len(w.held(t, w.principalKey)), 1)
 	})
 
+	t.Run("a service key is issued nothing over a bucket deleted since its creation", func(t *testing.T) {
+		w := setup(t)
+		other := w.addBucket(t, "bucket-b")
+		both := w.createKey(t, "both", []string{"s3:GetObject"}, []string{bucketName, "bucket-b"}, nil)
+		only := w.createKey(t, "only", []string{"s3:GetObject"}, []string{"bucket-b"}, nil)
+		require.NoError(t, w.run(t, tenantqueue.DeleteBucketSpec(w.tenant.DID(), other)))
+		w.awaitPublished(t)
+		require.Empty(t, w.held(t, only), "the deletion withdrew the grants over the bucket")
+		w.age(t, grant.RenewBefore-time.Hour)
+
+		w.renewDue(t)
+
+		for _, d := range w.held(t, both) {
+			require.Equal(t, w.bucket, d.Subject(), "a grant over the deleted bucket was issued again")
+		}
+		require.Empty(t, w.held(t, only))
+
+		// A change of status issues the same way: nothing over the deleted
+		// bucket, and no powerline grant for a key whose buckets are all gone.
+		require.NoError(t, w.setStatus(t, tenantstore.WriteLocked))
+		require.NoError(t, w.setStatus(t, tenantstore.Active))
+		require.Empty(t, w.held(t, only))
+		require.NotEmpty(t, w.held(t, both))
+		for _, d := range w.held(t, both) {
+			require.Equal(t, w.bucket, d.Subject())
+		}
+	})
+
 	t.Run("a tenant that is gone succeeds and writes nothing", func(t *testing.T) {
 		w := setup(t)
 		gone := tenantqueue.RenewGrantsSpec(testutil.RandomDID(t))
@@ -202,4 +232,15 @@ func containsLink(dels []ucan.Delegation, d ucan.Delegation) bool {
 		}
 	}
 	return false
+}
+
+// addBucket stores another bucket of the tenant, on the provider of the
+// world's bucket, and returns its DID.
+func (w *world) addBucket(t *testing.T, name string) did.DID {
+	t.Helper()
+	first, err := bucketpostgres.New(w.pool).GetByName(t.Context(), bucketName)
+	require.NoError(t, err)
+	id := testutil.RandomDID(t)
+	require.NoError(t, bucketpostgres.New(w.pool).Add(t.Context(), id, w.tenant.DID(), first.Provider, name))
+	return id
 }

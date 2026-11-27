@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/grant"
@@ -271,12 +272,21 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID, status tenant
 }
 
 // issueGrantsOf is [Queue.issueGrants] for the given keys of the tenant.
+//
+// A service key's bucket list still names a bucket that has been deleted:
+// deleting a bucket withdraws the grants over it and leaves the lists alone.
+// Such a bucket is left out, so a grant withdrawn by the deletion is never
+// issued again, and a key whose buckets are all gone is issued nothing. It is
+// never issued powerline grants, which an empty list would give it.
 func (q *Queue) issueGrantsOf(ctx context.Context, tenantID did.DID, status tenant.Status, keys []accesskey.Record) ([]ucan.Delegation, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
+	live, err := q.liveBuckets(ctx, tenantID, keys)
+	if err != nil {
+		return nil, err
+	}
 
-	var err error
 	now := time.Now()
 	policies := map[string][]bucketpolicy.Record{}
 	// The signing key is read for the first key that is to be issued grants,
@@ -286,6 +296,12 @@ func (q *Queue) issueGrantsOf(ctx context.Context, tenantID did.DID, status tena
 	for _, key := range keys {
 		if key.ExpiresAt != nil && !key.ExpiresAt.After(now) {
 			continue
+		}
+		if key.Principal == nil && len(key.Buckets) > 0 {
+			key.Buckets = slices.DeleteFunc(slices.Clone(key.Buckets), func(b did.DID) bool { return !live[b] })
+			if len(key.Buckets) == 0 {
+				continue
+			}
 		}
 		if issuer == nil {
 			issuer, err = vault.TenantIssuer(ctx, q.secrets, tenantID)
@@ -313,4 +329,33 @@ func (q *Queue) issueGrantsOf(ctx context.Context, tenantID did.DID, status tena
 		fresh = append(fresh, dels...)
 	}
 	return fresh, nil
+}
+
+// liveBuckets reports which of the buckets the service keys among keys are
+// scoped to the tenant still has.
+func (q *Queue) liveBuckets(ctx context.Context, tenantID did.DID, keys []accesskey.Record) (map[did.DID]bool, error) {
+	var ids []did.DID
+	for _, key := range keys {
+		if key.Principal == nil {
+			ids = append(ids, key.Buckets...)
+		}
+	}
+	live := make(map[did.DID]bool, len(ids))
+	if len(ids) == 0 {
+		return live, nil
+	}
+	recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
+		listOpts := []bucket.ListOption{bucket.WithIDs(ids...)}
+		if opts.Cursor != nil {
+			listOpts = append(listOpts, bucket.WithCursor(*opts.Cursor))
+		}
+		return q.buckets.ListByTenant(ctx, tenantID, listOpts...)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("looking up the keys' buckets: %w", err)
+	}
+	for _, b := range recs {
+		live[b.ID] = true
+	}
+	return live, nil
 }

@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
+	"github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tasks"
 	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/fil-forge/ucantone/ucan"
 	"go.uber.org/zap"
 )
 
@@ -62,14 +65,20 @@ func (q *Queue) runRenewGrants(ctx context.Context, ex *taskrunner.Exec, t taskr
 		return nil, nil
 	}
 
-	due, err := q.delegations.KeysWithGrantsDue(ctx, tenantID, time.Now().Add(grant.RenewBefore))
+	due, err := q.delegations.GrantsDue(ctx, tenantID, time.Now().Add(grant.RenewBefore))
 	if err != nil {
 		return nil, fmt.Errorf("finding the keys whose grants are due: %w", err)
 	}
 	if len(due) == 0 {
 		return nil, nil
 	}
-	keys, err := q.accessKeys.ListByTenant(ctx, tenantID, accesskey.WithIDs(due...))
+	var ids []did.DID
+	for _, d := range due {
+		if !slices.Contains(ids, d.Key) {
+			ids = append(ids, d.Key)
+		}
+	}
+	keys, err := q.accessKeys.ListByTenant(ctx, tenantID, accesskey.WithIDs(ids...))
 	if err != nil {
 		return nil, fmt.Errorf("listing the keys whose grants are due: %w", err)
 	}
@@ -77,6 +86,7 @@ func (q *Queue) runRenewGrants(ctx context.Context, ex *taskrunner.Exec, t taskr
 	if err != nil {
 		return nil, err
 	}
+	warnUnrenewed(log, keys, due, fresh)
 	if len(fresh) == 0 {
 		return nil, nil
 	}
@@ -90,6 +100,31 @@ func (q *Queue) runRenewGrants(ctx context.Context, ex *taskrunner.Exec, t taskr
 	}
 	log.Info("renewing the tenant's grants", zap.Int("keys", len(keys)), zap.Int("grants_issued", len(fresh)))
 	return nil, nil
+}
+
+// warnUnrenewed logs each live key and subject whose grants were due and that
+// the renewal issued nothing over. Every write that takes a subject from a
+// key withdraws its grants there, so such grants should not exist; they stay
+// due, are never deleted, and the key is issued a whole new set on every
+// pass. The log is repeated on each pass, so a cause such as a change to how
+// keys' grants are derived shows up while it lasts.
+func warnUnrenewed(log *zap.Logger, keys []accesskey.Record, due []delegation.DueGrant, fresh []ucan.Delegation) {
+	now := time.Now()
+	live := make(map[did.DID]bool, len(keys))
+	for _, key := range keys {
+		live[key.ID] = key.ExpiresAt == nil || key.ExpiresAt.After(now)
+	}
+	type held struct{ key, subject did.DID }
+	issued := make(map[held]bool, len(fresh))
+	for _, d := range fresh {
+		issued[held{d.Audience(), d.Subject()}] = true
+	}
+	for _, d := range due {
+		if live[d.Key] && !issued[held{d.Key, d.Subject}] {
+			log.Warn("grants due for renewal were not issued again",
+				zap.Stringer("access_key", d.Key), zap.Stringer("subject", d.Subject))
+		}
+	}
 }
 
 // RenewalInterval is how often [Queue.RenewDue] is run.
