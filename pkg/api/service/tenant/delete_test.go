@@ -403,6 +403,21 @@ func TestDelete(t *testing.T) {
 		require.ElementsMatch(t, append(slices.Clone(env.owed), env.grants...), env.swarf.Revoked(), "each revocation once, and the bucket's root not at all")
 	})
 
+	t.Run("revokes both sets of a key whose grants were renewed", func(t *testing.T) {
+		env := deleteSetup(t, tenant.Disabled)
+		renewed, err := grant.Issue(env.issuer, env.keys[0], []did.DID{env.bucketID}, []string{"s3:GetObject"}, nil)
+		require.NoError(t, err)
+		require.NoError(t, delegationpostgres.New(env.pool).PutBatch(ctx, renewed))
+		want := append(slices.Clone(env.owed), env.grants...)
+		for _, d := range renewed {
+			want = append(want, d.Link())
+		}
+
+		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))
+
+		require.ElementsMatch(t, want, env.swarf.Revoked())
+	})
+
 	t.Run("a second delete finds nothing and succeeds", func(t *testing.T) {
 		env := deleteSetup(t, tenant.Disabled)
 		require.NoError(t, env.svc.Delete(ctx, "tenant-1"))

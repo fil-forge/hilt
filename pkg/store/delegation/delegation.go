@@ -2,6 +2,7 @@ package delegation
 
 import (
 	"context"
+	"time"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
@@ -18,8 +19,10 @@ type Store interface {
 	// of delegations and their corresponding links in the order required for
 	// invocation. i.e. starting from the root Delegation (issued by the Subject),
 	// in strict sequence where the aud of the previous Delegation matches the iss
-	// of the next Delegation. It returns [store.ErrInvalidArgument] for an undef
-	// subject.
+	// of the next Delegation. An expired delegation is in no chain, and of two
+	// chains of the same length the one that lasts longer is returned, so a
+	// key that holds a grant and its renewal is answered with the renewal. It
+	// returns [store.ErrInvalidArgument] for an undef subject.
 	ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error)
 	// PutBatch stores a batch of delegation records in one transaction,
 	// leaving one already stored alone. It returns [store.ErrInvalidArgument]
@@ -67,4 +70,20 @@ type Store interface {
 	// was issued, those its access keys hold, and those over its buckets. It
 	// records no revocation.
 	DeleteTenantStatement(tenant did.DID) store.Statement
+	// TenantsWithGrantsDue returns the tenants that have an access key with a
+	// grant due for renewal: the newest delegation the tenant issued to the
+	// key for its subject and command expires before the given time. A
+	// delegation that expires with its key is never due, since the next one
+	// would expire with the key as well.
+	TenantsWithGrantsDue(ctx context.Context, before time.Time) ([]did.DID, error)
+	// KeysWithGrantsDue returns the tenant's access keys that have a grant
+	// due for renewal, as [Store.TenantsWithGrantsDue] finds them.
+	KeysWithGrantsDue(ctx context.Context, tenant did.DID, before time.Time) ([]did.DID, error)
+	// DeleteExpired removes the delegations that expired before the given
+	// time and returns how many it removed. An expired delegation is in no
+	// proof chain and needs no revocation. A grant that is due for renewal
+	// ([Store.TenantsWithGrantsDue]) is kept even once it has expired: it is
+	// the record that its key should hold a grant, which a late renewal
+	// issues from.
+	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
 }

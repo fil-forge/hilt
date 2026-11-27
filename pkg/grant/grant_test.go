@@ -39,7 +39,8 @@ func TestIssue(t *testing.T) {
 		for _, d := range dels {
 			require.Equal(t, tenantID, d.Issuer())
 			require.Equal(t, keyID, d.Audience())
-			require.Nil(t, d.Expiration())
+			require.NotNil(t, d.Expiration())
+			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
 			got = append(got, [2]string{d.Subject().String(), d.Command().String()})
 		}
 		var want [][2]string
@@ -49,6 +50,17 @@ func TestIssue(t *testing.T) {
 			}
 		}
 		require.Equal(t, want, got)
+	})
+
+	t.Run("a key that expires after the lifetime is issued the lifetime", func(t *testing.T) {
+		later := time.Now().Add(2 * grant.Lifetime)
+		dels, err := grant.Issue(tenant, keyID, []did.DID{bucketA}, []string{"s3:GetObject"}, &later)
+		require.NoError(t, err)
+		require.NotEmpty(t, dels)
+		for _, d := range dels {
+			require.NotNil(t, d.Expiration())
+			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
+		}
 	})
 
 	t.Run("issues powerline delegations when there is no subject", func(t *testing.T) {
@@ -126,7 +138,8 @@ func TestForKey(t *testing.T) {
 		require.NotEmpty(t, got)
 		for _, d := range got {
 			require.False(t, d.Subject().Defined())
-			require.Nil(t, d.Expiration())
+			require.NotNil(t, d.Expiration())
+			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
 		}
 	})
 

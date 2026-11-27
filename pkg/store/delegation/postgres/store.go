@@ -195,6 +195,74 @@ func (s *Store) WithdrawSubjectStatements(tenant, subject did.DID) []store.State
 	}
 }
 
+// dueGrant is the condition under which the delegation d, of the access key
+// k, is a grant due for renewal before $1: the tenant issued it, it expires
+// before $1 and ahead of its key, and the key holds no later delegation from
+// the tenant for the same subject and command. A grant expires on a whole
+// second, so a key's expiry is compared to the second.
+const dueGrant = `
+	d.issuer = k.tenant_id
+	AND d.expires_at < $1
+	AND (k.expires_at IS NULL OR d.expires_at < date_trunc('second', k.expires_at))
+	AND NOT EXISTS (
+		SELECT 1 FROM delegation n
+		WHERE n.audience = d.audience AND n.issuer = d.issuer
+		  AND n.subject IS NOT DISTINCT FROM d.subject AND n.command = d.command
+		  AND (n.expires_at IS NULL OR n.expires_at > d.expires_at)
+	)`
+
+func (s *Store) TenantsWithGrantsDue(ctx context.Context, before time.Time) ([]did.DID, error) {
+	return s.due(ctx, `
+		SELECT DISTINCT k.tenant_id
+		FROM delegation d JOIN access_key k ON k.id = d.audience
+		WHERE `+dueGrant+`
+		ORDER BY k.tenant_id`, before)
+}
+
+func (s *Store) KeysWithGrantsDue(ctx context.Context, tenant did.DID, before time.Time) ([]did.DID, error) {
+	return s.due(ctx, `
+		SELECT DISTINCT k.id
+		FROM delegation d JOIN access_key k ON k.id = d.audience
+		WHERE k.tenant_id = $2 AND `+dueGrant+`
+		ORDER BY k.id`, before, tenant.String())
+}
+
+// due runs a query that returns one column of DIDs.
+func (s *Store) due(ctx context.Context, query string, args ...any) ([]did.DID, error) {
+	rows, err := pglock.Reader(ctx, s.pool).Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying the grants due for renewal: %w", err)
+	}
+	strs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("scanning the grants due for renewal: %w", err)
+	}
+	ids := make([]did.DID, len(strs))
+	for i, str := range strs {
+		if ids[i], err = did.Parse(str); err != nil {
+			return nil, fmt.Errorf("parsing %q: %w", str, err)
+		}
+	}
+	return ids, nil
+}
+
+// DeleteExpired runs outside the tenants' task queues. The tasks either
+// withdraw a key's delegations, which an expired one needs nothing from, or
+// store ones that have not expired, so neither can conflict with it.
+func (s *Store) DeleteExpired(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM delegation d
+		WHERE d.expires_at < $1
+		  AND NOT EXISTS (
+			SELECT 1 FROM access_key k
+			WHERE k.id = d.audience AND `+dueGrant+`
+		  )`, before)
+	if err != nil {
+		return 0, fmt.Errorf("deleting expired delegations: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // listColumn is a delegation column a list query may filter on. The named type
 // keeps the value a package-controlled constant rather than caller input, since it
 // is interpolated into the query text.
@@ -275,8 +343,10 @@ func (s *Store) listBy(ctx context.Context, column listColumn, value string, opt
 // fixed subject (or NULL powerline delegations) and requiring each delegation's
 // command to prove the child's command (the segment-boundary prefix test from
 // command.Command.Proves). A delegation whose subject equals its issuer is the
-// trust root and terminates a path. The shortest complete path is returned
-// root-first, as libforge's ProofChain returns it.
+// trust root and terminates a path. Expired delegations are left out. The
+// shortest complete path is returned root-first, as libforge's ProofChain
+// returns it, and of the shortest the one whose first delegation to expire
+// expires last.
 func (s *Store) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, sub did.DID) ([]ucan.Delegation, []cid.Cid, error) {
 	if !sub.Defined() {
 		return nil, nil, fmt.Errorf("missing proof chain subject: %w", store.ErrInvalidArgument)
@@ -291,9 +361,11 @@ func (s *Store) ProofChain(ctx context.Context, aud did.DID, cmd ucan.Command, s
 WITH RECURSIVE chain AS (
     SELECT d.issuer, d.command,
            (d.subject IS NOT NULL AND d.subject = d.issuer) AS complete,
-           ARRAY[d.data] AS datas, ARRAY[d.id] AS ids, 1 AS depth
+           ARRAY[d.data] AS datas, ARRAY[d.id] AS ids, 1 AS depth,
+           coalesce(d.expires_at, 'infinity') AS expires
     FROM delegation d
     WHERE d.audience = $1
+      AND (d.expires_at IS NULL OR d.expires_at > now())
       AND (d.subject = $3 OR d.subject IS NULL)
       AND ( d.command = $2 OR d.command = '/'
             OR (length($2) > length(d.command)
@@ -302,10 +374,12 @@ WITH RECURSIVE chain AS (
   UNION ALL
     SELECT d.issuer, d.command,
            (d.subject IS NOT NULL AND d.subject = d.issuer),
-           c.datas || d.data, c.ids || d.id, c.depth + 1
+           c.datas || d.data, c.ids || d.id, c.depth + 1,
+           least(c.expires, coalesce(d.expires_at, 'infinity'))
     FROM delegation d
     JOIN chain c ON d.audience = c.issuer
     WHERE NOT c.complete
+      AND (d.expires_at IS NULL OR d.expires_at > now())
       AND (d.subject = $3 OR d.subject IS NULL)
       AND ( d.command = c.command OR d.command = '/'
             OR (length(c.command) > length(d.command)
@@ -313,7 +387,7 @@ WITH RECURSIVE chain AS (
                 AND substr(c.command, length(d.command) + 1, 1) = '/') )
       AND d.id <> ALL(c.ids)
 )
-SELECT datas FROM chain WHERE complete ORDER BY depth ASC LIMIT 1
+SELECT datas FROM chain WHERE complete ORDER BY depth ASC, expires DESC LIMIT 1
 `
 
 	var datas [][]byte

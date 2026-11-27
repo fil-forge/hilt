@@ -167,6 +167,12 @@ tenant's tasks on a queue always run one at a time, so the count is the number
 of tenants worked on together. `0` runs none and leaves the queue to other
 instances. The queues' tables live in the `public` schema beside Hilt's own.
 
+A grant lasts 7 days, or until its access key expires if that is sooner.
+Hilt issues each key its next grants 3 days before the current ones expire,
+checking once an hour, so a key keeps working for as long as it exists. A
+grant that is withdrawn is revoked at Swarf, which keeps a revocation only
+until the grant it names would have expired.
+
 ## Container images
 
 A push to `main` publishes to GHCR from the `Container` workflow. The `prod`

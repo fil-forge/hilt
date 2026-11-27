@@ -527,6 +527,26 @@ func TestDelete(t *testing.T) {
 // policies as they end.
 // A caller that goes away while its removal runs: the removal still finishes,
 // and its keys' secrets still leave the vault.
+// A key whose grants were renewed holds two sets until the older one
+// expires, and removing its principal revokes both.
+func TestDeleteRevokesARenewedKeysEarlierGrants(t *testing.T) {
+	d := setup(t, nil)
+	d.principal(t, "user-1")
+	bucket, _ := d.writePolicy(t, allow(s3bkt.Only("user-1"), "s3:GetObject"))
+	key := d.addKey(t, "user-1", "laptop")
+	first := d.held(t, key)
+	require.NotEmpty(t, first)
+	renewed, err := grant.Issue(d.tenant, key, []did.DID{bucket}, []string{"s3:GetObject"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, d.delegations.PutBatch(t.Context(), renewed))
+
+	require.NoError(t, d.svc.Delete(t.Context(), "tenant-1", "user-1"))
+	d.awaitPublished(t)
+
+	require.ElementsMatch(t, links(append(first, renewed...)), d.swarf.Revoked())
+	require.Empty(t, d.held(t, key))
+}
+
 func TestDeleteAfterTheCallerGoesAway(t *testing.T) {
 	ctx := t.Context()
 	h := &hook{}

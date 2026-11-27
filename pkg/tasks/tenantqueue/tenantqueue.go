@@ -36,6 +36,9 @@
 // deletes the bucket's delegations and the bucket, which takes its policy
 // (buckets.go).
 //
+// queue-tenant.renew-grants issues the keys whose grants are close to
+// expiring the next set, and withdraws nothing (renew.go).
+//
 // Every change that records revocations queues queue-revocation.publish for
 // the tenant, which publishes them after the commit.
 //
@@ -155,6 +158,7 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		tasks.ActionRemovePrincipal: q.runRemovePrincipal,
 		tasks.ActionDeleteBucket:    q.runDeleteBucket,
 		tasks.ActionDeleteTenant:    q.runDeleteTenant,
+		tasks.ActionRenewGrants:     q.runRenewGrants,
 	} {
 		if err := r.Handle(tasks.QueueTenant, action, h); err != nil {
 			return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, action, err)
@@ -263,10 +267,16 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID, status tenant
 	if err != nil {
 		return nil, fmt.Errorf("listing the tenant's access keys: %w", err)
 	}
+	return q.issueGrantsOf(ctx, tenantID, status, keys)
+}
+
+// issueGrantsOf is [Queue.issueGrants] for the given keys of the tenant.
+func (q *Queue) issueGrantsOf(ctx context.Context, tenantID did.DID, status tenant.Status, keys []accesskey.Record) ([]ucan.Delegation, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
 
+	var err error
 	now := time.Now()
 	policies := map[string][]bucketpolicy.Record{}
 	// The signing key is read for the first key that is to be issued grants,

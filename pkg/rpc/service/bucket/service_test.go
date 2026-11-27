@@ -574,6 +574,20 @@ func TestDelete(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrRecordNotFound, "the policy written meanwhile goes with the bucket")
 	})
 
+	t.Run("revokes both sets of a key whose grants were renewed", func(t *testing.T) {
+		week := delegation.WithExpiration(ucan.UnixTimestamp(time.Now().Add(7 * 24 * time.Hour).Unix()))
+		d := setup(t, allPerms, false, &fakeSprue{empty: true}, week)
+		renewed, err := delegation.Delegate(multikey.NewIssuer(tenantID, tenantSigner), akDID, d.bucketID, content.Retrieve.Command, week)
+		require.NoError(t, err)
+		require.NoError(t, d.delegations.PutBatch(ctx, []ucan.Delegation{renewed}))
+
+		_, err = d.svc.Delete(ctx, providerID, del(bucketName))
+		require.NoError(t, err)
+		htestutil.AwaitPublished(t, d.runner, tenantID)
+
+		require.Subset(t, d.swarf.Revoked(), []cid.Cid{d.grant.Link(), renewed.Link()})
+	})
+
 	t.Run("rejects a key without s3:DeleteBucket", func(t *testing.T) {
 		d := setup(t, []string{"s3:GetObject"}, false, &fakeSprue{empty: true})
 		_, err := d.svc.Delete(ctx, providerID, del(bucketName))

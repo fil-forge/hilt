@@ -9,6 +9,11 @@
 // (pkg/tasks/tenantqueue). [ForKey] issues either kind's set, for a key being
 // created and for one whose grants are issued again.
 //
+// Every grant expires, [Lifetime] after it is issued at the latest, and a key
+// is issued the next set [RenewBefore] ahead of that. The set it replaces
+// stays stored until it expires, so a change that withdraws the key's grants
+// revokes both.
+//
 // The set is narrower while the key's tenant is not active: every issue
 // reduces the key's actions to what the tenant's status keeps
 // ([LimitToTenantStatus]), and a change of status withdraws the set and
@@ -28,15 +33,29 @@ import (
 	"github.com/fil-forge/ucantone/ucan/delegation"
 )
 
+// Lifetime is how long a grant lasts from the moment it is issued. A grant
+// that is withdrawn is revoked, and the revocation service keeps a revocation
+// until the delegation it names has expired, so this is also how long each
+// revocation is kept.
+const Lifetime = 7 * 24 * time.Hour
+
+// RenewBefore is how long before a grant expires its key is issued the next
+// one (queue-tenant.renew-grants). It must stay longer than the delegations
+// an authorize issues beneath a grant, which last up to a day and the async
+// overhang, so that none of them outlives the grant it was issued under; the
+// rest is the time a renewal has to run in.
+const RenewBefore = 3 * 24 * time.Hour
+
 // Issue returns issuer→key delegations, one per subject and Forge command the
-// actions map to, expiring with the key when expiresAt is set and never
-// otherwise (ucantone's default is 30 seconds). No subjects means one
-// powerline delegation per command, with an undefined subject.
+// actions map to. Each expires [Lifetime] from now, or with the key when
+// expiresAt is sooner. No subjects means one powerline delegation per
+// command, with an undefined subject.
 func Issue(issuer ucan.Issuer, key did.DID, subjects []did.DID, actions []string, expiresAt *time.Time) ([]ucan.Delegation, error) {
-	opt := delegation.WithNoExpiration()
-	if expiresAt != nil {
-		opt = delegation.WithExpiration(ucan.UnixTimestamp(expiresAt.Unix()))
+	exp := time.Now().Add(Lifetime)
+	if expiresAt != nil && expiresAt.Before(exp) {
+		exp = *expiresAt
 	}
+	opt := delegation.WithExpiration(ucan.UnixTimestamp(exp.Unix()))
 	if len(subjects) == 0 {
 		subjects = []did.DID{did.Undef}
 	}

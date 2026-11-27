@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/store"
@@ -551,4 +552,159 @@ func linkStrings(dels []ucan.Delegation) []string {
 		out[i] = d.Link().String()
 	}
 	return out
+}
+
+// expiring builds a delegation as makeDelegation does, expiring after the
+// given time from now, or never when in is zero.
+func expiring(t *testing.T, issuer ucan.Issuer, audience, subject did.DID, cmd ucan.Command, in time.Duration) ucan.Delegation {
+	t.Helper()
+	opt := delegation.WithNoExpiration()
+	if in != 0 {
+		opt = delegation.WithExpiration(ucan.UnixTimestamp(time.Now().Add(in).Unix()))
+	}
+	dlg, err := delegation.Delegate(issuer, audience, subject, cmd, opt)
+	require.NoError(t, err)
+	return dlg
+}
+
+func TestProofChainExpiry(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+	f := setupKeys(t)
+	bucket := testutil.RandomIssuer(t)
+	root := expiring(t, bucket, f.tenant.DID(), bucket.DID(), command.Top(), 0)
+	expired := expiring(t, f.tenant, f.keys[0], bucket.DID(), read, -time.Hour)
+	require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{root, expired}))
+
+	proofs, _, err := f.store.ProofChain(t.Context(), f.keys[0], read, bucket.DID())
+	require.NoError(t, err)
+	require.Empty(t, proofs, "an expired delegation is in no chain")
+
+	// Of a grant and its renewal the chain goes through the renewal, however
+	// the two are ordered in the table.
+	for range 4 {
+		sooner := expiring(t, f.tenant, f.keys[0], bucket.DID(), read, time.Hour)
+		later := expiring(t, f.tenant, f.keys[0], bucket.DID(), read, 2*time.Hour)
+		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{sooner, later}))
+		proofs, _, err = f.store.ProofChain(t.Context(), f.keys[0], read, bucket.DID())
+		require.NoError(t, err)
+		require.Equal(t, linkStrings([]ucan.Delegation{root, later}), linkStrings(proofs))
+		_, err = f.pool.Exec(t.Context(), `DELETE FROM delegation WHERE id = ANY($1)`, linkStrings([]ucan.Delegation{sooner, later}))
+		require.NoError(t, err)
+	}
+}
+
+func TestGrantsDue(t *testing.T) {
+	read, write := command.MustParse("/content/retrieve"), command.MustParse("/blob/add")
+	day := 24 * time.Hour
+	due := func(t *testing.T, f keyFixture) ([]did.DID, []did.DID) {
+		t.Helper()
+		before := time.Now().Add(3 * day)
+		tenants, err := f.store.TenantsWithGrantsDue(t.Context(), before)
+		require.NoError(t, err)
+		keys, err := f.store.KeysWithGrantsDue(t.Context(), f.tenant.DID(), before)
+		require.NoError(t, err)
+		return tenants, keys
+	}
+
+	t.Run("a key whose newest grant expires before the time is due", func(t *testing.T) {
+		f := setupKeys(t)
+		bucket := testutil.RandomDID(t)
+		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{
+			expiring(t, f.tenant, f.keys[0], bucket, read, day),
+			// Not due: lasting past the time, never expiring, another
+			// tenant's, and issued by someone other than the key's tenant.
+			expiring(t, f.tenant, f.keys[1], bucket, read, 7*day),
+			expiring(t, f.tenant, f.keys[1], bucket, write, 0),
+			expiring(t, f.other, f.otherKey, bucket, read, 7*day),
+			expiring(t, f.other, f.keys[1], bucket, read, day),
+		}))
+
+		tenants, keys := due(t, f)
+		require.Equal(t, []did.DID{f.tenant.DID()}, tenants)
+		require.Equal(t, []did.DID{f.keys[0]}, keys)
+	})
+
+	t.Run("a grant with a later one for the same subject and command is not due", func(t *testing.T) {
+		f := setupKeys(t)
+		bucket := testutil.RandomDID(t)
+		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{
+			expiring(t, f.tenant, f.keys[0], bucket, read, day),
+			expiring(t, f.tenant, f.keys[0], bucket, read, 7*day),
+			expiring(t, f.tenant, f.keys[0], did.Undef, read, -day),
+			expiring(t, f.tenant, f.keys[0], did.Undef, read, 7*day),
+		}))
+
+		tenants, keys := due(t, f)
+		require.Empty(t, tenants)
+		require.Empty(t, keys)
+
+		// A later grant for another command leaves the first one due.
+		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{
+			expiring(t, f.tenant, f.keys[1], bucket, read, day),
+			expiring(t, f.tenant, f.keys[1], bucket, write, 7*day),
+		}))
+		_, keys = due(t, f)
+		require.Equal(t, []did.DID{f.keys[1]}, keys)
+	})
+
+	t.Run("a grant that expires with its key is not due", func(t *testing.T) {
+		f := setupKeys(t)
+		// The key's expiry has a fraction of a second, which the grant's
+		// leaves out.
+		keyExpiry := time.Now().Add(day).Truncate(time.Second).Add(400 * time.Millisecond)
+		_, err := f.pool.Exec(t.Context(), `UPDATE access_key SET expires_at = $2 WHERE id = $1`, f.keys[0].String(), keyExpiry)
+		require.NoError(t, err)
+		capped, err := delegation.Delegate(f.tenant, f.keys[0], testutil.RandomDID(t), read, delegation.WithExpiration(ucan.UnixTimestamp(keyExpiry.Unix())))
+		require.NoError(t, err)
+		require.NoError(t, f.store.PutBatch(t.Context(), []ucan.Delegation{capped}))
+
+		tenants, keys := due(t, f)
+		require.Empty(t, tenants)
+		require.Empty(t, keys)
+	})
+}
+
+func TestDeleteExpired(t *testing.T) {
+	read := command.MustParse("/content/retrieve")
+	day := 24 * time.Hour
+	f := setupKeys(t)
+	bucket := testutil.RandomIssuer(t)
+
+	keyExpiry := time.Now().Add(-time.Hour).Truncate(time.Second)
+	_, err := f.pool.Exec(t.Context(), `UPDATE access_key SET expires_at = $2 WHERE id = $1`, f.keys[1].String(), keyExpiry)
+	require.NoError(t, err)
+	withKey, err := delegation.Delegate(f.tenant, f.keys[1], bucket.DID(), read, delegation.WithExpiration(ucan.UnixTimestamp(keyExpiry.Unix())))
+	require.NoError(t, err)
+
+	gone := []ucan.Delegation{
+		// A grant that was renewed.
+		expiring(t, f.tenant, f.keys[0], bucket.DID(), read, -day),
+		// A grant that expired with its key.
+		withKey,
+		// A delegation to something that is not an access key.
+		expiring(t, f.tenant, testutil.RandomDID(t), bucket.DID(), read, -day),
+	}
+	kept := []ucan.Delegation{
+		expiring(t, f.tenant, f.keys[0], bucket.DID(), read, 7*day),
+		expiring(t, bucket, f.tenant.DID(), bucket.DID(), command.Top(), 0),
+		// The newest grant of its key, subject and command: expired, and
+		// still what says the key is due one.
+		expiring(t, f.tenant, f.keys[0], did.Undef, read, -day),
+	}
+	require.NoError(t, f.store.PutBatch(t.Context(), append(slices.Clone(gone), kept...)))
+
+	deleted, err := f.store.DeleteExpired(t.Context(), time.Now())
+	require.NoError(t, err)
+	require.EqualValues(t, len(gone), deleted)
+
+	var left []string
+	rows, err := f.pool.Query(t.Context(), `SELECT id FROM delegation`)
+	require.NoError(t, err)
+	left, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.ElementsMatch(t, linkStrings(kept), left)
+
+	keys, err := f.store.KeysWithGrantsDue(t.Context(), f.tenant.DID(), time.Now().Add(3*day))
+	require.NoError(t, err)
+	require.Equal(t, []did.DID{f.keys[0]}, keys, "the expired grant kept is due")
 }

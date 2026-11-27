@@ -3,6 +3,7 @@ package fx
 import (
 	"context"
 	"fmt"
+	"time"
 
 	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
 	"github.com/fil-forge/hilt/pkg/grant"
@@ -29,7 +30,7 @@ import (
 // module provides, and starts and stops the runner with the service.
 var TasksModule = fx.Module("tasks",
 	fx.Provide(NewRevocationQueue, NewTenantQueue),
-	fx.Invoke(RegisterTaskRunnerLifecycle),
+	fx.Invoke(RegisterTaskRunnerLifecycle, RegisterGrantRenewal),
 )
 
 // NewRevocationQueue registers the handler that publishes the revocations
@@ -120,4 +121,61 @@ func RegisterTaskRunnerLifecycle(
 			return runner.Stop(ctx)
 		},
 	})
+}
+
+// RegisterGrantRenewal keeps the access keys' grants from expiring: when the
+// service starts and every [tenantqueue.RenewalInterval] after, it queues a
+// renewal for each tenant with grants due and deletes the delegations that
+// have expired ([tenantqueue.Queue.RenewDue]). It is registered after the
+// runner's lifecycle, so the runner has started when the first pass runs.
+func RegisterGrantRenewal(
+	lc fx.Lifecycle,
+	runner *taskrunner.Runner,
+	tenants *tenantqueue.Queue,
+	logger *zap.Logger,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			go func() {
+				defer close(done)
+				renewGrants(ctx, runner, tenants, logger.Named("grant-renewal"), tenantqueue.RenewalInterval)
+			}()
+			return nil
+		},
+		OnStop: func(stopCtx context.Context) error {
+			cancel()
+			select {
+			case <-done:
+			case <-stopCtx.Done():
+			}
+			return nil
+		},
+	})
+}
+
+// renewGrants runs [tenantqueue.Queue.RenewDue] once, then every interval,
+// until ctx is canceled. A failed pass is logged and the next one tries
+// again: a grant is due [grant.RenewBefore] ahead of its expiry, so keys keep
+// working through that many failed passes.
+func renewGrants(ctx context.Context, runner *taskrunner.Runner, tenants *tenantqueue.Queue, logger *zap.Logger, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		queued, deleted, err := tenants.RenewDue(ctx, runner)
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			logger.Error("renewing grants failed", zap.Error(err))
+		case queued > 0 || deleted > 0:
+			logger.Info("queued grant renewals", zap.Int("tenants", queued), zap.Int64("expired_delegations_deleted", deleted))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

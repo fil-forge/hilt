@@ -40,6 +40,7 @@ import (
 	"github.com/fil-forge/ucantone/ucan"
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/delegation"
+	"github.com/fil-forge/ucantone/validator"
 	"github.com/ipfs/go-cid"
 	"go.uber.org/zap"
 )
@@ -253,6 +254,9 @@ func (s *Service) Create(ctx context.Context, issuer did.DID, args *s3bkt.Create
 	for _, d := range stored {
 		if d.Subject().Defined() {
 			continue // only powerline delegations reach a brand-new bucket
+		}
+		if validator.ValidateNotExpired(d, ucan.Now()) != nil {
+			continue // stored until it is deleted, and in no chain
 		}
 		proofs, links, err := s.delegations.ProofChain(ctx, accessKeyID, d.Command(), bucketID)
 		if err != nil {
@@ -576,7 +580,11 @@ func (s *Service) info(ctx context.Context, issuer did.DID, args *s3bkt.InfoArgu
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing delegations: %w", err)
 	}
-	stored = slices.DeleteFunc(stored, func(d ucan.Delegation) bool { return d.Subject().Defined() && d.Subject() != b.ID })
+	// An expired grant stays stored until it is deleted, and is in no chain.
+	now := ucan.Now()
+	stored = slices.DeleteFunc(stored, func(d ucan.Delegation) bool {
+		return d.Subject().Defined() && d.Subject() != b.ID || validator.ValidateNotExpired(d, now) != nil
+	})
 
 	proofSet := map[cid.Cid][]cid.Cid{}
 	var blocks []ucan.Delegation
