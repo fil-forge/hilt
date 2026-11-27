@@ -21,6 +21,12 @@ naming the metric and
 [FIL-1143](https://linear.app/filecoin-foundation/issue/FIL-1143), so it can be
 carried to the issue and instrumented when the service exports metrics.
 
+The task runner and the revocation queue already define their metrics
+(`taskrunner.*`, and `hilt.revocations.owed` and
+`hilt.revocations.oldest_owed_age` in `pkg/tasks/revocationqueue`) against
+the global OpenTelemetry meter provider. They are recorded nowhere until the
+service installs one.
+
 ## Traces
 
 Traces don't reach Grafana from Central yet either, but keep the spans complete

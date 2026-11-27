@@ -64,7 +64,9 @@ its own trace. The other standard `OTEL_*` environment variables apply:
 | `storage.postgres.skip_migrations` | `--skip-migrations` | `HILT_STORAGE_POSTGRES_SKIP_MIGRATIONS` | `false` |
 
 `storage.type` is always `postgres`; any other value is refused at startup.
-Migrations run on startup unless `skip_migrations` is set.
+Migrations run on startup unless `skip_migrations` is set. The same step
+creates the task queues' tables (see Task queues), which also needs the
+`CREATE` privilege on the database.
 
 ### Vault (private-key storage)
 
@@ -124,6 +126,21 @@ The Swarf service DID + HTTP endpoint Hilt publishes UCAN revocations to when a
 delegation it issued is withdrawn (e.g. when an access key is deleted). Both
 are required, and `hilt serve` exits at startup when either is unset. Each
 stage points at its own Swarf, which only knows that stage's tenants.
+
+### Task queues
+
+| Key | Flag | Env var | Default |
+| --- | --- | --- | --- |
+| `tasks.tenant_workers` | `--tenant-task-workers` | `HILT_TASKS_TENANT_WORKERS` | `4` |
+| `tasks.revocation_workers` | `--revocation-task-workers` | `HILT_TASKS_REVOCATION_WORKERS` | `8` |
+
+Hilt runs durable task queues in its Postgres database, on the libforge task
+runner: `queue-tenant` for changes to a tenant's authority and
+`queue-revocation` for publishing the revocations a tenant owes to Swarf. Each
+setting is the most queued tasks of that queue one instance runs at once. A
+tenant's tasks on a queue always run one at a time, so the count is the number
+of tenants worked on together. `0` runs none and leaves the queue to other
+instances. The queues' tables live in the `public` schema beside Hilt's own.
 
 ## Container images
 

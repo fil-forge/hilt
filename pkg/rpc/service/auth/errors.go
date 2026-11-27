@@ -33,9 +33,9 @@ const (
 // carries data of its own, [BucketRegionMismatchError], is a type rather than a
 // sentinel; match it with errors.As. Unexpected/internal
 // failures (store or vault errors) are intentionally not named — they are
-// 500-class, not authorization rejections. The one store failure that is named
-// is the lock timeout, [ErrTemporarilyUnavailable], because the caller can
-// retry it.
+// 500-class, not authorization rejections. The one failure of that kind that
+// is named is a wait that ran out, [ErrTemporarilyUnavailable], because the
+// caller can retry it.
 var (
 	// ErrMalformedSignature is returned when the request carries no parseable
 	// signature — absent entirely, or present but unparseable (unsupported
@@ -103,12 +103,15 @@ var (
 	// allows, or not covered by the signature as the payload hash or a
 	// signed checksum header. The wrapped message says which.
 	ErrInvalidBody = errors.New(InvalidBodyErrorName, "the request body cannot be authorized on")
-	// ErrTemporarilyUnavailable is returned when the share-locked read of the
-	// key, its principal or the bucket's policy waited out the store's lock
-	// timeout behind a write still committing. Nothing about the request was
-	// decided; a retry is answered from whichever state the write leaves. The
-	// returned error wraps [store.ErrLockTimeout] as well. Bucket info also
-	// returns it, without the store's timeout, when the policy or the key's
-	// grants moved between its reads.
+	// ErrTemporarilyUnavailable is returned when the state a request is
+	// authorized on was still being changed when the wait for it ran out: the
+	// share-locked read of the key, its principal or the bucket's policy
+	// waited out the store's lock timeout behind a write still committing, in
+	// which case the returned error wraps [store.ErrLockTimeout] as well, or
+	// a change to the tenant's authority was still queued or running on the
+	// task runner after the same bound. Nothing about the request was
+	// decided; a retry is answered from whichever state the change leaves.
+	// Bucket info also returns it, without the store's timeout, when the
+	// policy or the key's grants moved between its reads.
 	ErrTemporarilyUnavailable = errors.New(TemporarilyUnavailableErrorName, "authorization state is being changed, retry the request")
 )

@@ -86,6 +86,15 @@ func NewReadConfig(opts ...ReadOption) ReadConfig {
 	return cfg
 }
 
+// Statement is one SQL write a store builds without running it. A task handler
+// hands it to its task, so that the write commits with the task or not at all.
+type Statement struct {
+	// SQL is the statement's text.
+	SQL string
+	// Args are the statement's bound parameters, in order.
+	Args []any
+}
+
 // LockTimeout bounds how long a locking statement in a Postgres store waits
 // for a conflicting lock before giving up with [ErrLockTimeout].
 //

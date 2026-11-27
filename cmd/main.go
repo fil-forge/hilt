@@ -72,6 +72,10 @@ func main() {
 	serveCmd.Flags().String("revocation-service-id", "", "Revocation service DID (required)")
 	serveCmd.Flags().String("revocation-service-url", "", "Revocation service HTTP endpoint (required)")
 
+	// task queue config
+	serveCmd.Flags().Int("tenant-task-workers", 4, "most queued changes to tenants' authority to run at once (0 runs none)")
+	serveCmd.Flags().Int("revocation-task-workers", 8, "most tenants to publish revocations for at once (0 runs none)")
+
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(client.Cmd)
 

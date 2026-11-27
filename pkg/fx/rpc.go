@@ -11,9 +11,16 @@ import (
 	hiltmiddleware "github.com/fil-forge/hilt/pkg/rpc/middleware"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	bucketsvc "github.com/fil-forge/hilt/pkg/rpc/service/bucket"
+	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
+	bucketstore "github.com/fil-forge/hilt/pkg/store/bucket"
+	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
+	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
+	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
 	"github.com/fil-forge/hilt/pkg/tracing"
+	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/libforge/identity"
+	"github.com/fil-forge/libforge/taskrunner"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/key"
 	"github.com/fil-forge/ucantone/did/resolver"
@@ -31,7 +38,7 @@ import (
 // provider invokes on its own authority, the "ucanProviderRoutes" group.
 var RPCModule = fx.Module("rpc",
 	fx.Provide(
-		auth.NewAuthorizer,
+		NewAuthorizer,
 		fx.Annotate(
 			NewUploadClient,
 			fx.As(fx.Self()),
@@ -53,6 +60,23 @@ var RPCModule = fx.Module("rpc",
 		asAdminUCANRoute(rpc.NewListProvidersHandler),
 	),
 )
+
+// NewAuthorizer builds the shared authorization service, which holds a
+// request back while a change to its tenant's authority is queued or running
+// on the task runner.
+func NewAuthorizer(
+	logger *zap.Logger,
+	accessKeys accesskeystore.Store,
+	tenants tenantstore.Store,
+	providers providerstore.Store,
+	buckets bucketstore.Store,
+	principals principalstore.Store,
+	policies bucketpolicystore.Store,
+	secrets vault.Vault,
+	runner *taskrunner.Runner,
+) *auth.Authorizer {
+	return auth.NewAuthorizer(logger, accessKeys, tenants, providers, buckets, principals, policies, secrets, auth.WithTenantChanges(runner))
+}
 
 // asUCANRoute annotates a handler constructor so its result joins the
 // "ucanRoutes" group consumed by the UCAN server, whose routes are served
