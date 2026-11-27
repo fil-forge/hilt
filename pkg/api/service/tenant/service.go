@@ -434,7 +434,7 @@ func (s *Service) Delete(ctx context.Context, externalID string) error {
 // tenant's DID. A task of the queue publishing the same rows meanwhile
 // repeats revocations the service records once.
 func (s *Service) publishOwed(ctx context.Context, log *zap.Logger, tenantID did.DID) error {
-	done, err := revocationqueue.Drain(ctx, log, s.owed, s.secrets, s.revocations, tenantID, s.owed.Delete)
+	done, err := revocationqueue.Drain(ctx, log, s.owed, s.secrets, s.revocations, tenantID)
 	if err != nil {
 		return fmt.Errorf("publishing the tenant's revocations owed: %w", err)
 	}
