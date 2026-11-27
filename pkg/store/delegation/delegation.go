@@ -2,6 +2,7 @@ package delegation
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/ucantone/did"
@@ -67,4 +68,45 @@ type Store interface {
 	// was issued, those its access keys hold, and those over its buckets. It
 	// records no revocation.
 	DeleteTenantStatement(tenant did.DID) store.Statement
+}
+
+// GrantChains returns the chains that reach the bucket from each delegation
+// the access key holds over it, one scoped to the bucket or a powerline one:
+// the links of each delegation's chain, from the bucket's root delegation
+// down, keyed by the delegation's CID, and every delegation the chains use,
+// each once. A delegation with no chain to the bucket is left out.
+func GrantChains(ctx context.Context, s Store, key, bucket did.DID) (map[cid.Cid][]cid.Cid, []ucan.Delegation, error) {
+	held, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[ucan.Delegation], error) {
+		var o []store.PaginationOption
+		if opts.Cursor != nil {
+			o = append(o, store.WithCursor(*opts.Cursor))
+		}
+		return s.ListByAudience(ctx, key, o...)
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing the access key's delegations: %w", err)
+	}
+	chains := map[cid.Cid][]cid.Cid{}
+	var blocks []ucan.Delegation
+	seen := map[cid.Cid]bool{}
+	for _, d := range held {
+		if d.Subject().Defined() && d.Subject() != bucket {
+			continue
+		}
+		proofs, links, err := s.ProofChain(ctx, key, d.Command(), bucket)
+		if err != nil {
+			return nil, nil, fmt.Errorf("building the proof chain for %s: %w", d.Command(), err)
+		}
+		if len(proofs) == 0 {
+			continue
+		}
+		chains[d.Link()] = links
+		for _, p := range proofs {
+			if !seen[p.Link()] {
+				seen[p.Link()] = true
+				blocks = append(blocks, p)
+			}
+		}
+	}
+	return chains, blocks, nil
 }

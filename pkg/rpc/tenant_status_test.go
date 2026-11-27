@@ -334,42 +334,44 @@ func TestSetStatusThroughTheService(t *testing.T) {
 // A status change that commits between the authorizer's read of the status
 // and the reads that follow it never widens the answer.
 func TestAuthorizeAcrossAStatusChange(t *testing.T) {
-	t.Run("read as active, then disabled: what the key delegates has no chain", func(t *testing.T) {
+	t.Run("read as active, then disabled: the reply carries grants the change revokes", func(t *testing.T) {
 		for name, request := range map[string]func(*statusEnv, *testing.T) *s3req.AuthorizeArguments{
 			"GetObject":    (*statusEnv).get,
 			"DeleteObject": (*statusEnv).del,
 		} {
 			t.Run(name, func(t *testing.T) {
 				env := setupStatus(t)
+				before := cids(env.grants(t))
+				require.NotEmpty(t, before)
 				env.authTenants.then = func() {
 					require.NoError(t, env.svc.SetStatus(t.Context(), "tenant-1", "disabled"))
 				}
 
 				ok, issued, err := env.authorize(t, request(env, t))
 
-				// The answer is built on the status read before the
-				// change, so it is not a refusal.
+				// The answer is built on the state before the change, so it
+				// is not a refusal, and it carries the grants the key held
+				// then. The change revokes every one of them, which is how
+				// the gateway knows not to keep the answer.
 				require.NoError(t, err)
 				require.Equal(t, env.tenant, ok.Tenant)
-				require.Empty(t, env.grants(t), "the change committed before the later reads")
-				fromKey := issuedBy(issued, env.key.KeyDID())
-				require.NotEmpty(t, fromKey)
-				for _, d := range fromKey {
-					require.False(t, env.chained(t, d.Command()), "%s from the key reaches the bucket", d.Command())
-				}
-				// Whatever else rides back is the tenant's own cleanup
-				// delegations and the bucket's root, which do not pass
-				// through the key and which a request answered just
-				// before the change is given too.
-				for _, d := range issued {
-					if d.Issuer() == env.key.KeyDID() || d.Issuer() == env.bucket {
-						continue
+				require.Empty(t, env.grants(t), "the change committed before the answer")
+				var carried []cid.Cid
+				for _, d := range issuedBy(issued, env.tenant) {
+					if d.Audience() == env.key.KeyDID() {
+						carried = append(carried, d.Link())
 					}
-					require.Equal(t, env.tenant, d.Issuer())
-					require.True(t, slices.ContainsFunc([]string{"/blob/remove", "/blob/abort", "/upload/remove"}, func(c string) bool {
-						return d.Command().String() == c
-					}), "%s is not a cleanup command", d.Command())
 				}
+				require.ElementsMatch(t, before, carried)
+				require.Eventually(t, func() bool {
+					revoked := env.swarf.Revoked()
+					for _, c := range carried {
+						if !slices.Contains(revoked, c) {
+							return false
+						}
+					}
+					return true
+				}, htestutil.WaitTimeout, 10*time.Millisecond, "every grant the answer carries is revoked")
 
 				// The next request reads the new status.
 				_, _, err = env.authorize(t, request(env, t))

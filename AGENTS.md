@@ -300,14 +300,12 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   (`auth.WithSnapshots`): the key again, so a key a change deleted is
   refused, the tenant, the provider, the buckets, the principal and the
   policies. A change committing during those reads is seen by none of them,
-  so the decision is the state before it, whole. The key's stored grants,
-  which a handler reads after `Authorize` returns, are outside the snapshot;
-  a status change commits its status and its grant changes together, so a
-  change that lands before them leaves the answer no wider than the status
-  read allows, with one exception: a request read as `active` just before a
-  write-lock commits is answered as active, full permission set included
-  (the comment at the status read in `pkg/rpc/service/auth/auth.go` has the
-  cases).
+  so the decision is the state before it, whole. The authorize handler
+  reads the key's stored grants over each bucket in the same snapshot
+  (`auth.ReadAlso`) and answers with them and the bucket's root. Every
+  change to what a key may do on a bucket withdraws the key's grants over it
+  in its commit and revokes them, so an answer built just before a change
+  carries grants the change revokes, and the gateway does not keep it.
   **Tenant statuses**: `active` is read and write. `disabled` refuses every
   request (`ErrTenantDisabled`). `write-locked` is read-only: once the
   operation is classified, with the permissions its headers and body add, a

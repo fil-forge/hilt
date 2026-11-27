@@ -9,6 +9,7 @@ import (
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
+	"github.com/fil-forge/hilt/pkg/store/bucket"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
 	"github.com/fil-forge/libforge/commands/blob"
 	s3 "github.com/fil-forge/libforge/commands/s3"
@@ -58,8 +59,10 @@ func NewAuthorizeRequestHandler(
 // credential for either kind of key. The cleanup commands among them are also
 // issued by the tenant, lasting CleanupLifetime past the request delegations'
 // day, with the bucket's root delegation
-// (see issueCleanupDelegations). It returns the result and the delegation
-// blocks to attach to the response. It is factored out of the handler so it can
+// (see issueCleanupDelegations). The reply also carries the access key's
+// grants over each bucket the request acts on, with the buckets' roots, read
+// in the snapshot the decision is read in. It returns the result and the
+// delegation blocks to attach to the response. It is factored out of the handler so it can
 // be unit tested without constructing a UCAN invocation.
 func AuthorizeRequest(
 	ctx context.Context,
@@ -69,7 +72,24 @@ func AuthorizeRequest(
 	issuer did.DID,
 	args *s3req.AuthorizeArguments,
 ) (*s3req.AuthorizeOK, []ucan.Delegation, error) {
-	authz, err := authorizer.Authorize(ctx, issuer, args.Request)
+	// The key's grants over every bucket the request acts on are read in the
+	// snapshot the decision is read in, so the reply carries the grants the
+	// decision rests on. A change that commits after the snapshot revokes
+	// them, which tells the gateway the reply is out of date.
+	var grants grantChains
+	authz, err := authorizer.Authorize(ctx, issuer, args.Request, auth.ReadAlso(func(ctx context.Context, authz *auth.AuthorizedRequest) error {
+		for _, b := range []*bucket.Record{authz.Bucket, authz.SourceBucket} {
+			if b == nil {
+				continue
+			}
+			chains, blocks, err := delegationstore.GrantChains(ctx, delegations, authz.AccessKey.ID, b.ID)
+			if err != nil {
+				return fmt.Errorf("reading the access key's grants over %s: %w", b.ID, err)
+			}
+			grants.add(chains, blocks)
+		}
+		return nil
+	}))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -102,8 +122,8 @@ func AuthorizeRequest(
 	// subject. The key holds these commands over the bucket, a service key from
 	// its creation and a principal-bound key from the bucket's policy, which the
 	// action check above is the mirror of. If it does not, the delegation simply
-	// has no proof chain to a root and is unusable — harmless. The gateway
-	// obtains the chain to the access key via `/s3/bucket/info`.
+	// has no proof chain to a root and is unusable — harmless. The chain to
+	// the access key is the key's grants, which the reply carries.
 	akIssuer := multikey.NewIssuer(accessKeyID, signer)
 	// Expire when the derived key does — 00:00:00 UTC of the following day —
 	// plus the max clock skew, so the gateway can still enact a request signed
@@ -142,10 +162,14 @@ func AuthorizeRequest(
 		}
 		issued = append(issued, srcDlgs...)
 	}
-	// The proof set keys each issued delegation to its own one-element chain.
-	proofSet := make(map[cid.Cid][]cid.Cid, len(issued))
+	// The proof set keys each issued delegation to its own one-element chain,
+	// and each of the key's grants to its chain from the bucket's root.
+	proofSet := make(map[cid.Cid][]cid.Cid, len(issued)+len(grants.chains))
 	for _, d := range issued {
 		proofSet[d.Link()] = []cid.Cid{d.Link()}
+	}
+	for link, chain := range grants.chains {
+		proofSet[link] = chain
 	}
 	if bucketID != nil {
 		cleanup, root, err := issueCleanupDelegations(ctx, authorizer, delegations, authz.Tenant.ID, issuer, *bucketID, perm)
@@ -161,11 +185,15 @@ func AuthorizeRequest(
 				proofSet[d.Link()] = []cid.Cid{root.Link(), d.Link()}
 			}
 			issued = append(issued, cleanup...)
-			issued = append(issued, root)
+			if !grants.has(root) {
+				issued = append(issued, root)
+			}
 		case hasCleanupCommands(perm):
 			logger.Warn("no root delegation for the bucket; issuing no cleanup delegations", zap.Stringer("bucket", bucketID))
 		}
 	}
+
+	issued = append(issued, grants.blocks...)
 
 	logger.Debug("authorized request",
 		zap.Stringer("bucket", bucketID),
@@ -185,6 +213,32 @@ func AuthorizeRequest(
 		Delegations: s3.ProofSet{Entries: proofSet},
 	}, issued, nil
 }
+
+// grantChains collects the access key's grants over the buckets a request
+// acts on, with their chains, each delegation once.
+type grantChains struct {
+	chains map[cid.Cid][]cid.Cid
+	blocks []ucan.Delegation
+	seen   map[cid.Cid]bool
+}
+
+func (g *grantChains) add(chains map[cid.Cid][]cid.Cid, blocks []ucan.Delegation) {
+	if g.chains == nil {
+		g.chains, g.seen = map[cid.Cid][]cid.Cid{}, map[cid.Cid]bool{}
+	}
+	for link, chain := range chains {
+		g.chains[link] = chain
+	}
+	for _, b := range blocks {
+		if !g.seen[b.Link()] {
+			g.seen[b.Link()] = true
+			g.blocks = append(g.blocks, b)
+		}
+	}
+}
+
+// has reports whether d is among the collected delegations.
+func (g *grantChains) has(d ucan.Delegation) bool { return g.seen[d.Link()] }
 
 // cleanupCommands are the Forge commands a gateway runs long after the request
 // that caused them: releasing blobs a delete or overwrite left unreferenced,

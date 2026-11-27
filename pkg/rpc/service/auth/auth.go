@@ -198,13 +198,17 @@ func NewAuthorizer(
 // deleted meanwhile is [ErrUnknownAccessKey], the tenant, the provider, the
 // buckets, the principal and the policies. A change submitted after the wait
 // can commit while Authorize reads, and is seen by none of those reads, so
-// the decision is the one the state before it gives, whole. The key's stored
-// grants, which a handler reads after Authorize returns, are read outside
-// the snapshot: see the comment at the status read.
+// the decision is the one the state before it gives, whole. A handler that
+// answers with more of that state, such as the key's stored grants, reads
+// it in the same snapshot ([ReadAlso]).
 //
 // Note that the caller must still check the operation matches the handler's
 // operation: Authorize decides any operation, and a handler serves one.
-func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request) (*AuthorizedRequest, error) {
+func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Request, opts ...AuthorizeOption) (*AuthorizedRequest, error) {
+	var cfg authorizeConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	sr, err := sigv4.Parse(sigv4.Request{
 		Method:  req.Method,
 		Headers: req.Headers,
@@ -266,12 +270,30 @@ func (a *Authorizer) Authorize(ctx context.Context, issuer did.DID, req s3.Reque
 	err = a.ReadSnapshot(ctx, func(ctx context.Context) error {
 		var err error
 		out, err = a.decide(ctx, log, issuer, req, sr, accessKeyID)
-		return err
+		if err != nil || cfg.readAlso == nil {
+			return err
+		}
+		return cfg.readAlso(ctx, out)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// AuthorizeOption configures one call of [Authorizer.Authorize].
+type AuthorizeOption func(*authorizeConfig)
+
+type authorizeConfig struct {
+	readAlso func(ctx context.Context, authz *AuthorizedRequest) error
+}
+
+// ReadAlso makes [Authorizer.Authorize] call read once it has authorized the
+// request, with ctx carrying the snapshot the decision was read in, so that
+// what read reads is of the state the decision was made from. An error from
+// read is Authorize's.
+func ReadAlso(read func(ctx context.Context, authz *AuthorizedRequest) error) AuthorizeOption {
+	return func(c *authorizeConfig) { c.readAlso = read }
 }
 
 // ReadSnapshot runs fn with ctx carrying one read snapshot of the database,
@@ -304,33 +326,12 @@ func (a *Authorizer) decide(ctx context.Context, log *zap.Logger, issuer did.DID
 
 	// The status, and everything else decide reads, is read in the snapshot,
 	// so a change that commits while decide runs leaves the decision as the
-	// state before it gives. The key's stored grants are read by the handler
-	// after Authorize returns, outside the snapshot, and so may be newer
-	// than the status. A status change commits the status together with the
-	// grants it withdraws or issues, so the grants can only be newer, and
-	// the answer grants no more than the older status allows:
-	//
-	//   - Read as active, then disabled: the key's stored grants are gone by
-	//     the time they are read, so nothing the key delegates has a chain
-	//     to the bucket. The answer is the one a request that finished just
-	//     before the change would have had, without the key's grants.
-	//   - Read as disabled, then reactivated: the request is refused below,
-	//     whatever grants have been issued since.
-	//   - Read as write-locked, then active: the request is decided, and
-	//     its permissions reported, as write-locked, which is within what
-	//     an active tenant is allowed.
-	//   - Read as write-locked, then disabled: as the first case, the
-	//     key's stored grants are gone by the time they are read.
-	//   - Read as active, then write-locked: the request is decided as
-	//     active, as one that finished just before the change would have
-	//     been, and the permissions reported are the full set. This is the
-	//     one case the order does not narrow, because the grants a
-	//     write-locked key holds carry commands an upload uses too
-	//     ([s3perm.KeptWhenWriteLocked]): the gateway holds the full set
-	//     until it asks again.
-	//
-	// Keep the status read no later than the handler's grant reads, and keep
-	// a status change's grant writes in the commit that writes the status.
+	// state before it gives. The authorize handler reads the key's stored
+	// grants in the same snapshot ([ReadAlso]) and answers with them. Every
+	// change to what a key may do on a bucket withdraws the key's grants over
+	// it in the commit that makes the change, and revokes them. So an answer
+	// built from the state before a change carries grants the change
+	// revokes, and the gateway does not keep it.
 	tenantRec, err := a.tenants.Get(ctx, akRec.Tenant)
 	if err != nil {
 		log.Error("looking up tenant", zap.Error(err))
