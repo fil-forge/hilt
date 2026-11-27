@@ -63,7 +63,6 @@ func NewTenantQueue(
 	secrets vault.Vault,
 	directory *plc.DirectoryClient,
 	publisher grant.RevocationPublisher,
-	uploads tenantqueue.Uploads,
 	logger *zap.Logger,
 ) (*tenantqueue.Queue, error) {
 	return tenantqueue.New(runner, tenantqueue.Deps{
@@ -77,7 +76,6 @@ func NewTenantQueue(
 		Secrets:     secrets,
 		Directory:   directory,
 		Publisher:   publisher,
-		Uploads:     uploads,
 		Logger:      logger.Named("tenant-changes"),
 	})
 }

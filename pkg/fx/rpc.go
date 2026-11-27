@@ -19,7 +19,6 @@ import (
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	tenantstore "github.com/fil-forge/hilt/pkg/store/tenant"
-	"github.com/fil-forge/hilt/pkg/tasks/tenantqueue"
 	"github.com/fil-forge/hilt/pkg/tracing"
 	"github.com/fil-forge/hilt/pkg/vault"
 	"github.com/fil-forge/libforge/identity"
@@ -46,7 +45,6 @@ var RPCModule = fx.Module("rpc",
 			NewUploadClient,
 			fx.As(fx.Self()),
 			fx.As(new(bucketsvc.UploadClient)),
-			fx.As(new(tenantqueue.Uploads)),
 			fx.As(new(rpc.RoutingClient)),
 			fx.As(new(metricssvc.UsageSampler)),
 		),
