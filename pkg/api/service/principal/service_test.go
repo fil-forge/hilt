@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,22 +17,16 @@ import (
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
 	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
 	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
 	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
 	principalstore "github.com/fil-forge/hilt/pkg/store/principal"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
 	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
@@ -40,43 +35,52 @@ import (
 	"github.com/fil-forge/ucantone/multikey/ed25519"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 type deps struct {
 	svc         *principalsvc.Service
-	tenants     *tenantmemory.Store
-	principals  *principalmemory.Store
-	policies    *bucketpolicymemory.Store
-	accessKeys  *accesskeymemory.Store
+	pool        *pgxpool.Pool
+	tenants     *tenantpostgres.Store
+	principals  *principalpostgres.Store
+	policies    *bucketpolicypostgres.Store
+	accessKeys  *accesskeypostgres.Store
 	secrets     *vaultmemory.Store
-	delegations *delegationmemory.Store
+	delegations *delegationpostgres.Store
 	swarf       *testutil.FakeSwarf
 	grants      *grant.Rotator
 	tenantID    did.DID
 	tenant      ucan.Issuer
 	otherTenant did.DID
+	// providerID is the provider every bucket putPolicy creates is placed with.
+	providerID did.DID
 }
 
-// setup wires the service over memory stores with two tenants, "tenant-1" and
-// the foreign "tenant-2".
+// setup wires the service over a fresh database with two tenants, "tenant-1"
+// and the foreign "tenant-2".
 func setup(t *testing.T) deps {
 	t.Helper()
 	ctx := t.Context()
-	tenants := tenantmemory.New()
+	pool := testutil.PostgresOrSkip(t)
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "region-1", nil))
+	tenants := tenantpostgres.New(pool)
 	tenantID, otherTenant := testutil.RandomDID(t), testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, tenants.Add(ctx, otherTenant, "tenant-2", tenant.Active))
 
-	principals := principalmemory.New()
+	principals := principalpostgres.New(pool)
 	d := deps{
+		pool:        pool,
+		providerID:  providerID,
 		tenants:     tenants,
 		principals:  principals,
-		policies:    bucketpolicymemory.New(),
-		accessKeys:  accesskeymemory.New(accesskeymemory.WithPrincipals(principals.WithLive)),
+		policies:    bucketpolicypostgres.New(pool),
+		accessKeys:  accesskeypostgres.New(pool),
 		secrets:     vaultmemory.New(),
-		delegations: delegationmemory.New(),
+		delegations: delegationpostgres.New(pool),
 		swarf:       &testutil.FakeSwarf{},
 		tenantID:    tenantID,
 		otherTenant: otherTenant,
@@ -92,11 +96,16 @@ func setup(t *testing.T) deps {
 	return d
 }
 
-// putPolicy stores a bucket policy for the tenant and returns the bucket and
-// the stored ETag.
+// bucketNames numbers the buckets putPolicy creates, whose names must differ.
+var bucketNames atomic.Int64
+
+// putPolicy creates a bucket of the tenant, stores a policy on it and returns
+// the bucket and the stored ETag.
 func (d deps) putPolicy(t *testing.T, tenantID did.DID, doc s3bkt.PolicyDocument) (did.DID, string) {
 	t.Helper()
 	bucket := testutil.RandomDID(t)
+	name := fmt.Sprintf("bucket-%d", bucketNames.Add(1))
+	require.NoError(t, bucketpostgres.New(d.pool).Add(t.Context(), bucket, tenantID, d.providerID, name))
 	etag, err := d.policies.Put(t.Context(), bucketpolicystore.Input{Bucket: bucket, Tenant: tenantID, Policy: doc, Conditional: true}, nil)
 	require.NoError(t, err)
 	return bucket, etag
@@ -605,9 +614,10 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 			{Effect: s3bkt.Allow, Principal: s3bkt.Everyone(), Actions: s3bkt.NewStringSet("s3:GetObject"), Resources: s3bkt.NewStringSet(s3bkt.BucketARN("photos"), s3bkt.ObjectsARN("photos"))},
 		}})
 
-		// The removal starts once the key row is committed, and the creation
-		// stores the key's grants while the removal, having revoked under the
-		// principal's row lock, has not yet deleted the row.
+		// The removal starts once the key row is committed. It revokes under the
+		// principal's row lock and parks there, the key rows not yet deleted, so
+		// the creation waits on that lock to store the key's grants and stores
+		// them only once the removal has committed.
 		delegations := &pausingDelegations{Store: d.delegations, revoked: make(chan struct{}), released: make(chan struct{})}
 		principals := &renamingPrincipals{Store: d.principals, write: func() { delegations.armed = true }}
 		grants := grant.NewRotator(zap.NewNop(), delegations, d.accessKeys, d.secrets, d.swarf)
@@ -616,11 +626,11 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		keys := &racingKeys{Store: d.accessKeys, race: func() {
 			go func() { removed <- removal.Delete(ctx, "tenant-1", "user-1") }()
 			<-delegations.revoked
+			time.AfterFunc(testutil.MinBlock, func() { close(delegations.released) })
 		}}
-		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketmemory.New(), d.policies, delegations, d.secrets, d.swarf)
+		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketpostgres.New(d.pool), d.policies, delegations, d.secrets, d.swarf)
 
 		_, _, _ = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
-		close(delegations.released)
 		require.NoError(t, <-removed)
 
 		_, err = d.accessKeys.Get(ctx, keys.added)
@@ -636,7 +646,7 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 		keys := &removeBeforeAdd{Store: d.accessKeys, remove: func() {
 			require.NoError(t, d.svc.Delete(ctx, "tenant-1", "user-1"))
 		}}
-		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketmemory.New(), d.policies, d.delegations, d.secrets, d.swarf)
+		creator := accesskeysvc.New(zap.NewNop(), d.tenants, keys, d.principals, bucketpostgres.New(d.pool), d.policies, d.delegations, d.secrets, d.swarf)
 		_, _, err = creator.Create(ctx, "tenant-1", "laptop", nil, nil, new("user-1"), nil)
 		require.ErrorIs(t, err, accesskeysvc.ErrUnknownPrincipal)
 
@@ -650,7 +660,7 @@ func TestDeleteDuringKeyCreate(t *testing.T) {
 }
 
 // TestDeleteDuringPolicyWritePostgres removes a principal while a policy write
-// that drops it is in flight, on Postgres. The write holds the bucket and then
+// that drops it is in flight. The write holds the bucket and then
 // locks the principal, as its delegation rotation does. The removal rewrites
 // the bucket's policy before it locks the principal, so neither waits on the
 // other: the removal returns at once when the write commits, with the work

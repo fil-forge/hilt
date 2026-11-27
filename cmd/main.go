@@ -42,7 +42,7 @@ func main() {
 	serveCmd.Flags().Bool("insecure-did-resolution", false, "resolve did:web DIDs over HTTP instead of HTTPS on the UCAN RPC server (insecure; development only)")
 
 	// storage config
-	serveCmd.Flags().String("storage", "postgres", "storage backend (memory or postgres)")
+	serveCmd.Flags().String("storage", "postgres", "storage backend (postgres)")
 	serveCmd.Flags().String("postgres-dsn", "", "postgres connection string (used when storage=postgres)")
 	serveCmd.Flags().Bool("skip-migrations", false, "skip running postgres migrations on startup")
 

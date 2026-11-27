@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/fil-forge/hilt/pkg/config"
-	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
 	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
 	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
 	vaultopenbao "github.com/fil-forge/hilt/pkg/fx/vault/openbao"
@@ -12,7 +11,8 @@ import (
 )
 
 // AppModule aggregates all application modules into a single fx option,
-// selecting the storage backend from the configured storage type.
+// selecting the vault backend from the configured vault type. Storage is
+// always Postgres; any other storage type is an error.
 func AppModule(cfg *config.Config) fx.Option {
 	opts := []fx.Option{
 		fx.Supply(cfg),
@@ -27,13 +27,11 @@ func AppModule(cfg *config.Config) fx.Option {
 	}
 
 	switch cfg.Storage.Type {
-	case config.StorageTypeMemory:
-		opts = append(opts, storememory.Module)
 	case config.StorageTypePostgres, "":
 		// Empty type is treated as the default backend (postgres).
 		opts = append(opts, storepostgres.Module)
 	default:
-		return fx.Error(fmt.Errorf("unknown storage.type %q (valid: memory, postgres)", cfg.Storage.Type))
+		return fx.Error(fmt.Errorf("unknown storage.type %q (valid: postgres)", cfg.Storage.Type))
 	}
 
 	switch cfg.Vault.Type {

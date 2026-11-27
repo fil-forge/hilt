@@ -8,7 +8,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -47,7 +47,7 @@ func (c *countingProviders) blockReads() (release func()) {
 	return func() { close(c.release) }
 }
 
-// resolverFixture is a providerResolver over an in-memory provider store, a
+// resolverFixture is a providerResolver over a provider store, a
 // next resolver that counts its calls, and a clock the test moves.
 type resolverFixture struct {
 	resolver  *providerResolver
@@ -58,8 +58,9 @@ type resolverFixture struct {
 
 func newResolverFixture(t *testing.T) *resolverFixture {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	f := &resolverFixture{
-		providers: &countingProviders{Store: providermemory.New()},
+		providers: &countingProviders{Store: providerpostgres.New(pool)},
 		now:       time.Now(),
 	}
 	next := did.ResolverFunc(func(_ context.Context, d did.DID) (did.Document, error) {

@@ -110,8 +110,8 @@ func (s *Store) GetByRegion(ctx context.Context, region string) (provider.Record
 
 func (s *Store) List(ctx context.Context) ([]provider.Record, error) {
 	// COLLATE "C" orders by bytes. The database's default collation is locale
-	// aware and case-insensitive at its primary level, which would order the
-	// mixed-case base58 of did:key strings differently from the memory store.
+	// aware and case-insensitive at its primary level, which would not order
+	// the mixed-case base58 of did:key strings by their bytes.
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, region, policy, created_at, updated_at
 		FROM provider

@@ -6,7 +6,7 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
-	storememory "github.com/fil-forge/hilt/pkg/fx/store/memory"
+	storepostgres "github.com/fil-forge/hilt/pkg/fx/store/postgres"
 	vaultmemory "github.com/fil-forge/hilt/pkg/fx/vault/memory"
 	providerstore "github.com/fil-forge/hilt/pkg/store/provider"
 	"github.com/fil-forge/libforge/identity"
@@ -18,6 +18,7 @@ import (
 	"github.com/fil-forge/ucantone/ucan/delegation"
 	"github.com/fil-forge/ucantone/ucan/invocation"
 	"github.com/ipfs/go-cid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -48,7 +49,8 @@ type rpcApp struct {
 }
 
 // newRPCApp builds the RPC module, with the API module that provides the
-// policy writes the bucket service uses, over in-memory backends and returns
+// policy writes the bucket service uses, over a test database and the
+// in-memory vault, and returns
 // the route groups and the server built from them, so a test sees the
 // wiring the app actually gets (RPCModule decides which group a handler
 // joins). fx.New executes Invoke functions immediately, so the values are
@@ -59,11 +61,29 @@ func newRPCApp(t *testing.T) (routes []server.Route, admin []server.Route, srv *
 	return app.routes, app.admin, app.srv, app.id
 }
 
+// testStorage returns the Postgres store module and the storage config that
+// points it at a fresh test database. The module's pool connects on first use,
+// so a graph that is built and never started still reaches the database; the
+// pool is closed when the test finishes.
+func testStorage(t *testing.T) (config.StorageConfig, fx.Option) {
+	t.Helper()
+	dsn := testutil.PostgresOrSkip(t).Config().ConnString()
+	storage := config.StorageConfig{
+		Type:     config.StorageTypePostgres,
+		Postgres: config.PostgresConfig{DSN: dsn, SkipMigrations: true},
+	}
+	return storage, fx.Options(
+		storepostgres.Module,
+		fx.Invoke(func(pool *pgxpool.Pool) { t.Cleanup(pool.Close) }),
+	)
+}
+
 // newFullRPCApp is newRPCApp with everything it built.
 func newFullRPCApp(t *testing.T) (out rpcApp) {
 	t.Helper()
+	storage, stores := testStorage(t)
 	cfg := &config.Config{
-		Storage:    config.StorageConfig{Type: config.StorageTypeMemory},
+		Storage:    storage,
 		Vault:      config.VaultConfig{Type: config.VaultTypeMemory},
 		Upload:     config.UploadConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://sprue.test", ProductID: testutil.RandomDID(t).String()},
 		Revocation: config.RevocationConfig{ServiceID: testutil.RandomDID(t).String(), ServiceURL: "http://swarf.test"},
@@ -76,7 +96,7 @@ func newFullRPCApp(t *testing.T) (out rpcApp) {
 		appfx.RevocationModule,
 		appfx.APIModule,
 		appfx.RPCModule,
-		storememory.Module,
+		stores,
 		vaultmemory.Module,
 		fx.NopLogger,
 		// The handlers log their rejections; keep the test output quiet.

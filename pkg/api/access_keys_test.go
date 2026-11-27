@@ -14,34 +14,46 @@ import (
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
 	principalsvc "github.com/fil-forge/hilt/pkg/api/service/principal"
 	"github.com/fil-forge/hilt/pkg/store"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/fil-forge/ucantone/did/plc"
 	"github.com/fil-forge/ucantone/multikey/secp256k1"
 	"github.com/fil-forge/ucantone/ucan"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 type accessKeyDeps struct {
-	tenants     *tenantmemory.Store
-	accessKeys  *accesskeymemory.Store
-	principals  *principalmemory.Store
-	buckets     *bucketmemory.Store
-	delegations *delegationmemory.Store
+	pool        *pgxpool.Pool
+	providerID  did.DID // the provider every bucket is placed with
+	tenants     *tenantpostgres.Store
+	accessKeys  *accesskeypostgres.Store
+	principals  *principalpostgres.Store
+	buckets     *bucketpostgres.Store
+	delegations *delegationpostgres.Store
 	vault       vault.Vault
 	tenantID    did.DID // owner of "tenant-1" + "bucket-a", with principal "alice"
 	bucketID    did.DID // "bucket-a", owned by tenant-1
 	otherBucket string  // "bucket-b", owned by a different tenant
+}
+
+// addProvider registers a provider for buckets to be placed with.
+func addProvider(t *testing.T, pool *pgxpool.Pool) did.DID {
+	t.Helper()
+	id := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(t.Context(), id, "region-"+id.String(), nil))
+	return id
 }
 
 // addTenant creates a tenant with a real did:plc key written to the vault and a
@@ -60,19 +72,22 @@ func addTenant(t *testing.T, deps *accessKeyDeps, externalID, bucketName string)
 	require.NoError(t, deps.tenants.Add(ctx, tenantID, externalID, tenant.Active))
 	require.NoError(t, deps.vault.Write(ctx, "/tenant/"+tenantID.String(), signer.Bytes()))
 	bucketID := testutil.RandomDID(t)
-	require.NoError(t, deps.buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), bucketName))
+	require.NoError(t, deps.buckets.Add(ctx, bucketID, tenantID, deps.providerID, bucketName))
 	return tenantID, bucketID
 }
 
 func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	t.Helper()
-	tenants := tenantmemory.New()
+	pool := testutil.PostgresOrSkip(t)
+	tenants := tenantpostgres.New(pool)
 	deps := &accessKeyDeps{
+		pool:        pool,
+		providerID:  addProvider(t, pool),
 		tenants:     tenants,
-		accessKeys:  accesskeymemory.New(accesskeymemory.WithTenants(tenants)),
-		principals:  principalmemory.New(),
-		buckets:     bucketmemory.New(),
-		delegations: delegationmemory.New(),
+		accessKeys:  accesskeypostgres.New(pool),
+		principals:  principalpostgres.New(pool),
+		buckets:     bucketpostgres.New(pool),
+		delegations: delegationpostgres.New(pool),
 		vault:       vaultmemory.New(),
 		otherBucket: "bucket-b",
 	}
@@ -80,7 +95,7 @@ func setupAccessKeys(t *testing.T) (*echo.Echo, *accessKeyDeps) {
 	addTenant(t, deps, "tenant-2", deps.otherBucket) // a foreign tenant + bucket
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "alice"))
 
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), deps.delegations, deps.vault, &testutil.FakeSwarf{})
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicypostgres.New(pool), deps.delegations, deps.vault, &testutil.FakeSwarf{})
 	e := echo.New()
 	for _, r := range []api.Route{
 		api.NewCreateAccessKeyHandler(zap.NewNop(), svc),
@@ -559,7 +574,7 @@ func TestDeleteAccessKeyHandler(t *testing.T) {
 // heldBeforeReplace answers Replace as if a policy write had rotated the key
 // meanwhile: the callback sees each audience already holding a delegation.
 // Only the count is read, so the held delegation is a placeholder.
-type heldBeforeReplace struct{ *delegationmemory.Store }
+type heldBeforeReplace struct{ *delegationpostgres.Store }
 
 func (h heldBeforeReplace) Replace(ctx context.Context, audiences []did.DID, next func(context.Context, map[did.DID][]ucan.Delegation) (map[did.DID][]ucan.Delegation, error)) error {
 	current := make(map[did.DID][]ucan.Delegation, len(audiences))
@@ -572,7 +587,7 @@ func (h heldBeforeReplace) Replace(ctx context.Context, audiences []did.DID, nex
 
 func TestCreateAccessKeyRotatedMeanwhileHandler(t *testing.T) {
 	_, deps := setupAccessKeys(t)
-	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicymemory.New(), heldBeforeReplace{deps.delegations}, deps.vault, &testutil.FakeSwarf{})
+	svc := accesskeysvc.New(zap.NewNop(), deps.tenants, deps.accessKeys, deps.principals, deps.buckets, bucketpolicypostgres.New(deps.pool), heldBeforeReplace{deps.delegations}, deps.vault, &testutil.FakeSwarf{})
 	e := echo.New()
 	route := api.NewCreateAccessKeyHandler(zap.NewNop(), svc)
 	e.Add(route.Method, route.Path, route.Handler)

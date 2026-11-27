@@ -10,8 +10,7 @@
 // committing, so a caller can run a callback with the guarantee that
 // a share-locked read of the bucket (see [store.WithShareLock]) waits for the
 // outcome, whether the write creates, replaces or deletes the policy. A
-// callback error rolls the write back. The memory backend runs the callback
-// under the store mutex.
+// callback error rolls the write back.
 package bucketpolicy
 
 import (
@@ -81,8 +80,7 @@ type Store interface {
 	// [store.LockTimeout]; a longer wait returns [store.ErrLockTimeout] and
 	// nothing is written.
 	//
-	// fn must not read or write this store: on the memory backend it
-	// runs under the store mutex, and on Postgres a locked read of the same row
+	// fn must not read or write this store: a locked read of the same row
 	// would wait on the lock the call itself holds.
 	Put(ctx context.Context, in Input, fn func(ctx context.Context, old *Record) error) (string, error)
 	// Delete removes the bucket's policy in one transaction, under the same
@@ -105,9 +103,8 @@ type Store interface {
 	// ordered by bucket. It is answered from the index. With [store.WithShareLock]
 	// the read waits for in-flight writes of the listed rows.
 	//
-	// Deleting a principal removes its index rows on Postgres by cascade but
-	// not on the memory backend, and neither backend rewrites the policies.
-	// Principal removal must strip the principal from each listed policy
+	// Deleting a principal removes its index rows by cascade but does not
+	// rewrite the policies. Principal removal must strip the principal from each listed policy
 	// itself and must not rely on the cascade.
 	ListByPrincipal(ctx context.Context, tenant did.DID, principal string, opts ...store.ReadOption) ([]Record, error)
 }

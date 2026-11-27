@@ -81,8 +81,8 @@ func NewPrincipalKey(id, tenant did.DID, name, principal string, expiresAt *time
 }
 
 // Validate checks the input's own consistency (not its referential integrity),
-// returning [store.ErrInvalidArgument] wrapped with the reason. Both backends
-// apply it before writing.
+// returning [store.ErrInvalidArgument] wrapped with the reason. The store
+// applies it before writing.
 func (in Input) Validate() error {
 	switch {
 	case in.ID == did.Undef:

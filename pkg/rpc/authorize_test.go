@@ -6,22 +6,23 @@ import (
 
 	s3bkt "github.com/fil-forge/libforge/commands/s3/bucket"
 
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/rpc"
 	"github.com/fil-forge/hilt/pkg/rpc/service/auth"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/sigv4"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
 	bucketpolicystore "github.com/fil-forge/hilt/pkg/store/bucketpolicy"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	delegationstore "github.com/fil-forge/hilt/pkg/store/delegation"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/libforge/commands/blob"
@@ -118,12 +119,13 @@ func TestAuthorizeRequest(t *testing.T) {
 	// Each opt adjusts the stored key before it is added.
 	// storeFor is the delegation store each setup built its authorizer over.
 	storeFor := map[*auth.Authorizer]delegationstore.Store{}
-	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *bucketpolicymemory.Store) {
+	setup := func(t *testing.T, perms []string, principalBound bool, vaultSigner ed25519.Signer, opts ...func(*accesskey.Input)) (*auth.Authorizer, *bucketpolicypostgres.Store) {
 		t.Helper()
-		accessKeys, tenants, buckets := accesskeymemory.New(), tenantmemory.New(), bucketmemory.New()
-		providers, secrets := providermemory.New(), vaultmemory.New()
-		principals, policies := principalmemory.New(), bucketpolicymemory.New()
-		dels := delegationmemory.New()
+		pool := htestutil.PostgresOrSkip(t)
+		accessKeys, tenants, buckets := accesskeypostgres.New(pool), tenantpostgres.New(pool), bucketpostgres.New(pool)
+		providers, secrets := providerpostgres.New(pool), vaultmemory.New()
+		principals, policies := principalpostgres.New(pool), bucketpolicypostgres.New(pool)
+		dels := delegationpostgres.New(pool)
 
 		require.NoError(t, providers.Add(ctx, providerID, region, nil))
 		require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
@@ -155,7 +157,7 @@ func TestAuthorizeRequest(t *testing.T) {
 	}
 
 	// grant stores a policy allowing "user-1" the given actions on the bucket.
-	grant := func(t *testing.T, policies *bucketpolicymemory.Store, actions ...string) {
+	grant := func(t *testing.T, policies *bucketpolicypostgres.Store, actions ...string) {
 		t.Helper()
 		_, err := policies.Put(ctx, bucketpolicystore.Input{
 			Bucket: bucketID,
@@ -435,9 +437,10 @@ func TestAuthorizeRequest(t *testing.T) {
 	})
 
 	t.Run("a bucket with no root delegation gets no cleanup delegations", func(t *testing.T) {
+		pool := htestutil.PostgresOrSkip(t)
 		az, _ := setup(t, []string{"s3:PutObject"}, false, akSigner)
 		args := signedArgs(t, akSigner, "PUT", "https://s3.fil.one/"+bucketName+"/object-key", region)
-		_, blocks, err := rpc.AuthorizeRequest(ctx, zap.NewNop(), az, delegationmemory.New(), providerID, args)
+		_, blocks, err := rpc.AuthorizeRequest(ctx, zap.NewNop(), az, delegationpostgres.New(pool), providerID, args)
 		require.NoError(t, err)
 		require.Empty(t, issuedBy(blocks, tenantID))
 		require.Len(t, blocks, len(s3perm.CommandsFor("s3:PutObject")))

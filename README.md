@@ -63,8 +63,8 @@ its own trace. The other standard `OTEL_*` environment variables apply:
 | `storage.postgres.min_conns` | _(none)_ | `HILT_STORAGE_POSTGRES_MIN_CONNS` | `0` |
 | `storage.postgres.skip_migrations` | `--skip-migrations` | `HILT_STORAGE_POSTGRES_SKIP_MIGRATIONS` | `false` |
 
-`storage.type` is `postgres` or `memory`. Postgres keys apply when
-`type=postgres`; migrations run on startup unless `skip_migrations` is set.
+`storage.type` is always `postgres`; any other value is refused at startup.
+Migrations run on startup unless `skip_migrations` is set.
 
 ### Vault (private-key storage)
 

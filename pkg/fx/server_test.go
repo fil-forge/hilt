@@ -6,19 +6,21 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/build"
 	"github.com/fil-forge/hilt/pkg/config"
 	appfx "github.com/fil-forge/hilt/pkg/fx"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 func TestServerInfoRoute(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providermemory.New(), Logger: zap.NewNop()})
+	srv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providerpostgres.New(pool), Logger: zap.NewNop()})
 	require.NoError(t, err)
 
 	e := appfx.NewEchoServer(appfx.ServerParams{
@@ -63,10 +65,11 @@ func TestServerInfoRoute(t *testing.T) {
 }
 
 func TestHealthRoute(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providermemory.New(), Logger: zap.NewNop()})
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providerpostgres.New(pool), Logger: zap.NewNop()})
 	require.NoError(t, err)
 
 	e := appfx.NewEchoServer(appfx.ServerParams{
@@ -87,10 +90,11 @@ func TestHealthRoute(t *testing.T) {
 }
 
 func TestDIDDocumentRoute(t *testing.T) {
+	pool := htestutil.PostgresOrSkip(t)
 	id, err := appfx.NewIdentity(config.IdentityConfig{}, zap.NewNop())
 	require.NoError(t, err)
 
-	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providermemory.New(), Logger: zap.NewNop()})
+	ucanSrv, err := appfx.NewUCANServer(appfx.UCANServerParams{Identity: id, Providers: providerpostgres.New(pool), Logger: zap.NewNop()})
 	require.NoError(t, err)
 
 	e := appfx.NewEchoServer(appfx.ServerParams{

@@ -10,12 +10,13 @@ import (
 	"github.com/fil-forge/hilt/internal/testutil"
 	metricssvc "github.com/fil-forge/hilt/pkg/api/service/metrics"
 	"github.com/fil-forge/hilt/pkg/client/upload"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	usagestore "github.com/fil-forge/hilt/pkg/store/usage"
-	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
+	usagepostgres "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	metricscmds "github.com/fil-forge/libforge/commands/metrics"
@@ -43,10 +44,12 @@ type sampled struct {
 	// service having clamped that call against a different instant.
 	series map[did.DID][]metricscmds.SampleItem
 	// usage is the store the service reads the gateways' counts from.
-	usage *usagememory.Store
+	usage *usagepostgres.Store
+	// buckets says which provider and tenant a bucket's counts belong to.
+	buckets *bucketpostgres.Store
 }
 
-// setup wires the metrics service over memory stores against an in-process Sprue
+// setup wires the metrics service against an in-process Sprue
 // that serves /metrics/sample, mirroring production: one tenant whose secp256k1
 // key is in the vault, owning two buckets, each of which has issued the
 // tenant top authority over itself. That root lives only in the delegation store, as
@@ -54,20 +57,23 @@ type sampled struct {
 // static set loaded from config and never contain it.
 func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DID, did.DID, *sampled) {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
-	tenants, buckets := tenantmemory.New(), bucketmemory.New()
-	delegations, secrets := delegationmemory.New(), vaultmemory.New()
+	tenants, buckets := tenantpostgres.New(pool), bucketpostgres.New(pool)
+	delegations, secrets := delegationpostgres.New(pool), vaultmemory.New()
 
 	signer, err := secp256k1.Generate()
 	require.NoError(t, err)
 	tenantID := signer.KeyDID()
 	require.NoError(t, tenants.Add(ctx, tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, secrets.Write(ctx, vault.TenantKeyPath(tenantID), signer.Bytes()))
+	providerID := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(pool).Add(ctx, providerID, "region-1", nil))
 
 	bucketSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketID := bucketSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, testutil.RandomDID(t), "bucket-a"))
+	require.NoError(t, buckets.Add(ctx, bucketID, tenantID, providerID, "bucket-a"))
 	root, err := delegation.Delegate(
 		multikey.NewIssuer(bucketID, bucketSigner), tenantID, bucketID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)
@@ -76,7 +82,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 	bucketBSigner, err := ed25519.Generate()
 	require.NoError(t, err)
 	bucketBID := bucketBSigner.KeyDID()
-	require.NoError(t, buckets.Add(ctx, bucketBID, tenantID, testutil.RandomDID(t), "bucket-b"))
+	require.NoError(t, buckets.Add(ctx, bucketBID, tenantID, providerID, "bucket-b"))
 	rootB, err := delegation.Delegate(
 		multikey.NewIssuer(bucketBID, bucketBSigner), tenantID, bucketBID, command.Top(), delegation.WithNoExpiration())
 	require.NoError(t, err)
@@ -86,7 +92,7 @@ func setup(t *testing.T, opts ...metricssvc.Option) (*metricssvc.Service, did.DI
 	require.NoError(t, err)
 	sprue := multikey.NewIssuer(sprueSigner.KeyDID(), sprueSigner)
 
-	seen := &sampled{series: map[did.DID][]metricscmds.SampleItem{}, usage: usagememory.New()}
+	seen := &sampled{series: map[did.DID][]metricscmds.SampleItem{}, usage: usagepostgres.New(pool), buckets: buckets}
 	srv := server.NewHTTP(sprue)
 	srv.Handle(metricscmds.Sample.Command, metricscmds.Sample.Handler(
 		func(req *binding.Request[*metricscmds.SampleArguments], res *binding.Response[*metricscmds.SampleOK]) error {
@@ -292,8 +298,12 @@ func TestTenantSumsAlignedRunsWhole(t *testing.T) {
 // of an hour: how many it has ever gained and lost.
 func reportObjects(t *testing.T, seen *sampled, bucket did.DID, hour time.Time, added, removed uint64) {
 	t.Helper()
-	require.NoError(t, seen.usage.SetObjects(t.Context(), testutil.RandomDID(t), []usagestore.ObjectCount{
-		{Bucket: bucket, Tenant: testutil.RandomDID(t), Hour: hour, Added: added, Removed: removed},
+	// Reported by the bucket's own provider for its own tenant, which the
+	// counts' foreign keys require.
+	owner, err := seen.buckets.Owner(t.Context(), bucket)
+	require.NoError(t, err)
+	require.NoError(t, seen.usage.SetObjects(t.Context(), owner.Provider, []usagestore.ObjectCount{
+		{Bucket: bucket, Tenant: owner.Tenant, Hour: hour, Added: added, Removed: removed},
 	}))
 }
 

@@ -229,8 +229,8 @@ func (s *Store) Delete(ctx context.Context, bucket did.DID, ifMatch string, befo
 }
 
 // DeleteByBucket removes the bucket's policy unconditionally, under the
-// bucket's advisory lock so it serializes with a Put or Delete in flight the
-// way the memory backend's mutex does, and runs beforeCommit while holding it.
+// bucket's advisory lock so it serializes with a Put or Delete in flight, and
+// runs beforeCommit while holding it.
 func (s *Store) DeleteByBucket(ctx context.Context, bucket did.DID, beforeCommit func(ctx context.Context) error) (err error) {
 	defer func() { err = pglock.MapError(err) }()
 	tx, err := pglock.Begin(ctx, s.pool)

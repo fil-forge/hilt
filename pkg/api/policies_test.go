@@ -13,13 +13,13 @@ import (
 	"github.com/fil-forge/hilt/pkg/api"
 	bucketpolicysvc "github.com/fil-forge/hilt/pkg/api/service/bucketpolicy"
 	"github.com/fil-forge/hilt/pkg/grant"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/ucantone/did"
 	"github.com/labstack/echo/v4"
@@ -28,33 +28,34 @@ import (
 )
 
 type policyDeps struct {
-	buckets    *bucketmemory.Store
-	principals *principalmemory.Store
+	buckets    *bucketpostgres.Store
+	principals *principalpostgres.Store
 	policies   *bucketpolicysvc.Service
 	tenantID   did.DID // "tenant-1"
 	photos     did.DID
 }
 
-// setupPolicies serves every policy route over memory stores, with two tenants
+// setupPolicies serves every policy route over a test database, with two tenants
 // and one bucket, "photos", owned by "tenant-1".
 func setupPolicies(t *testing.T) (*echo.Echo, *policyDeps) {
 	t.Helper()
-	tenants := tenantmemory.New()
+	pool := testutil.PostgresOrSkip(t)
+	tenants := tenantpostgres.New(pool)
 	deps := &policyDeps{
-		buckets:    bucketmemory.New(),
-		principals: principalmemory.New(),
+		buckets:    bucketpostgres.New(pool),
+		principals: principalpostgres.New(pool),
 		tenantID:   testutil.RandomDID(t),
 		photos:     testutil.RandomDID(t),
 	}
 	require.NoError(t, tenants.Add(t.Context(), deps.tenantID, "tenant-1", tenant.Active))
 	require.NoError(t, tenants.Add(t.Context(), testutil.RandomDID(t), "tenant-2", tenant.Active))
-	require.NoError(t, deps.buckets.Add(t.Context(), deps.photos, deps.tenantID, testutil.RandomDID(t), "photos"))
+	require.NoError(t, deps.buckets.Add(t.Context(), deps.photos, deps.tenantID, addProvider(t, pool), "photos"))
 	require.NoError(t, deps.principals.Add(t.Context(), deps.tenantID, "user-1"))
 
 	// No principal holds a key here, so the grant rotator has nothing to
 	// issue; the routes are what is under test.
-	grants := grant.NewRotator(zap.NewNop(), delegationmemory.New(), accesskeymemory.New(), vaultmemory.New(), &testutil.FakeSwarf{})
-	svc := bucketpolicysvc.New(zap.NewNop(), tenants, deps.buckets, deps.principals, bucketpolicymemory.New(), grants)
+	grants := grant.NewRotator(zap.NewNop(), delegationpostgres.New(pool), accesskeypostgres.New(pool), vaultmemory.New(), &testutil.FakeSwarf{})
+	svc := bucketpolicysvc.New(zap.NewNop(), tenants, deps.buckets, deps.principals, bucketpolicypostgres.New(pool), grants)
 	deps.policies = svc
 	e := echo.New()
 	for _, r := range []api.Route{

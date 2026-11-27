@@ -6,11 +6,15 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/rpc"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
+	"github.com/fil-forge/hilt/pkg/store/tenant"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	usagestore "github.com/fil-forge/hilt/pkg/store/usage"
-	usagememory "github.com/fil-forge/hilt/pkg/store/usage/memory"
+	usagepostgres "github.com/fil-forge/hilt/pkg/store/usage/postgres"
 	"github.com/fil-forge/libforge/commands/s3/usage"
 	"github.com/fil-forge/ucantone/did"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -20,10 +24,11 @@ var (
 	usageHour1 = usageHour0.Add(time.Hour)
 )
 
-// usageFixture is a provider serving one tenant's bucket, over memory stores.
+// usageFixture is a provider serving one tenant's bucket.
 type usageFixture struct {
-	buckets  *bucketmemory.Store
-	counts   *usagememory.Store
+	pool     *pgxpool.Pool
+	buckets  *bucketpostgres.Store
+	counts   *usagepostgres.Store
 	provider did.DID
 	tenant   did.DID
 	bucket   did.DID
@@ -31,15 +36,32 @@ type usageFixture struct {
 
 func newUsageFixture(t *testing.T) *usageFixture {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	f := &usageFixture{
-		buckets:  bucketmemory.New(),
-		counts:   usagememory.New(),
-		provider: testutil.RandomDID(t),
-		tenant:   testutil.RandomDID(t),
-		bucket:   testutil.RandomDID(t),
+		pool:    pool,
+		buckets: bucketpostgres.New(pool),
+		counts:  usagepostgres.New(pool),
+		bucket:  testutil.RandomDID(t),
 	}
+	f.provider, f.tenant = f.newProvider(t), f.newTenant(t)
 	require.NoError(t, f.buckets.Add(t.Context(), f.bucket, f.tenant, f.provider, "photos"))
 	return f
+}
+
+// newProvider registers a provider.
+func (f *usageFixture) newProvider(t *testing.T) did.DID {
+	t.Helper()
+	id := testutil.RandomDID(t)
+	require.NoError(t, providerpostgres.New(f.pool).Add(t.Context(), id, "region-"+id.String(), nil))
+	return id
+}
+
+// newTenant creates a tenant.
+func (f *usageFixture) newTenant(t *testing.T) did.DID {
+	t.Helper()
+	id := testutil.RandomDID(t)
+	require.NoError(t, tenantpostgres.New(f.pool).Add(t.Context(), id, "ext-"+id.String(), tenant.Active))
+	return id
 }
 
 func (f *usageFixture) report(t *testing.T, provider did.DID, egress ...usage.SpaceEgress) (*usage.ReportOK, error) {
@@ -91,7 +113,7 @@ func TestReportUsageSkipsBucketsItCannotAttribute(t *testing.T) {
 	f := newUsageFixture(t)
 	unknown := testutil.RandomDID(t)
 	theirs := testutil.RandomDID(t)
-	require.NoError(t, f.buckets.Add(t.Context(), theirs, testutil.RandomDID(t), testutil.RandomDID(t), "elsewhere"))
+	require.NoError(t, f.buckets.Add(t.Context(), theirs, f.newTenant(t), f.newProvider(t), "elsewhere"))
 
 	ok, err := f.report(t, f.provider,
 		usage.SpaceEgress{Space: unknown, Hours: hours(1)},
@@ -151,7 +173,7 @@ func TestReportUsageChecksTheCountsOfBucketsItLeavesOut(t *testing.T) {
 	f := newUsageFixture(t)
 	good := usage.HourEgress{Hour: usageHour0.Unix(), Bytes: 10}
 	unknown := testutil.RandomDID(t)
-	stranger, strangers := testutil.RandomDID(t), testutil.RandomDID(t)
+	stranger, strangers := f.newProvider(t), testutil.RandomDID(t)
 	require.NoError(t, f.buckets.Add(t.Context(), strangers, f.tenant, stranger, "elsewhere"))
 	mine := usage.SpaceEgress{Space: f.bucket, Hours: []usage.HourEgress{good}}
 

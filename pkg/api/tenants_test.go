@@ -18,17 +18,17 @@ import (
 	"github.com/fil-forge/hilt/pkg/client/upload"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
-	accesskeymemory "github.com/fil-forge/hilt/pkg/store/accesskey/memory"
-	bucketmemory "github.com/fil-forge/hilt/pkg/store/bucket/memory"
-	bucketpolicymemory "github.com/fil-forge/hilt/pkg/store/bucketpolicy/memory"
-	delegationmemory "github.com/fil-forge/hilt/pkg/store/delegation/memory"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
+	accesskeypostgres "github.com/fil-forge/hilt/pkg/store/accesskey/postgres"
+	bucketpostgres "github.com/fil-forge/hilt/pkg/store/bucket/postgres"
+	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
+	delegationpostgres "github.com/fil-forge/hilt/pkg/store/delegation/postgres"
+	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	"github.com/fil-forge/hilt/pkg/store/provider"
-	providermemory "github.com/fil-forge/hilt/pkg/store/provider/memory"
+	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
-	tenantmemory "github.com/fil-forge/hilt/pkg/store/tenant/memory"
+	tenantpostgres "github.com/fil-forge/hilt/pkg/store/tenant/postgres"
 	wrapkeystore "github.com/fil-forge/hilt/pkg/store/wrapkey"
-	wrapkeymemory "github.com/fil-forge/hilt/pkg/store/wrapkey/memory"
+	wrapkeypostgres "github.com/fil-forge/hilt/pkg/store/wrapkey/postgres"
 	"github.com/fil-forge/hilt/pkg/vault"
 	vaultmemory "github.com/fil-forge/hilt/pkg/vault/memory"
 	"github.com/fil-forge/hilt/pkg/wrapkey"
@@ -43,6 +43,7 @@ import (
 	"github.com/fil-forge/ucantone/ucan/command"
 	"github.com/fil-forge/ucantone/ucan/container"
 	"github.com/fil-forge/ucantone/ucan/delegation"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -84,7 +85,7 @@ func (s *spyVault) liveKeys() int {
 }
 
 // addFailTenantStore is a tenant.Store whose Add always fails. It embeds a real
-// memory store so the handler's idempotency lookup (GetByExternalID) behaves.
+// store so the handler's idempotency lookup (GetByExternalID) behaves.
 type addFailTenantStore struct {
 	tenant.Store
 	err error
@@ -140,8 +141,10 @@ func (s *loseRaceTenantStore) Add(ctx context.Context, _ did.DID, externalID str
 
 type setupConfig struct {
 	plcStatus int
-	tenants   tenant.Store
-	wrapKeys  wrapkeystore.Store
+	// wrapTenants and wrapWrapKeys, when set, decorate the stores the service
+	// is built over.
+	wrapTenants  func(tenant.Store) tenant.Store
+	wrapWrapKeys func(wrapkeystore.Store) wrapkeystore.Store
 }
 
 type provisionDeps struct {
@@ -160,26 +163,23 @@ type provisionDeps struct {
 }
 
 // setupProvision builds an echo server with the provision handler wired to
-// memory stores/vault, a PLC directory client pointed at an httptest server that
+// a test database and the in-memory vault, a PLC directory client pointed at an httptest server that
 // accepts genesis operations, and an upload client pointed at an in-process
 // Sprue stub that handles /customer/add (no real PLC or Sprue network).
 func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps) {
 	t.Helper()
-	var tenants tenant.Store
-	if cfg != nil && cfg.tenants != nil {
-		tenants = cfg.tenants
-	} else {
-		tenants = tenantmemory.New()
+	pool := testutil.PostgresOrSkip(t)
+	var tenants tenant.Store = tenantpostgres.New(pool)
+	if cfg != nil && cfg.wrapTenants != nil {
+		tenants = cfg.wrapTenants(tenants)
 	}
-	var wrapKeys wrapkeystore.Store
-	if cfg != nil && cfg.wrapKeys != nil {
-		wrapKeys = cfg.wrapKeys
-	} else {
-		wrapKeys = wrapkeymemory.New()
+	var wrapKeys wrapkeystore.Store = wrapkeypostgres.New(pool)
+	if cfg != nil && cfg.wrapWrapKeys != nil {
+		wrapKeys = cfg.wrapWrapKeys(wrapKeys)
 	}
 	deps := &provisionDeps{
 		tenants:   tenants,
-		providers: providermemory.New(),
+		providers: providerpostgres.New(pool),
 		wrapKeys:  wrapKeys,
 		secrets:   newSpyVault(),
 		product:   testutil.RandomDID(t),
@@ -230,7 +230,7 @@ func setupProvision(t *testing.T, cfg *setupConfig) (*echo.Echo, *provisionDeps)
 		upload.WithHTTPClient(&http.Client{Transport: srv}))
 	require.NoError(t, err)
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), deps.secrets, deps.wrapKeys, plcClient, upload, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, bucketpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), deps.secrets, deps.wrapKeys, plcClient, upload, &testutil.FakeSwarf{})
 	route := api.NewProvisionTenantHandler(zap.NewNop(), svc)
 	e := echo.New()
 	e.Add(route.Method, route.Path, route.Handler)
@@ -415,9 +415,9 @@ func TestProvisionTenantHandler(t *testing.T) {
 	})
 
 	t.Run("cleans up the orphaned key when storing the tenant fails", func(t *testing.T) {
-		tenants := addFailTenantStore{Store: tenantmemory.New(), err: errors.New("boom")}
-
-		e, deps := setupProvision(t, &setupConfig{tenants: tenants})
+		e, deps := setupProvision(t, &setupConfig{wrapTenants: func(s tenant.Store) tenant.Store {
+			return addFailTenantStore{Store: s, err: errors.New("boom")}
+		}})
 		rec := provisionRequest(t, e, "tenant-7")
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 		// An unexpected failure stays opaque: a message, no code, no cause.
@@ -429,8 +429,9 @@ func TestProvisionTenantHandler(t *testing.T) {
 	})
 
 	t.Run("cleans up both vault keys when storing the wrap key record fails", func(t *testing.T) {
-		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New(), addErr: errors.New("boom")}
-		e, deps := setupProvision(t, &setupConfig{wrapKeys: wrapKeys})
+		e, deps := setupProvision(t, &setupConfig{wrapWrapKeys: func(s wrapkeystore.Store) wrapkeystore.Store {
+			return &spyWrapKeyStore{Store: s, addErr: errors.New("boom")}
+		}})
 
 		rec := provisionRequest(t, e, "tenant-8")
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -444,10 +445,15 @@ func TestProvisionTenantHandler(t *testing.T) {
 
 	t.Run("losing a concurrent create returns the winner and unwinds the loser", func(t *testing.T) {
 		winnerID := testutil.RandomDID(t)
-		wrapKeys := &spyWrapKeyStore{Store: wrapkeymemory.New()}
+		wrapKeys := &spyWrapKeyStore{}
 		e, deps := setupProvision(t, &setupConfig{
-			tenants:  &loseRaceTenantStore{Store: tenantmemory.New(), winnerID: winnerID},
-			wrapKeys: wrapKeys,
+			wrapTenants: func(s tenant.Store) tenant.Store {
+				return &loseRaceTenantStore{Store: s, winnerID: winnerID}
+			},
+			wrapWrapKeys: func(s wrapkeystore.Store) wrapkeystore.Store {
+				wrapKeys.Store = s
+				return wrapKeys
+			},
 		})
 
 		rec := provisionRequest(t, e, "tenant-9")
@@ -495,10 +501,11 @@ func doRequest(t *testing.T, e *echo.Echo, method, target string, body []byte) *
 }
 
 func TestGetTenantHandler(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
-	tenants := tenantmemory.New()
+	tenants := tenantpostgres.New(pool)
 	require.NoError(t, tenants.Add(ctx, testutil.RandomDID(t), "tenant-1", tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), tenants, bucketpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeypostgres.New(pool), nil, nil, &testutil.FakeSwarf{})
 	e := serve(api.NewGetTenantHandler(zap.NewNop(), svc))
 
 	t.Run("found", func(t *testing.T) {
@@ -522,11 +529,12 @@ func TestGetTenantHandler(t *testing.T) {
 }
 
 func TestUpdateTenantStatusHandler(t *testing.T) {
+	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
-	tenants := tenantmemory.New()
+	tenants := tenantpostgres.New(pool)
 	id := testutil.RandomDID(t)
 	require.NoError(t, tenants.Add(ctx, id, "tenant-1", tenant.Active))
-	svc := tenantsvc.New(zap.NewNop(), tenants, bucketmemory.New(), accesskeymemory.New(), principalmemory.New(), bucketpolicymemory.New(), delegationmemory.New(), vaultmemory.New(), wrapkeymemory.New(), nil, nil, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), tenants, bucketpostgres.New(pool), accesskeypostgres.New(pool), principalpostgres.New(pool), bucketpolicypostgres.New(pool), delegationpostgres.New(pool), vaultmemory.New(), wrapkeypostgres.New(pool), nil, nil, &testutil.FakeSwarf{})
 	e := serve(api.NewUpdateTenantStatusHandler(zap.NewNop(), svc))
 
 	statusBody := func(s api.TenantStatus) []byte {
@@ -592,12 +600,13 @@ func (d *plcDirectory) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type deleteDeps struct {
-	tenants     *tenantmemory.Store
-	buckets     *bucketmemory.Store
-	accessKeys  *accesskeymemory.Store
-	principals  *principalmemory.Store
-	delegations *delegationmemory.Store
-	wrapKeys    *wrapkeymemory.Store
+	pool        *pgxpool.Pool
+	tenants     *tenantpostgres.Store
+	buckets     *bucketpostgres.Store
+	accessKeys  *accesskeypostgres.Store
+	principals  *principalpostgres.Store
+	delegations *delegationpostgres.Store
+	wrapKeys    *wrapkeypostgres.Store
 	secrets     vault.Vault
 	directory   *plcDirectory
 	signer      secp256k1.Signer
@@ -618,11 +627,12 @@ func (d *deleteDeps) serveTombstone(t *testing.T) {
 	d.directory.logLast = buf.Bytes()
 }
 
-// setupDelete builds a delete handler over memory stores and an httptest did:plc
+// setupDelete builds a delete handler over a test database and an httptest did:plc
 // directory. The tenant is created with a real did:plc whose genesis op the
 // directory serves, so the handler can fetch it and sign a tombstone.
 func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 	t.Helper()
+	pool := testutil.PostgresOrSkip(t)
 	ctx := t.Context()
 
 	signer, err := secp256k1.Generate()
@@ -647,12 +657,13 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 	require.NoError(t, err)
 
 	deps := &deleteDeps{
-		tenants:     tenantmemory.New(),
-		buckets:     bucketmemory.New(),
-		accessKeys:  accesskeymemory.New(),
-		principals:  principalmemory.New(),
-		delegations: delegationmemory.New(),
-		wrapKeys:    wrapkeymemory.New(),
+		pool:        pool,
+		tenants:     tenantpostgres.New(pool),
+		buckets:     bucketpostgres.New(pool),
+		accessKeys:  accesskeypostgres.New(pool),
+		principals:  principalpostgres.New(pool),
+		delegations: delegationpostgres.New(pool),
+		wrapKeys:    wrapkeypostgres.New(pool),
 		secrets:     vaultmemory.New(),
 		directory:   directory,
 		signer:      signer,
@@ -674,7 +685,7 @@ func setupDelete(t *testing.T, status tenant.Status) (*echo.Echo, *deleteDeps) {
 		VaultKey: wrapkeystore.VaultKey(tenantID, 1),
 	}))
 
-	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.buckets, deps.accessKeys, deps.principals, bucketpolicymemory.New(), deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil, &testutil.FakeSwarf{})
+	svc := tenantsvc.New(zap.NewNop(), deps.tenants, deps.buckets, deps.accessKeys, deps.principals, bucketpolicypostgres.New(pool), deps.delegations, deps.secrets, deps.wrapKeys, plcClient, nil, &testutil.FakeSwarf{})
 	route := api.NewDeleteTenantHandler(zap.NewNop(), svc)
 	return serve(route), deps
 }
@@ -691,12 +702,14 @@ func TestDeleteTenantHandler(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("deletes a disabled tenant and cascades", func(t *testing.T) {
-		e, deps := setupDelete(t, tenant.Disabled)
+		// The tenant is disabled once it owns its resources: a disabled tenant
+		// takes no new key.
+		e, deps := setupDelete(t, tenant.Active)
 
 		// Seed owned resources: a bucket, an access key (+ vault key), and
 		// delegations addressed to the tenant and to the access key.
 		bucketID := testutil.RandomDID(t)
-		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, testutil.RandomDID(t), "bucket-1"))
+		require.NoError(t, deps.buckets.Add(ctx, bucketID, deps.tenantID, addProvider(t, deps.pool), "bucket-1"))
 		akID := testutil.RandomDID(t)
 		require.NoError(t, deps.accessKeys.Add(ctx, accesskey.Input{ID: akID, Tenant: deps.tenantID, Name: "k1", Permissions: []string{"s3:GetObject"}}))
 		akVaultKey := "/tenant/" + deps.tenantID.String() + "/access-key/" + akID.String()
@@ -704,6 +717,7 @@ func TestDeleteTenantHandler(t *testing.T) {
 		require.NoError(t, deps.principals.Add(ctx, deps.tenantID, "user-1"))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, deps.tenantID)}))
 		require.NoError(t, deps.delegations.PutBatch(ctx, []ucan.Delegation{makeDelegation(t, akID)}))
+		require.NoError(t, deps.tenants.SetStatus(ctx, deps.tenantID, tenant.Disabled))
 
 		rec := doRequest(t, e, http.MethodDelete, "/tenants/tenant-1", nil)
 		require.Equal(t, http.StatusNoContent, rec.Code)

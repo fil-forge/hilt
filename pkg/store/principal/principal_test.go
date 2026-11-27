@@ -18,7 +18,6 @@ import (
 	bucketpolicypostgres "github.com/fil-forge/hilt/pkg/store/bucketpolicy/postgres"
 	"github.com/fil-forge/hilt/pkg/store/pglock"
 	"github.com/fil-forge/hilt/pkg/store/principal"
-	principalmemory "github.com/fil-forge/hilt/pkg/store/principal/memory"
 	principalpostgres "github.com/fil-forge/hilt/pkg/store/principal/postgres"
 	providerpostgres "github.com/fil-forge/hilt/pkg/store/provider/postgres"
 	"github.com/fil-forge/hilt/pkg/store/tenant"
@@ -29,381 +28,356 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type StoreKind string
-
-const (
-	Memory   StoreKind = "memory"
-	Postgres StoreKind = "postgres"
-)
-
-var storeKinds = []StoreKind{Memory, Postgres}
-
-// seedFunc ensures the parent tenant (and its provider) exist so the
-// principal.tenant_id foreign key is satisfied. It is a no-op for the memory
-// store, which does not enforce referential integrity.
+// seedFunc creates a tenant, which principal.tenant_id references.
 type seedFunc func(t *testing.T, tenantID did.DID)
 
-func makeStore(t *testing.T, k StoreKind) (principal.Store, seedFunc) {
-	switch k {
-	case Memory:
-		return principalmemory.New(), func(*testing.T, did.DID) {}
-	case Postgres:
-		pool := htestutil.PostgresOrSkip(t)
-		return principalpostgres.New(pool), seeder(pool)
-	}
-	panic("unknown store kind")
+func makeStore(t *testing.T) (principal.Store, seedFunc) {
+	pool := htestutil.PostgresOrSkip(t)
+	return principalpostgres.New(pool), seeder(pool)
 }
 
 func seeder(pool *pgxpool.Pool) seedFunc {
-	providers := providerpostgres.New(pool)
 	tenants := tenantpostgres.New(pool)
 	return func(t *testing.T, tenantID did.DID) {
-		providerID := testutil.RandomDID(t)
-		require.NoError(t, providers.Add(t.Context(), providerID, tenantID.String(), nil))
 		require.NoError(t, tenants.Add(t.Context(), tenantID, "ext-"+tenantID.String(), tenant.Active))
 	}
 }
 
 func TestPrincipalStore(t *testing.T) {
-	for _, k := range storeKinds {
-		t.Run(string(k), func(t *testing.T) {
-			s, seed := makeStore(t, k)
+	s, seed := makeStore(t)
 
-			t.Run("adds and retrieves a principal", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "user-1"))
+	t.Run("adds and retrieves a principal", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "user-1"))
 
-				rec, err := s.Get(t.Context(), tenantID, "user-1")
-				require.NoError(t, err)
-				require.Equal(t, tenantID, rec.Tenant)
-				require.Equal(t, "user-1", rec.ExternalID)
-				require.False(t, rec.CreatedAt.IsZero())
-			})
+		rec, err := s.Get(t.Context(), tenantID, "user-1")
+		require.NoError(t, err)
+		require.Equal(t, tenantID, rec.Tenant)
+		require.Equal(t, "user-1", rec.ExternalID)
+		require.False(t, rec.CreatedAt.IsZero())
+	})
 
-			t.Run("Get honours the share lock option", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "user-1"))
+	t.Run("Get honours the share lock option", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "user-1"))
 
-				rec, err := s.Get(t.Context(), tenantID, "user-1", store.WithShareLock())
-				require.NoError(t, err)
-				require.Equal(t, "user-1", rec.ExternalID)
-			})
+		rec, err := s.Get(t.Context(), tenantID, "user-1", store.WithShareLock())
+		require.NoError(t, err)
+		require.Equal(t, "user-1", rec.ExternalID)
+	})
 
-			t.Run("Get returns ErrRecordNotFound for an unknown principal", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				_, err := s.Get(t.Context(), tenantID, "nobody")
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-				_, err = s.Get(t.Context(), tenantID, "nobody", store.WithShareLock())
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-			})
+	t.Run("Get returns ErrRecordNotFound for an unknown principal", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		_, err := s.Get(t.Context(), tenantID, "nobody")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+		_, err = s.Get(t.Context(), tenantID, "nobody", store.WithShareLock())
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
 
-			t.Run("Get isolates by tenant", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				other := testutil.RandomDID(t)
-				seed(t, tenantID)
-				seed(t, other)
-				require.NoError(t, s.Add(t.Context(), tenantID, "shared-id"))
+	t.Run("Get isolates by tenant", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		other := testutil.RandomDID(t)
+		seed(t, tenantID)
+		seed(t, other)
+		require.NoError(t, s.Add(t.Context(), tenantID, "shared-id"))
 
-				_, err := s.Get(t.Context(), other, "shared-id")
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-			})
+		_, err := s.Get(t.Context(), other, "shared-id")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
 
-			t.Run("Add returns ErrRecordExists for a duplicate (tenant, external ID)", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				other := testutil.RandomDID(t)
-				seed(t, tenantID)
-				seed(t, other)
-				require.NoError(t, s.Add(t.Context(), tenantID, "dup"))
-				require.ErrorIs(t, s.Add(t.Context(), tenantID, "dup"), store.ErrRecordExists)
-				// The same external ID under a different tenant is a different principal.
-				require.NoError(t, s.Add(t.Context(), other, "dup"))
-			})
+	t.Run("Add returns ErrRecordExists for a duplicate (tenant, external ID)", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		other := testutil.RandomDID(t)
+		seed(t, tenantID)
+		seed(t, other)
+		require.NoError(t, s.Add(t.Context(), tenantID, "dup"))
+		require.ErrorIs(t, s.Add(t.Context(), tenantID, "dup"), store.ErrRecordExists)
+		// The same external ID under a different tenant is a different principal.
+		require.NoError(t, s.Add(t.Context(), other, "dup"))
+	})
 
-			t.Run("Add returns ErrInvalidArgument for an undef tenant", func(t *testing.T) {
-				require.ErrorIs(t, s.Add(t.Context(), did.Undef, "user-1"), store.ErrInvalidArgument)
-			})
+	t.Run("Add returns ErrInvalidArgument for an undef tenant", func(t *testing.T) {
+		require.ErrorIs(t, s.Add(t.Context(), did.Undef, "user-1"), store.ErrInvalidArgument)
+	})
 
-			t.Run("Add returns ErrInvalidArgument for an empty external ID", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.ErrorIs(t, s.Add(t.Context(), tenantID, ""), store.ErrInvalidArgument)
-			})
+	t.Run("Add returns ErrInvalidArgument for an empty external ID", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.ErrorIs(t, s.Add(t.Context(), tenantID, ""), store.ErrInvalidArgument)
+	})
 
-			t.Run("ListByTenant isolates by tenant and orders by external ID", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				other := testutil.RandomDID(t)
-				seed(t, tenantID)
-				seed(t, other)
-				for _, id := range []string{"c", "a", "b"} {
-					require.NoError(t, s.Add(t.Context(), tenantID, id))
-				}
-				require.NoError(t, s.Add(t.Context(), other, "a"))
+	t.Run("ListByTenant isolates by tenant and orders by external ID", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		other := testutil.RandomDID(t)
+		seed(t, tenantID)
+		seed(t, other)
+		for _, id := range []string{"c", "a", "b"} {
+			require.NoError(t, s.Add(t.Context(), tenantID, id))
+		}
+		require.NoError(t, s.Add(t.Context(), other, "a"))
 
-				recs, err := s.ListByTenant(t.Context(), tenantID)
-				require.NoError(t, err)
-				require.Len(t, recs, 3)
-				var ids []string
-				for _, r := range recs {
-					require.Equal(t, tenantID, r.Tenant)
-					ids = append(ids, r.ExternalID)
-				}
-				require.Equal(t, []string{"a", "b", "c"}, ids)
+		recs, err := s.ListByTenant(t.Context(), tenantID)
+		require.NoError(t, err)
+		require.Len(t, recs, 3)
+		var ids []string
+		for _, r := range recs {
+			require.Equal(t, tenantID, r.Tenant)
+			ids = append(ids, r.ExternalID)
+		}
+		require.Equal(t, []string{"a", "b", "c"}, ids)
 
-				recs, err = s.ListByTenant(t.Context(), testutil.RandomDID(t))
-				require.NoError(t, err)
-				require.Empty(t, recs)
-			})
+		recs, err = s.ListByTenant(t.Context(), testutil.RandomDID(t))
+		require.NoError(t, err)
+		require.Empty(t, recs)
+	})
 
-			t.Run("ListIDsByTenant lists live external IDs by tenant in order", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				other := testutil.RandomDID(t)
-				seed(t, tenantID)
-				seed(t, other)
-				for _, id := range []string{"c", "a", "gone", "b"} {
-					require.NoError(t, s.Add(t.Context(), tenantID, id))
-				}
-				require.NoError(t, s.Tombstone(t.Context(), tenantID, "gone", nil))
-				require.NoError(t, s.Add(t.Context(), other, "z"))
+	t.Run("ListIDsByTenant lists live external IDs by tenant in order", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		other := testutil.RandomDID(t)
+		seed(t, tenantID)
+		seed(t, other)
+		for _, id := range []string{"c", "a", "gone", "b"} {
+			require.NoError(t, s.Add(t.Context(), tenantID, id))
+		}
+		require.NoError(t, s.Tombstone(t.Context(), tenantID, "gone", nil))
+		require.NoError(t, s.Add(t.Context(), other, "z"))
 
-				ids, err := s.ListIDsByTenant(t.Context(), tenantID)
-				require.NoError(t, err)
-				require.Equal(t, []string{"a", "b", "c"}, ids)
+		ids, err := s.ListIDsByTenant(t.Context(), tenantID)
+		require.NoError(t, err)
+		require.Equal(t, []string{"a", "b", "c"}, ids)
 
-				ids, err = s.ListIDsByTenant(t.Context(), testutil.RandomDID(t))
-				require.NoError(t, err)
-				require.Empty(t, ids)
-			})
+		ids, err = s.ListIDsByTenant(t.Context(), testutil.RandomDID(t))
+		require.NoError(t, err)
+		require.Empty(t, ids)
+	})
 
-			t.Run("Add revives a removed principal with a fresh CreatedAt", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "again"))
-				first, err := s.Get(t.Context(), tenantID, "again")
-				require.NoError(t, err)
-				require.NoError(t, s.Tombstone(t.Context(), tenantID, "again", nil))
+	t.Run("Add revives a removed principal with a fresh CreatedAt", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "again"))
+		first, err := s.Get(t.Context(), tenantID, "again")
+		require.NoError(t, err)
+		require.NoError(t, s.Tombstone(t.Context(), tenantID, "again", nil))
 
-				recs, err := s.ListByTenant(t.Context(), tenantID)
-				require.NoError(t, err)
-				require.Empty(t, recs, "a removed principal is not listed")
+		recs, err := s.ListByTenant(t.Context(), tenantID)
+		require.NoError(t, err)
+		require.Empty(t, recs, "a removed principal is not listed")
 
-				time.Sleep(2 * time.Millisecond)
-				require.NoError(t, s.Add(t.Context(), tenantID, "again"), "revive is not a duplicate")
-				revived, err := s.Get(t.Context(), tenantID, "again")
-				require.NoError(t, err)
-				require.True(t, revived.CreatedAt.After(first.CreatedAt))
-				require.ErrorIs(t, s.Add(t.Context(), tenantID, "again"), store.ErrRecordExists)
-			})
+		time.Sleep(2 * time.Millisecond)
+		require.NoError(t, s.Add(t.Context(), tenantID, "again"), "revive is not a duplicate")
+		revived, err := s.Get(t.Context(), tenantID, "again")
+		require.NoError(t, err)
+		require.True(t, revived.CreatedAt.After(first.CreatedAt))
+		require.ErrorIs(t, s.Add(t.Context(), tenantID, "again"), store.ErrRecordExists)
+	})
 
-			t.Run("Tombstone runs the callback once, removes the row and is idempotent", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "del"))
+	t.Run("Tombstone runs the callback once, removes the row and is idempotent", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "del"))
 
-				calls := 0
-				require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
-					calls++
-					return nil
-				}))
-				require.Equal(t, 1, calls)
-				_, err := s.Get(t.Context(), tenantID, "del")
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
+		calls := 0
+		require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
+			calls++
+			return nil
+		}))
+		require.Equal(t, 1, calls)
+		_, err := s.Get(t.Context(), tenantID, "del")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
 
-				// Deleting an absent principal is a no-op: nothing to publish, so the
-				// callback does not run.
-				require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
-					calls++
-					return nil
-				}))
-				require.Equal(t, 1, calls)
-			})
+		// Deleting an absent principal is a no-op: nothing to publish, so the
+		// callback does not run.
+		require.NoError(t, s.Tombstone(t.Context(), tenantID, "del", func(context.Context) error {
+			calls++
+			return nil
+		}))
+		require.Equal(t, 1, calls)
+	})
 
-			t.Run("Tombstone holds only the removal: ListByTenant answers, a share-locked Get waits", func(t *testing.T) {
-				// The locking both backends owe the two writers that cross here:
-				// a policy write lists the tenant's principals from inside its own
-				// lock while a removal's callback rewrites that tenant's policies.
-				// The list must not wait on the removal, and a share-locked read
-				// must.
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+	t.Run("Tombstone holds only the removal: ListByTenant answers, a share-locked Get waits", func(t *testing.T) {
+		// The locking the store owes the two writers that cross here:
+		// a policy write lists the tenant's principals from inside its own
+		// lock while a removal's callback rewrites that tenant's policies.
+		// The list must not wait on the removal, and a share-locked read
+		// must.
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
 
-				deleted, got := htestutil.RequireWaitsForWriter(t,
-					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.Tombstone(context.Background(), tenantID, "held", func(ctx context.Context) error {
-							recs, err := s.ListByTenant(ctx, tenantID)
-							if err != nil {
-								return err
-							}
-							if len(recs) != 1 {
-								return fmt.Errorf("listed %d principals during the removal, want the live one", len(recs))
-							}
-							close(entered)
-							<-release
-							return nil
-						})
-					},
-					func() error {
-						_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
+		deleted, got := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return s.Tombstone(context.Background(), tenantID, "held", func(ctx context.Context) error {
+					recs, err := s.ListByTenant(ctx, tenantID)
+					if err != nil {
 						return err
-					})
-				require.NoError(t, deleted)
-				require.ErrorIs(t, got, store.ErrRecordNotFound, "the tombstone is visible once the removal commits")
-			})
-
-			t.Run("Tombstone accepts a nil callback", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "nil-cb"))
-				require.NoError(t, s.Tombstone(t.Context(), tenantID, "nil-cb", nil))
-				_, err := s.Get(t.Context(), tenantID, "nil-cb")
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
-			})
-
-			t.Run("Tombstone returns the callback error and leaves the row", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "keep"))
-
-				publishFailed := errors.New("publish failed")
-				err := s.Tombstone(t.Context(), tenantID, "keep", func(context.Context) error {
-					return publishFailed
+					}
+					if len(recs) != 1 {
+						return fmt.Errorf("listed %d principals during the removal, want the live one", len(recs))
+					}
+					close(entered)
+					<-release
+					return nil
 				})
-				require.ErrorIs(t, err, publishFailed)
-
-				rec, err := s.Get(t.Context(), tenantID, "keep")
-				require.NoError(t, err)
-				require.Equal(t, "keep", rec.ExternalID)
-
-				// A retry after the failure completes the removal.
-				require.NoError(t, s.Tombstone(t.Context(), tenantID, "keep", nil))
-				_, err = s.Get(t.Context(), tenantID, "keep")
-				require.ErrorIs(t, err, store.ErrRecordNotFound)
+			},
+			func() error {
+				_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
+				return err
 			})
+		require.NoError(t, deleted)
+		require.ErrorIs(t, got, store.ErrRecordNotFound, "the tombstone is visible once the removal commits")
+	})
 
-			t.Run("WithLock runs the callback once and returns its error", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+	t.Run("Tombstone accepts a nil callback", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "nil-cb"))
+		require.NoError(t, s.Tombstone(t.Context(), tenantID, "nil-cb", nil))
+		_, err := s.Get(t.Context(), tenantID, "nil-cb")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
 
-				calls := 0
-				require.NoError(t, s.WithLock(t.Context(), tenantID, []string{"held", "absent"}, func(ctx context.Context) error {
-					calls++
-					return nil
-				}))
-				require.Equal(t, 1, calls)
+	t.Run("Tombstone returns the callback error and leaves the row", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "keep"))
 
-				boom := errors.New("boom")
-				err := s.WithLock(t.Context(), tenantID, []string{"held"}, func(ctx context.Context) error { return boom })
-				require.ErrorIs(t, err, boom)
-			})
-
-			t.Run("WithLock waits on a principal a removal holds", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-				deleted, locked := htestutil.RequireWaitsForWriter(t,
-					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
-							close(entered)
-							<-release
-							return nil
-						})
-					},
-					func() error {
-						return s.WithLock(context.Background(), tenantID, []string{"held"}, func(context.Context) error { return nil })
-					})
-				require.NoError(t, deleted)
-				require.NoError(t, locked, "the row is gone when Lock gets its turn, so it is skipped")
-			})
-
-			t.Run("WithLock does not wait on principals a removal does not hold", func(t *testing.T) {
-				tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
-				seed(t, tenantID)
-				seed(t, other)
-				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-				require.NoError(t, s.Add(t.Context(), tenantID, "other"))
-				require.NoError(t, s.Add(t.Context(), other, "other"))
-
-				entered, release := make(chan struct{}), make(chan struct{})
-				removed := make(chan error, 1)
-				go func() {
-					removed <- s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
-						close(entered)
-						<-release
-						return nil
-					})
-				}()
-				select {
-				case <-entered:
-				case err := <-removed:
-					t.Fatalf("the removal returned before holding its row: %v", err)
-				case <-time.After(htestutil.WaitTimeout):
-					t.Fatal("the removal did not hold its row")
-				}
-				defer func() { close(release); require.NoError(t, <-removed) }()
-
-				// Another principal of the same tenant, another tenant's, and an
-				// id with no row: none is held by the removal, so none waits.
-				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-				defer cancel()
-				noop := func(context.Context) error { return nil }
-				require.NoError(t, s.WithLock(ctx, tenantID, []string{"other"}, noop))
-				require.NoError(t, s.WithLock(ctx, other, []string{"other"}, noop))
-				require.NoError(t, s.WithLock(ctx, tenantID, []string{"absent"}, noop))
-			})
-
-			t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				seed(t, tenantID)
-				require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-				locked, got := htestutil.RequireWaitsForWriter(t,
-					func(entered chan<- struct{}, release <-chan struct{}) error {
-						return s.WithLock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
-							close(entered)
-							<-release
-							return nil
-						})
-					},
-					func() error {
-						_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
-						return err
-					})
-				require.NoError(t, locked)
-				require.NoError(t, got)
-			})
-
-			t.Run("DeleteByTenant removes every principal of the tenant and is idempotent", func(t *testing.T) {
-				tenantID := testutil.RandomDID(t)
-				other := testutil.RandomDID(t)
-				seed(t, tenantID)
-				seed(t, other)
-				require.NoError(t, s.Add(t.Context(), tenantID, "a"))
-				require.NoError(t, s.Add(t.Context(), tenantID, "b"))
-				require.NoError(t, s.Add(t.Context(), other, "a"))
-
-				require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
-				recs, err := s.ListByTenant(t.Context(), tenantID)
-				require.NoError(t, err)
-				require.Empty(t, recs)
-				recs, err = s.ListByTenant(t.Context(), other)
-				require.NoError(t, err)
-				require.Len(t, recs, 1)
-
-				require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
-			})
+		publishFailed := errors.New("publish failed")
+		err := s.Tombstone(t.Context(), tenantID, "keep", func(context.Context) error {
+			return publishFailed
 		})
-	}
+		require.ErrorIs(t, err, publishFailed)
+
+		rec, err := s.Get(t.Context(), tenantID, "keep")
+		require.NoError(t, err)
+		require.Equal(t, "keep", rec.ExternalID)
+
+		// A retry after the failure completes the removal.
+		require.NoError(t, s.Tombstone(t.Context(), tenantID, "keep", nil))
+		_, err = s.Get(t.Context(), tenantID, "keep")
+		require.ErrorIs(t, err, store.ErrRecordNotFound)
+	})
+
+	t.Run("WithLock runs the callback once and returns its error", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+		calls := 0
+		require.NoError(t, s.WithLock(t.Context(), tenantID, []string{"held", "absent"}, func(ctx context.Context) error {
+			calls++
+			return nil
+		}))
+		require.Equal(t, 1, calls)
+
+		boom := errors.New("boom")
+		err := s.WithLock(t.Context(), tenantID, []string{"held"}, func(ctx context.Context) error { return boom })
+		require.ErrorIs(t, err, boom)
+	})
+
+	t.Run("WithLock waits on a principal a removal holds", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+		deleted, locked := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
+					close(entered)
+					<-release
+					return nil
+				})
+			},
+			func() error {
+				return s.WithLock(context.Background(), tenantID, []string{"held"}, func(context.Context) error { return nil })
+			})
+		require.NoError(t, deleted)
+		require.NoError(t, locked, "the row is gone when Lock gets its turn, so it is skipped")
+	})
+
+	t.Run("WithLock does not wait on principals a removal does not hold", func(t *testing.T) {
+		tenantID, other := testutil.RandomDID(t), testutil.RandomDID(t)
+		seed(t, tenantID)
+		seed(t, other)
+		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+		require.NoError(t, s.Add(t.Context(), tenantID, "other"))
+		require.NoError(t, s.Add(t.Context(), other, "other"))
+
+		entered, release := make(chan struct{}), make(chan struct{})
+		removed := make(chan error, 1)
+		go func() {
+			removed <- s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
+				close(entered)
+				<-release
+				return nil
+			})
+		}()
+		select {
+		case <-entered:
+		case err := <-removed:
+			t.Fatalf("the removal returned before holding its row: %v", err)
+		case <-time.After(htestutil.WaitTimeout):
+			t.Fatal("the removal did not hold its row")
+		}
+		defer func() { close(release); require.NoError(t, <-removed) }()
+
+		// Another principal of the same tenant, another tenant's, and an
+		// id with no row: none is held by the removal, so none waits.
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		noop := func(context.Context) error { return nil }
+		require.NoError(t, s.WithLock(ctx, tenantID, []string{"other"}, noop))
+		require.NoError(t, s.WithLock(ctx, other, []string{"other"}, noop))
+		require.NoError(t, s.WithLock(ctx, tenantID, []string{"absent"}, noop))
+	})
+
+	t.Run("a share-locked Get waits for Lock's callback", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		seed(t, tenantID)
+		require.NoError(t, s.Add(t.Context(), tenantID, "held"))
+
+		locked, got := htestutil.RequireWaitsForWriter(t,
+			func(entered chan<- struct{}, release <-chan struct{}) error {
+				return s.WithLock(context.Background(), tenantID, []string{"held"}, func(ctx context.Context) error {
+					close(entered)
+					<-release
+					return nil
+				})
+			},
+			func() error {
+				_, err := s.Get(context.Background(), tenantID, "held", store.WithShareLock())
+				return err
+			})
+		require.NoError(t, locked)
+		require.NoError(t, got)
+	})
+
+	t.Run("DeleteByTenant removes every principal of the tenant and is idempotent", func(t *testing.T) {
+		tenantID := testutil.RandomDID(t)
+		other := testutil.RandomDID(t)
+		seed(t, tenantID)
+		seed(t, other)
+		require.NoError(t, s.Add(t.Context(), tenantID, "a"))
+		require.NoError(t, s.Add(t.Context(), tenantID, "b"))
+		require.NoError(t, s.Add(t.Context(), other, "a"))
+
+		require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
+		recs, err := s.ListByTenant(t.Context(), tenantID)
+		require.NoError(t, err)
+		require.Empty(t, recs)
+		recs, err = s.ListByTenant(t.Context(), other)
+		require.NoError(t, err)
+		require.Len(t, recs, 1)
+
+		require.NoError(t, s.DeleteByTenant(t.Context(), tenantID))
+	})
 }
 
 // TestPrincipalStorePostgresLocking pins the locking contract the authorizer
 // relies on: a share-locked Get waits for a transaction that holds the row FOR
-// UPDATE, and is answered once that transaction commits. Postgres only: the
-// memory store cannot hold a row across calls.
+// UPDATE, and is answered once that transaction commits.
 func TestPrincipalStorePostgresLocking(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	s := principalpostgres.New(pool)
@@ -526,8 +500,7 @@ func TestPrincipalStorePostgresLocking(t *testing.T) {
 // key; re-adding the principal, locking it for a policy write, and adding a
 // key bound to it (FOR KEY SHARE through the access_key foreign key) take the
 // row itself. Neither edge is visible to Postgres, so the wait is bounded and
-// one side is told to retry. Postgres only: each case holds the row from a raw
-// transaction. TestPrincipalStoreMemoryLockTimeout covers the memory store.
+// one side is told to retry. Each case holds the row from a raw transaction.
 func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 	pool := htestutil.PostgresOrSkip(t)
 	principals := principalpostgres.New(pool)
@@ -643,42 +616,4 @@ func TestPrincipalStorePostgresLockTimeout(t *testing.T) {
 			tc.unwritten(t, tenantID)
 		})
 	}
-}
-
-// TestPrincipalStoreMemoryLockTimeout is the memory counterpart of
-// TestPrincipalStorePostgresLockTimeout: a Lock that waits out a removal in
-// flight gives up with [store.ErrLockTimeout] instead of wedging against it.
-func TestPrincipalStoreMemoryLockTimeout(t *testing.T) {
-	principalmemory.LockWait = 100 * time.Millisecond
-	t.Cleanup(func() { principalmemory.LockWait = store.LockTimeout })
-
-	s := principalmemory.New()
-	tenantID := testutil.RandomDID(t)
-	require.NoError(t, s.Add(t.Context(), tenantID, "held"))
-
-	entered, release := make(chan struct{}), make(chan struct{})
-	removed := make(chan error, 1)
-	go func() {
-		removed <- s.Tombstone(context.Background(), tenantID, "held", func(context.Context) error {
-			close(entered)
-			<-release
-			return nil
-		})
-	}()
-	select {
-	case <-entered:
-	case err := <-removed:
-		t.Fatalf("the removal returned before holding its row: %v", err)
-	case <-time.After(htestutil.WaitTimeout):
-		t.Fatal("the removal did not hold its row")
-	}
-
-	// The policy write waits on the row the removal holds and gives up.
-	err := s.WithLock(context.Background(), tenantID, []string{"held"}, func(context.Context) error {
-		return errors.New("the callback must not run while the removal holds the principal")
-	})
-	require.ErrorIs(t, err, store.ErrLockTimeout)
-
-	close(release)
-	require.NoError(t, <-removed)
 }
