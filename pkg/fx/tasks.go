@@ -135,24 +135,12 @@ func RegisterGrantRenewal(
 	logger *zap.Logger,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	lc.Append(fx.Hook{
-		OnStart: func(context.Context) error {
-			go func() {
-				defer close(done)
-				renewGrants(ctx, runner, tenants, logger.Named("grant-renewal"), tenantqueue.RenewalInterval)
-			}()
-			return nil
+	lc.Append(fx.StartStopHook(
+		func() {
+			go renewGrants(ctx, runner, tenants, logger.Named("grant-renewal"), tenantqueue.RenewalInterval)
 		},
-		OnStop: func(stopCtx context.Context) error {
-			cancel()
-			select {
-			case <-done:
-			case <-stopCtx.Done():
-			}
-			return nil
-		},
-	})
+		cancel,
+	))
 }
 
 // renewGrants runs [tenantqueue.Queue.RenewDue] once, then every interval,
