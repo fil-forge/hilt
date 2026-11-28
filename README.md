@@ -133,6 +133,9 @@ stage points at its own Swarf, which only knows that stage's tenants.
 | --- | --- | --- | --- |
 | `tasks.tenant_workers` | `--tenant-task-workers` | `HILT_TASKS_TENANT_WORKERS` | `4` |
 | `tasks.revocation_workers` | `--revocation-task-workers` | `HILT_TASKS_REVOCATION_WORKERS` | `8` |
+| `grants.lifetime` | `--grant-lifetime` | `HILT_GRANTS_LIFETIME` | `168h` |
+| `grants.renew_before` | `--grant-renew-before` | `HILT_GRANTS_RENEW_BEFORE` | `72h` |
+| `grants.renewal_interval` | `--grant-renewal-interval` | `HILT_GRANTS_RENEWAL_INTERVAL` | `1h` |
 
 Hilt runs durable task queues in its Postgres database, on the libforge task
 runner: `queue-tenant` for changes to a tenant's authority and

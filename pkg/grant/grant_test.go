@@ -40,7 +40,7 @@ func TestIssue(t *testing.T) {
 			require.Equal(t, tenantID, d.Issuer())
 			require.Equal(t, keyID, d.Audience())
 			require.NotNil(t, d.Expiration())
-			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
+			require.WithinDuration(t, time.Now().Add(grant.DefaultLifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
 			got = append(got, [2]string{d.Subject().String(), d.Command().String()})
 		}
 		var want [][2]string
@@ -53,13 +53,13 @@ func TestIssue(t *testing.T) {
 	})
 
 	t.Run("a key that expires after the lifetime is issued the lifetime", func(t *testing.T) {
-		later := time.Now().Add(2 * grant.Lifetime)
+		later := time.Now().Add(2 * grant.DefaultLifetime)
 		dels, err := grant.Issue(tenant, keyID, []did.DID{bucketA}, []string{"s3:GetObject"}, &later)
 		require.NoError(t, err)
 		require.NotEmpty(t, dels)
 		for _, d := range dels {
 			require.NotNil(t, d.Expiration())
-			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
+			require.WithinDuration(t, time.Now().Add(grant.DefaultLifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
 		}
 	})
 
@@ -139,7 +139,7 @@ func TestForKey(t *testing.T) {
 		for _, d := range got {
 			require.False(t, d.Subject().Defined())
 			require.NotNil(t, d.Expiration())
-			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
+			require.WithinDuration(t, time.Now().Add(grant.DefaultLifetime), time.Unix(int64(*d.Expiration()), 0), time.Minute)
 		}
 	})
 
@@ -236,4 +236,46 @@ func TestLimitToTenantStatus(t *testing.T) {
 	require.Empty(t, grant.LimitToTenantStatus(tenantstore.Disabled, actions))
 	require.Empty(t, grant.LimitToTenantStatus(tenantstore.Status("paused"), actions), "a status that is not one keeps nothing")
 	require.Equal(t, given, actions, "the actions given are left alone")
+}
+
+func TestIssueWithLifetime(t *testing.T) {
+	tenantSigner, err := secp256k1.Generate()
+	require.NoError(t, err)
+	tenant := multikey.NewIssuer(tenantSigner.KeyDID(), tenantSigner)
+	keySigner, err := ed25519.Generate()
+	require.NoError(t, err)
+	keyID := keySigner.KeyDID()
+	bucket := did.MustParse("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK")
+
+	dels, err := grant.Issue(tenant, keyID, []did.DID{bucket}, []string{"s3:GetObject"}, nil, grant.WithLifetime(90*time.Second))
+	require.NoError(t, err)
+	require.NotEmpty(t, dels)
+	for _, d := range dels {
+		require.NotNil(t, d.Expiration())
+		require.WithinDuration(t, time.Now().Add(90*time.Second), time.Unix(int64(*d.Expiration()), 0), 2*time.Second)
+	}
+
+	// A key that expires sooner still caps the grant.
+	soon := time.Now().Add(30 * time.Second)
+	dels, err = grant.ForKey(tenant, tenantstore.Active, accesskeystore.Record{ID: keyID, Permissions: []string{"s3:GetObject"}, ExpiresAt: &soon}, nil, grant.WithLifetime(time.Hour))
+	require.NoError(t, err)
+	require.NotEmpty(t, dels)
+	for _, d := range dels {
+		require.Equal(t, ucan.UnixTimestamp(soon.Unix()), *d.Expiration())
+	}
+}
+
+func TestTimingValidate(t *testing.T) {
+	require.NoError(t, grant.DefaultTiming.Validate())
+	require.NoError(t, grant.Timing{Lifetime: 90 * time.Second, RenewBefore: 45 * time.Second}.Validate())
+	for _, bad := range []grant.Timing{
+		{},
+		{Lifetime: 500 * time.Millisecond, RenewBefore: 100 * time.Millisecond},
+		{Lifetime: time.Hour},
+		{Lifetime: time.Hour, RenewBefore: time.Hour},
+		{Lifetime: time.Hour, RenewBefore: 2 * time.Hour},
+		{Lifetime: time.Hour, RenewBefore: -time.Minute},
+	} {
+		require.Error(t, bad.Validate(), "%+v", bad)
+	}
 }

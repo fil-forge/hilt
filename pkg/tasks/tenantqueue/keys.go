@@ -219,7 +219,7 @@ func (q *Queue) createKey(ctx context.Context, ex *taskrunner.Exec, t taskrunner
 		Permissions: key.Permissions,
 		Principal:   key.Principal,
 		ExpiresAt:   key.ExpiresAt,
-	}, policies)
+	}, policies, grant.WithLifetime(q.timing.Lifetime))
 	if err != nil {
 		return fmt.Errorf("issuing the key's grants: %w", err)
 	}

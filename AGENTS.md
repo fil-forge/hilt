@@ -196,15 +196,16 @@ and `sprue` (the upload service; mirror its patterns where relevant).
   it then removes the tenant's keys from the vault, and one commit deletes
   every row Hilt holds for the tenant. A run after a failure that came after
   the deactivation finds the DID deactivated and only deletes the rows.
-  Every grant expires, `grant.Lifetime` (7 days) after it is issued or with
+  Every grant expires, `grants.lifetime` (7 days) after it is issued or with
   its key if sooner, so that the revocation of one that is withdrawn does
   not have to be kept for good: Swarf drops a revocation once the delegation
   it names has expired. `queue-tenant.renew-grants` issues a key the next
-  set `grant.RenewBefore` (3 days) ahead, without withdrawing the set it
+  set `grants.renew_before` (3 days) ahead, without withdrawing the set it
   held, which stays stored until it expires so that a later withdrawal
   revokes both; `delegation.Store.ProofChain` leaves out expired delegations
-  and prefers the chain that lasts longest. Once an hour
-  `tenantqueue.Queue.RenewDue` (run from `pkg/fx/tasks.go`) queues the
+  and prefers the chain that lasts longest. Every
+  `grants.renewal_interval` (an hour) `tenantqueue.Queue.RenewDue` (run from
+  `pkg/fx/tasks.go`) queues the
   renewal for each tenant with grants due and deletes expired delegations.
   A task's arguments that carry more than one value,
   and a result that does, are a

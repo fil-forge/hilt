@@ -9,10 +9,10 @@
 // (pkg/tasks/tenantqueue). [ForKey] issues either kind's set, for a key being
 // created and for one whose grants are issued again.
 //
-// Every grant expires, [Lifetime] after it is issued at the latest, and a key
-// is issued the next set [RenewBefore] ahead of that. The set it replaces
-// stays stored until it expires, so a change that withdraws the key's grants
-// revokes both.
+// Every grant expires, a [Timing]'s lifetime after it is issued at the latest
+// (seven days by default), and a key is issued the next set its renewal
+// window ahead of that (three days). The set it replaces stays stored until
+// it expires, so a change that withdraws the key's grants revokes both.
 //
 // The set is narrower while the key's tenant is not active: every issue
 // reduces the key's actions to what the tenant's status keeps
@@ -21,6 +21,7 @@
 package grant
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/bucketpolicy"
@@ -33,25 +34,68 @@ import (
 	"github.com/fil-forge/ucantone/ucan/delegation"
 )
 
-// Lifetime is how long a grant lasts from the moment it is issued. A grant
-// that is withdrawn is revoked, and the revocation service keeps a revocation
-// until the delegation it names has expired, so this is also how long each
-// revocation is kept.
-const Lifetime = 7 * 24 * time.Hour
+// DefaultLifetime is how long a grant lasts from the moment it is issued,
+// unless [WithLifetime] says otherwise. A grant that is withdrawn is revoked,
+// and the revocation service keeps a revocation until the delegation it names
+// has expired, so this is also how long each revocation is kept.
+const DefaultLifetime = 7 * 24 * time.Hour
 
-// RenewBefore is how long before a grant expires its key is issued the next
-// one (queue-tenant.renew-grants). It must stay longer than the delegations
-// an authorize issues beneath a grant, which last up to a day and the async
-// overhang, so that none of them outlives the grant it was issued under; the
-// rest is the time a renewal has to run in.
-const RenewBefore = 3 * 24 * time.Hour
+// DefaultRenewBefore is how long before a grant expires its key is issued
+// the next one (queue-tenant.renew-grants), unless configured otherwise. It
+// must stay longer than the delegations an authorize issues beneath a grant,
+// which last up to a day and the async overhang, so that none of them
+// outlives the grant it was issued under; the rest is the time a renewal has
+// to run in.
+const DefaultRenewBefore = 3 * 24 * time.Hour
+
+// Timing is how long grants last and how far ahead of their expiry they are
+// renewed.
+type Timing struct {
+	// Lifetime is how long a grant lasts from the moment it is issued.
+	Lifetime time.Duration
+	// RenewBefore is how long before a grant expires its key is issued the
+	// next one.
+	RenewBefore time.Duration
+}
+
+// DefaultTiming is [DefaultLifetime] and [DefaultRenewBefore].
+var DefaultTiming = Timing{Lifetime: DefaultLifetime, RenewBefore: DefaultRenewBefore}
+
+// Validate refuses a timing whose grants would never be renewed in time: a
+// lifetime of at least a second, and a renewal window that is positive and
+// shorter than it.
+func (t Timing) Validate() error {
+	if t.Lifetime < time.Second {
+		return fmt.Errorf("grant lifetime %s is shorter than a second", t.Lifetime)
+	}
+	if t.RenewBefore <= 0 || t.RenewBefore >= t.Lifetime {
+		return fmt.Errorf("grant renewal window %s must be positive and shorter than the lifetime %s", t.RenewBefore, t.Lifetime)
+	}
+	return nil
+}
+
+// Option configures [Issue] and [ForKey].
+type Option func(*options)
+
+type options struct {
+	lifetime time.Duration
+}
+
+// WithLifetime issues grants that last d rather than [DefaultLifetime].
+func WithLifetime(d time.Duration) Option {
+	return func(o *options) { o.lifetime = d }
+}
 
 // Issue returns issuer→key delegations, one per subject and Forge command the
-// actions map to. Each expires [Lifetime] from now, or with the key when
-// expiresAt is sooner. No subjects means one powerline delegation per
-// command, with an undefined subject.
-func Issue(issuer ucan.Issuer, key did.DID, subjects []did.DID, actions []string, expiresAt *time.Time) ([]ucan.Delegation, error) {
-	exp := time.Now().Add(Lifetime)
+// actions map to. Each expires [DefaultLifetime] from now (see
+// [WithLifetime]), or with the key when expiresAt is sooner. No subjects
+// means one powerline delegation per command, with an undefined subject.
+func Issue(issuer ucan.Issuer, key did.DID, subjects []did.DID, actions []string, expiresAt *time.Time, opts ...Option) ([]ucan.Delegation, error) {
+	o := options{lifetime: DefaultLifetime}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	exp := time.Now().Add(o.lifetime)
 	if expiresAt != nil && expiresAt.Before(exp) {
 		exp = *expiresAt
 	}
@@ -83,13 +127,13 @@ func Issue(issuer ucan.Issuer, key did.DID, subjects []did.DID, actions []string
 // the delegations of its reads, listings and deletions alone, and a disabled
 // tenant's holds none. Only the key's ID, Buckets, Permissions, Principal
 // and ExpiresAt are read.
-func ForKey(issuer ucan.Issuer, status tenant.Status, key accesskeystore.Record, policies []bucketpolicystore.Record) ([]ucan.Delegation, error) {
+func ForKey(issuer ucan.Issuer, status tenant.Status, key accesskeystore.Record, policies []bucketpolicystore.Record, opts ...Option) ([]ucan.Delegation, error) {
 	if key.Principal == nil {
 		actions := LimitToTenantStatus(status, key.Permissions)
 		if len(actions) == 0 {
 			return nil, nil
 		}
-		return Issue(issuer, key.ID, key.Buckets, actions, key.ExpiresAt)
+		return Issue(issuer, key.ID, key.Buckets, actions, key.ExpiresAt, opts...)
 	}
 	var dels []ucan.Delegation
 	for _, p := range policies {
@@ -97,7 +141,7 @@ func ForKey(issuer ucan.Issuer, status tenant.Status, key accesskeystore.Record,
 		if len(eff) == 0 {
 			continue
 		}
-		granted, err := Issue(issuer, key.ID, []did.DID{p.Bucket}, eff, key.ExpiresAt)
+		granted, err := Issue(issuer, key.ID, []did.DID{p.Bucket}, eff, key.ExpiresAt, opts...)
 		if err != nil {
 			return nil, err
 		}

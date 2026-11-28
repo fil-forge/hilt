@@ -688,7 +688,7 @@ func TestCreatePrincipalBound(t *testing.T) {
 			require.Equal(t, rec.ID, m.Audience())
 			require.Equal(t, d.bucketID, m.Subject())
 			require.NotNil(t, m.Expiration())
-			require.WithinDuration(t, time.Now().Add(grant.Lifetime), time.Unix(int64(*m.Expiration()), 0), time.Minute)
+			require.WithinDuration(t, time.Now().Add(grant.DefaultLifetime), time.Unix(int64(*m.Expiration()), 0), time.Minute)
 			got = append(got, m.Command().String())
 		}
 		var want []string

@@ -139,6 +139,12 @@ type world struct {
 
 func setup(t *testing.T) *world {
 	t.Helper()
+	return setupWith(t, grant.Timing{})
+}
+
+// setupWith is setup with the queue issuing and renewing grants on timing.
+func setupWith(t *testing.T, timing grant.Timing) *world {
+	t.Helper()
 	ctx := t.Context()
 	pool := htestutil.PostgresOrSkip(t)
 	w := &world{
@@ -182,6 +188,7 @@ func setup(t *testing.T) *world {
 			Policies:    w.policies,
 			Delegations: hookedDelegations{w.delegations, w.hooks},
 			Secrets:     w.secrets,
+			Grants:      timing,
 		})
 		require.NoError(t, err)
 		_, err = revocationqueue.New(r, revocationqueue.Deps{
@@ -283,7 +290,7 @@ func links(dels []ucan.Delegation) []cid.Cid {
 
 // shapes describes each delegation by what it grants and to whom, leaving out
 // what differs between two issues of the same grant: one that lasts
-// [grant.Lifetime] expires at a time of its own, so only an expiry sooner
+// [grant.DefaultLifetime] expires at a time of its own, so only an expiry sooner
 // than that, which is the key's, is given. The result is sorted, so two sets
 // of grants are the same when their shapes are equal, a repeated grant
 // included.
@@ -293,7 +300,7 @@ func shapes(dels []ucan.Delegation) []string {
 		exp := "never"
 		if e := d.Expiration(); e != nil {
 			exp = fmt.Sprint(*e)
-			if time.Until(time.Unix(int64(*e), 0)) > grant.Lifetime-time.Hour {
+			if time.Until(time.Unix(int64(*e), 0)) > grant.DefaultLifetime-time.Hour {
 				exp = "its lifetime ends"
 			}
 		}

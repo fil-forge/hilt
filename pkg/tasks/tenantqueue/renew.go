@@ -7,7 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/store"
 	"github.com/fil-forge/hilt/pkg/store/accesskey"
 	"github.com/fil-forge/hilt/pkg/store/delegation"
@@ -29,9 +28,9 @@ func RenewGrantsSpec(tenantID did.DID) taskrunner.Spec {
 	}
 }
 
-// runRenewGrants is queue-tenant.renew-grants. Every grant expires
-// ([grant.Lifetime]), and this issues the next ones: each access key of the
-// subject tenant that holds a grant expiring within [grant.RenewBefore] is
+// runRenewGrants is queue-tenant.renew-grants. Every grant expires (see the
+// queue's [grant.Timing]), and this issues the next ones: each access key of
+// the subject tenant that holds a grant expiring within the renewal window is
 // stored the whole set its creation would issue it under the tenant's status
 // ([grant.ForKey]), lasting a full lifetime from now.
 //
@@ -65,7 +64,7 @@ func (q *Queue) runRenewGrants(ctx context.Context, ex *taskrunner.Exec, t taskr
 		return nil, nil
 	}
 
-	due, err := q.delegations.GrantsDue(ctx, tenantID, time.Now().Add(grant.RenewBefore))
+	due, err := q.delegations.GrantsDue(ctx, tenantID, time.Now().Add(q.timing.RenewBefore))
 	if err != nil {
 		return nil, fmt.Errorf("finding the keys whose grants are due: %w", err)
 	}
@@ -127,9 +126,6 @@ func warnUnrenewed(log *zap.Logger, keys []accesskey.Record, due []delegation.Du
 	}
 }
 
-// RenewalInterval is how often [Queue.RenewDue] is run.
-const RenewalInterval = time.Hour
-
 // RenewDue queues queue-tenant.renew-grants for every tenant that has a
 // grant due for renewal and no such task pending, then deletes the
 // delegations that have expired. It returns how many tasks it queued and how
@@ -139,7 +135,7 @@ const RenewalInterval = time.Hour
 // on the next call, for as long as its grants stay due.
 func (q *Queue) RenewDue(ctx context.Context, r *taskrunner.Runner) (queued int, deleted int64, err error) {
 	now := time.Now()
-	due, err := q.delegations.TenantsWithGrantsDue(ctx, now.Add(grant.RenewBefore))
+	due, err := q.delegations.TenantsWithGrantsDue(ctx, now.Add(q.timing.RenewBefore))
 	if err != nil {
 		return 0, 0, fmt.Errorf("finding the tenants whose grants are due: %w", err)
 	}

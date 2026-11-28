@@ -1,7 +1,10 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/fil-forge/hilt/pkg/config"
 	"github.com/stretchr/testify/require"
@@ -50,4 +53,18 @@ func TestLoadRevocationHasNoDefault(t *testing.T) {
 	cfg, err := config.Load("")
 	require.NoError(t, err)
 	require.Equal(t, config.RevocationConfig{}, cfg.Revocation)
+}
+
+// TestLoadGrantTiming verifies the grant timing defaults, and that a config
+// file, as an integration test mounts one, sets them as durations.
+func TestLoadGrantTiming(t *testing.T) {
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	require.Equal(t, config.GrantsConfig{Lifetime: 168 * time.Hour, RenewBefore: 72 * time.Hour, RenewalInterval: time.Hour}, cfg.Grants)
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("grants:\n  lifetime: 90s\n  renew_before: 45s\n  renewal_interval: 5s\n"), 0o600))
+	cfg, err = config.Load(path)
+	require.NoError(t, err)
+	require.Equal(t, config.GrantsConfig{Lifetime: 90 * time.Second, RenewBefore: 45 * time.Second, RenewalInterval: 5 * time.Second}, cfg.Grants)
 }

@@ -66,7 +66,7 @@ func TestRenewingGrants(t *testing.T) {
 	t.Run("issues each key with grants close to expiring the next set, and revokes nothing", func(t *testing.T) {
 		w := setup(t)
 		service, bound := w.held(t, w.serviceKey), w.held(t, w.principalKey)
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 
 		queued, _ := w.renewDue(t)
 
@@ -104,7 +104,7 @@ func TestRenewingGrants(t *testing.T) {
 
 	t.Run("a change that withdraws a key's grants revokes the set it renewed too", func(t *testing.T) {
 		w := setup(t)
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 		w.renewDue(t)
 		all := append(w.held(t, w.serviceKey), w.held(t, w.principalKey)...)
 
@@ -116,7 +116,7 @@ func TestRenewingGrants(t *testing.T) {
 
 	t.Run("deleting a key revokes the set it renewed too", func(t *testing.T) {
 		w := setup(t)
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 		w.renewDue(t)
 		all, kept := w.held(t, w.principalKey), w.held(t, w.serviceKey)
 
@@ -129,7 +129,7 @@ func TestRenewingGrants(t *testing.T) {
 
 	t.Run("a policy write revokes the set a key renewed too, and leaves it one set", func(t *testing.T) {
 		w := setup(t)
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 		w.renewDue(t)
 		all, kept := w.held(t, w.principalKey), w.held(t, w.serviceKey)
 		spec, err := tenantqueue.PutPolicySpec(w.tenant.DID(), w.bucket, bucketName, policyOf("s3:GetObject", "s3:PutObject"), tenantqueue.PolicyCondition{})
@@ -148,11 +148,11 @@ func TestRenewingGrants(t *testing.T) {
 
 	t.Run("deletes the grants that expired once their keys hold the next set", func(t *testing.T) {
 		w := setup(t)
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 		w.renewDue(t)
 		renewed := len(w.held(t, w.serviceKey)) / 2
 		_, err := w.pool.Exec(t.Context(), `UPDATE delegation SET expires_at = now() - interval '1 minute' WHERE issuer = $1 AND expires_at < $2`,
-			w.tenant.DID().String(), time.Now().Add(grant.RenewBefore))
+			w.tenant.DID().String(), time.Now().Add(grant.DefaultRenewBefore))
 		require.NoError(t, err)
 
 		_, deleted := w.renewDue(t)
@@ -176,7 +176,7 @@ func TestRenewingGrants(t *testing.T) {
 
 	t.Run("a key that has expired is issued nothing", func(t *testing.T) {
 		w := setup(t)
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 		_, err := w.pool.Exec(t.Context(), `UPDATE access_key SET expires_at = now() - interval '1 hour' WHERE id = $1`, w.serviceKey.String())
 		require.NoError(t, err)
 		service := w.held(t, w.serviceKey)
@@ -195,7 +195,7 @@ func TestRenewingGrants(t *testing.T) {
 		require.NoError(t, w.run(t, tenantqueue.DeleteBucketSpec(w.tenant.DID(), other)))
 		w.awaitPublished(t)
 		require.Empty(t, w.held(t, only), "the deletion withdrew the grants over the bucket")
-		w.age(t, grant.RenewBefore-time.Hour)
+		w.age(t, grant.DefaultRenewBefore-time.Hour)
 
 		w.renewDue(t)
 
@@ -212,6 +212,27 @@ func TestRenewingGrants(t *testing.T) {
 		require.NotEmpty(t, w.held(t, both))
 		for _, d := range w.held(t, both) {
 			require.Equal(t, w.bucket, d.Subject())
+		}
+	})
+
+	t.Run("issues and renews on the queue's timing", func(t *testing.T) {
+		w := setupWith(t, grant.Timing{Lifetime: time.Hour, RenewBefore: 50 * time.Minute})
+		for _, d := range w.held(t, w.serviceKey) {
+			require.WithinDuration(t, time.Now().Add(time.Hour), time.Unix(int64(*d.Expiration()), 0), time.Minute)
+		}
+		queued, _ := w.renewDue(t)
+		require.Zero(t, queued, "grants with more than the renewal window left are not due")
+
+		before := w.held(t, w.serviceKey)
+		w.age(t, 40*time.Minute)
+		queued, _ = w.renewDue(t)
+		require.Equal(t, 1, queued)
+		after := w.held(t, w.serviceKey)
+		require.Len(t, after, 2*len(before))
+		for _, d := range after {
+			if !containsLink(before, d) {
+				require.WithinDuration(t, time.Now().Add(time.Hour), time.Unix(int64(*d.Expiration()), 0), time.Minute, "a renewed grant lasts the queue's lifetime")
+			}
 		}
 	})
 

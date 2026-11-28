@@ -111,6 +111,10 @@ type Deps struct {
 	// revocations of the tenant's keys' grants to. Nil fails every tenant
 	// deletion.
 	Publisher grant.RevocationPublisher
+	// Grants is how long the grants the queue issues last and how far ahead
+	// of their expiry they are renewed. The zero value is
+	// [grant.DefaultTiming].
+	Grants grant.Timing
 	// Logger is optional; defaults to zap.NewNop().
 	Logger *zap.Logger
 }
@@ -127,6 +131,7 @@ type Queue struct {
 	secrets     vault.Vault
 	directory   Directory
 	publisher   grant.RevocationPublisher
+	timing      grant.Timing
 	logger      *zap.Logger
 }
 
@@ -143,10 +148,17 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		secrets:     d.Secrets,
 		directory:   d.Directory,
 		publisher:   d.Publisher,
+		timing:      d.Grants,
 		logger:      d.Logger,
 	}
 	if q.logger == nil {
 		q.logger = zap.NewNop()
+	}
+	if q.timing == (grant.Timing{}) {
+		q.timing = grant.DefaultTiming
+	}
+	if err := q.timing.Validate(); err != nil {
+		return nil, err
 	}
 	if err := r.Handle(tasks.QueueTenant, tasks.ActionSetStatus, q.runSetStatus); err != nil {
 		return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, tasks.ActionSetStatus, err)
@@ -322,7 +334,7 @@ func (q *Queue) issueGrantsOf(ctx context.Context, tenantID did.DID, status tena
 				policies[*key.Principal] = named
 			}
 		}
-		dels, err := grant.ForKey(issuer, status, key, named)
+		dels, err := grant.ForKey(issuer, status, key, named, grant.WithLifetime(q.timing.Lifetime))
 		if err != nil {
 			return nil, fmt.Errorf("issuing the grants of %s: %w", key.ID, err)
 		}
