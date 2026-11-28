@@ -108,10 +108,10 @@ type forgeNet struct {
 }
 
 // startForge boots the smelt stack with the working tree's hilt injected,
-// waits for hilt and ingot to serve health, and returns the network with its
-// clients wired up. The stack lives until the calling test — including all
-// of its subtests — completes.
-func startForge(t *testing.T) *forgeNet {
+// and the extra options, waits for hilt and ingot to serve health, and
+// returns the network with its clients wired up. The stack lives until the
+// calling test — including all of its subtests — completes.
+func startForge(t *testing.T, extra ...stack.Option) *forgeNet {
 	t.Helper()
 	t.Logf("booting the smelt Forge stack (~1-2 min; first run also compiles hilt and pulls images)")
 	opts := []stack.Option{
@@ -120,6 +120,7 @@ func startForge(t *testing.T) *forgeNet {
 		stack.WithPiriNodes(stack.PiriNodeConfig{Postgres: true}),
 		stack.WithServiceBinary("hilt", localHiltBinary(t)),
 	}
+	opts = append(opts, extra...)
 	// Local-dev escape hatches: run against sprue / piri / ingot images the
 	// registry doesn't have yet — e.g. built from an unmerged branch. Unset
 	// (CI) uses the published defaults.

@@ -56,7 +56,7 @@ func TestLoadRevocationHasNoDefault(t *testing.T) {
 }
 
 // TestLoadGrantTiming verifies the grant timing defaults, and that a config
-// file, as an integration test mounts one, sets them as durations.
+// file and environment variables set them as durations.
 func TestLoadGrantTiming(t *testing.T) {
 	cfg, err := config.Load("")
 	require.NoError(t, err)
@@ -67,4 +67,13 @@ func TestLoadGrantTiming(t *testing.T) {
 	cfg, err = config.Load(path)
 	require.NoError(t, err)
 	require.Equal(t, config.GrantsConfig{Lifetime: 90 * time.Second, RenewBefore: 45 * time.Second, RenewalInterval: 5 * time.Second}, cfg.Grants)
+
+	// Environment variables, as an integration test sets them, win over the
+	// file and accept a duration in Go's form.
+	t.Setenv("HILT_GRANTS_LIFETIME", (2 * time.Minute).String())
+	t.Setenv("HILT_GRANTS_RENEW_BEFORE", "50s")
+	t.Setenv("HILT_GRANTS_RENEWAL_INTERVAL", "5s")
+	cfg, err = config.Load(path)
+	require.NoError(t, err)
+	require.Equal(t, config.GrantsConfig{Lifetime: 2 * time.Minute, RenewBefore: 50 * time.Second, RenewalInterval: 5 * time.Second}, cfg.Grants)
 }
