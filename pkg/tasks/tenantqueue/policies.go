@@ -368,7 +368,7 @@ func (q *Queue) issueOver(ctx context.Context, tenantID, bucket did.DID, doc *s3
 				return nil, err
 			}
 		}
-		dels, err := grant.Issue(issuer, key.ID, []did.DID{bucket}, actions[*key.Principal], key.ExpiresAt)
+		dels, err := grant.Issue(issuer, key.ID, []did.DID{bucket}, actions[*key.Principal], key.ExpiresAt, grant.WithLifetime(q.timing.Lifetime))
 		if err != nil {
 			return nil, fmt.Errorf("issuing the grants of %s: %w", key.ID, err)
 		}

@@ -36,6 +36,9 @@
 // deletes the bucket's delegations and the bucket, which takes its policy
 // (buckets.go).
 //
+// queue-tenant.renew-grants issues the keys whose grants are close to
+// expiring the next set, and withdraws nothing (renew.go).
+//
 // Every change that records revocations queues queue-revocation.publish for
 // the tenant, which publishes them after the commit.
 //
@@ -54,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/fil-forge/hilt/pkg/grant"
@@ -107,6 +111,10 @@ type Deps struct {
 	// revocations of the tenant's keys' grants to. Nil fails every tenant
 	// deletion.
 	Publisher grant.RevocationPublisher
+	// Grants is how long the grants the queue issues last and how far ahead
+	// of their expiry they are renewed. The zero value is
+	// [grant.DefaultTiming].
+	Grants grant.Timing
 	// Logger is optional; defaults to zap.NewNop().
 	Logger *zap.Logger
 }
@@ -123,6 +131,7 @@ type Queue struct {
 	secrets     vault.Vault
 	directory   Directory
 	publisher   grant.RevocationPublisher
+	timing      grant.Timing
 	logger      *zap.Logger
 }
 
@@ -139,10 +148,17 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		secrets:     d.Secrets,
 		directory:   d.Directory,
 		publisher:   d.Publisher,
+		timing:      d.Grants,
 		logger:      d.Logger,
 	}
 	if q.logger == nil {
 		q.logger = zap.NewNop()
+	}
+	if q.timing == (grant.Timing{}) {
+		q.timing = grant.DefaultTiming
+	}
+	if err := q.timing.Validate(); err != nil {
+		return nil, err
 	}
 	if err := r.Handle(tasks.QueueTenant, tasks.ActionSetStatus, q.runSetStatus); err != nil {
 		return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, tasks.ActionSetStatus, err)
@@ -155,6 +171,7 @@ func New(r *taskrunner.Runner, d Deps) (*Queue, error) {
 		tasks.ActionRemovePrincipal: q.runRemovePrincipal,
 		tasks.ActionDeleteBucket:    q.runDeleteBucket,
 		tasks.ActionDeleteTenant:    q.runDeleteTenant,
+		tasks.ActionRenewGrants:     q.runRenewGrants,
 	} {
 		if err := r.Handle(tasks.QueueTenant, action, h); err != nil {
 			return nil, fmt.Errorf("registering %s.%s: %w", tasks.QueueTenant, action, err)
@@ -263,8 +280,23 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID, status tenant
 	if err != nil {
 		return nil, fmt.Errorf("listing the tenant's access keys: %w", err)
 	}
+	return q.issueGrantsOf(ctx, tenantID, status, keys)
+}
+
+// issueGrantsOf is [Queue.issueGrants] for the given keys of the tenant.
+//
+// A service key's bucket list still names a bucket that has been deleted:
+// deleting a bucket withdraws the grants over it and leaves the lists alone.
+// Such a bucket is left out, so a grant withdrawn by the deletion is never
+// issued again, and a key whose buckets are all gone is issued nothing. It is
+// never issued powerline grants, which an empty list would give it.
+func (q *Queue) issueGrantsOf(ctx context.Context, tenantID did.DID, status tenant.Status, keys []accesskey.Record) ([]ucan.Delegation, error) {
 	if len(keys) == 0 {
 		return nil, nil
+	}
+	live, err := q.liveBuckets(ctx, tenantID, keys)
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -276,6 +308,12 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID, status tenant
 	for _, key := range keys {
 		if key.ExpiresAt != nil && !key.ExpiresAt.After(now) {
 			continue
+		}
+		if key.Principal == nil && len(key.Buckets) > 0 {
+			key.Buckets = slices.DeleteFunc(slices.Clone(key.Buckets), func(b did.DID) bool { return !live[b] })
+			if len(key.Buckets) == 0 {
+				continue
+			}
 		}
 		if issuer == nil {
 			issuer, err = vault.TenantIssuer(ctx, q.secrets, tenantID)
@@ -296,11 +334,40 @@ func (q *Queue) issueGrants(ctx context.Context, tenantID did.DID, status tenant
 				policies[*key.Principal] = named
 			}
 		}
-		dels, err := grant.ForKey(issuer, status, key, named)
+		dels, err := grant.ForKey(issuer, status, key, named, grant.WithLifetime(q.timing.Lifetime))
 		if err != nil {
 			return nil, fmt.Errorf("issuing the grants of %s: %w", key.ID, err)
 		}
 		fresh = append(fresh, dels...)
 	}
 	return fresh, nil
+}
+
+// liveBuckets reports which of the buckets the service keys among keys are
+// scoped to the tenant still has.
+func (q *Queue) liveBuckets(ctx context.Context, tenantID did.DID, keys []accesskey.Record) (map[did.DID]bool, error) {
+	var ids []did.DID
+	for _, key := range keys {
+		if key.Principal == nil {
+			ids = append(ids, key.Buckets...)
+		}
+	}
+	live := make(map[did.DID]bool, len(ids))
+	if len(ids) == 0 {
+		return live, nil
+	}
+	recs, err := store.Collect(ctx, func(ctx context.Context, opts store.PaginationConfig) (store.Page[bucket.Record], error) {
+		listOpts := []bucket.ListOption{bucket.WithIDs(ids...)}
+		if opts.Cursor != nil {
+			listOpts = append(listOpts, bucket.WithCursor(*opts.Cursor))
+		}
+		return q.buckets.ListByTenant(ctx, tenantID, listOpts...)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("looking up the keys' buckets: %w", err)
+	}
+	for _, b := range recs {
+		live[b.ID] = true
+	}
+	return live, nil
 }

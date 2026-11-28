@@ -126,6 +126,7 @@ type world struct {
 	swarf       *heldSwarf
 	keys        *accesskeysvc.Service
 	runner      *taskrunner.Runner
+	queue       *tenantqueue.Queue
 	hooks       *hooks
 	// tenant signs as the tenant.
 	tenant ucan.Issuer
@@ -137,6 +138,12 @@ type world struct {
 }
 
 func setup(t *testing.T) *world {
+	t.Helper()
+	return setupWith(t, grant.Timing{})
+}
+
+// setupWith is setup with the queue issuing and renewing grants on timing.
+func setupWith(t *testing.T, timing grant.Timing) *world {
 	t.Helper()
 	ctx := t.Context()
 	pool := htestutil.PostgresOrSkip(t)
@@ -172,7 +179,8 @@ func setup(t *testing.T) *world {
 	w.putPolicy(t, "s3:GetObject")
 
 	w.runner = htestutil.StartTaskRunner(t, pool, func(r *taskrunner.Runner) {
-		_, err := tenantqueue.New(r, tenantqueue.Deps{
+		var err error
+		w.queue, err = tenantqueue.New(r, tenantqueue.Deps{
 			Tenants:     hookedTenants{w.tenants, w.hooks},
 			AccessKeys:  w.accessKeys,
 			Principals:  principals,
@@ -180,6 +188,7 @@ func setup(t *testing.T) *world {
 			Policies:    w.policies,
 			Delegations: hookedDelegations{w.delegations, w.hooks},
 			Secrets:     w.secrets,
+			Grants:      timing,
 		})
 		require.NoError(t, err)
 		_, err = revocationqueue.New(r, revocationqueue.Deps{
@@ -280,15 +289,20 @@ func links(dels []ucan.Delegation) []cid.Cid {
 }
 
 // shapes describes each delegation by what it grants and to whom, leaving out
-// what differs between two issues of the same grant. The result is sorted, so
-// two sets of grants are the same when their shapes are equal, a repeated
-// grant included.
+// what differs between two issues of the same grant: one that lasts
+// [grant.DefaultLifetime] expires at a time of its own, so only an expiry sooner
+// than that, which is the key's, is given. The result is sorted, so two sets
+// of grants are the same when their shapes are equal, a repeated grant
+// included.
 func shapes(dels []ucan.Delegation) []string {
 	out := make([]string, len(dels))
 	for i, d := range dels {
 		exp := "never"
 		if e := d.Expiration(); e != nil {
 			exp = fmt.Sprint(*e)
+			if time.Until(time.Unix(int64(*e), 0)) > grant.DefaultLifetime-time.Hour {
+				exp = "its lifetime ends"
+			}
 		}
 		out[i] = fmt.Sprintf("%s -> %s over %s may %s until %s", d.Issuer(), d.Audience(), d.Subject(), d.Command(), exp)
 	}

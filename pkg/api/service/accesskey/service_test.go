@@ -14,6 +14,7 @@ import (
 
 	"github.com/fil-forge/hilt/internal/testutil"
 	accesskeysvc "github.com/fil-forge/hilt/pkg/api/service/accesskey"
+	"github.com/fil-forge/hilt/pkg/grant"
 	"github.com/fil-forge/hilt/pkg/s3perm"
 	"github.com/fil-forge/hilt/pkg/store"
 	accesskeystore "github.com/fil-forge/hilt/pkg/store/accesskey"
@@ -680,13 +681,14 @@ func TestCreatePrincipalBound(t *testing.T) {
 		require.Empty(t, rec.Buckets)
 
 		// The key holds one tenant → key delegation per Forge command the
-		// policy's actions map to, over the bucket, living as long as the key.
+		// policy's actions map to, over the bucket, each lasting a grant lifetime.
 		var got []string
 		for _, m := range d.held(t, rec.ID) {
 			require.Equal(t, d.tenantID, m.Issuer())
 			require.Equal(t, rec.ID, m.Audience())
 			require.Equal(t, d.bucketID, m.Subject())
-			require.Nil(t, m.Expiration())
+			require.NotNil(t, m.Expiration())
+			require.WithinDuration(t, time.Now().Add(grant.DefaultLifetime), time.Unix(int64(*m.Expiration()), 0), time.Minute)
 			got = append(got, m.Command().String())
 		}
 		var want []string

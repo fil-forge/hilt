@@ -133,6 +133,9 @@ stage points at its own Swarf, which only knows that stage's tenants.
 | --- | --- | --- | --- |
 | `tasks.tenant_workers` | `--tenant-task-workers` | `HILT_TASKS_TENANT_WORKERS` | `4` |
 | `tasks.revocation_workers` | `--revocation-task-workers` | `HILT_TASKS_REVOCATION_WORKERS` | `8` |
+| `grants.lifetime` | `--grant-lifetime` | `HILT_GRANTS_LIFETIME` | `168h` |
+| `grants.renew_before` | `--grant-renew-before` | `HILT_GRANTS_RENEW_BEFORE` | `72h` |
+| `grants.renewal_interval` | `--grant-renewal-interval` | `HILT_GRANTS_RENEWAL_INTERVAL` | `1h` |
 
 Hilt runs durable task queues in its Postgres database, on the libforge task
 runner: `queue-tenant` for changes to a tenant's authority and
@@ -166,6 +169,12 @@ setting is the most queued tasks of that queue one instance runs at once. A
 tenant's tasks on a queue always run one at a time, so the count is the number
 of tenants worked on together. `0` runs none and leaves the queue to other
 instances. The queues' tables live in the `public` schema beside Hilt's own.
+
+A grant lasts 7 days, or until its access key expires if that is sooner.
+Hilt issues each key its next grants 3 days before the current ones expire,
+checking once an hour, so a key keeps working for as long as it exists. A
+grant that is withdrawn is revoked at Swarf, which keeps a revocation only
+until the grant it names would have expired.
 
 ## Container images
 

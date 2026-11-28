@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -37,6 +38,26 @@ type Config struct {
 	Upload     UploadConfig     `mapstructure:"upload"`
 	Revocation RevocationConfig `mapstructure:"revocation"`
 	Tasks      TasksConfig      `mapstructure:"tasks"`
+	Grants     GrantsConfig     `mapstructure:"grants"`
+}
+
+// GrantsConfig times the grants Hilt issues to access keys. The defaults suit
+// every deployment; shorter values are for tests that watch a grant expire
+// and be renewed. A renewal window shorter than about 28 hours, the longest a
+// delegation issued on authorize lasts, lets those delegations outlive the
+// grant under them, and the gateway then asks Hilt again on every request it
+// cannot answer from its cache.
+type GrantsConfig struct {
+	// Lifetime is how long a grant lasts from when it is issued. Defaults to
+	// 168h.
+	Lifetime time.Duration `mapstructure:"lifetime"`
+	// RenewBefore is how long before a grant expires its key is issued the
+	// next one. It must be shorter than Lifetime. Defaults to 72h.
+	RenewBefore time.Duration `mapstructure:"renew_before"`
+	// RenewalInterval is how often each instance looks for grants due for
+	// renewal and deletes expired delegations. It must be shorter than
+	// RenewBefore. Defaults to 1h.
+	RenewalInterval time.Duration `mapstructure:"renewal_interval"`
 }
 
 // TasksConfig sizes the durable task queues. Each count is the most queued
@@ -196,6 +217,10 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("tasks.tenant_workers", 4)
 	v.SetDefault("tasks.revocation_workers", 8)
 
+	v.SetDefault("grants.lifetime", "168h")
+	v.SetDefault("grants.renew_before", "72h")
+	v.SetDefault("grants.renewal_interval", "1h")
+
 	// upload.service_id, upload.service_url and upload.product_id have no
 	// default: every deployment names its own stage's Sprue and product, and
 	// `serve` refuses to start without them (see fx.NewUploadClient).
@@ -233,6 +258,9 @@ var flagBindings = map[string]string{
 	"revocation.service_url":           "revocation-service-url",
 	"tasks.tenant_workers":             "tenant-task-workers",
 	"tasks.revocation_workers":         "revocation-task-workers",
+	"grants.lifetime":                  "grant-lifetime",
+	"grants.renew_before":              "grant-renew-before",
+	"grants.renewal_interval":          "grant-renewal-interval",
 }
 
 // BindEnvVars sets up environment variable binding with the HILT_ prefix. Each

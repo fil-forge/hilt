@@ -26,6 +26,7 @@ type Configs struct {
 	Upload     config.UploadConfig
 	Revocation config.RevocationConfig
 	Tasks      config.TasksConfig
+	Grants     config.GrantsConfig
 }
 
 // ProvideConfigs provides the individual fields of the config.
@@ -43,5 +44,6 @@ func ProvideConfigs(cfg *config.Config) Configs {
 		Upload:     cfg.Upload,
 		Revocation: cfg.Revocation,
 		Tasks:      cfg.Tasks,
+		Grants:     cfg.Grants,
 	}
 }

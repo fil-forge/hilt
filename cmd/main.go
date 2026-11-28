@@ -76,6 +76,11 @@ func main() {
 	serveCmd.Flags().Int("tenant-task-workers", 4, "most queued changes to tenants' authority to run at once (0 runs none)")
 	serveCmd.Flags().Int("revocation-task-workers", 8, "most tenants to publish revocations for at once (0 runs none)")
 
+	// grant timing config
+	serveCmd.Flags().Duration("grant-lifetime", 168*time.Hour, "how long a grant to an access key lasts")
+	serveCmd.Flags().Duration("grant-renew-before", 72*time.Hour, "how long before a grant expires its key is issued the next one")
+	serveCmd.Flags().Duration("grant-renewal-interval", time.Hour, "how often to look for grants due for renewal")
+
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(client.Cmd)
 

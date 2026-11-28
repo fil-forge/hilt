@@ -61,6 +61,11 @@ const ActionDeleteBucket = "delete-bucket"
 // and those of its keys' grants and deactivating its DID.
 const ActionDeleteTenant = "delete-tenant"
 
+// ActionRenewGrants is queue-tenant.renew-grants: issue each access key of
+// the subject tenant whose grants are close to expiring the next set, which
+// lasts a full lifetime again.
+const ActionRenewGrants = "renew-grants"
+
 // ActionPublish is queue-revocation.publish: publish every revocation the
 // subject tenant owes.
 const ActionPublish = "publish"

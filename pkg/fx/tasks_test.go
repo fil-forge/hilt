@@ -3,6 +3,7 @@ package fx_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	htestutil "github.com/fil-forge/hilt/internal/testutil"
 	"github.com/fil-forge/hilt/pkg/config"
@@ -97,4 +98,17 @@ func TestNewTaskRunnerRefusesNegativeWorkers(t *testing.T) {
 	require.ErrorContains(t, err, "tasks.tenant_workers must not be negative")
 	_, err = storepostgres.NewTaskRunner(config.TasksConfig{RevocationWorkers: -1}, nil, zap.NewNop())
 	require.ErrorContains(t, err, "tasks.revocation_workers must not be negative")
+}
+
+// The service refuses to start on grant timing that would never renew a
+// grant in time. The checks run before the queue touches the runner.
+func TestNewTenantQueueRefusesBadGrantTiming(t *testing.T) {
+	for _, grants := range []config.GrantsConfig{
+		{Lifetime: time.Hour, RenewBefore: time.Minute, RenewalInterval: time.Hour},
+		{Lifetime: time.Hour, RenewBefore: time.Minute, RenewalInterval: -time.Second},
+		{Lifetime: time.Hour, RenewBefore: 2 * time.Hour, RenewalInterval: time.Minute},
+	} {
+		_, err := appfx.NewTenantQueue(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, grants, zap.NewNop())
+		require.Error(t, err, "%+v", grants)
+	}
 }
